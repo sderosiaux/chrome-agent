@@ -21,7 +21,7 @@ cargo install aibrowsr
 Or build from source:
 
 ```bash
-git clone https://github.com/sdmusic/aibrowsr.git
+git clone https://github.com/sderosiaux/aibrowsr.git
 cd aibrowsr
 cargo build --release
 ```
