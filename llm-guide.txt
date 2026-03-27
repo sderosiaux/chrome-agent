@@ -1,0 +1,77 @@
+LLM USAGE GUIDE:
+  aibrowsr controls Chrome via CDP. No Node.js, no Playwright, no sandbox.
+  Scripts execute directly in Chrome. Named pages persist between invocations.
+
+  Workflow: snap → read uids → act → snap again.
+
+  Quick start:
+    aibrowsr --headless goto https://example.com
+    aibrowsr snap
+    aibrowsr click e4
+    aibrowsr fill e2 "hello@example.com"
+    aibrowsr eval "document.title"
+
+  Snapshot (accessibility tree, token-optimized):
+    aibrowsr snap
+    → uid=e1 heading "Welcome" level=1
+      uid=e2 textbox "Email" value="" focusable
+      uid=e3 button "Submit" focusable
+
+    Use uids from the snapshot to target elements:
+    aibrowsr click e3
+    aibrowsr fill e2 "user@test.com"
+
+  Snap after action (saves one round-trip):
+    aibrowsr click e3 --snap
+    → Clicked uid=e3
+    → uid=e1 heading "Dashboard" level=1
+      uid=e2 ...
+
+  Batch fill (multiple fields at once):
+    aibrowsr fill-form e2="user@test.com" e3="password123" --snap
+
+  Screenshot (returns file path, not binary):
+    aibrowsr screenshot
+    → /Users/me/.aibrowsr/tmp/screenshot-1711540200.png
+
+  Evaluate JavaScript:
+    aibrowsr eval "document.querySelectorAll('a').length"
+    → 42
+
+    aibrowsr eval "JSON.stringify([...document.querySelectorAll('.price')].map(e => e.textContent))"
+    → ["$10","$20","$30"]
+
+  List tabs:
+    aibrowsr tabs
+
+  Connect to running Chrome:
+    aibrowsr --connect goto https://example.com
+    aibrowsr --connect http://localhost:9222 snap
+    aibrowsr --connect ws://127.0.0.1:9222/devtools/browser/... eval "1+1"
+
+  Named browser profiles (separate cookies/state):
+    aibrowsr --browser work goto https://app.company.com
+    aibrowsr --browser personal goto https://gmail.com
+
+  Common patterns:
+    # Login flow
+    aibrowsr --headless goto https://app.com/login --snap
+    aibrowsr fill e2 "user@test.com"
+    aibrowsr fill e3 "password"
+    aibrowsr click e4 --snap
+
+    # Scrape data
+    aibrowsr goto https://shop.com
+    aibrowsr eval "JSON.stringify([...document.querySelectorAll('.product')].map(e => ({name: e.querySelector('h2').textContent, price: e.querySelector('.price').textContent})))"
+
+    # Check page state after action
+    aibrowsr click e5 --snap
+
+  Tips:
+    - Always snap before interacting — uids change when the page mutates.
+    - Use --snap on click/fill to get updated state in one call.
+    - Use eval for complex DOM queries the snapshot doesn't cover.
+    - Prefer snap over screenshot — it's token-optimized (~50 vs ~100K tokens).
+    - Use --headless for automation; omit for debugging.
+    - Named pages persist cookies across invocations (login once, stay logged in).
+    - Use --timeout 60 for slow pages.
