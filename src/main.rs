@@ -288,38 +288,65 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // All other commands need a browser connection + CDP client
     let mut store = session::load_session()?;
 
+    let want_headless = !cli.headed;
+
     // Try to reuse existing session, or launch a new browser
     let (conn, browser_client) = if let Some(existing) = store.browsers.get(&cli.browser) {
+        let mode_matches = existing.headless == want_headless;
         let ws = &existing.ws_endpoint;
         let http = browser::extract_http_from_ws(ws);
-        match CdpClient::connect(ws).await {
-            Ok(client) => {
-                // Reuse existing browser — keep this connection as browser_client
-                let conn = browser::BrowserConnection {
-                    ws_endpoint: ws.clone(),
-                    http_endpoint: Some(http),
-                    pid: existing.pid,
-                };
-                (conn, client)
+
+        if mode_matches {
+            match CdpClient::connect(ws).await {
+                Ok(client) => {
+                    let conn = browser::BrowserConnection {
+                        ws_endpoint: ws.clone(),
+                        http_endpoint: Some(http),
+                        pid: existing.pid,
+                    };
+                    (conn, client)
+                }
+                Err(_) => {
+                    store.browsers.remove(&cli.browser);
+                    let opts = BrowserOptions {
+                        name: cli.browser.clone(),
+                        headless: want_headless,
+                        ignore_https_errors: cli.ignore_https_errors,
+                        connect: cli.connect.clone(),
+                    };
+                    let conn = browser::resolve_browser(&opts).await?;
+                    let client = CdpClient::connect(&conn.ws_endpoint).await?;
+                    (conn, client)
+                }
             }
-            Err(_) => {
-                // Dead — clean up and launch fresh
-                store.browsers.remove(&cli.browser);
-                let opts = BrowserOptions {
-                    name: cli.browser.clone(),
-                    headless: !cli.headed,
-                    ignore_https_errors: cli.ignore_https_errors,
-                    connect: cli.connect.clone(),
-                };
-                let conn = browser::resolve_browser(&opts).await?;
-                let client = CdpClient::connect(&conn.ws_endpoint).await?;
-                (conn, client)
+        } else {
+            // Mode mismatch (e.g. old session is headed, agent wants headless).
+            // Kill old browser and launch fresh with correct mode.
+            if let Some(pid) = existing.pid {
+                #[cfg(unix)]
+                {
+                    let _ = std::process::Command::new("kill")
+                        .arg(pid.to_string())
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .status();
+                }
             }
+            store.browsers.remove(&cli.browser);
+            let opts = BrowserOptions {
+                name: cli.browser.clone(),
+                headless: want_headless,
+                ignore_https_errors: cli.ignore_https_errors,
+                connect: cli.connect.clone(),
+            };
+            let conn = browser::resolve_browser(&opts).await?;
+            let client = CdpClient::connect(&conn.ws_endpoint).await?;
+            (conn, client)
         }
     } else {
         let opts = BrowserOptions {
             name: cli.browser.clone(),
-            headless: !cli.headed,
+            headless: want_headless,
             ignore_https_errors: cli.ignore_https_errors,
             connect: cli.connect.clone(),
         };
