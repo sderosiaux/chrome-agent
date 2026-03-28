@@ -105,16 +105,29 @@ pub fn save_session(store: &mut SessionStore) -> Result<(), SessionError> {
     Ok(())
 }
 
-/// Remove stale browser sessions where the process is no longer running.
+/// Remove stale browser sessions where the process is no longer running
+/// or the WebSocket endpoint is unreachable.
 pub fn cleanup_stale(store: &mut SessionStore) {
     store.browsers.retain(|_name, session| {
         if let Some(pid) = session.pid {
             is_process_alive(pid)
         } else {
-            // External connection (--connect) — keep, we'll verify on reconnect
-            true
+            // External connection (--connect) — probe HTTP endpoint
+            is_ws_reachable(&session.ws_endpoint)
         }
     });
+}
+
+/// Quick check if a WebSocket endpoint's Chrome is still alive
+/// by probing the HTTP /json/version endpoint (same host:port).
+fn is_ws_reachable(ws_url: &str) -> bool {
+    let http_url = crate::browser::extract_http_from_ws(ws_url);
+    let version_url = format!("{http_url}/json/version");
+    let agent = ureq::Agent::config_builder()
+        .timeout_global(Some(std::time::Duration::from_millis(500)))
+        .build()
+        .new_agent();
+    agent.get(&version_url).call().is_ok()
 }
 
 /// Ensure a browser session entry exists, returning a mutable ref.
