@@ -332,3 +332,156 @@ impl std::fmt::Display for ElementError {
 }
 
 impl std::error::Error for ElementError {}
+
+/// Click at explicit (x, y) coordinates using Input.dispatchMouseEvent.
+pub async fn click_at_coords(
+    client: &CdpClient,
+    x: f64,
+    y: f64,
+) -> Result<(), ElementError> {
+    // mousePressed
+    client
+        .send(
+            "Input.dispatchMouseEvent",
+            DispatchMouseEventParams {
+                event_type: MouseEventType::MousePressed,
+                x,
+                y,
+                button: Some(MouseButton::Left),
+                buttons: Some(1),
+                click_count: Some(1),
+                modifiers: None,
+                timestamp: None,
+                delta_x: None,
+                delta_y: None,
+                pointer_type: Some("mouse".into()),
+            },
+        )
+        .await
+        .map_err(|e| ElementError::Action(format!("mousePressed failed: {e}")))?;
+
+    // mouseReleased
+    client
+        .send(
+            "Input.dispatchMouseEvent",
+            DispatchMouseEventParams {
+                event_type: MouseEventType::MouseReleased,
+                x,
+                y,
+                button: Some(MouseButton::Left),
+                buttons: Some(0),
+                click_count: Some(1),
+                modifiers: None,
+                timestamp: None,
+                delta_x: None,
+                delta_y: None,
+                pointer_type: Some("mouse".into()),
+            },
+        )
+        .await
+        .map_err(|e| ElementError::Action(format!("mouseReleased failed: {e}")))?;
+
+    wait_for_stabilization(client).await;
+    Ok(())
+}
+
+/// Click an element matched by a CSS selector via Runtime.evaluate.
+pub async fn click_selector(
+    client: &CdpClient,
+    selector: &str,
+) -> Result<(), ElementError> {
+    let js = format!(
+        r#"(() => {{
+            const el = document.querySelector({sel});
+            if (!el) throw new Error('No element matches selector: ' + {sel});
+            el.click();
+        }})()"#,
+        sel = serde_json::to_string(selector).unwrap_or_default()
+    );
+    let result: serde_json::Value = client
+        .call("Runtime.evaluate", json!({ "expression": js, "returnByValue": true }))
+        .await
+        .map_err(|e| ElementError::Action(format!("click_selector failed: {e}")))?;
+
+    if let Some(exception) = result.get("exceptionDetails") {
+        let text = exception
+            .get("exception")
+            .and_then(|ex| ex.get("description"))
+            .and_then(|d| d.as_str())
+            .or_else(|| exception.get("text").and_then(|t| t.as_str()))
+            .unwrap_or("unknown error");
+        return Err(ElementError::NotFound(text.to_string()));
+    }
+
+    wait_for_stabilization(client).await;
+    Ok(())
+}
+
+/// Fill an element matched by a CSS selector via Runtime.evaluate.
+pub async fn fill_selector(
+    client: &CdpClient,
+    selector: &str,
+    value: &str,
+) -> Result<(), ElementError> {
+    let js = format!(
+        r#"(() => {{
+            const el = document.querySelector({sel});
+            if (!el) throw new Error('No element matches selector: ' + {sel});
+            el.focus();
+            el.value = '';
+            el.value = {val};
+            el.dispatchEvent(new Event('input', {{bubbles: true}}));
+            el.dispatchEvent(new Event('change', {{bubbles: true}}));
+        }})()"#,
+        sel = serde_json::to_string(selector).unwrap_or_default(),
+        val = serde_json::to_string(value).unwrap_or_default()
+    );
+    let result: serde_json::Value = client
+        .call("Runtime.evaluate", json!({ "expression": js, "returnByValue": true }))
+        .await
+        .map_err(|e| ElementError::Action(format!("fill_selector failed: {e}")))?;
+
+    if let Some(exception) = result.get("exceptionDetails") {
+        let text = exception
+            .get("exception")
+            .and_then(|ex| ex.get("description"))
+            .and_then(|d| d.as_str())
+            .or_else(|| exception.get("text").and_then(|t| t.as_str()))
+            .unwrap_or("unknown error");
+        return Err(ElementError::Action(text.to_string()));
+    }
+
+    wait_for_stabilization(client).await;
+    Ok(())
+}
+
+/// Focus an element matched by a CSS selector via Runtime.evaluate.
+pub async fn focus_selector(
+    client: &CdpClient,
+    selector: &str,
+) -> Result<(), ElementError> {
+    let js = format!(
+        r#"(() => {{
+            const el = document.querySelector({sel});
+            if (!el) throw new Error('No element matches selector: ' + {sel});
+            el.focus();
+        }})()"#,
+        sel = serde_json::to_string(selector).unwrap_or_default()
+    );
+    let result: serde_json::Value = client
+        .call("Runtime.evaluate", json!({ "expression": js, "returnByValue": true }))
+        .await
+        .map_err(|e| ElementError::Action(format!("focus_selector failed: {e}")))?;
+
+    if let Some(exception) = result.get("exceptionDetails") {
+        let text = exception
+            .get("exception")
+            .and_then(|ex| ex.get("description"))
+            .and_then(|d| d.as_str())
+            .or_else(|| exception.get("text").and_then(|t| t.as_str()))
+            .unwrap_or("unknown error");
+        return Err(ElementError::NotFound(text.to_string()));
+    }
+
+    Ok(())
+}

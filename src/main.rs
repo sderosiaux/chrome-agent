@@ -82,21 +82,31 @@ enum Command {
         inspect: bool,
     },
 
-    /// Click an element by uid
+    /// Click an element by uid, CSS selector, or coordinates
     Click {
-        /// Element uid (e.g. "e5")
-        uid: String,
+        /// Element uid (e.g. "e5") — omit if using --selector or --xy
+        uid: Option<String>,
+        /// CSS selector to click
+        #[arg(long)]
+        selector: Option<String>,
+        /// Click at x,y coordinates (e.g. --xy 100,200)
+        #[arg(long, value_delimiter = ',')]
+        xy: Option<Vec<f64>>,
         /// Inspect page after clicking
         #[arg(long)]
         inspect: bool,
     },
 
-    /// Fill an input element by uid
+    /// Fill an input element by uid or CSS selector
     Fill {
-        /// Element uid (e.g. "e5")
-        uid: String,
         /// Value to fill
         value: String,
+        /// Element uid (e.g. "e5") — omit if using --selector
+        #[arg(long)]
+        uid: Option<String>,
+        /// CSS selector to fill
+        #[arg(long)]
+        selector: Option<String>,
         /// Inspect page after filling
         #[arg(long)]
         inspect: bool,
@@ -158,10 +168,13 @@ enum Command {
         timeout: u64,
     },
 
-    /// Type text into the focused element
+    /// Type text into the focused element (or focus a selector first)
     Type {
         /// Text to type
         text: String,
+        /// CSS selector to focus before typing
+        #[arg(long)]
+        selector: Option<String>,
     },
 
     /// Press a key (Enter, Tab, Escape, etc.)
@@ -409,9 +422,29 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        Command::Click { uid, inspect } => {
-            let uid_map = get_uid_map(&store, &cli.browser, &cli.page);
-            let msg = commands::click::run(&client, &uid_map, &uid).await?;
+        Command::Click { uid, selector, xy, inspect } => {
+            let provided = uid.is_some() as u8 + selector.is_some() as u8 + xy.is_some() as u8;
+            if provided == 0 {
+                return Err("Provide a uid, --selector, or --xy to identify the click target.".into());
+            }
+            if provided > 1 {
+                return Err("Only one of uid, --selector, or --xy can be provided.".into());
+            }
+
+            let msg = if let Some(ref sel) = selector {
+                crate::element::click_selector(&client, sel).await?;
+                format!("Clicked selector '{sel}'")
+            } else if let Some(ref coords) = xy {
+                if coords.len() != 2 {
+                    return Err("--xy requires exactly 2 values: x,y".into());
+                }
+                crate::element::click_at_coords(&client, coords[0], coords[1]).await?;
+                format!("Clicked at ({}, {})", coords[0], coords[1])
+            } else {
+                let uid = uid.as_ref().unwrap();
+                let uid_map = get_uid_map(&store, &cli.browser, &cli.page);
+                commands::click::run(&client, &uid_map, uid).await?
+            };
 
             if json_mode {
                 let mut obj = json!({"ok": true, "message": msg});
@@ -437,9 +470,23 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        Command::Fill { uid, value, inspect } => {
-            let uid_map = get_uid_map(&store, &cli.browser, &cli.page);
-            let msg = commands::fill::run(&client, &uid_map, &uid, &value).await?;
+        Command::Fill { uid, selector, value, inspect } => {
+            let provided = uid.is_some() as u8 + selector.is_some() as u8;
+            if provided == 0 {
+                return Err("Provide --uid or --selector to identify the element.".into());
+            }
+            if provided > 1 {
+                return Err("Only one of --uid or --selector can be provided.".into());
+            }
+
+            let msg = if let Some(ref sel) = selector {
+                crate::element::fill_selector(&client, sel, &value).await?;
+                format!("Filled selector '{sel}'")
+            } else {
+                let uid = uid.as_ref().unwrap();
+                let uid_map = get_uid_map(&store, &cli.browser, &cli.page);
+                commands::fill::run(&client, &uid_map, uid, &value).await?
+            };
 
             if json_mode {
                 let mut obj = json!({"ok": true, "message": msg});
@@ -568,9 +615,16 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        Command::Type { text } => {
+        Command::Type { text, selector } => {
+            if let Some(ref sel) = selector {
+                crate::element::focus_selector(&client, sel).await?;
+            }
             crate::element::type_text(&client, &text).await?;
-            let msg = format!("Typed {} chars", text.len());
+            let msg = if selector.is_some() {
+                format!("Typed {} chars into selector '{}'", text.len(), selector.as_ref().unwrap())
+            } else {
+                format!("Typed {} chars", text.len())
+            };
             if json_mode {
                 json_output(&json!({"ok": true, "message": msg}));
             } else {

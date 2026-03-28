@@ -624,7 +624,8 @@ pub struct AXValue {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AXRelatedNode {
-    pub backend_dom_node_id: i64,
+    #[serde(default, rename = "backendDOMNodeId")]
+    pub backend_dom_node_id: Option<i64>,
     #[serde(default)]
     pub idref: Option<String>,
     #[serde(default)]
