@@ -11,6 +11,14 @@ pub struct GotoResult {
 }
 
 pub async fn run(client: &CdpClient, url: &str, timeout_secs: u64) -> Result<GotoResult, crate::BoxError> {
+    // Auto-prefix https:// if no scheme is provided
+    let url = if !url.contains("://") {
+        format!("https://{url}")
+    } else {
+        url.to_string()
+    };
+    let url = url.as_str();
+
     // Ensure Page domain is enabled so we receive loadEventFired
     client.enable("Page").await?;
 
