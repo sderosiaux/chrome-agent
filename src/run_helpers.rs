@@ -57,8 +57,10 @@ pub async fn output_goto(
     max_depth: Option<usize>,
     json_mode: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let browser_session = store.browsers.get_mut(browser_name)
+        .ok_or_else(|| format!("Browser session '{browser_name}' not found in session store"))?;
     let page = session::ensure_page(
-        store.browsers.get_mut(browser_name).unwrap(),
+        browser_session,
         page_name,
         target_id,
     );
@@ -327,4 +329,26 @@ pub fn cmd_close(browser_name: &str, purge: bool, json_mode: bool) -> Result<(),
 
     session::save_session(&store)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bug_error_hint_covers_all_cases() {
+        // Verify all error patterns have hints
+        assert!(error_hint("Connection refused").is_some());
+        assert!(error_hint("uid=n5 not found").is_some());
+        assert!(error_hint("Navigation failed").is_some());
+        assert!(error_hint("No snapshot").is_some());
+        assert!(error_hint("Timeout waiting").is_some());
+        assert!(error_hint("not interactable").is_some());
+        assert!(error_hint("No element matches selector").is_some());
+        assert!(error_hint("response parse error").is_some());
+        assert!(error_hint("Readability failed").is_some());
+        assert!(error_hint("Provide a uid").is_some());
+        // Unknown errors should return None
+        assert!(error_hint("something random").is_none());
+    }
 }

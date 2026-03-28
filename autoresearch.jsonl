@@ -1,3 +1,4 @@
 {"type":"config","name":"bug-hunt","metricName":"bugs_fixed","metricUnit":"count","bestDirection":"higher"}
 {"n":1,"commit":"95bd642","metric":0,"status":"keep","description":"baseline: 30 existing tests, 0 bug-specific tests","metrics":{},"timestamp":1774702603}
 {"n":2,"commit":"6edb8b8","metric":9,"status":"keep","description":"fix 6 UTF-8 string slicing panics + truncate module with 6 tests + 3 network tests","metrics":{},"timestamp":1774702802}
+{"n":3,"commit":"4111ce1","metric":10,"status":"keep","description":"fix unwrap panic in output_goto, fix silent error in console, add error_hint test","metrics":{},"timestamp":1774702882}

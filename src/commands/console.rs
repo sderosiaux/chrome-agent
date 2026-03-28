@@ -111,7 +111,8 @@ pub async fn run(
         .and_then(|v| v.as_str())
         .unwrap_or("[]");
 
-    let entries: Vec<ConsoleEntry> = serde_json::from_str(raw).unwrap_or_default();
+    let entries: Vec<ConsoleEntry> = serde_json::from_str(raw)
+        .map_err(|e| format!("Failed to parse console buffer: {e}"))?;
 
     let filtered: Vec<ConsoleEntry> = if let Some(level) = level_filter {
         entries.into_iter().filter(|e| e.level == level).collect()
