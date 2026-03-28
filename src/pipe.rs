@@ -297,10 +297,10 @@ async fn dispatch_text(
     let uid_map = get_uid_map(store, browser_name, page_name);
 
     let text = commands::text::run(client, None, selector, &uid_map).await?;
-    let full_length = text.len();
+    let full_length = text.chars().count();
     let (text, truncated) = if let Some(n) = truncate {
-        if text.len() > n {
-            (format!("{}...", &text[..n]), true)
+        if full_length > n {
+            (crate::truncate::truncate_str(&text, n, "..."), true)
         } else {
             (text, false)
         }

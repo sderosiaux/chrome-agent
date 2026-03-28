@@ -90,8 +90,8 @@ pub async fn run(
     }
 
     if let Some(max) = truncate {
-        if parsed.text_content.len() > max {
-            parsed.text_content = format!("{}...", &parsed.text_content[..max]);
+        if parsed.text_content.chars().count() > max {
+            parsed.text_content = crate::truncate::truncate_str(&parsed.text_content, max, "...");
         }
     }
 

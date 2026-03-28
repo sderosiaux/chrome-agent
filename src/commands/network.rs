@@ -241,8 +241,8 @@ pub fn format_text(entries: &[NetworkEntry]) -> String {
         "-".repeat(110)
     );
     for e in entries {
-        let url_display = if e.url.len() > 70 {
-            format!("{}...", &e.url[..67])
+        let url_display = if e.url.chars().count() > 70 {
+            crate::truncate::truncate_str(&e.url, 67, "...")
         } else {
             e.url.clone()
         };
@@ -259,7 +259,7 @@ pub fn format_text(entries: &[NetworkEntry]) -> String {
             url_display, status_str, e.content_type, size_str, e.duration_ms
         );
         if let Some(ref b) = e.body {
-            let preview = if b.len() > 200 { &b[..200] } else { b.as_str() };
+            let preview = crate::truncate::truncate_str(b, 200, "...");
             out += &format!("  body: {preview}\n");
         }
     }
@@ -279,10 +279,64 @@ async fn fetch_response_body(client: &CdpClient, request_id: &str) -> Option<Str
         .ok()?;
 
     let body = result.get("body")?.as_str()?;
-    let truncated = if body.len() > 2000 {
-        format!("{}...(truncated)", &body[..2000])
+    let truncated = if body.chars().count() > 2000 {
+        crate::truncate::truncate_str(body, 2000, "...(truncated)")
     } else {
         body.to_string()
     };
     Some(truncated)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bug_url_truncation_utf8_safe() {
+        // Bug: &e.url[..67] panics on URLs with multi-byte chars
+        let entry = NetworkEntry {
+            url: "https://example.com/café/résumé/über/naïve/длинный".to_string(),
+            method: "GET".to_string(),
+            status: 200,
+            content_type: "text/html".to_string(),
+            size: 1000,
+            duration_ms: 50,
+            body: None,
+        };
+        // This should not panic
+        let text = format_text(&[entry]);
+        assert!(!text.is_empty());
+    }
+
+    #[test]
+    fn bug_body_truncation_utf8_safe() {
+        // Bug: &body[..2000] panics on bodies with multi-byte chars
+        let entry = NetworkEntry {
+            url: "https://example.com".to_string(),
+            method: "GET".to_string(),
+            status: 200,
+            content_type: "application/json".to_string(),
+            size: 5000,
+            duration_ms: 50,
+            body: Some("é".repeat(3000)),  // each é is 2 bytes
+        };
+        let text = format_text(&[entry]);
+        assert!(!text.is_empty());
+    }
+
+    #[test]
+    fn bug_body_preview_utf8_safe() {
+        // Bug: &b[..200] panics on bodies with multi-byte chars
+        let entry = NetworkEntry {
+            url: "https://example.com".to_string(),
+            method: "GET".to_string(),
+            status: 200,
+            content_type: "application/json".to_string(),
+            size: 500,
+            duration_ms: 50,
+            body: Some("日本語テスト".repeat(100)),  // multi-byte Japanese
+        };
+        let text = format_text(&[entry]);
+        assert!(!text.is_empty());
+    }
 }

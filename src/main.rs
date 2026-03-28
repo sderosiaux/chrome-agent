@@ -10,6 +10,7 @@ mod run_helpers;
 mod session;
 mod setup;
 mod snapshot;
+mod truncate;
 
 use clap::{Parser, Subcommand};
 use serde_json::json;
@@ -591,10 +592,10 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             }
             let uid_map = get_uid_map(&store, &cli.browser, &cli.page);
             let text = commands::text::run(&client, uid.as_deref(), selector.as_deref(), &uid_map).await?;
-            let full_length = text.len();
+            let full_length = text.chars().count();
             let (text, truncated) = if let Some(n) = truncate {
-                if text.len() > n {
-                    (format!("{}...", &text[..n]), true)
+                if full_length > n {
+                    (crate::truncate::truncate_str(&text, n, "..."), true)
                 } else {
                     (text, false)
                 }
