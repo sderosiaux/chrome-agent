@@ -215,6 +215,9 @@ enum Command {
         /// Max items to extract
         #[arg(long, default_value = "10")]
         limit: usize,
+        /// Scroll to load lazy content before extracting (useful for infinite-scroll pages)
+        #[arg(long)]
+        scroll: bool,
     },
 
     /// Evaluate JavaScript in the page
@@ -764,7 +767,10 @@ async fn run(cli: Cli) -> Result<(), BoxError> {
             }
         }
 
-        Command::Extract { selector, limit } => {
+        Command::Extract { selector, limit, scroll } => {
+            if scroll {
+                commands::extract::scroll_to_load(&client).await?;
+            }
             let result = commands::extract::run(&client, selector.as_deref(), limit).await?;
             if json_mode {
                 json_output(&commands::extract::to_json(&result));

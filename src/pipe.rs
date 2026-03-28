@@ -648,6 +648,10 @@ async fn dispatch_extract(
 ) -> Result<Value, crate::BoxError> {
     let selector = cmd.get("selector").and_then(Value::as_str);
     let limit = cmd.get("limit").and_then(Value::as_u64).unwrap_or(10) as usize;
+    let scroll = cmd.get("scroll").and_then(Value::as_bool).unwrap_or(false);
+    if scroll {
+        commands::extract::scroll_to_load(client).await?;
+    }
     let result = commands::extract::run(client, selector, limit).await?;
     Ok(commands::extract::to_json(&result))
 }

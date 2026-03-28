@@ -10,6 +10,50 @@ pub struct ExtractResult {
     pub pattern: String,
 }
 
+/// Scroll to bottom repeatedly until no new content loads.
+/// Uses `MutationObserver` to detect DOM changes instead of blind sleep.
+/// Max 10 scroll iterations to avoid infinite scroll traps.
+pub async fn scroll_to_load(client: &CdpClient) -> Result<(), crate::BoxError> {
+    let js = r"(async () => {
+        const MAX_SCROLLS = 10;
+        const SETTLE_MS = 1000;
+        let prevHeight = 0;
+        for (let i = 0; i < MAX_SCROLLS; i++) {
+            const height = document.body.scrollHeight;
+            if (height === prevHeight && i > 0) break;
+            prevHeight = height;
+            window.scrollTo(0, height);
+            // Wait for DOM to settle using MutationObserver
+            await new Promise(resolve => {
+                let timer = setTimeout(resolve, SETTLE_MS);
+                const observer = new MutationObserver(() => {
+                    clearTimeout(timer);
+                    timer = setTimeout(() => {
+                        observer.disconnect();
+                        resolve();
+                    }, 300);
+                });
+                observer.observe(document.body, { childList: true, subtree: true });
+            });
+        }
+        window.scrollTo(0, 0);
+        return document.body.scrollHeight;
+    })()";
+
+    let _: Value = client
+        .call(
+            "Runtime.evaluate",
+            json!({
+                "expression": js,
+                "returnByValue": true,
+                "awaitPromise": true,
+            }),
+        )
+        .await?;
+
+    Ok(())
+}
+
 pub async fn run(
     client: &CdpClient,
     selector: Option<&str>,
