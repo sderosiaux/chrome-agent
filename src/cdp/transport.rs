@@ -33,7 +33,7 @@ impl Drop for ShutdownHandle {
     }
 }
 
-/// Connect to a Chrome DevTools Protocol WebSocket endpoint.
+/// Connect to a Chrome `DevTools` Protocol WebSocket endpoint.
 ///
 /// Returns a split `(CdpSender, CdpReceiver)` pair. The sender is clone-safe
 /// and can be shared across tasks. The receiver is owned by a single consumer
@@ -105,19 +105,16 @@ async fn io_loop<S, R>(
         tokio::select! {
             // --- Writer path: caller → WebSocket ---
             msg = outbound_rx.recv() => {
-                match msg {
-                    Some(text) => {
-                        if ws_write.send(Message::Text(text)).await.is_err() {
-                            // WebSocket write failed — connection dead.
-                            break;
-                        }
-                    }
-                    None => {
-                        // Outbound channel closed — caller is done sending.
-                        // Send a clean WebSocket close frame.
-                        let _ = ws_write.send(Message::Close(None)).await;
+                if let Some(text) = msg {
+                    if ws_write.send(Message::Text(text)).await.is_err() {
+                        // WebSocket write failed — connection dead.
                         break;
                     }
+                } else {
+                    // Outbound channel closed — caller is done sending.
+                    // Send a clean WebSocket close frame.
+                    let _ = ws_write.send(Message::Close(None)).await;
+                    break;
                 }
             }
 
@@ -125,7 +122,7 @@ async fn io_loop<S, R>(
             frame = ws_read.next() => {
                 match frame {
                     Some(Ok(Message::Text(text))) => {
-                        if inbound_tx.send(text.into()).await.is_err() {
+                        if inbound_tx.send(text).await.is_err() {
                             // Receiver dropped — nobody is reading.
                             break;
                         }

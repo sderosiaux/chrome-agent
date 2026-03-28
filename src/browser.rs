@@ -231,7 +231,7 @@ async fn fetch_ws_endpoint(base_url: &str) -> Result<String, BrowserError> {
     Ok(ws_url.to_string())
 }
 
-/// HTTP GET that returns JSON. Uses ureq (blocking, run on tokio spawn_blocking).
+/// HTTP GET that returns JSON. Uses ureq (blocking, run on tokio `spawn_blocking`).
 async fn http_get_json(
     url: &str,
     timeout: Duration,
@@ -273,7 +273,7 @@ async fn probe_ws_endpoint(ws_url: &str) -> bool {
     .is_ok_and(|r| r.is_ok())
 }
 
-/// Wait for DevToolsActivePort file to appear and parse it.
+/// Wait for `DevToolsActivePort` file to appear and parse it.
 async fn wait_for_devtools_port(
     path: &Path,
     timeout: Duration,
@@ -294,7 +294,7 @@ async fn wait_for_devtools_port(
     )))
 }
 
-/// Parse a DevToolsActivePort file: line 1 = port, line 2 = ws path.
+/// Parse a `DevToolsActivePort` file: line 1 = port, line 2 = ws path.
 fn read_devtools_active_port(path: &Path) -> Option<String> {
     let contents = std::fs::read_to_string(path).ok()?;
     let mut lines = contents.lines();
@@ -308,7 +308,7 @@ fn read_devtools_active_port(path: &Path) -> Option<String> {
     Some(format!("ws://127.0.0.1:{port}{ws_path}"))
 }
 
-/// DevToolsActivePort file candidates per platform.
+/// `DevToolsActivePort` file candidates per platform.
 fn devtools_active_port_candidates() -> Vec<PathBuf> {
     let Some(home) = dirs::home_dir() else {
         return vec![];
@@ -467,3 +467,59 @@ impl std::fmt::Display for BrowserError {
 }
 
 impl std::error::Error for BrowserError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_browser_name_accepts_valid() {
+        assert!(validate_browser_name("default").is_ok());
+        assert!(validate_browser_name("my-browser").is_ok());
+        assert!(validate_browser_name("test_123").is_ok());
+    }
+
+    #[test]
+    fn validate_browser_name_rejects_traversal() {
+        assert!(validate_browser_name("../../etc").is_err());
+        assert!(validate_browser_name("").is_err());
+        assert!(validate_browser_name("foo bar").is_err());
+        assert!(validate_browser_name("foo/bar").is_err());
+    }
+
+    #[test]
+    fn extract_http_from_ws_works() {
+        assert_eq!(
+            extract_http_from_ws("ws://127.0.0.1:9222/devtools/browser/abc"),
+            "http://127.0.0.1:9222"
+        );
+        assert_eq!(
+            extract_http_from_ws("wss://host:443/path"),
+            "http://host:443"
+        );
+    }
+
+    #[test]
+    fn read_devtools_active_port_parses_correctly() {
+        let dir = std::env::temp_dir().join("aibrowsr_test_devtools");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("DevToolsActivePort");
+        std::fs::write(&path, "9222\n/devtools/browser/abc-123\n").unwrap();
+        let result = read_devtools_active_port(&path);
+        assert_eq!(
+            result,
+            Some("ws://127.0.0.1:9222/devtools/browser/abc-123".into())
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn read_devtools_active_port_rejects_invalid() {
+        let dir = std::env::temp_dir().join("aibrowsr_test_devtools_bad");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("DevToolsActivePort");
+        std::fs::write(&path, "not_a_number\n").unwrap();
+        assert!(read_devtools_active_port(&path).is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}

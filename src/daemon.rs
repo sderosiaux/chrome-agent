@@ -5,7 +5,6 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::mpsc;
 
-use crate::cdp::client::CdpClient;
 use crate::session;
 
 const IDLE_TIMEOUT: Duration = Duration::from_secs(300); // 5 min
@@ -75,7 +74,7 @@ pub async fn run_daemon(socket_path: &Path) -> Result<(), DaemonError> {
                 last_activity = Instant::now();
             }
 
-            _ = tokio::time::sleep(IDLE_TIMEOUT.saturating_sub(last_activity.elapsed())) => {
+            () = tokio::time::sleep(IDLE_TIMEOUT.saturating_sub(last_activity.elapsed())) => {
                 if last_activity.elapsed() >= IDLE_TIMEOUT {
                     eprintln!("daemon idle timeout, exiting");
                     break;
@@ -101,7 +100,7 @@ async fn handle_client(stream: UnixStream, _activity: mpsc::Sender<()>) {
     let mut lines = BufReader::new(reader).lines();
 
     while let Ok(Some(line)) = lines.next_line().await {
-        let response = process_command(&line).await;
+        let response = process_command(&line);
         let json = serde_json::to_string(&response).unwrap_or_else(|_| {
             r#"{"ok":false,"error":"serialization failed"}"#.to_string()
         });
@@ -112,7 +111,7 @@ async fn handle_client(stream: UnixStream, _activity: mpsc::Sender<()>) {
 }
 
 /// Process a daemon command. Thin dispatch layer.
-async fn process_command(line: &str) -> serde_json::Value {
+fn process_command(line: &str) -> serde_json::Value {
     let request: serde_json::Value = match serde_json::from_str(line) {
         Ok(v) => v,
         Err(e) => {
@@ -130,7 +129,7 @@ async fn process_command(line: &str) -> serde_json::Value {
 
         "status" => {
             let store = session::load_session().unwrap_or_default();
-            let browsers: Vec<&str> = store.browsers.keys().map(|s| s.as_str()).collect();
+            let browsers: Vec<&str> = store.browsers.keys().map(std::string::String::as_str).collect();
             serde_json::json!({
                 "ok": true,
                 "data": {
@@ -156,6 +155,7 @@ async fn process_command(line: &str) -> serde_json::Value {
 }
 
 /// Start the daemon in a background process (fork on Unix).
+#[allow(dead_code)] // Used in v2.1 daemon auto-start
 pub fn spawn_daemon() -> Result<(), DaemonError> {
     let exe = std::env::current_exe()
         .map_err(|e| DaemonError(format!("Cannot find own executable: {e}")))?;
@@ -190,6 +190,7 @@ pub fn spawn_daemon() -> Result<(), DaemonError> {
 }
 
 /// Ensure daemon is running. Start it if not.
+#[allow(dead_code)] // Used in v2.1 daemon auto-start
 pub async fn ensure_daemon() -> Result<(), DaemonError> {
     if session::daemon_socket_exists() {
         // Try connecting to verify it's alive
@@ -219,6 +220,7 @@ pub async fn ensure_daemon() -> Result<(), DaemonError> {
 }
 
 /// Try to ping the daemon. Returns true if it responds.
+#[allow(dead_code)] // Used in v2.1 daemon auto-start
 async fn try_ping_daemon(socket_path: &Path) -> bool {
     let Ok(mut stream) = UnixStream::connect(socket_path).await else {
         return false;

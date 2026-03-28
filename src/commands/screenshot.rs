@@ -28,26 +28,23 @@ pub async fn run(
     let dir = screenshot_dir()?;
     std::fs::create_dir_all(&dir)?;
 
-    let file_name = match filename {
-        Some(name) => {
-            // Sanitize: extract only the filename component, strip path traversal
-            let sanitized = std::path::Path::new(name)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("screenshot");
-            if sanitized.ends_with(".png") {
-                sanitized.to_string()
-            } else {
-                format!("{sanitized}.png")
-            }
+    let file_name = if let Some(name) = filename {
+        // Sanitize: extract only the filename component, strip path traversal
+        let sanitized = std::path::Path::new(name)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("screenshot");
+        if sanitized.ends_with(".png") {
+            sanitized.to_string()
+        } else {
+            format!("{sanitized}.png")
         }
-        None => {
-            let ts = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis();
-            format!("screenshot-{ts}.png")
-        }
+    } else {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        format!("screenshot-{ts}.png")
     };
 
     let path = dir.join(&file_name);
@@ -92,7 +89,7 @@ fn base64_decode(input: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
         if val == 255 {
             return Err(format!("Invalid base64 character: {}", b as char).into());
         }
-        buf = (buf << 6) | val as u32;
+        buf = (buf << 6) | u32::from(val);
         bits += 6;
         if bits >= 8 {
             bits -= 8;

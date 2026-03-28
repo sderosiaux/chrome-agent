@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
@@ -160,20 +160,12 @@ fn dev_browser_dir() -> Result<PathBuf, SessionError> {
 }
 
 fn is_process_alive(pid: u32) -> bool {
-    // Check /proc on Linux, or use kill -0 via Command on Unix
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     {
-        std::path::Path::new(&format!("/proc/{pid}")).exists()
-    }
-    #[cfg(target_os = "macos")]
-    {
-        std::process::Command::new("kill")
-            .args(["-0", &pid.to_string()])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
+        // SAFETY: kill(pid, 0) only checks if the process exists. No signal sent.
+        #[allow(unsafe_code)]
+        let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
+        result == 0
     }
     #[cfg(not(unix))]
     {
@@ -192,3 +184,27 @@ impl std::fmt::Display for SessionError {
 }
 
 impl std::error::Error for SessionError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_roundtrip() {
+        let mut store = SessionStore::default();
+        let browser =
+            ensure_browser(&mut store, "test", "ws://localhost:9222", Some(1234), true);
+        ensure_page(browser, "main", "target-abc");
+
+        let json = serde_json::to_string(&store).unwrap();
+        let loaded: SessionStore = serde_json::from_str(&json).unwrap();
+
+        assert!(loaded.browsers.contains_key("test"));
+        let b = &loaded.browsers["test"];
+        assert_eq!(b.ws_endpoint, "ws://localhost:9222");
+        assert_eq!(b.pid, Some(1234));
+        assert!(b.headless);
+        assert!(b.pages.contains_key("main"));
+        assert_eq!(b.pages["main"].target_id, "target-abc");
+    }
+}

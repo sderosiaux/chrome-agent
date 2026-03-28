@@ -228,7 +228,7 @@ enum DaemonAction {
 async fn main() {
     // Install signal handler so managed Chrome is cleaned up on Ctrl+C
     tokio::spawn(async {
-        if let Ok(()) = tokio::signal::ctrl_c().await {
+        if matches!(tokio::signal::ctrl_c().await, Ok(())) {
             // Best-effort: kill all managed Chrome processes from session
             if let Ok(store) = session::load_session() {
                 for browser in store.browsers.values() {
@@ -287,7 +287,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
 
         Command::Status => {
-            return cmd_status(cli.json).await;
+            return cmd_status(cli.json);
         }
 
         Command::Stop => {
@@ -295,7 +295,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
 
         Command::Close => {
-            return cmd_close(&cli.browser, cli.json).await;
+            return cmd_close(&cli.browser, cli.json);
         }
 
         _ => {}
@@ -313,27 +313,24 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         let http = browser::extract_http_from_ws(ws);
 
         if mode_matches {
-            match CdpClient::connect(ws).await {
-                Ok(client) => {
-                    let conn = browser::BrowserConnection {
-                        ws_endpoint: ws.clone(),
-                        http_endpoint: Some(http),
-                        pid: existing.pid,
-                    };
-                    (conn, client)
-                }
-                Err(_) => {
-                    store.browsers.remove(&cli.browser);
-                    let opts = BrowserOptions {
-                        name: cli.browser.clone(),
-                        headless: want_headless,
-                        ignore_https_errors: cli.ignore_https_errors,
-                        connect: cli.connect.clone(),
-                    };
-                    let conn = browser::resolve_browser(&opts).await?;
-                    let client = CdpClient::connect(&conn.ws_endpoint).await?;
-                    (conn, client)
-                }
+            if let Ok(client) = CdpClient::connect(ws).await {
+                let conn = browser::BrowserConnection {
+                    ws_endpoint: ws.clone(),
+                    http_endpoint: Some(http),
+                    pid: existing.pid,
+                };
+                (conn, client)
+            } else {
+                store.browsers.remove(&cli.browser);
+                let opts = BrowserOptions {
+                    name: cli.browser.clone(),
+                    headless: want_headless,
+                    ignore_https_errors: cli.ignore_https_errors,
+                    connect: cli.connect.clone(),
+                };
+                let conn = browser::resolve_browser(&opts).await?;
+                let client = CdpClient::connect(&conn.ws_endpoint).await?;
+                (conn, client)
             }
         } else {
             // Mode mismatch (e.g. old session is headed, agent wants headless).
@@ -371,7 +368,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         (conn, client)
     };
 
-    let http_endpoint = conn.http_endpoint.as_deref().ok_or_else(|| {
+    let http_endpoint = conn.http_endpoint.as_deref().ok_or({
         "No HTTP endpoint available. Cannot resolve page WebSocket URL."
     })?;
 
@@ -400,33 +397,11 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
         Command::Goto { url, inspect } => {
             let result = commands::goto::run(&client, &url, cli.timeout).await?;
-
-            let page = session::ensure_page(
-                store.browsers.get_mut(&cli.browser).unwrap(),
-                &cli.page,
-                &target_id,
-            );
-
-            if json_mode {
-                let mut obj = json!({"ok": true, "url": result.url, "title": result.title});
-                if inspect {
-                    let snapshot = commands::inspect::run(&client, false, None, None).await?;
-                    obj["snapshot"] = json!(snapshot.text);
-                    page.uid_map = snapshot.uid_map;
-                }
-                json_output(&obj);
-            } else {
-                println!("{} — {}", result.url, result.title);
-                if inspect {
-                    let snapshot = commands::inspect::run(&client, false, None, None).await?;
-                    page.uid_map = snapshot.uid_map;
-                    println!("{}", snapshot.text);
-                }
-            }
+            output_goto(&client, &mut store, &cli.browser, &cli.page, &target_id, &result.url, &result.title, inspect, json_mode).await?;
         }
 
         Command::Click { uid, selector, xy, inspect } => {
-            let provided = uid.is_some() as u8 + selector.is_some() as u8 + xy.is_some() as u8;
+            let provided = u8::from(uid.is_some()) + u8::from(selector.is_some()) + u8::from(xy.is_some());
             if provided == 0 {
                 return Err("Provide a uid, --selector, or --xy to identify the click target.".into());
             }
@@ -449,32 +424,11 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 commands::click::run(&client, &uid_map, uid).await?
             };
 
-            if json_mode {
-                let mut obj = json!({"ok": true, "message": msg});
-                if inspect {
-                    let snapshot = commands::inspect::run(&client, false, None, None).await?;
-                    obj["snapshot"] = json!(snapshot.text);
-                    if let Some(browser_s) = store.browsers.get_mut(&cli.browser) {
-                        let page = session::ensure_page(browser_s, &cli.page, &target_id);
-                        page.uid_map = snapshot.uid_map;
-                    }
-                }
-                json_output(&obj);
-            } else {
-                println!("{msg}");
-                if inspect {
-                    let snapshot = commands::inspect::run(&client, false, None, None).await?;
-                    if let Some(browser_s) = store.browsers.get_mut(&cli.browser) {
-                        let page = session::ensure_page(browser_s, &cli.page, &target_id);
-                        page.uid_map = snapshot.uid_map;
-                    }
-                    println!("{}", snapshot.text);
-                }
-            }
+            output_action(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, inspect, json_mode).await?;
         }
 
         Command::Fill { uid, selector, value, inspect } => {
-            let provided = uid.is_some() as u8 + selector.is_some() as u8;
+            let provided = u8::from(uid.is_some()) + u8::from(selector.is_some());
             if provided == 0 {
                 return Err("Provide --uid or --selector to identify the element.".into());
             }
@@ -491,28 +445,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 commands::fill::run(&client, &uid_map, uid, &value).await?
             };
 
-            if json_mode {
-                let mut obj = json!({"ok": true, "message": msg});
-                if inspect {
-                    let snapshot = commands::inspect::run(&client, false, None, None).await?;
-                    obj["snapshot"] = json!(snapshot.text);
-                    if let Some(browser_s) = store.browsers.get_mut(&cli.browser) {
-                        let page = session::ensure_page(browser_s, &cli.page, &target_id);
-                        page.uid_map = snapshot.uid_map;
-                    }
-                }
-                json_output(&obj);
-            } else {
-                println!("{msg}");
-                if inspect {
-                    let snapshot = commands::inspect::run(&client, false, None, None).await?;
-                    if let Some(browser_s) = store.browsers.get_mut(&cli.browser) {
-                        let page = session::ensure_page(browser_s, &cli.page, &target_id);
-                        page.uid_map = snapshot.uid_map;
-                    }
-                    println!("{}", snapshot.text);
-                }
-            }
+            output_action(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, inspect, json_mode).await?;
         }
 
         Command::FillForm { pairs, inspect } => {
@@ -528,28 +461,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
             let msg = commands::fill::run_form(&client, &uid_map, &parsed).await?;
 
-            if json_mode {
-                let mut obj = json!({"ok": true, "message": msg});
-                if inspect {
-                    let snapshot = commands::inspect::run(&client, false, None, None).await?;
-                    obj["snapshot"] = json!(snapshot.text);
-                    if let Some(browser_s) = store.browsers.get_mut(&cli.browser) {
-                        let page = session::ensure_page(browser_s, &cli.page, &target_id);
-                        page.uid_map = snapshot.uid_map;
-                    }
-                }
-                json_output(&obj);
-            } else {
-                println!("{msg}");
-                if inspect {
-                    let snapshot = commands::inspect::run(&client, false, None, None).await?;
-                    if let Some(browser_s) = store.browsers.get_mut(&cli.browser) {
-                        let page = session::ensure_page(browser_s, &cli.page, &target_id);
-                        page.uid_map = snapshot.uid_map;
-                    }
-                    println!("{}", snapshot.text);
-                }
-            }
+            output_action(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, inspect, json_mode).await?;
         }
 
         Command::Text { uid } => {
@@ -744,6 +656,78 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Execute a command, optionally inspect after, and output result.
+async fn output_action(
+    client: &CdpClient,
+    store: &mut SessionStore,
+    browser_name: &str,
+    page_name: &str,
+    target_id: &str,
+    msg: String,
+    inspect: bool,
+    json_mode: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if json_mode {
+        let mut obj = json!({"ok": true, "message": msg});
+        if inspect {
+            let snapshot = commands::inspect::run(client, false, None, None).await?;
+            obj["snapshot"] = json!(snapshot.text);
+            if let Some(browser_s) = store.browsers.get_mut(browser_name) {
+                let page = session::ensure_page(browser_s, page_name, target_id);
+                page.uid_map = snapshot.uid_map;
+            }
+        }
+        json_output(&obj);
+    } else {
+        println!("{msg}");
+        if inspect {
+            let snapshot = commands::inspect::run(client, false, None, None).await?;
+            if let Some(browser_s) = store.browsers.get_mut(browser_name) {
+                let page = session::ensure_page(browser_s, page_name, target_id);
+                page.uid_map = snapshot.uid_map;
+            }
+            println!("{}", snapshot.text);
+        }
+    }
+    Ok(())
+}
+
+/// Output goto result with optional post-inspect.
+async fn output_goto(
+    client: &CdpClient,
+    store: &mut SessionStore,
+    browser_name: &str,
+    page_name: &str,
+    target_id: &str,
+    url: &str,
+    title: &str,
+    inspect: bool,
+    json_mode: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let page = session::ensure_page(
+        store.browsers.get_mut(browser_name).unwrap(),
+        page_name,
+        target_id,
+    );
+    if json_mode {
+        let mut obj = json!({"ok": true, "url": url, "title": title});
+        if inspect {
+            let snapshot = commands::inspect::run(client, false, None, None).await?;
+            obj["snapshot"] = json!(snapshot.text);
+            page.uid_map = snapshot.uid_map;
+        }
+        json_output(&obj);
+    } else {
+        println!("{url} — {title}");
+        if inspect {
+            let snapshot = commands::inspect::run(client, false, None, None).await?;
+            page.uid_map = snapshot.uid_map;
+            println!("{}", snapshot.text);
+        }
+    }
+    Ok(())
+}
+
 /// Print a `serde_json::Value` as a single compact JSON line to stdout.
 fn json_output(value: &serde_json::Value) {
     println!("{}", serde_json::to_string(value).unwrap_or_default());
@@ -772,7 +756,7 @@ fn error_hint(msg: &str) -> Option<&'static str> {
     }
 }
 
-/// Get the uid_map from the current session, or empty if none.
+/// Get the `uid_map` from the current session, or empty if none.
 fn get_uid_map(store: &SessionStore, browser_name: &str, page_name: &str) -> HashMap<String, ElementRef> {
     store
         .browsers
@@ -840,7 +824,7 @@ async fn resolve_page_target(
     Ok(target_id)
 }
 
-async fn cmd_status(json_mode: bool) -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_status(json_mode: bool) -> Result<(), Box<dyn std::error::Error>> {
     let store = session::load_session()?;
     let daemon_alive = session::daemon_socket_exists();
 
@@ -923,7 +907,7 @@ async fn cmd_stop(json_mode: bool) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-async fn cmd_close(browser_name: &str, json_mode: bool) -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_close(browser_name: &str, json_mode: bool) -> Result<(), Box<dyn std::error::Error>> {
     let mut store = session::load_session()?;
 
     let browser = store.browsers.remove(browser_name);

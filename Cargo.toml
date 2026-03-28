@@ -27,6 +27,27 @@ module_name_repetitions = "allow"
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 must_use_candidate = "allow"
+# Structural — tracked but not blocking
+cognitive_complexity = "allow"
+too_many_arguments = "allow"
+too_many_lines = "allow"
+unused_self = "allow"
+# Style — not worth the churn for a CLI
+items_after_statements = "allow"
+option_if_let_else = "allow"
+redundant_else = "allow"
+similar_names = "allow"
+cast_possible_truncation = "allow"
+cast_possible_wrap = "allow"
+case_sensitive_file_extension_comparisons = "allow"
+enum_variant_names = "allow"
+used_underscore_binding = "allow"
+significant_drop_in_scrutinee = "allow"
+format_push_string = "allow"
+redundant_continue = "allow"
+if_same_then_else = "allow"
+unnecessary_wraps = "allow"
+single_match_else = "allow"
 
 [profile.release]
 opt-level = 3

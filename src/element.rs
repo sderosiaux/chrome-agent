@@ -5,12 +5,11 @@ use serde_json::json;
 
 use crate::cdp::client::CdpClient;
 use crate::cdp::types::{
-    BoxModel, DispatchMouseEventParams, GetBoxModelResult, MouseButton, MouseEventType,
-    RemoteObject, ResolveNodeParams, ResolveNodeResult,
+    DispatchMouseEventParams, GetBoxModelResult, MouseButton, MouseEventType, ResolveNodeParams, ResolveNodeResult,
 };
 use crate::element_ref::ElementRef;
 
-/// Resolve a uid to a CDP objectId via the ElementRef in the uid map.
+/// Resolve a uid to a CDP objectId via the `ElementRef` in the uid map.
 async fn resolve_uid(
     client: &CdpClient,
     uid_map: &HashMap<String, ElementRef>,
@@ -170,15 +169,13 @@ pub async fn fill(
     let resolved = resolve_uid(client, uid_map, uid).await?;
 
     // Focus, clear, set value, dispatch events
-    let js = format!(
-        r#"function(v) {{
+    let js = r"function(v) {
             this.focus();
             this.value = '';
             this.value = v;
-            this.dispatchEvent(new Event('input', {{bubbles: true}}));
-            this.dispatchEvent(new Event('change', {{bubbles: true}}));
-        }}"#
-    );
+            this.dispatchEvent(new Event('input', {bubbles: true}));
+            this.dispatchEvent(new Event('change', {bubbles: true}));
+        }".to_string();
 
     let result: serde_json::Value = client
         .call(
@@ -391,11 +388,11 @@ pub async fn click_selector(
     selector: &str,
 ) -> Result<(), ElementError> {
     let js = format!(
-        r#"(() => {{
+        r"(() => {{
             const el = document.querySelector({sel});
             if (!el) throw new Error('No element matches selector: ' + {sel});
             el.click();
-        }})()"#,
+        }})()",
         sel = serde_json::to_string(selector).unwrap_or_default()
     );
     let result: serde_json::Value = client
@@ -424,7 +421,7 @@ pub async fn fill_selector(
     value: &str,
 ) -> Result<(), ElementError> {
     let js = format!(
-        r#"(() => {{
+        r"(() => {{
             const el = document.querySelector({sel});
             if (!el) throw new Error('No element matches selector: ' + {sel});
             el.focus();
@@ -432,7 +429,7 @@ pub async fn fill_selector(
             el.value = {val};
             el.dispatchEvent(new Event('input', {{bubbles: true}}));
             el.dispatchEvent(new Event('change', {{bubbles: true}}));
-        }})()"#,
+        }})()",
         sel = serde_json::to_string(selector).unwrap_or_default(),
         val = serde_json::to_string(value).unwrap_or_default()
     );
@@ -461,11 +458,11 @@ pub async fn focus_selector(
     selector: &str,
 ) -> Result<(), ElementError> {
     let js = format!(
-        r#"(() => {{
+        r"(() => {{
             const el = document.querySelector({sel});
             if (!el) throw new Error('No element matches selector: ' + {sel});
             el.focus();
-        }})()"#,
+        }})()",
         sel = serde_json::to_string(selector).unwrap_or_default()
     );
     let result: serde_json::Value = client

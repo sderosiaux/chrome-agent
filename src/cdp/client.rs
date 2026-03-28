@@ -57,7 +57,7 @@ impl From<CdpTransportError> for CdpClientError {
 }
 
 impl CdpClient {
-    /// Connect to a Chrome DevTools Protocol endpoint.
+    /// Connect to a Chrome `DevTools` Protocol endpoint.
     pub async fn connect(url: &str) -> Result<Self, CdpClientError> {
         let (sender, receiver) = transport::connect(url).await?;
         let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));

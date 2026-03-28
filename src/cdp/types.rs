@@ -78,24 +78,6 @@ pub struct CreateTargetResult {
     pub target_id: String,
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ActivateTargetParams {
-    pub target_id: String,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CloseTargetParams {
-    pub target_id: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CloseTargetResult {
-    pub success: bool,
-}
-
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GetTargetsResult {
@@ -116,20 +98,6 @@ pub struct TargetInfo {
     pub opener_id: Option<String>,
     #[serde(default)]
     pub browser_context_id: Option<String>,
-}
-
-// Target events
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TargetCreatedEvent {
-    pub target_info: TargetInfo,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TargetDestroyedEvent {
-    pub target_id: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -166,7 +134,7 @@ pub struct CaptureScreenshotParams {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub quality: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub clip: Option<Viewport>,
+    pub clip: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub from_surface: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -175,99 +143,15 @@ pub struct CaptureScreenshotParams {
     pub optimize_for_speed: Option<bool>,
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Viewport {
-    pub x: f64,
-    pub y: f64,
-    pub width: f64,
-    pub height: f64,
-    pub scale: f64,
-}
-
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CaptureScreenshotResult {
     pub data: String,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct GetFrameTreeResult {
-    pub frame_tree: FrameTree,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FrameTree {
-    pub frame: Frame,
-    #[serde(default)]
-    pub child_frames: Option<Vec<FrameTree>>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Frame {
-    pub id: String,
-    #[serde(default)]
-    pub parent_id: Option<String>,
-    #[serde(default)]
-    pub loader_id: Option<String>,
-    #[serde(default)]
-    pub name: Option<String>,
-    pub url: String,
-    #[serde(default)]
-    pub security_origin: Option<String>,
-    #[serde(default)]
-    pub mime_type: Option<String>,
-}
-
-// Page events
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FrameNavigatedEvent {
-    pub frame: Frame,
-    #[serde(rename = "type", default)]
-    pub navigation_type: Option<String>,
-}
-
-/// `Page.loadEventFired` carries only a timestamp.
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LoadEventFiredEvent {
-    pub timestamp: f64,
-}
-
 // ---------------------------------------------------------------------------
 // Runtime domain
 // ---------------------------------------------------------------------------
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct EvaluateParams {
-    pub expression: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub object_group: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub include_command_line_api: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub silent: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub context_id: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub return_by_value: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub generate_preview: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub user_gesture: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub await_promise: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub throw_on_side_effect: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub timeout: Option<f64>,
-}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -275,57 +159,6 @@ pub struct EvaluateResult {
     pub result: RemoteObject,
     #[serde(default)]
     pub exception_details: Option<ExceptionDetails>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CallFunctionOnParams {
-    pub function_declaration: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub object_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub arguments: Option<Vec<CallArgument>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub silent: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub return_by_value: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub generate_preview: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub user_gesture: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub await_promise: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub execution_context_id: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub object_group: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CallArgument {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub value: Option<Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub unserializable_value: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub object_id: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CallFunctionOnResult {
-    pub result: RemoteObject,
-    #[serde(default)]
-    pub exception_details: Option<ExceptionDetails>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AddBindingParams {
-    pub name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub execution_context_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -364,16 +197,6 @@ pub struct ExceptionDetails {
     pub execution_context_id: Option<u64>,
 }
 
-// Runtime events
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BindingCalledEvent {
-    pub name: String,
-    pub payload: String,
-    pub execution_context_id: u64,
-}
-
 // ---------------------------------------------------------------------------
 // DOM domain
 // ---------------------------------------------------------------------------
@@ -397,17 +220,6 @@ pub struct ResolveNodeResult {
     pub object: RemoteObject,
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct GetBoxModelParams {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub node_id: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub backend_node_id: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub object_id: Option<String>,
-}
-
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GetBoxModelResult {
@@ -428,54 +240,6 @@ pub struct BoxModel {
 
 /// A quad is 4 (x, y) points = 8 floats.
 pub type Quad = Vec<f64>;
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DescribeNodeParams {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub node_id: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub backend_node_id: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub object_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub depth: Option<i32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub pierce: Option<bool>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DescribeNodeResult {
-    pub node: DomNode,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DomNode {
-    pub node_id: i64,
-    #[serde(default)]
-    pub parent_id: Option<i64>,
-    pub backend_node_id: i64,
-    pub node_type: i32,
-    pub node_name: String,
-    pub local_name: String,
-    pub node_value: String,
-    #[serde(default)]
-    pub child_node_count: Option<u32>,
-    #[serde(default)]
-    pub children: Option<Vec<DomNode>>,
-    #[serde(default)]
-    pub attributes: Option<Vec<String>>,
-    #[serde(default)]
-    pub document_url: Option<String>,
-    #[serde(default)]
-    pub base_url: Option<String>,
-    #[serde(default)]
-    pub frame_id: Option<String>,
-    #[serde(default)]
-    pub content_document: Option<Box<DomNode>>,
-}
 
 // ---------------------------------------------------------------------------
 // Input domain
@@ -512,7 +276,6 @@ pub enum MouseEventType {
     MousePressed,
     MouseReleased,
     MouseMoved,
-    MouseWheel,
 }
 
 #[derive(Debug, Serialize)]
@@ -524,54 +287,6 @@ pub enum MouseButton {
     Right,
     Back,
     Forward,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DispatchKeyEventParams {
-    #[serde(rename = "type")]
-    pub event_type: KeyEventType,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub modifiers: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub timestamp: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub text: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub unmodified_text: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub key_identifier: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub code: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub key: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub windows_virtual_key_code: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub native_virtual_key_code: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub auto_repeat: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub is_keypad: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub is_system_key: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub location: Option<u32>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub enum KeyEventType {
-    KeyDown,
-    KeyUp,
-    RawKeyDown,
-    Char,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct InsertTextParams {
-    pub text: String,
 }
 
 // ---------------------------------------------------------------------------
