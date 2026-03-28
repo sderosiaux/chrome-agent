@@ -152,21 +152,12 @@ async fn launch_browser(opts: &BrowserOptions) -> Result<BrowserConnection, Brow
     cmd.arg("--remote-debugging-port=0"); // auto-assign port
     cmd.arg("--no-first-run");
     cmd.arg("--no-default-browser-check");
-    // Prevent Chrome from merging into an existing instance on macOS
-    cmd.arg("--new-window");
     cmd.arg("--disable-background-timer-throttling");
     cmd.arg("--disable-backgrounding-occluded-windows");
     cmd.arg("--disable-renderer-backgrounding");
-    // Keep Chrome alive even when all tabs are closed (critical for headed mode)
-    cmd.arg("--keep-alive-for-test");
-    cmd.arg("--disable-session-crashed-bubble");
 
     if opts.headless {
         cmd.arg("--headless=new");
-    } else {
-        // Headed mode: open about:blank to keep Chrome alive between commands.
-        // Without this, Chrome exits when the navigated page tab is the only one.
-        cmd.arg("about:blank");
     }
 
     if opts.ignore_https_errors {
@@ -174,21 +165,13 @@ async fn launch_browser(opts: &BrowserOptions) -> Result<BrowserConnection, Brow
     }
 
     if opts.stealth {
-        // Suppress the "Chrome is being controlled by automated test software" infobar
         cmd.arg("--disable-infobars");
-        // Exclude automation-related Chrome switches from navigator.userAgent
         cmd.arg("--disable-component-extensions-with-background-pages");
     }
 
     cmd.stdin(Stdio::null());
-    if opts.headless {
-        cmd.stdout(Stdio::null());
-        cmd.stderr(Stdio::null());
-    } else {
-        // In headed mode, let Chrome write to inherited stderr.
-        // Suppressing it causes issues with DevTools port binding on macOS.
-        cmd.stdout(Stdio::null());
-    }
+    cmd.stdout(Stdio::null());
+    cmd.stderr(Stdio::null());
 
     let child = cmd.spawn().map_err(|e| {
         BrowserError::Launch(format!("Failed to launch {}: {e}", chromium_path.display()))
