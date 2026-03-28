@@ -357,8 +357,8 @@ pub fn cmd_close(browser_name: &str, purge: bool, json_mode: bool) -> Result<(),
     };
 
     // Purge browser profile if requested
-    if purge {
-        if let Some(home) = dirs::home_dir() {
+    if purge
+        && let Some(home) = dirs::home_dir() {
             let profile_dir = home.join(".aibrowsr").join("browsers").join(browser_name);
             if profile_dir.exists() {
                 // Wait briefly for Chrome to exit after kill, then retry purge
@@ -370,7 +370,6 @@ pub fn cmd_close(browser_name: &str, purge: bool, json_mode: bool) -> Result<(),
                 }
             }
         }
-    }
 
     let message = if purge {
         format!("{message} (profile purged)")

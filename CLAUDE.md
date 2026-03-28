@@ -1,7 +1,7 @@
-# aibrowsr v0.2.0
+# aibrowsr v0.2.5
 
 Single Rust binary for browser automation via CDP. Built for AI agents.
-~5.3K lines Rust, zero runtime dependencies, 2.9 MB binary.
+~6.2K lines Rust, zero runtime dependencies, 2.9 MB binary.
 
 ## Architecture
 
@@ -12,7 +12,7 @@ CLI (clap) → CDP Client (WebSocket) → Chrome
 | Module | Role |
 |--------|------|
 | `src/cdp/` | WebSocket transport, message correlation, CDP types |
-| `src/commands/` | 25 commands: goto, click, fill, inspect, eval, text, read, network, console, wait, screenshot, tabs... |
+| `src/commands/` | 27 commands: goto, click, fill, inspect, eval, text, read, extract, diff, network, console, wait, screenshot, tabs... |
 | `src/element.rs` | uid/selector/coordinate resolution → CDP input dispatch, JS click fallback |
 | `src/element_ref.rs` | ElementRef abstraction (decouples from CDP internals) |
 | `src/snapshot.rs` | Accessibility tree → compact text with stable uids (backendNodeId), role filter + aliases |
@@ -24,6 +24,7 @@ CLI (clap) → CDP Client (WebSocket) → Chrome
 | `src/run_helpers.rs` | Shared output/error handling, connect_page with 5x retry |
 | `src/daemon.rs` | Optional micro-daemon (Unix only), heartbeat, crash recovery |
 | `vendor/Readability.js` | Mozilla Readability (90KB, MIT) embedded via include_str! |
+| `vendor/extract.js` | MDR/DEPTA-inspired data record extraction (standalone, tested via jsdom) |
 | `npm/` | npm distribution wrapper (postinstall downloads native binary) |
 | `skills/aibrowsr/SKILL.md` | Agent skill file — `npx skills add sderosiaux/aibrowsr` |
 
@@ -57,7 +58,8 @@ cargo clippy -- -D warnings  # zero warnings enforced in CI
 - **`--json` mode** — errors exit 0 with `{"ok":false}`. Agents parse stdout, not exit codes.
 - **Self-healing errors** — every error includes a `hint` field suggesting the next action
 - **Reader mode** — `read` injects Mozilla Readability.js for article extraction (~500 tokens vs ~15K)
-- **Content extraction hierarchy** — `read` (articles) > `text --selector` (scoped) > `text` (full page) > `eval` (structured JS) > `network` (API responses)
+- **Content extraction hierarchy** — `read` (articles) > `extract` (repeating data) > `text --selector` (scoped) > `text` (full page) > `eval` (structured JS) > `network` (API responses)
+- **`extract` command** — MDR/DEPTA-inspired heuristics: sibling structural similarity, content heterogeneity, text-to-link ratio, semantic class fast-pass, hidden element exclusion, tag-based merge for modifier classes. 187 tests (117 JS unit via jsdom + 70 Rust E2E).
 - **Pipe mode** — `aibrowsr pipe` reads JSON from stdin, writes JSON to stdout. One connection, 10x faster.
 - **Network capture** — retroactive via Performance API (stealth-safe) or live via Network domain
 - **Console capture** — stealth-safe interceptor via addScriptToEvaluateOnNewDocument

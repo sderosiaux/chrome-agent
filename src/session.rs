@@ -65,13 +65,11 @@ pub fn save_session(store: &SessionStore) -> Result<(), SessionError> {
     let path = session_path()?;
 
     // Detect concurrent modification (another aibrowsr process touched the file)
-    if let Some(loaded_mtime) = store.loaded_mtime {
-        if let Ok(current_mtime) = std::fs::metadata(&path).and_then(|m| m.modified()) {
-            if current_mtime != loaded_mtime {
+    if let Some(loaded_mtime) = store.loaded_mtime
+        && let Ok(current_mtime) = std::fs::metadata(&path).and_then(|m| m.modified())
+            && current_mtime != loaded_mtime {
                 eprintln!("warning: session file was modified by another process. Use --browser <name> to isolate parallel agents.");
             }
-        }
-    }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| SessionError(format!("Failed to create dir: {e}")))?;

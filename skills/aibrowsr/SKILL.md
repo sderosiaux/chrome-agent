@@ -3,7 +3,7 @@ name: aibrowsr
 description: Browser automation for AI agents. Use when the user asks to interact with websites, scrape data, fill forms, take screenshots, or automate any browser task. Triggers on "open a website", "go to", "scrape", "fill the form", "click", "take a screenshot", "read this page", "search on", "check this site".
 metadata:
   author: sderosiaux
-  version: "0.1.0"
+  version: "0.2.5"
   tags: ["browser", "automation", "scraping", "chrome", "cdp"]
 ---
 
@@ -46,6 +46,7 @@ aibrowsr fill --selector "input[name=email]" "hello@test.com"
 | Tool | When | Tokens |
 |------|------|--------|
 | `aibrowsr read` | Articles, blog posts, product pages | ~200-500 |
+| `aibrowsr extract` | Repeating data: product grids, news feeds, tables, search results | ~100-500 |
 | `aibrowsr text --selector "main"` | Scoped visible text | ~500-1000 |
 | `aibrowsr eval "JSON.stringify(...)"` | Structured data from DOM | Varies |
 | `aibrowsr inspect --filter "link"` | Find interactive elements | ~50-200 |
@@ -90,6 +91,7 @@ aibrowsr press Enter|Tab|Escape
 
 # Content extraction
 aibrowsr read [--truncate N]
+aibrowsr extract [--selector "css"] [--limit N]   # auto-detect repeating data (no selectors needed)
 aibrowsr text [--selector "main"] [--truncate N]
 aibrowsr eval "expression" [--selector "css"]
 

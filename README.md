@@ -73,7 +73,7 @@ aibrowsr screenshot
 ## How It Works
 
 ```
-aibrowsr v0.2.0 (Rust, ~5.3K lines, 2.9 MB binary)
+aibrowsr v0.2.5 (Rust, ~6.2K lines, 2.9 MB binary)
     │
     │ WebSocket (Chrome DevTools Protocol)
     ▼
@@ -110,6 +110,8 @@ UIDs are stable across inspects (based on Chrome's `backendNodeId`). The agent i
 | `back` | Navigate back in history |
 | `screenshot [--filename name]` | Capture screenshot → file path |
 | `tabs` | List open browser tabs |
+| `extract [--selector "css"] [--limit N]` | Auto-detect repeating data records (tables, cards, lists) |
+| `diff` | Compare current page state to last inspect snapshot |
 | `close [--purge]` | Close browser (--purge deletes profile/cookies) |
 | `status` | Show session info |
 | `stop` | Stop background daemon |
@@ -199,12 +201,41 @@ aibrowsr read
 # → # Article Title
 # → Clean article text without nav, footer, sidebar...
 
+# Repeating data (products, news items, search results — no selectors needed)
+aibrowsr extract
+# → Found 30 items (pattern: TR.athing.submission)
+# → 1. Title: "..." | URL: https://...
+
 # Full page text (scoped by selector)
 aibrowsr text --selector "[role=main]" --truncate 1000
 
 # Structured data via JS
 aibrowsr eval "JSON.stringify([...document.querySelectorAll('h2')].map(e => e.textContent))"
 ```
+
+## Structured Data Extraction
+
+Auto-detect repeating patterns (product grids, news feeds, tables, search results) and extract structured JSON — no selectors needed:
+
+```bash
+aibrowsr goto https://news.ycombinator.com
+aibrowsr extract
+# → Found 30 items (pattern: TR.athing.submission)
+# → 1. Title: "Show HN: A New Browser Tool" | URL: https://...
+# → 2. Title: "Rust 2025 Edition" | URL: https://...
+
+# Scope to a specific section
+aibrowsr extract --selector ".product-grid"
+
+# Limit results
+aibrowsr extract --limit 5
+
+# JSON output for agent consumption
+aibrowsr --json extract
+# → {"ok":true,"items":[{"title":"...","url":"...","price":"..."}],"count":30,"pattern":"TR.athing.submission"}
+```
+
+Uses MDR/DEPTA-inspired heuristics: sibling structural similarity, content heterogeneity scoring, text-to-link ratio filtering, semantic class detection, hidden element exclusion. Prefers rich data records over navigation links or ads.
 
 ## Stealth Mode
 
@@ -332,7 +363,8 @@ google-chrome --remote-debugging-port=9222  # or launch manually
 | Network capture | Retroactive + live | No | No | Metadata only (no bodies) |
 | Console capture | Stealth-safe interceptor | No | Console messages | No |
 | Pipe mode | JSON stdin/stdout | No | No | No |
-| Code | ~5.3K lines | ~76K lines (69K Playwright fork) | ~12K lines | Playwright |
+| Data extraction | `extract` (auto-detect repeating patterns) | No | No | No |
+| Code | ~6.2K lines | ~76K lines (69K Playwright fork) | ~12K lines | Playwright |
 
 ## License
 

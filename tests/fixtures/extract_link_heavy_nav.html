@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html><head><title>Link Heavy Page</title></head>
+<body>
+<!-- This page has a massive nav with many links — should NOT be extracted as data -->
+<nav>
+  <a href="/page1">Page One</a>
+  <a href="/page2">Page Two</a>
+  <a href="/page3">Page Three</a>
+  <a href="/page4">Page Four</a>
+  <a href="/page5">Page Five</a>
+  <a href="/page6">Page Six</a>
+  <a href="/page7">Page Seven</a>
+  <a href="/page8">Page Eight</a>
+  <a href="/page9">Page Nine</a>
+  <a href="/page10">Page Ten</a>
+</nav>
+<!-- The real data is in these cards with fewer items but richer content -->
+<main>
+  <div class="job-listing">
+    <h3><a href="/jobs/senior-rust">Senior Rust Engineer</a></h3>
+    <p class="company">Acme Corp</p>
+    <p class="location">Remote</p>
+    <p class="salary">$180k - $250k</p>
+    <time datetime="2025-03-20">3 days ago</time>
+  </div>
+  <div class="job-listing">
+    <h3><a href="/jobs/backend-go">Backend Engineer (Go)</a></h3>
+    <p class="company">StartupXYZ</p>
+    <p class="location">San Francisco, CA</p>
+    <p class="salary">$150k - $200k</p>
+    <time datetime="2025-03-22">1 day ago</time>
+  </div>
+  <div class="job-listing">
+    <h3><a href="/jobs/devops">DevOps Engineer</a></h3>
+    <p class="company">CloudFirst Inc</p>
+    <p class="location">New York, NY</p>
+    <p class="salary">$140k - $190k</p>
+    <time datetime="2025-03-21">2 days ago</time>
+  </div>
+  <div class="job-listing">
+    <h3><a href="/jobs/frontend-react">Frontend Developer (React)</a></h3>
+    <p class="company">DesignCo</p>
+    <p class="location">London, UK</p>
+    <p class="salary">£70k - £95k</p>
+    <time datetime="2025-03-23">Today</time>
+  </div>
+</main>
+</body>
+</html>

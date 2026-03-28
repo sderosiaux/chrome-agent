@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html><head><title>Dashboard</title></head>
+<body>
+<nav>
+  <a href="/">Dashboard</a>
+  <a href="/settings">Settings</a>
+  <a href="/logout">Logout</a>
+</nav>
+<h1>Recent Activity</h1>
+<div class="activity-feed">
+  <div class="activity-item">
+    <img src="/avatars/alice.jpg" alt="Alice">
+    <div class="activity-content">
+      <strong><a href="/users/alice">Alice Chen</a></strong>
+      <span>pushed 3 commits to <a href="/repos/frontend">frontend</a></span>
+      <time datetime="2025-03-28T10:30:00Z">2 hours ago</time>
+    </div>
+  </div>
+  <div class="activity-item">
+    <img src="/avatars/bob.jpg" alt="Bob">
+    <div class="activity-content">
+      <strong><a href="/users/bob">Bob Smith</a></strong>
+      <span>opened PR #42 on <a href="/repos/backend">backend</a></span>
+      <time datetime="2025-03-28T09:15:00Z">3 hours ago</time>
+    </div>
+  </div>
+  <div class="activity-item">
+    <img src="/avatars/carol.jpg" alt="Carol">
+    <div class="activity-content">
+      <strong><a href="/users/carol">Carol Jones</a></strong>
+      <span>merged PR #38 on <a href="/repos/infra">infra</a></span>
+      <time datetime="2025-03-28T08:00:00Z">5 hours ago</time>
+    </div>
+  </div>
+  <div class="activity-item">
+    <img src="/avatars/dave.jpg" alt="Dave">
+    <div class="activity-content">
+      <strong><a href="/users/dave">Dave Wilson</a></strong>
+      <span>created branch feature/auth on <a href="/repos/api">api</a></span>
+      <time datetime="2025-03-28T07:30:00Z">5 hours ago</time>
+    </div>
+  </div>
+</div>
+<aside class="sidebar">
+  <h2>Quick Stats</h2>
+  <div class="stat">Commits today: 47</div>
+  <div class="stat">Open PRs: 12</div>
+  <div class="stat">Active deployments: 3</div>
+</aside>
+</body>
+</html>

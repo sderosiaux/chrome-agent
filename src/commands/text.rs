@@ -155,7 +155,7 @@ mod tests {
     #[test]
     fn bug_selector_injection_escaped() {
         // serde_json::to_string wraps in double quotes and escapes internals
-        let malicious = r#"'); alert('xss"#;
+        let malicious = r"'); alert('xss";
         let escaped = serde_json::to_string(malicious).unwrap();
         assert!(escaped.starts_with('"'));
         assert!(escaped.ends_with('"'));

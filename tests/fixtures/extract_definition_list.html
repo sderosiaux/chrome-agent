@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html><head><title>FAQ</title></head>
+<body>
+<h1>Frequently Asked Questions</h1>
+<div class="faq-list">
+  <div class="faq-item">
+    <h3>What is aibrowsr?</h3>
+    <p>A single Rust binary for browser automation via Chrome DevTools Protocol. Built for AI agents, not humans.</p>
+  </div>
+  <div class="faq-item">
+    <h3>How does it work?</h3>
+    <p>It connects directly to Chrome via WebSocket and sends CDP commands. No Playwright, no Node.js, no daemon.</p>
+  </div>
+  <div class="faq-item">
+    <h3>What about stealth mode?</h3>
+    <p>Seven CDP-level patches bypass bot detection: navigator.webdriver, chrome.runtime, WebGL, User-Agent, Permissions API, input coordinates, and Runtime.enable skip.</p>
+  </div>
+  <div class="faq-item">
+    <h3>Can I use it with my existing Chrome?</h3>
+    <p>Yes! Use --connect to attach to any Chrome instance with remote debugging enabled. Essential for sites with heavy bot protection like DataDome.</p>
+  </div>
+  <div class="faq-item">
+    <h3>Is it free?</h3>
+    <p>Yes, MIT licensed. Open source on GitHub.</p>
+  </div>
+</div>
+</body>
+</html>

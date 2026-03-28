@@ -1,6 +1,6 @@
 {
   "name": "aibrowsr",
-  "version": "0.2.0",
+  "version": "0.2.5",
   "description": "Browser automation for AI agents. Single binary, zero dependencies, CDP direct.",
   "type": "module",
   "bin": {

@@ -83,11 +83,10 @@ pub async fn run_retroactive(
         .into_iter()
         .filter_map(|e| {
             let url = e.get("url")?.as_str()?.to_string();
-            if let Some(ref f) = filter_lower {
-                if !url.to_ascii_lowercase().contains(f.as_str()) {
+            if let Some(ref f) = filter_lower
+                && !url.to_ascii_lowercase().contains(f.as_str()) {
                     return None;
                 }
-            }
             let initiator = e.get("type").and_then(Value::as_str).unwrap_or("other");
             let duration = e.get("duration").and_then(Value::as_u64).unwrap_or(0);
             let size = e.get("size").and_then(Value::as_u64).unwrap_or(0);
@@ -174,11 +173,10 @@ pub async fn run_live(
             .to_string();
 
         // Apply filter
-        if let Some(ref f) = filter_lower {
-            if !url.to_ascii_lowercase().contains(f.as_str()) {
+        if let Some(ref f) = filter_lower
+            && !url.to_ascii_lowercase().contains(f.as_str()) {
                 continue;
             }
-        }
 
         let status = response
             .get("status")

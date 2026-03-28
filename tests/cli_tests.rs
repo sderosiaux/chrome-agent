@@ -1,5 +1,4 @@
 use std::process::Command;
-use std::time::Duration;
 
 /// Get the path to the built binary.
 fn binary() -> String {
@@ -14,7 +13,7 @@ fn binary() -> String {
     path.to_string_lossy().into_owned()
 }
 
-/// Run aibrowsr with args and return (stdout, stderr, exit_code).
+/// Run aibrowsr with args and return (stdout, stderr, `exit_code`).
 fn run_cli(args: &[&str]) -> (String, String, i32) {
     let output = Command::new(binary())
         .args(args)

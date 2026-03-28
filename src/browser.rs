@@ -49,11 +49,10 @@ pub async fn get_page_ws_url(
                 if let Some(pages) = list.as_array() {
                     for page in pages {
                         let id = page.get("id").and_then(|v| v.as_str()).unwrap_or("");
-                        if id == target_id {
-                            if let Some(ws) = page.get("webSocketDebuggerUrl").and_then(|v| v.as_str()) {
+                        if id == target_id
+                            && let Some(ws) = page.get("webSocketDebuggerUrl").and_then(|v| v.as_str()) {
                                 return Ok(ws.to_string());
                             }
-                        }
                     }
                     // Target not found in list — might not be created yet
                     last_err = BrowserError::NotFound(format!(
@@ -193,15 +192,14 @@ async fn launch_browser(opts: &BrowserOptions) -> Result<BrowserConnection, Brow
 async fn auto_discover() -> Result<BrowserConnection, BrowserError> {
     // 1. Check DevToolsActivePort files from known Chrome profile paths
     for candidate in devtools_active_port_candidates() {
-        if let Some(ws) = read_devtools_active_port(&candidate) {
-            if probe_ws_endpoint(&ws).await {
+        if let Some(ws) = read_devtools_active_port(&candidate)
+            && probe_ws_endpoint(&ws).await {
                 return Ok(BrowserConnection {
                     http_endpoint: Some(extract_http_endpoint(&ws)),
                     ws_endpoint: ws,
                     pid: None,
                 });
             }
-        }
     }
 
     // 2. Probe common debugging ports
@@ -273,7 +271,9 @@ async fn http_get_json(
     timeout: Duration,
 ) -> Result<serde_json::Value, BrowserError> {
     let url = url.to_string();
-    let result = tokio::task::spawn_blocking(move || {
+    
+
+    tokio::task::spawn_blocking(move || {
         let agent = ureq::Agent::config_builder()
             .timeout_connect(Some(timeout))
             .timeout_recv_body(Some(timeout))
@@ -293,9 +293,7 @@ async fn http_get_json(
             .map_err(|e| BrowserError::NotFound(format!("Invalid JSON: {e}")))
     })
     .await
-    .map_err(|e| BrowserError::NotFound(format!("Task failed: {e}")))?;
-
-    result
+    .map_err(|e| BrowserError::NotFound(format!("Task failed: {e}")))?
 }
 
 /// Check if a WebSocket endpoint is reachable.
@@ -445,16 +443,14 @@ fn find_chromium() -> Result<PathBuf, BrowserError> {
             return Ok(path);
         }
         // For Linux: check if it's on PATH
-        if cfg!(target_os = "linux") {
-            if let Ok(output) = Command::new("which").arg(candidate).output() {
-                if output.status.success() {
+        if cfg!(target_os = "linux")
+            && let Ok(output) = Command::new("which").arg(candidate).output()
+                && output.status.success() {
                     let found = String::from_utf8_lossy(&output.stdout).trim().to_string();
                     if !found.is_empty() {
                         return Ok(PathBuf::from(found));
                     }
                 }
-            }
-        }
     }
 
     Err(BrowserError::NotFound(

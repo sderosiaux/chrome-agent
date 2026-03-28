@@ -153,12 +153,11 @@ fn format_ax_tree(
             .lines()
             .filter(|line| {
                 let trimmed = line.trim();
-                if let Some(after_uid) = trimmed.strip_prefix("uid=") {
-                    if let Some(rest) = after_uid.split_once(' ') {
+                if let Some(after_uid) = trimmed.strip_prefix("uid=")
+                    && let Some(rest) = after_uid.split_once(' ') {
                         let role = rest.1.split([' ', '"']).next().unwrap_or("");
                         return expanded.iter().any(|r| r.eq_ignore_ascii_case(role));
                     }
-                }
                 false
             })
             .fold(String::new(), |mut acc, line| {
@@ -230,8 +229,8 @@ fn format_node_with_tracking(
     }
 
     // If name is empty and we're filtering noise, pull text from StaticText children
-    if !verbose && name.is_empty() {
-        if let Some(child_ids) = &node.child_ids {
+    if !verbose && name.is_empty()
+        && let Some(child_ids) = &node.child_ids {
             let texts: Vec<&str> = child_ids
                 .iter()
                 .filter_map(|cid| nodes.get(cid.as_str()))
@@ -242,7 +241,6 @@ fn format_node_with_tracking(
                 name = texts.join(" ");
             }
         }
-    }
 
     // Skip generic containers with no name unless verbose
     if !verbose && role == "generic" && name.is_empty() {
@@ -289,15 +287,13 @@ fn format_node_with_tracking(
     }
 
     // Value (for inputs)
-    if let Some(value_ax) = &node.value {
-        if let Some(val) = value_ax.value.as_ref().and_then(|v| v.as_str()) {
-            if !val.is_empty() {
+    if let Some(value_ax) = &node.value
+        && let Some(val) = value_ax.value.as_ref().and_then(|v| v.as_str())
+            && !val.is_empty() {
                 output.push_str(" value=\"");
                 output.push_str(val);
                 output.push('"');
             }
-        }
-    }
 
     // Properties: focused, disabled, expanded, selected, level, checked
     if let Some(props) = &node.properties {
@@ -325,12 +321,11 @@ fn format_node_with_tracking(
                     }
                 }
                 "checked" => {
-                    if let Some(val) = prop_val.and_then(|v| v.as_str()) {
-                        if val != "false" {
+                    if let Some(val) = prop_val.and_then(|v| v.as_str())
+                        && val != "false" {
                             output.push_str(" checked=");
                             output.push_str(val);
                         }
-                    }
                 }
                 "level" => {
                     if let Some(level) = prop_val.and_then(serde_json::Value::as_u64) {
@@ -349,8 +344,8 @@ fn format_node_with_tracking(
                 }
                 _ => {
                     // Include all properties in verbose mode
-                    if verbose {
-                        if let Some(val) = prop_val {
+                    if verbose
+                        && let Some(val) = prop_val {
                             output.push(' ');
                             output.push_str(&prop.name);
                             output.push('=');
@@ -365,7 +360,6 @@ fn format_node_with_tracking(
                                 _ => output.push_str(&val.to_string()),
                             }
                         }
-                    }
                 }
             }
         }
@@ -374,11 +368,10 @@ fn format_node_with_tracking(
     output.push('\n');
 
     // Depth limit: skip children if we've reached max_depth
-    if let Some(max) = max_depth {
-        if depth >= max {
+    if let Some(max) = max_depth
+        && depth >= max {
             return;
         }
-    }
 
     // Recurse children
     if let Some(child_ids) = &node.child_ids {
@@ -655,7 +648,7 @@ mod tests {
             height: 0,
         };
         let (x, y) = model.content_center();
-        assert_eq!(x, 0.0);
-        assert_eq!(y, 0.0);
+        assert!(x.abs() < f64::EPSILON);
+        assert!(y.abs() < f64::EPSILON);
     }
 }
