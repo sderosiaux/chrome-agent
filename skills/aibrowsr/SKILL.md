@@ -79,6 +79,7 @@ aibrowsr scroll down|up|<uid>
 
 # Inspection
 aibrowsr inspect [--max-depth N] [--filter "button,link"] [--uid nN]
+aibrowsr inspect --filter "article" --scroll --limit 50  # collect from infinite scroll (X.com, etc.)
 
 # Actions (3 targeting modes: uid, --selector, --xy)
 aibrowsr click <uid> [--inspect]

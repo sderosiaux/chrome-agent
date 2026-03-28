@@ -39,7 +39,7 @@ Chrome (headless, no Node.js, no runtime deps)
 - **Agent-native errors** — every error includes a `hint` field suggesting the next action. `--json` mode exits 0 so agents parse stdout, not exit codes.
 - **10ms startup** — persistent sessions mean Chrome stays running between commands. No cold boot.
 - **Reuse your login sessions** — `--copy-cookies` copies cookies from your real Chrome. Access X.com, Gmail, dashboards — no manual login needed.
-- **Lazy-load aware** — `extract --scroll` scrolls the page and waits for DOM mutations before extracting. YouTube: 17 → 73 items.
+- **Lazy-load aware** — `extract --scroll` scrolls and waits for DOM mutations before extracting. `inspect --filter "article" --scroll --limit 50` collects items from virtualized infinite-scroll lists (X.com: 50 tweets from timeline).
 - **Parallel agents** — `--browser agent1`, `--browser agent2`. Separate Chrome instances, no session corruption.
 
 ## Install

@@ -35,6 +35,7 @@ LLM USAGE GUIDE:
     aibrowsr inspect --max-depth 2                 # limit depth (saves tokens)
     aibrowsr inspect --filter "button,link"        # only these roles (flat list)
     aibrowsr inspect --uid n50                     # subtree only
+    aibrowsr inspect --filter "article" --scroll --limit 50  # infinite scroll (X.com, feeds)
 
   Content extraction (choose the right tool):
     aibrowsr read                                  # article/main content (Readability)
