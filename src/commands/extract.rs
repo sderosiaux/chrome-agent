@@ -17,9 +17,12 @@ pub async fn scroll_to_load(client: &CdpClient) -> Result<(), crate::BoxError> {
     let js = r"(async () => {
         const MAX_SCROLLS = 10;
         const SETTLE_MS = 1000;
+        // Some sites (YouTube) scroll on documentElement, not body
+        const getHeight = () => Math.max(document.body.scrollHeight, document.documentElement.scrollHeight);
+        const root = document.body.scrollHeight > 0 ? document.body : document.documentElement;
         let prevHeight = 0;
         for (let i = 0; i < MAX_SCROLLS; i++) {
-            const height = document.body.scrollHeight;
+            const height = getHeight();
             if (height === prevHeight && i > 0) break;
             prevHeight = height;
             window.scrollTo(0, height);
@@ -33,11 +36,11 @@ pub async fn scroll_to_load(client: &CdpClient) -> Result<(), crate::BoxError> {
                         resolve();
                     }, 300);
                 });
-                observer.observe(document.body, { childList: true, subtree: true });
+                observer.observe(root, { childList: true, subtree: true });
             });
         }
         window.scrollTo(0, 0);
-        return document.body.scrollHeight;
+        return getHeight();
     })()";
 
     let _: Value = client
