@@ -1,35 +1,52 @@
 LLM USAGE GUIDE:
   Workflow: inspect -> read uids -> act (click/fill) -> inspect again.
+  Use --json for structured output. Headless by default.
 
   Quick start:
     aibrowsr goto https://example.com --inspect
     aibrowsr click e3 --inspect
-    aibrowsr fill e2 "hello@example.com" --inspect
-    aibrowsr fill-form e2="user@test.com" e3="pass" --inspect
+    aibrowsr fill --uid e2 "hello@example.com"
     aibrowsr eval "document.title"
 
-  Key patterns:
+  Targeting elements (3 modes):
+    aibrowsr click e4                              # by uid from inspect
+    aibrowsr click --selector "button.submit"      # by CSS selector
+    aibrowsr click --xy 100,200                    # by coordinates
+    aibrowsr fill --uid e2 "value"                 # fill by uid
+    aibrowsr fill --selector "input[name=q]" "val" # fill by CSS selector
+    aibrowsr type "hello" --selector "input.search"  # type with focus
+
+  Inspection:
     aibrowsr inspect                        # accessibility tree with uid=eN
-    aibrowsr inspect --max-depth 2          # limit tree depth
-    aibrowsr inspect --uid e5               # subtree rooted at e5
-    aibrowsr text                           # extract visible page text
-    aibrowsr text e5                        # extract text from element e5
-    aibrowsr back                           # navigate back in history
-    aibrowsr click e4 --inspect             # act + observe in one call
-    aibrowsr fill-form e2="a" e3="b"        # batch fill
-    aibrowsr eval "JSON.stringify(...)"     # complex DOM queries
+    aibrowsr inspect --max-depth 2          # limit depth (saves tokens)
+    aibrowsr inspect --uid e5               # subtree only
+    aibrowsr text                           # visible page text (reader mode)
+    aibrowsr text e5                        # text of specific element
+
+  Navigation:
+    aibrowsr goto https://example.com       # navigate
+    aibrowsr back                           # history.back()
+    aibrowsr scroll down                    # scroll page
+    aibrowsr wait text "Success"            # wait for content
+
+  Other:
     aibrowsr screenshot                     # returns file path (PNG)
-    aibrowsr wait text "Success" --timeout 15
-    aibrowsr type "hello"                   # type into focused element
-    aibrowsr press Enter                    # press a key
-    aibrowsr scroll down                    # scroll page, or: scroll e5
-    aibrowsr hover e3                       # hover over element
+    aibrowsr eval "JSON.stringify(...)"     # run JS, get result
+    aibrowsr press Enter                    # press key
+    aibrowsr hover e3                       # hover element
+    aibrowsr fill-form e2="a" e3="b"        # batch fill by uid
 
   Multi-tab:
     aibrowsr --page tab2 goto https://other.com
     aibrowsr --page tab2 inspect
 
+  JSON mode (for programmatic use):
+    aibrowsr --json goto https://example.com
+    -> {"ok":true,"url":"...","title":"..."}
+    Errors: {"ok":false,"error":"...","hint":"..."} (exit 0)
+
   Tips:
-    - Always inspect before interacting -- uids change when the page mutates.
-    - Use --inspect on click/fill to get updated state in one call.
+    - inspect before interacting -- uids change when the page mutates.
+    - --inspect on click/fill returns updated page state in one call.
     - Prefer inspect over screenshot (~50 vs ~100K tokens).
+    - Use --selector when inspect uids aren't available or practical.

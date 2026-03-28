@@ -267,7 +267,10 @@ async fn main() {
                 eprintln!("hint: {hint}");
             }
         }
-        std::process::exit(1);
+        if !json_mode {
+            std::process::exit(1);
+        }
+        // JSON mode: exit 0 so agents can parse {"ok":false} without exit code checks
     }
 }
 
@@ -759,7 +762,11 @@ fn error_hint(msg: &str) -> Option<&'static str> {
     } else if msg.contains("Timeout") || msg.contains("timeout") {
         Some("Use --timeout N for slow pages")
     } else if msg.contains("not interactable") || msg.contains("no visible box model") {
-        Some("Element may be hidden. Try scrolling.")
+        Some("Element may be hidden. Try: aibrowsr scroll <uid>")
+    } else if msg.contains("No element matches selector") {
+        Some("CSS selector didn't match. Check with: aibrowsr eval \"document.querySelector('...')\"")
+    } else if msg.contains("backendDomNodeId") || msg.contains("response parse") {
+        Some("Page structure issue. Try: aibrowsr click --selector or aibrowsr eval")
     } else {
         None
     }
