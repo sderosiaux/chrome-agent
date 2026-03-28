@@ -74,6 +74,10 @@ struct ResolvedElement {
 }
 
 /// Click an element by uid.
+///
+/// Strategy: try mouse event at element center coordinates first.
+/// If no box model available (hidden, custom component, a11y reports "disabled"
+/// but DOM isn't), falls back to JS `.click()` on the element directly.
 pub async fn click(
     client: &CdpClient,
     uid_map: &HashMap<String, ElementRef>,
@@ -81,11 +85,10 @@ pub async fn click(
 ) -> Result<(), ElementError> {
     let resolved = resolve_uid(client, uid_map, uid).await?;
 
-    let (x, y) = resolved.center.ok_or_else(|| {
-        ElementError::NotInteractable(format!(
-            "Element uid={uid} has no visible box model. It may be hidden or zero-sized."
-        ))
-    })?;
+    // If no box model, fallback to JS click immediately
+    if resolved.center.is_none() {
+        return js_click(client, &resolved.object_id).await;
+    }
 
     // Scroll element into view first
     let _ = client
@@ -107,9 +110,10 @@ pub async fn click(
         )
         .await;
 
-    let (cx, cy) = box_result
-        .map(|r| r.model.content_center())
-        .unwrap_or((x, y));
+    let Some((cx, cy)) = box_result.ok().map(|r| r.model.content_center()) else {
+        // Box model disappeared after scroll — fallback to JS click
+        return js_click(client, &resolved.object_id).await;
+    };
 
     // mousePressed
     client
@@ -156,6 +160,31 @@ pub async fn click(
     // Wait for action stabilization
     wait_for_stabilization(client).await;
 
+    Ok(())
+}
+
+/// Fallback: click an element via JS `.click()` when mouse events can't be dispatched.
+async fn js_click(client: &CdpClient, object_id: &str) -> Result<(), ElementError> {
+    let result: serde_json::Value = client
+        .call(
+            "Runtime.callFunctionOn",
+            json!({
+                "objectId": object_id,
+                "functionDeclaration": "function() { this.click(); }",
+                "returnByValue": true,
+            }),
+        )
+        .await
+        .map_err(|e| ElementError::Action(format!("JS click fallback failed: {e}")))?;
+
+    if let Some(exception) = result.get("exceptionDetails") {
+        return Err(ElementError::Action(format!(
+            "JS click threw: {}",
+            exception.get("text").and_then(|t| t.as_str()).unwrap_or("unknown")
+        )));
+    }
+
+    wait_for_stabilization(client).await;
     Ok(())
 }
 
