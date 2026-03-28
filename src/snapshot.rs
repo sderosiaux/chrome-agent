@@ -218,17 +218,18 @@ fn format_node_with_tracking(
         return;
     }
 
-    // Assign uid
-    *uid_counter += 1;
-    let uid = format!("e{uid_counter}");
+    // Assign uid — stable (based on backendNodeId) when available, sequential fallback
+    let uid = if let Some(backend_id) = node.backend_dom_node_id {
+        let uid = format!("n{backend_id}");
+        uid_map.insert(uid.clone(), ElementRef::backend_node(backend_id));
+        uid
+    } else {
+        *uid_counter += 1;
+        format!("e{uid_counter}")
+    };
 
     // Track uid → AXNode nodeId for focus_uid lookup
     uid_to_node_id.insert(uid.clone(), node_id.to_string());
-
-    // Register in uid_map if we have a backendDOMNodeId
-    if let Some(backend_id) = node.backend_dom_node_id {
-        uid_map.insert(uid.clone(), ElementRef::backend_node(backend_id));
-    }
 
     // Build attribute string
     let indent = "  ".repeat(depth);
@@ -427,9 +428,9 @@ mod tests {
         ];
 
         let (text, uid_map) = format_ax_tree(&nodes, false, None, None);
-        assert!(text.contains("uid=e1 heading \"Welcome\" level=1"));
-        assert!(uid_map.contains_key("e1"));
-        assert_eq!(uid_map["e1"].backend_node_id(), Some(10));
+        assert!(text.contains("uid=n10 heading \"Welcome\" level=1"));
+        assert!(uid_map.contains_key("n10"));
+        assert_eq!(uid_map["n10"].backend_node_id(), Some(10));
     }
 
     #[test]
@@ -465,7 +466,7 @@ mod tests {
 
         let (text, uid_map) = format_ax_tree(&nodes, false, None, None);
         assert!(!text.contains("ignored"));
-        assert!(text.contains("uid=e1 button \"Click me\" focused"));
+        assert!(text.contains("uid=n20 button \"Click me\" focused"));
         assert_eq!(uid_map.len(), 1);
     }
 
@@ -537,8 +538,8 @@ mod tests {
                 ..default_ax_node()
             },
         ];
-        // e1=WebArea, e2=heading, e3=button — focus on e3
-        let (text, _) = format_ax_tree(&nodes, false, None, Some("e3"));
+        // n1=WebArea, n2=heading, n3=button — focus on n3
+        let (text, _) = format_ax_tree(&nodes, false, None, Some("n3"));
         assert!(text.contains("Submit"));
         assert!(!text.contains("Title"));
     }

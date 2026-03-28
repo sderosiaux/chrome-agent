@@ -237,7 +237,7 @@ fn headed_inspect_returns_uids() {
     ]);
 
     if code == 0 {
-        assert!(stdout.contains("uid=e"), "inspect should contain uid=eN: {stdout}");
+        assert!(stdout.contains("uid="), "inspect should contain uid=N: {stdout}");
     }
 
     let _ = run_cli(&["--browser", "test-inspect", "close"]);
