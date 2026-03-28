@@ -17,7 +17,7 @@ use serde_json::json;
 
 use crate::browser::BrowserOptions;
 use crate::cdp::client::CdpClient;
-use crate::run_helpers::{cmd_close, cmd_status, cmd_stop, error_hint, get_uid_map, json_output, output_action, output_goto, resolve_page_target};
+use crate::run_helpers::{cmd_close, cmd_status, cmd_stop, connect_page, error_hint, get_uid_map, json_output, output_action, output_goto, resolve_page_target};
 
 // ---------------------------------------------------------------------------
 // CLI definition
@@ -489,42 +489,8 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // Save session immediately so Chrome PID is persisted even if CLI crashes later
     let _ = session::save_session(&store);
 
-    // Connect page-level CDP with retry (browser may need time between invocations)
-    let client = {
-        let mut last_err = String::new();
-        let mut connected = None;
-        for attempt in 0..5 {
-            match browser::get_page_ws_url(http_endpoint, &target_id).await {
-                Ok(page_ws) => match CdpClient::connect(&page_ws).await {
-                    Ok(c) => { connected = Some(c); break; }
-                    Err(e) => { last_err = e.to_string(); }
-                },
-                Err(e) => { last_err = e.to_string(); }
-            }
-            if attempt < 4 {
-                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-            }
-        }
-        connected.ok_or_else(|| format!("Failed to connect to page after 5 attempts: {last_err}"))?
-    };
-    client.enable("Page").await?;
-
-    // Inject console interceptor (stealth-safe, no Runtime.enable needed).
-    // Survives navigations via addScriptToEvaluateOnNewDocument + bootstraps current page.
-    commands::console::inject(&client).await;
-
-    // Runtime.enable intentionally NOT called in stealth mode — it's the #1 detection vector.
-    // Runtime.evaluate still works without Runtime.enable (it's a separate CDP method).
-    // What we lose: Runtime events (executionContextCreated, bindingCalled, consoleAPICalled).
-    // What we keep: Runtime.evaluate, Runtime.callFunctionOn, Runtime.addBinding.
-    if !cli.stealth {
-        client.enable("Runtime").await?;
-    }
-
-    // Stealth mode: hide automation fingerprints from bot detectors
-    if cli.stealth {
-        setup::apply_stealth(&client).await;
-    }
+    // Connect page-level CDP with retry + full setup (Page.enable, console, stealth)
+    let client = connect_page(http_endpoint, &target_id, cli.stealth).await?;
 
     // Execute command
     let json_mode = cli.json;

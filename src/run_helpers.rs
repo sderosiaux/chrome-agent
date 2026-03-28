@@ -7,6 +7,51 @@ use crate::commands;
 use crate::element_ref::ElementRef;
 use crate::session::{self, BrowserSession, SessionStore};
 
+/// Connect to a page-level CDP endpoint with retry. Sets up Page domain,
+/// console interceptor, and optionally Runtime domain + stealth patches.
+pub async fn connect_page(
+    http_endpoint: &str,
+    target_id: &str,
+    stealth: bool,
+) -> Result<CdpClient, Box<dyn std::error::Error>> {
+    let mut last_err = String::new();
+    for attempt in 0..5u32 {
+        match crate::browser::get_page_ws_url(http_endpoint, target_id).await {
+            Ok(page_ws) => match CdpClient::connect(&page_ws).await {
+                Ok(client) => {
+                    // Setup: enable Page domain
+                    if let Err(e) = client.enable("Page").await {
+                        last_err = format!("Page.enable failed: {e}");
+                        drop(client);
+                        if attempt < 4 {
+                            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                        }
+                        continue;
+                    }
+                    // Console interceptor
+                    commands::console::inject(&client).await;
+                    // Runtime.enable only in non-stealth
+                    if !stealth {
+                        let _ = client.enable("Runtime").await;
+                    }
+                    // Stealth patches
+                    if stealth {
+                        crate::setup::apply_stealth(&client).await;
+                    }
+                    return Ok(client);
+                }
+                Err(e) => last_err = e.to_string(),
+            },
+            Err(e) => last_err = e.to_string(),
+        }
+        if attempt < 4 {
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        }
+    }
+    Err(format!("Failed to connect to page after 5 attempts: {last_err}").into())
+}
+
+
 /// Execute a command, optionally inspect after, and output result.
 pub async fn output_action(
     client: &CdpClient,
