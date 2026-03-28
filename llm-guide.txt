@@ -20,8 +20,8 @@ LLM USAGE GUIDE:
     aibrowsr inspect                        # accessibility tree with uid=nN
     aibrowsr inspect --max-depth 2          # limit depth (saves tokens)
     aibrowsr inspect --uid n50               # subtree only
-    aibrowsr text                           # visible page text (reader mode)
-    aibrowsr text n50                        # text of specific element
+    aibrowsr text                           # full visible text (use "read" for articles)
+    aibrowsr text n50 --truncate 500                        # text of specific element
 
   Navigation:
     aibrowsr goto https://example.com       # navigate

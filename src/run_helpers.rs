@@ -104,8 +104,10 @@ pub fn error_hint(msg: &str) -> Option<&'static str> {
         Some("CSS selector didn't match. Check with: aibrowsr eval \"document.querySelector('...')\"")
     } else if msg.contains("backendDomNodeId") || msg.contains("response parse") {
         Some("Page structure issue. Try: aibrowsr click --selector or aibrowsr eval")
-    } else if msg.contains("may not have an article") {
+    } else if msg.contains("may not have an article") || msg.contains("Readability") {
         Some("Page has no article structure. Try: aibrowsr text or aibrowsr text --selector \"main\"")
+    } else if msg.contains("Provide a uid") || msg.contains("Provide --uid") {
+        Some("Specify what to target: uid (e.g. n47), --selector \"css\", or --xy x,y")
     } else {
         None
     }
@@ -265,7 +267,7 @@ pub async fn cmd_stop(json_mode: bool) -> Result<(), Box<dyn std::error::Error>>
     } // #[cfg(unix)]
 }
 
-pub fn cmd_close(browser_name: &str, json_mode: bool) -> Result<(), Box<dyn std::error::Error>> {
+pub fn cmd_close(browser_name: &str, purge: bool, json_mode: bool) -> Result<(), Box<dyn std::error::Error>> {
     let mut store = session::load_session()?;
 
     let browser = store.browsers.remove(browser_name);
@@ -293,6 +295,22 @@ pub fn cmd_close(browser_name: &str, json_mode: bool) -> Result<(), Box<dyn std:
         None => {
             format!("No browser session named '{browser_name}'.")
         }
+    };
+
+    // Purge browser profile if requested
+    if purge {
+        if let Some(home) = dirs::home_dir() {
+            let profile_dir = home.join(".aibrowsr").join("browsers").join(browser_name);
+            if profile_dir.exists() {
+                let _ = std::fs::remove_dir_all(&profile_dir);
+            }
+        }
+    }
+
+    let message = if purge {
+        format!("{message} (profile purged)")
+    } else {
+        message
     };
 
     if json_mode {

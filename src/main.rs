@@ -233,7 +233,11 @@ enum Command {
     Tabs,
 
     /// Close the managed browser
-    Close,
+    Close {
+        /// Also delete the browser profile (cookies, cache, data)
+        #[arg(long)]
+        purge: bool,
+    },
 
     /// Show session status
     Status,
@@ -334,8 +338,8 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             return cmd_stop(cli.json).await;
         }
 
-        Command::Close => {
-            return cmd_close(&cli.browser, cli.json);
+        Command::Close { purge } => {
+            return cmd_close(&cli.browser, purge, cli.json);
         }
 
         _ => {}
@@ -730,7 +734,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
 
         // Already handled above
-        Command::Daemon { .. } | Command::Status | Command::Stop | Command::Close => {
+        Command::Daemon { .. } | Command::Status | Command::Stop | Command::Close { .. } => {
             unreachable!()
         }
     }

@@ -44,7 +44,7 @@ aibrowsr fill --uid e5 "user@test.com"
 aibrowsr click --selector "button.submit"
 aibrowsr fill --selector "input[name=email]" "hello@test.com"
 
-# Extract visible text (reader mode)
+# Extract full visible text (use "read" for articles)
 aibrowsr text
 
 # Evaluate JavaScript
@@ -57,7 +57,7 @@ aibrowsr screenshot
 ## How It Works
 
 ```
-aibrowsr (Rust, ~3.5K lines)
+aibrowsr (Rust, ~4K lines)
     │
     │ WebSocket (Chrome DevTools Protocol)
     ▼
@@ -73,14 +73,15 @@ The accessibility tree snapshot assigns a unique `uid` to each element. The agen
 | Command | Description |
 |---------|------------|
 | `goto <url> [--inspect]` | Navigate to URL |
-| `inspect [--verbose] [--max-depth N] [--uid eN]` | Accessibility tree with uids |
+| `inspect [--verbose] [--max-depth N] [--uid eN] [--filter "role,role"]` | Accessibility tree with uids |
 | `click <uid> [--inspect]` | Click by uid |
 | `click --selector "css" [--inspect]` | Click by CSS selector |
 | `click --xy 100,200` | Click by coordinates |
 | `fill --uid <uid> <value> [--inspect]` | Fill input by uid |
 | `fill --selector "css" <value>` | Fill by CSS selector |
 | `fill-form <uid=val>...` | Batch fill multiple fields |
-| `text [uid]` | Extract visible text (page or element) |
+| `text [uid] [--selector] [--truncate N]` | Extract visible text (page or element) |
+| `read [--html] [--truncate N]` | Extract main content (Mozilla Readability) |
 | `eval <expression>` | Run JS in page context |
 | `wait <text\|url\|selector> <pattern>` | Wait for condition |
 | `type <text> [--selector "css"]` | Type into focused/selected element |
@@ -180,7 +181,7 @@ google-chrome --remote-debugging-port=9222  # or launch manually
 | Startup | ~10ms | ~500ms | ~500ms | ~500ms |
 | Element targeting | uid + selector + xy | CSS selectors | CSS selectors | uid |
 | Action + observe | `--inspect` flag | 2 calls | 1 script | 2 calls |
-| Code | ~3.5K Rust | Playwright | 76K (69K fork) | ~12K TS |
+| Code | ~4K Rust | Playwright | 76K (69K fork) | ~12K TS |
 
 ## License
 

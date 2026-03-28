@@ -28,19 +28,22 @@ pub async fn run(
     #[allow(clippy::needless_raw_string_hashes)]
     let js = format!(
         r#"(() => {{
-            {READABILITY_JS}
-            const doc = document.cloneNode(true);
-            const reader = new Readability(doc);
-            const article = reader.parse();
-            if (!article) return null;
-            return JSON.stringify({{
-                title: article.title || '',
-                textContent: article.textContent || '',
-                content: article.content || '',
-                excerpt: article.excerpt || '',
-                byline: article.byline || '',
-                length: article.length || 0,
-            }});
+            try {{
+                {READABILITY_JS}
+                const doc = document.cloneNode(true);
+                const reader = new Readability(doc);
+                const article = reader.parse();
+                if (!article) return JSON.stringify({{__error: "Readability returned null — page may not have article structure. Try: aibrowsr text --selector main"}});
+                return JSON.stringify({{
+                    title: article.title || '',
+                    textContent: article.textContent || '',
+                    content: article.content || '',
+                    excerpt: article.excerpt || '',
+                    byline: article.byline || '',
+                }});
+            }} catch(e) {{
+                return JSON.stringify({{__error: "Readability failed: " + e.message + ". Try: aibrowsr text --selector main"}});
+            }}
         }})()"#
     );
 
@@ -68,9 +71,15 @@ pub async fn run(
         .value
         .as_ref()
         .and_then(|v| v.as_str())
-        .ok_or("Readability returned null — page may not have an article structure")?;
+        .ok_or("Readability returned null — page may not have an article structure. Try: aibrowsr text --selector main")?;
 
-    let mut parsed: ReadResult = serde_json::from_str(raw)?;
+    // Check for in-JS error return
+    let raw_value: serde_json::Value = serde_json::from_str(raw)?;
+    if let Some(err) = raw_value.get("__error").and_then(|v| v.as_str()) {
+        return Err(err.into());
+    }
+
+    let mut parsed: ReadResult = serde_json::from_value(raw_value)?;
 
     // Clean up: collapse whitespace runs in textContent
     parsed.text_content = collapse_whitespace(&parsed.text_content);
