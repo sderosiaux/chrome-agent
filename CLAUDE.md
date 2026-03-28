@@ -1,7 +1,7 @@
 # aibrowsr
 
 Single Rust binary for browser automation via CDP. Built for AI agents.
-~4K lines Rust, zero runtime dependencies, 3.2 MB binary.
+~5K lines Rust, zero runtime dependencies, 3.4 MB binary.
 
 ## Architecture
 
@@ -12,13 +12,15 @@ CLI (clap) → CDP Client (WebSocket) → Chrome
 | Module | Role |
 |--------|------|
 | `src/cdp/` | WebSocket transport, message correlation, CDP types |
-| `src/commands/` | 22 commands: goto, click, fill, inspect, eval, text, read, wait, screenshot, tabs... |
+| `src/commands/` | 25 commands: goto, click, fill, inspect, eval, text, read, wait, screenshot, tabs, network, console... |
 | `src/element.rs` | uid/selector/coordinate resolution → CDP input dispatch, JS click fallback |
 | `src/element_ref.rs` | ElementRef abstraction (decouples from CDP internals) |
 | `src/snapshot.rs` | Accessibility tree → compact text with stable uids (backendNodeId) |
 | `src/session.rs` | JSON session persistence (~/.aibrowsr/sessions.json, 0600 perms) |
 | `src/browser.rs` | Chrome launch, auto-discovery, profile management |
 | `src/daemon.rs` | Optional micro-daemon (Unix only), heartbeat, crash recovery |
+| `src/pipe.rs` | Pipe mode: persistent connection, JSON stdin/stdout protocol |
+| `src/setup.rs` | Stealth patches extracted (shared by main.rs + pipe.rs) |
 | `src/run_helpers.rs` | Shared output/error handling extracted from main.rs |
 | `vendor/Readability.js` | Mozilla Readability (90KB, MIT) embedded via include_str! |
 | `npm/` | npm distribution wrapper (postinstall downloads native binary) |

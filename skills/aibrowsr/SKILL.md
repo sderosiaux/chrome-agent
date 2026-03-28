@@ -93,6 +93,16 @@ aibrowsr read [--truncate N]
 aibrowsr text [--selector "main"] [--truncate N]
 aibrowsr eval "expression" [--selector "css"]
 
+# Network capture ("Readability for APIs" — extract API data, not DOM)
+aibrowsr network [--filter "pattern"] [--body] [--limit N]  # already-loaded (stealth-safe)
+aibrowsr network --live 5 --body --filter "graphql"          # capture live traffic
+
+# Console + JS errors (stealth-safe)
+aibrowsr console [--level error] [--clear]
+
+# Pipe mode (persistent connection, 10x faster for multi-step workflows)
+echo '{"cmd":"goto","url":"...","inspect":true}' | aibrowsr pipe
+
 # Other
 aibrowsr screenshot [--filename name]
 aibrowsr wait text|url|selector "pattern" [--timeout N]

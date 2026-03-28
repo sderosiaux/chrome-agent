@@ -73,7 +73,7 @@ aibrowsr screenshot
 ## How It Works
 
 ```
-aibrowsr (Rust, ~4K lines)
+aibrowsr (Rust, ~5K lines)
     │
     │ WebSocket (Chrome DevTools Protocol)
     ▼
@@ -98,7 +98,10 @@ UIDs are stable across inspects (based on Chrome's `backendNodeId`). The agent i
 | `fill-form <uid=val>...` | Batch fill multiple fields |
 | `read [--html] [--truncate N]` | Extract main content (Mozilla Readability) |
 | `text [uid] [--selector "css"] [--truncate N]` | Extract visible text (page or element) |
-| `eval <expression>` | Run JS in page context |
+| `eval <expression> [--selector "css"]` | Run JS in page context (`el` = matched element) |
+| `network [--filter "pattern"] [--body] [--live N]` | Capture network requests / API responses |
+| `console [--level error] [--clear]` | Show captured console.log/warn/error + JS exceptions |
+| `pipe` | Persistent connection: JSON stdin → JSON stdout |
 | `wait <text\|url\|selector> <pattern>` | Wait for condition |
 | `type <text> [--selector "css"]` | Type into focused/selected element |
 | `press <key>` | Press Enter, Tab, Escape, etc. |
@@ -147,6 +150,46 @@ aibrowsr click n63 --inspect
 ```
 
 UIDs (n47, n52, etc.) are stable — they won't change between inspects as long as the DOM node exists.
+
+## Network Capture
+
+Extract API data directly instead of DOM scraping:
+
+```bash
+# Show resources loaded by the page (stealth-safe, uses Performance API)
+aibrowsr network --filter "api"
+
+# Capture live traffic with response bodies (5 seconds)
+aibrowsr network --live 5 --body --filter "graphql"
+
+# JSON output for structured extraction
+aibrowsr --json network --body --filter "api" --limit 10
+```
+
+## Console Capture
+
+See what the page logs — useful for debugging and error detection:
+
+```bash
+aibrowsr console                    # all messages
+aibrowsr console --level error      # errors + exceptions only
+aibrowsr console --clear            # read and clear buffer
+```
+
+Stealth-safe: uses injected interceptor, not `Runtime.enable`.
+
+## Pipe Mode
+
+Persistent connection for high-performance agent workflows:
+
+```bash
+# Start pipe (one connection, reads JSON from stdin)
+echo '{"cmd":"goto","url":"https://example.com","inspect":true}
+{"cmd":"click","uid":"n12","inspect":true}
+{"cmd":"read"}' | aibrowsr pipe
+```
+
+Each command returns one JSON line: `{"ok":true,...}` or `{"ok":false,"error":"..."}`. 10x faster than spawning aibrowsr per command.
 
 ## Content Extraction
 
@@ -274,7 +317,10 @@ google-chrome --remote-debugging-port=9222  # or launch manually
 | Stealth mode | 7 CDP patches + Runtime.enable skip | No | No | No |
 | Reader mode | `read` (Mozilla Readability) | No | No | No |
 | Sandbox | Chrome sandbox | QuickJS WASM sandbox | Chrome sandbox | No |
-| Code | ~4K lines | ~76K lines (69K Playwright fork) | ~12K lines | Playwright |
+| Network capture | Retroactive + live | No | No | Metadata only (no bodies) |
+| Console capture | Stealth-safe interceptor | No | Console messages | No |
+| Pipe mode | JSON stdin/stdout | No | No | No |
+| Code | ~5K lines | ~76K lines (69K Playwright fork) | ~12K lines | Playwright |
 
 ## License
 

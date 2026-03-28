@@ -39,6 +39,21 @@ LLM USAGE GUIDE:
     aibrowsr text                                  # full page innerText (verbose)
     aibrowsr eval "JSON.stringify(...)"            # structured data via JS
     aibrowsr eval --selector "h1" "el.textContent" # eval scoped to a CSS element (el = matched)
+    aibrowsr network --filter "api" --body         # intercept API responses directly
+    aibrowsr console --level error                 # see JS errors from the page
+
+  Network capture ("Readability for APIs"):
+    aibrowsr network                               # resources already loaded (stealth-safe)
+    aibrowsr network --filter "graphql" --body     # filter + response bodies
+    aibrowsr network --live 5 --body               # capture live traffic for 5 seconds
+
+  Console capture (stealth-safe):
+    aibrowsr console                               # all messages
+    aibrowsr console --level error                 # errors + exceptions only
+
+  Pipe mode (persistent connection, 10x faster):
+    echo '{"cmd":"goto","url":"https://example.com","inspect":true}' | aibrowsr pipe
+    # Returns one JSON line per command: {"ok":true,...}
 
   Navigation:
     aibrowsr goto https://example.com              # navigate
