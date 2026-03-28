@@ -268,9 +268,9 @@ pub async fn run(
     let raw = crate::commands::eval::run_raw(client, &js).await?;
 
     // The JS returns a JSON string; parse it.
-    let parsed: Value = match &raw {
-        Value::String(s) => serde_json::from_str(s)?,
-        other => other.clone(),
+    let parsed: Value = match raw {
+        Value::String(s) => serde_json::from_str(&s)?,
+        other => other,
     };
 
     let items = parsed

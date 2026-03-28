@@ -67,13 +67,17 @@ fn screenshot_dir() -> Result<PathBuf, crate::BoxError> {
 
 /// Minimal base64 decoder (RFC 4648). Avoids pulling in the `base64` crate.
 fn base64_decode(input: &str) -> Result<Vec<u8>, crate::BoxError> {
-    const TABLE: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-    let mut lookup = [255u8; 256];
-    for (i, &c) in TABLE.iter().enumerate() {
-        lookup[c as usize] = i as u8;
-    }
+    // Compile-time lookup table (Rust 2024 const block)
+    const LOOKUP: [u8; 256] = const {
+        let table = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut lut = [255u8; 256];
+        let mut i = 0;
+        while i < 64 {
+            lut[table[i] as usize] = i as u8;
+            i += 1;
+        }
+        lut
+    };
 
     let input = input.as_bytes();
     let mut out = Vec::with_capacity(input.len() * 3 / 4);
@@ -82,10 +86,10 @@ fn base64_decode(input: &str) -> Result<Vec<u8>, crate::BoxError> {
     let mut bits: u32 = 0;
 
     for &b in input {
-        if b == b'=' || b == b'\n' || b == b'\r' || b == b' ' {
+        if matches!(b, b'=' | b'\n' | b'\r' | b' ') {
             continue;
         }
-        let val = lookup[b as usize];
+        let val = LOOKUP[b as usize];
         if val == 255 {
             return Err(format!("Invalid base64 character: {}", b as char).into());
         }

@@ -224,18 +224,13 @@ mod tests {
         assert!(b.pages.contains_key("main"));
         assert_eq!(b.pages["main"].target_id, "target-abc");
     }
-}
 
     #[test]
     fn bug_session_corrupt_json() {
-        // Bug: if sessions.json contains invalid JSON, load_session should
-        // return an error, not panic
         let dir = std::env::temp_dir().join("aibrowsr_test_corrupt");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("sessions.json");
         std::fs::write(&path, "NOT VALID JSON {{{").unwrap();
-        // Can't test load_session directly (uses home dir) but verify
-        // serde handles it
         let result: Result<SessionStore, _> = serde_json::from_str("NOT VALID JSON {{{");
         assert!(result.is_err());
         std::fs::remove_dir_all(&dir).ok();
@@ -249,9 +244,8 @@ mod tests {
 
     #[test]
     fn bug_element_ref_unknown_type() {
-        // If session has a future ElementRef type we don't know, deserialize gracefully
         let json = r#"{"type":"futureType","data":"unknown"}"#;
         let result: Result<crate::element_ref::ElementRef, _> = serde_json::from_str(json);
-        // Should fail gracefully, not panic
         assert!(result.is_err());
     }
+}

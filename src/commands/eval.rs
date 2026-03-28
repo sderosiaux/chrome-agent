@@ -31,7 +31,7 @@ pub async fn run_raw(
         .into());
     }
 
-    Ok(result.result.value.unwrap_or(Value::Null))
+    Ok(result.result.value.unwrap_or_default())
 }
 
 /// Evaluate JS and return a display string (for text mode).

@@ -123,7 +123,7 @@ impl CdpClient {
             });
         }
 
-        let result_value = response.result.unwrap_or(Value::Null);
+        let result_value = response.result.unwrap_or_default();
         serde_json::from_value(result_value).map_err(CdpClientError::ResponseParse)
     }
 

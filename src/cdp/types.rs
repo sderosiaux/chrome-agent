@@ -374,20 +374,12 @@ impl BoxModel {
 impl AXNode {
     /// Extract the human-readable role string, if present.
     pub fn role_name(&self) -> Option<&str> {
-        self.role.as_ref().and_then(|v| {
-            v.value
-                .as_ref()
-                .and_then(|val| val.as_str())
-        })
+        self.role.as_ref()?.value.as_ref()?.as_str()
     }
 
     /// Extract the human-readable name string, if present.
     pub fn name_value(&self) -> Option<&str> {
-        self.name.as_ref().and_then(|v| {
-            v.value
-                .as_ref()
-                .and_then(|val| val.as_str())
-        })
+        self.name.as_ref()?.value.as_ref()?.as_str()
     }
 }
 

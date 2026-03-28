@@ -42,11 +42,10 @@ pub async fn run_pipe(cli: &Cli) -> Result<(), crate::BoxError> {
     // Console interceptor (stealth-safe)
     commands::console::inject(&client).await;
 
-    if !cli.stealth {
-        client.enable("Runtime").await?;
-    }
     if cli.stealth {
         crate::setup::apply_stealth(&client).await;
+    } else {
+        client.enable("Runtime").await?;
     }
 
     // Main loop: read JSON commands from stdin
@@ -138,11 +137,10 @@ pub async fn run_replay(
     let client = CdpClient::connect(&page_ws).await?;
     client.enable("Page").await?;
     commands::console::inject(&client).await;
-    if !cli.stealth {
-        client.enable("Runtime").await?;
-    }
     if cli.stealth {
         crate::setup::apply_stealth(&client).await;
+    } else {
+        client.enable("Runtime").await?;
     }
 
     for line in content.lines() {
@@ -161,7 +159,7 @@ pub async fn run_replay(
 
         // Support both recording format {"cmd":..., "response":...} and raw command format
         let cmd = if parsed.get("cmd").is_some_and(Value::is_object) && parsed.get("response").is_some() {
-            parsed.get("cmd").cloned().unwrap_or(Value::Null)
+            parsed.get("cmd").cloned().unwrap_or_default()
         } else {
             parsed
         };
