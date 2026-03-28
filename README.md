@@ -1,5 +1,15 @@
 # aibrowsr
 
+[![Crates.io](https://img.shields.io/crates/v/aibrowsr)](https://crates.io/crates/aibrowsr)
+[![npm](https://img.shields.io/npm/v/aibrowsr)](https://www.npmjs.com/package/aibrowsr)
+[![CI](https://github.com/sderosiaux/aibrowsr/actions/workflows/ci.yml/badge.svg)](https://github.com/sderosiaux/aibrowsr/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Rust 2024](https://img.shields.io/badge/Rust-2024_edition-orange)](https://doc.rust-lang.org/edition-guide/rust-2024/)
+
+<p align="center">
+  <img src="docs/hero.png" alt="aibrowsr — AI agent looking through a browser's accessibility tree" width="700">
+</p>
+
 **The browser tool that thinks like your agent does.**
 
 Playwright, Puppeteer, Selenium — they were built for humans writing test scripts. aibrowsr was built for LLMs issuing commands. That distinction changes everything.
