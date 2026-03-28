@@ -71,6 +71,7 @@ pub async fn output_action(
             obj["snapshot"] = json!(snapshot.text);
             if let Some(browser_s) = store.browsers.get_mut(browser_name) {
                 let page = session::ensure_page(browser_s, page_name, target_id);
+                page.last_snapshot = Some(snapshot.text);
                 page.uid_map = snapshot.uid_map;
             }
         }
@@ -79,11 +80,12 @@ pub async fn output_action(
         println!("{msg}");
         if inspect {
             let snapshot = commands::inspect::run(client, false, max_depth, None, None).await?;
+            println!("{}", snapshot.text);
             if let Some(browser_s) = store.browsers.get_mut(browser_name) {
                 let page = session::ensure_page(browser_s, page_name, target_id);
+                page.last_snapshot = Some(snapshot.text);
                 page.uid_map = snapshot.uid_map;
             }
-            println!("{}", snapshot.text);
         }
     }
     Ok(())
@@ -114,6 +116,7 @@ pub async fn output_goto(
         if inspect {
             let snapshot = commands::inspect::run(client, false, max_depth, None, None).await?;
             obj["snapshot"] = json!(snapshot.text);
+            page.last_snapshot = Some(snapshot.text);
             page.uid_map = snapshot.uid_map;
         }
         json_output(&obj);
@@ -125,8 +128,9 @@ pub async fn output_goto(
         }
         if inspect {
             let snapshot = commands::inspect::run(client, false, max_depth, None, None).await?;
-            page.uid_map = snapshot.uid_map;
             println!("{}", snapshot.text);
+            page.last_snapshot = Some(snapshot.text);
+            page.uid_map = snapshot.uid_map;
         }
     }
     Ok(())

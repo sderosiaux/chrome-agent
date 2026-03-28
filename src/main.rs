@@ -193,12 +193,25 @@ enum Command {
         filter: Option<String>,
     },
 
+    /// Show what changed since the last inspect
+    Diff,
+
     /// Capture a screenshot
     #[command(alias = "capture")]
     Screenshot {
         /// Output filename (default: timestamped)
         #[arg(long)]
         filename: Option<String>,
+    },
+
+    /// Auto-extract structured data from repeating page elements (lists, tables, cards)
+    Extract {
+        /// CSS selector to scope extraction (e.g. "main", ".results")
+        #[arg(long)]
+        selector: Option<String>,
+        /// Max items to extract
+        #[arg(long, default_value = "10")]
+        limit: usize,
     },
 
     /// Evaluate JavaScript in the page
@@ -275,6 +288,25 @@ enum Command {
         clear: bool,
         /// Max entries to show
         #[arg(long, default_value = "50")]
+        limit: usize,
+    },
+
+    /// Replay a recorded session file
+    Replay {
+        /// Path to the recording file
+        file: String,
+        /// Variable substitutions (key=value, comma-separated)
+        #[arg(long, value_delimiter = ',')]
+        vars: Option<Vec<String>>,
+    },
+
+    /// Show browsing history
+    History {
+        /// Filter entries by URL pattern (case-insensitive)
+        #[arg(long)]
+        filter: Option<String>,
+        /// Max entries to show
+        #[arg(long, default_value = "20")]
         limit: usize,
     },
 
@@ -398,6 +430,29 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             return pipe::run_pipe(&cli).await;
         }
 
+        Command::Replay { ref file, ref vars } => {
+            return pipe::run_replay(&cli, file, vars.as_deref()).await;
+        }
+
+        Command::History { ref filter, limit } => {
+            let entries = commands::history::run(filter.as_deref(), limit)?;
+            if cli.json {
+                let entries_json: Vec<serde_json::Value> = entries
+                    .iter()
+                    .map(|e| json!({"ts": e.ts, "url": e.url, "title": e.title, "page": e.page}))
+                    .collect();
+                json_output(&json!({"ok": true, "entries": entries_json}));
+            } else {
+                let text = commands::history::format_text(&entries);
+                if text.is_empty() {
+                    println!("No history entries found.");
+                } else {
+                    println!("{text}");
+                }
+            }
+            return Ok(());
+        }
+
         _ => {}
     }
 
@@ -502,6 +557,8 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             if let Some(ref selector) = wait_for {
                 commands::wait::run(&client, "selector", selector, cli.timeout).await?;
             }
+            // Log to browsing history
+            let _ = commands::history::append(&result.url, &result.title, &cli.page);
             output_goto(&client, &mut store, &cli.browser, &cli.page, &target_id, &result.url, &result.title, inspect, depth, json_mode).await?;
         }
 
@@ -647,11 +704,41 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             if let Some(browser_s) = store.browsers.get_mut(&cli.browser) {
                 let page = session::ensure_page(browser_s, &cli.page, &target_id);
                 page.uid_map = snapshot.uid_map;
+                page.last_snapshot = Some(snapshot.text.clone());
             }
             if json_mode {
                 json_output(&json!({"ok": true, "snapshot": snapshot.text}));
             } else {
                 println!("{}", snapshot.text);
+            }
+        }
+
+        Command::Diff => {
+            let old_snapshot = store
+                .browsers
+                .get(&cli.browser)
+                .and_then(|b| b.pages.get(&cli.page))
+                .and_then(|p| p.last_snapshot.clone());
+            let old_text = old_snapshot.ok_or("No previous snapshot. Run 'aibrowsr inspect' first.")?;
+            let snapshot = commands::inspect::run(&client, false, None, None, None).await?;
+            let diff = commands::diff::diff_snapshots(&old_text, &snapshot.text);
+            let stats = commands::diff::diff_stats(&diff);
+            // Update session with new snapshot
+            if let Some(browser_s) = store.browsers.get_mut(&cli.browser) {
+                let page = session::ensure_page(browser_s, &cli.page, &target_id);
+                page.last_snapshot = Some(snapshot.text);
+                page.uid_map = snapshot.uid_map;
+            }
+            if json_mode {
+                json_output(&json!({
+                    "ok": true,
+                    "added": stats.added,
+                    "removed": stats.removed,
+                    "changed": stats.changed,
+                    "diff": diff.trim_end(),
+                }));
+            } else {
+                print!("{diff}");
             }
         }
 
@@ -661,6 +748,15 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 json_output(&json!({"ok": true, "path": path}));
             } else {
                 println!("{path}");
+            }
+        }
+
+        Command::Extract { selector, limit } => {
+            let result = commands::extract::run(&client, selector.as_deref(), limit).await?;
+            if json_mode {
+                json_output(&commands::extract::to_json(&result));
+            } else {
+                print!("{}", commands::extract::format_text(&result));
             }
         }
 
@@ -828,7 +924,8 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
 
         // Already handled above
-        Command::Daemon { .. } | Command::Status | Command::Stop | Command::Close { .. } | Command::Pipe => {
+        Command::Daemon { .. } | Command::Status | Command::Stop | Command::Close { .. }
+        | Command::Pipe | Command::Replay { .. } | Command::History { .. } => {
             unreachable!()
         }
     }

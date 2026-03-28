@@ -38,6 +38,8 @@ pub struct PageSession {
     pub target_id: String,
     #[serde(default)]
     pub uid_map: HashMap<String, ElementRef>,
+    #[serde(default)]
+    pub last_snapshot: Option<String>,
 }
 
 /// Load the session store from disk. Returns empty store if file doesn't exist.
@@ -145,6 +147,7 @@ pub fn ensure_page<'a>(
         .or_insert_with(|| PageSession {
             target_id: target_id.to_string(),
             uid_map: HashMap::new(),
+            last_snapshot: None,
         })
 }
 

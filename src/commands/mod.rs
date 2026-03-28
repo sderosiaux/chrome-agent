@@ -10,3 +10,7 @@ pub mod read;
 pub mod text;
 pub mod wait;
 pub mod console;
+pub mod diff;
+pub mod extract;
+pub mod record;
+pub mod history;

@@ -67,6 +67,105 @@ pub async fn run_pipe(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             }
         };
 
+        // Check for _record field to start/continue recording
+        let record_path = cmd.get("_record").and_then(Value::as_str).map(String::from);
+        if let Some(ref path) = record_path {
+            let _ = commands::record::start_recording(path);
+        }
+
+        let response = dispatch(
+            &client,
+            &browser_client,
+            &mut store,
+            &cli.browser,
+            &cli.page,
+            &target_id,
+            cli.timeout,
+            cli.max_depth,
+            &cmd,
+        )
+        .await;
+
+        // Log to recording file if _record was specified
+        if let Some(ref path) = record_path {
+            let _ = commands::record::log_entry(path, &cmd, &response);
+        }
+
+        emit(&response);
+    }
+
+    // EOF: save session and exit cleanly
+    let _ = session::save_session(&store);
+    Ok(())
+}
+
+/// Replay a recorded session file, optionally substituting variables.
+pub async fn run_replay(
+    cli: &Cli,
+    file: &str,
+    vars: Option<&[String]>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let content = std::fs::read_to_string(file)
+        .map_err(|e| format!("Cannot read replay file '{file}': {e}"))?;
+
+    // Parse variable substitutions: ["key=val", "key2=val2"]
+    let replacements: Vec<(&str, &str)> = vars
+        .unwrap_or(&[])
+        .iter()
+        .filter_map(|pair| pair.split_once('='))
+        .collect();
+
+    let mut store = session::load_session()?;
+    let want_headless = !cli.headed;
+    let (conn, browser_client) = connect_browser(&mut store, cli, want_headless).await?;
+
+    let http_endpoint = conn.http_endpoint.as_deref().ok_or(
+        "No HTTP endpoint available.",
+    )?;
+    let target_id = {
+        let browser_session = session::ensure_browser(
+            &mut store,
+            &cli.browser,
+            &conn.ws_endpoint,
+            conn.pid,
+            want_headless,
+        );
+        resolve_page_target(&browser_client, browser_session, &cli.page).await?
+    };
+    let _ = session::save_session(&store);
+
+    let page_ws = browser::get_page_ws_url(http_endpoint, &target_id).await?;
+    let client = CdpClient::connect(&page_ws).await?;
+    client.enable("Page").await?;
+    commands::console::inject(&client).await;
+    if !cli.stealth {
+        client.enable("Runtime").await?;
+    }
+    if cli.stealth {
+        crate::setup::apply_stealth(&client).await;
+    }
+
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        // Apply variable substitutions
+        let mut resolved = line.to_string();
+        for (key, val) in &replacements {
+            resolved = resolved.replace(&format!("{{{{{key}}}}}"), val);
+        }
+
+        let parsed: Value = serde_json::from_str(&resolved)
+            .map_err(|e| format!("Invalid JSON in replay: {e}"))?;
+
+        // Support both recording format {"cmd":..., "response":...} and raw command format
+        let cmd = if parsed.get("cmd").is_some_and(Value::is_object) && parsed.get("response").is_some() {
+            parsed.get("cmd").cloned().unwrap_or(Value::Null)
+        } else {
+            parsed
+        };
+
         let response = dispatch(
             &client,
             &browser_client,
@@ -83,7 +182,6 @@ pub async fn run_pipe(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         emit(&response);
     }
 
-    // EOF: save session and exit cleanly
     let _ = session::save_session(&store);
     Ok(())
 }
@@ -125,6 +223,11 @@ async fn dispatch(
         "tabs" => dispatch_tabs(browser_client, store).await,
         "network" => dispatch_network(client, cmd).await,
         "console" => dispatch_console(client, cmd).await,
+        "diff" => dispatch_diff(client, store, browser_name, page_name, target_id).await,
+        "extract" => dispatch_extract(client, cmd).await,
+        "navigate_and_read" | "navigate-and-read" => dispatch_navigate_and_read(client, store, browser_name, page_name, target_id, timeout, cmd).await,
+        "fill_and_submit" | "fill-and-submit" => dispatch_fill_and_submit(client, timeout, cmd).await,
+        "history" => dispatch_history(cmd),
         "" => Err("Missing \"cmd\" field".into()),
         other => Err(format!("Unknown command: {other}").into()),
     };
@@ -161,6 +264,10 @@ async fn dispatch_goto(
     let max_depth = cmd_max_depth(cmd).or(global_max_depth);
 
     let result = commands::goto::run(client, url, timeout).await?;
+
+    // Log to browsing history
+    let _ = commands::history::append(&result.url, &result.title, page_name);
+
     let mut obj = json!({"ok": true, "url": result.url, "title": result.title});
 
     if inspect {
@@ -248,9 +355,43 @@ async fn dispatch_inspect(
     if let Some(browser_s) = store.browsers.get_mut(browser_name) {
         let page = session::ensure_page(browser_s, page_name, target_id);
         page.uid_map = snapshot.uid_map;
+        page.last_snapshot = Some(snapshot.text.clone());
     }
 
     Ok(json!({"ok": true, "snapshot": snapshot.text}))
+}
+
+async fn dispatch_diff(
+    client: &CdpClient,
+    store: &mut SessionStore,
+    browser_name: &str,
+    page_name: &str,
+    target_id: &str,
+) -> Result<Value, Box<dyn std::error::Error>> {
+    let old_text = store
+        .browsers
+        .get(browser_name)
+        .and_then(|b| b.pages.get(page_name))
+        .and_then(|p| p.last_snapshot.clone())
+        .ok_or("No previous snapshot. Run inspect first.")?;
+
+    let snapshot = commands::inspect::run(client, false, None, None, None).await?;
+    let diff = commands::diff::diff_snapshots(&old_text, &snapshot.text);
+    let stats = commands::diff::diff_stats(&diff);
+
+    if let Some(browser_s) = store.browsers.get_mut(browser_name) {
+        let page = session::ensure_page(browser_s, page_name, target_id);
+        page.uid_map = snapshot.uid_map;
+        page.last_snapshot = Some(snapshot.text);
+    }
+
+    Ok(json!({
+        "ok": true,
+        "added": stats.added,
+        "removed": stats.removed,
+        "changed": stats.changed,
+        "diff": diff.trim_end(),
+    }))
 }
 
 async fn dispatch_eval(
@@ -503,6 +644,111 @@ async fn dispatch_console(
     Ok(json!({"ok": true, "messages": messages}))
 }
 
+async fn dispatch_extract(
+    client: &CdpClient,
+    cmd: &Value,
+) -> Result<Value, Box<dyn std::error::Error>> {
+    let selector = cmd.get("selector").and_then(Value::as_str);
+    let limit = cmd.get("limit").and_then(Value::as_u64).unwrap_or(10) as usize;
+    let result = commands::extract::run(client, selector, limit).await?;
+    Ok(commands::extract::to_json(&result))
+}
+
+// ---------------------------------------------------------------------------
+// Composite dispatchers
+// ---------------------------------------------------------------------------
+
+async fn dispatch_navigate_and_read(
+    client: &CdpClient,
+    _store: &mut SessionStore,
+    _browser_name: &str,
+    _page_name: &str,
+    _target_id: &str,
+    timeout: u64,
+    cmd: &Value,
+) -> Result<Value, Box<dyn std::error::Error>> {
+    let url = cmd.get("url").and_then(Value::as_str)
+        .ok_or("navigate_and_read: missing \"url\"")?;
+    let truncate = cmd.get("truncate").and_then(Value::as_u64).map(|v| v as usize);
+
+    // Step 1: goto + wait for load
+    let goto_result = commands::goto::run(client, url, timeout).await?;
+
+    // Log to browsing history
+    let _ = commands::history::append(&goto_result.url, &goto_result.title, _page_name);
+
+    // Step 2: read with optional truncation
+    let read_result = commands::read::run(client, false, truncate).await?;
+
+    Ok(json!({
+        "ok": true,
+        "url": goto_result.url,
+        "title": goto_result.title,
+        "content": read_result.text_content,
+    }))
+}
+
+async fn dispatch_fill_and_submit(
+    client: &CdpClient,
+    timeout: u64,
+    cmd: &Value,
+) -> Result<Value, Box<dyn std::error::Error>> {
+    let fields = cmd.get("fields").and_then(Value::as_array)
+        .ok_or("fill_and_submit: missing \"fields\" array")?;
+    let submit_selector = cmd.get("submit").and_then(Value::as_str)
+        .ok_or("fill_and_submit: missing \"submit\" selector")?;
+    let wait_for = cmd.get("wait_for").and_then(Value::as_str);
+
+    // Step 1: fill each field
+    let field_count = fields.len();
+    for field in fields {
+        let selector = field.get("selector").and_then(Value::as_str)
+            .ok_or("fill_and_submit: each field needs \"selector\"")?;
+        let value = field.get("value").and_then(Value::as_str)
+            .ok_or("fill_and_submit: each field needs \"value\"")?;
+        crate::element::fill_selector(client, selector, value).await?;
+    }
+
+    // Step 2: click submit
+    crate::element::click_selector(client, submit_selector).await?;
+
+    // Step 3: wait for condition if specified
+    if let Some(pattern) = wait_for {
+        // Heuristic: if it looks like a CSS selector, wait for selector; else wait for text
+        let is_selector = pattern.contains('.') || pattern.contains('#')
+            || pattern.contains('[') || pattern.contains('>');
+        let wait_type = if is_selector { "selector" } else { "text" };
+        commands::wait::run(client, wait_type, pattern, timeout).await?;
+    }
+
+    // Step 4: read page content
+    let read_result = commands::read::run(client, false, None).await?;
+
+    let message = format!(
+        "Filled {field_count} fields, submitted, waited for '{}'",
+        wait_for.unwrap_or("none")
+    );
+
+    Ok(json!({
+        "ok": true,
+        "message": message,
+        "content": read_result.text_content,
+    }))
+}
+
+fn dispatch_history(
+    cmd: &Value,
+) -> Result<Value, Box<dyn std::error::Error>> {
+    let filter = cmd.get("filter").and_then(Value::as_str);
+    let limit = cmd.get("limit").and_then(Value::as_u64).unwrap_or(20) as usize;
+    let entries = commands::history::run(filter, limit)?;
+    let entries_json: Vec<Value> = entries
+        .iter()
+        .map(|e| json!({"ts": e.ts, "url": e.url, "title": e.title, "page": e.page}))
+        .collect();
+    Ok(json!({"ok": true, "entries": entries_json}))
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -520,6 +766,7 @@ async fn attach_snapshot(
     if let Some(browser_s) = store.browsers.get_mut(browser_name) {
         let page = session::ensure_page(browser_s, page_name, target_id);
         page.uid_map = snapshot.uid_map;
+        page.last_snapshot = Some(snapshot.text.clone());
     }
     Ok(snapshot.text)
 }
