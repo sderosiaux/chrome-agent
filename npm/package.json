@@ -1,0 +1,34 @@
+{
+  "name": "aibrowsr",
+  "version": "0.1.0",
+  "description": "Browser automation for AI agents. Single binary, zero dependencies, CDP direct.",
+  "type": "module",
+  "bin": {
+    "aibrowsr": "./bin/aibrowsr.js"
+  },
+  "scripts": {
+    "postinstall": "node scripts/postinstall.js"
+  },
+  "files": [
+    "bin/",
+    "scripts/",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "browser",
+    "automation",
+    "ai",
+    "agent",
+    "cdp",
+    "chrome",
+    "headless",
+    "cli"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sderosiaux/aibrowsr.git"
+  },
+  "author": "Stephane Derosiaux"
+}

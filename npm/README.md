@@ -15,14 +15,15 @@ aibrowsr is a ~3K line Rust binary that replaces the entire Playwright/Puppeteer
 ## Install
 
 ```bash
-# npm (recommended — downloads prebuilt binary)
-npm install -g aibrowsr
-
-# or with npx (no install needed)
-npx aibrowsr --help
-
-# or with Cargo (builds from source)
 cargo install aibrowsr
+```
+
+Or build from source:
+
+```bash
+git clone https://github.com/sderosiaux/aibrowsr.git
+cd aibrowsr
+cargo build --release
 ```
 
 ## Quick Start
