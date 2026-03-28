@@ -203,30 +203,37 @@ pub async fn run(
 
   if (candidates.length === 0) return JSON.stringify({{ items: [], hint: "No repeating pattern found. Try: extract --selector or eval --selector" }});
 
-  // Pick best candidate
   candidates.sort((a, b) => b.score - a.score);
   const best = candidates[0];
 
-  // Extract structured data from each element
-  const items = best.elements.slice(0, _limit).map(el => {{
+  function isSrOnly(el) {{ return /sr-only|visually-hidden|screen-reader/i.test(el.className || ''); }}
+  function cleanText(txt) {{ return txt.replace(/\.[a-zA-Z_-]+\{{[^}}]*\}}/g, '').trim().replace(/\s+/g, ' '); }}
+
+  const meaningful = best.elements.filter(el => {{
+    const text = el.textContent.trim();
+    return text.length >= 3 && el.children.length >= 1;
+  }});
+
+  const items = meaningful.slice(0, _limit).map(el => {{
     const item = {{}};
     const heading = el.querySelector('h1,h2,h3,h4,h5,h6,[role=heading]');
     if (heading) item.title = heading.textContent.trim().replace(/\s+/g, ' ');
 
     const headingLink = el.querySelector('h1 a[href],h2 a[href],h3 a[href],h4 a[href],h5 a[href],h6 a[href],th a[href]');
-    const links = [...el.querySelectorAll('a[href]')].filter(a => a.textContent.trim().length > 0);
+    const titleClassLink = el.querySelector('[class*=title] > a[href],[class*=Title] > a[href],.titleline > a[href]');
+    const links = [...el.querySelectorAll('a[href]')].filter(a => {{
+      const t = a.textContent.trim();
+      return t.length > 0 && !isSrOnly(a) && !a.closest('[aria-hidden="true"]');
+    }});
     const longestLink = links.sort((a, b) => b.textContent.trim().length - a.textContent.trim().length)[0];
-    const link = headingLink || longestLink;
+    const link = headingLink || titleClassLink || longestLink;
     if (link) {{
       if (!item.title) item.title = link.textContent.trim().replace(/\s+/g, ' ');
       item.url = link.href;
     }}
 
     const price = el.querySelector('[class*=price],[class*=Price],[data-price]');
-    if (price) {{
-      const priceText = price.textContent.trim();
-      item.price = priceText || price.getAttribute('data-price') || '';
-    }}
+    if (price) {{ item.price = price.textContent.trim() || price.getAttribute('data-price') || ''; }}
 
     const img = el.querySelector('img[src]');
     if (img) item.image = img.src;
@@ -234,27 +241,25 @@ pub async fn run(
     const time = el.querySelector('time,[datetime]');
     if (time) item.date = time.getAttribute('datetime') || time.textContent.trim();
 
-    // Extract additional text fields from distinct child elements
     const fields = [];
     for (const child of el.children) {{
       const cStyle = (child.getAttribute('style') || '').toLowerCase();
       if (cStyle.includes('display:none') || cStyle.includes('display: none') ||
           cStyle.includes('visibility:hidden') || cStyle.includes('visibility: hidden')) continue;
       if (child.hidden || child.getAttribute('aria-hidden') === 'true') continue;
-      const txt = child.textContent.trim();
-      if (txt && txt.length > 0 && txt.length < 200) {{
+      if (isSrOnly(child)) continue;
+      if (child.tagName === 'SCRIPT' || child.tagName === 'STYLE') continue;
+      const txt = cleanText(child.textContent);
+      if (txt && txt.length > 2 && txt.length < 200) {{
         if (item.title && txt === item.title) continue;
         if (item.price && txt === item.price) continue;
+        if (/^(Star|Sponsor|Share|Like|Save|Follow|Built by|Unstar)$/i.test(txt)) continue;
         fields.push(txt);
       }}
     }}
-    if (fields.length > 0) {{
-      item.fields = fields.slice(0, 8);
-    }}
+    if (fields.length > 0) {{ item.fields = fields.slice(0, 8); }}
 
-    if (Object.keys(item).length === 0) {{
-      item.text = el.textContent.trim().substring(0, 200);
-    }}
+    if (Object.keys(item).length === 0) {{ item.text = cleanText(el.textContent).substring(0, 200); }}
 
     return item;
   }});
@@ -263,7 +268,8 @@ pub async fn run(
   let patternClasses = patternParts[1] || '';
   if (patternClasses.length > 40) patternClasses = patternClasses.substring(0, 40) + '...';
   const patternLabel = patternParts[0] + (patternClasses ? '.' + patternClasses : '');
-  return JSON.stringify({{ items, count: best.elements.length, pattern: patternLabel }});
+  const nonEmpty = items.filter(i => i.title || i.url || i.text || i.fields);
+  return JSON.stringify({{ items: nonEmpty, count: meaningful.length, pattern: patternLabel }});
 }})()"#
     );
 

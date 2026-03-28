@@ -149,7 +149,7 @@ fn format_ax_tree(
             }
             v
         }).collect();
-        output
+        let filtered: String = output
             .lines()
             .filter(|line| {
                 let trimmed = line.trim();
@@ -164,7 +164,15 @@ fn format_ax_tree(
                 acc.push_str(line.trim_start());
                 acc.push('\n');
                 acc
-            })
+            });
+        // Warn if filter matched nothing — likely the matching elements are deeper
+        // than max_depth. This prevents silent empty output that confuses agents.
+        if filtered.is_empty() && max_depth.is_some() {
+            format!("No elements matching filter {:?} found within --max-depth {}. Try increasing depth or removing --max-depth.\n",
+                roles, max_depth.unwrap_or(0))
+        } else {
+            filtered
+        }
     } else {
         output
     };

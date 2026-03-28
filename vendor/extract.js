@@ -159,16 +159,47 @@ function extract(_scope, _limit) {
   candidates.sort((a, b) => b.score - a.score);
   const best = candidates[0];
 
-  const items = best.elements.slice(0, _limit).map(el => {
+  // Helper: check if element or ancestor is sr-only/visually-hidden
+  function isSrOnly(el) {
+    const cl = el.className || '';
+    return /sr-only|visually-hidden|screen-reader/i.test(cl);
+  }
+
+  // Helper: clean text by removing CSS leaks and UI chrome noise
+  function cleanText(txt) {
+    // Remove inline CSS that leaks from style elements
+    let cleaned = txt.replace(/\.[a-zA-Z_-]+\{[^}]*\}/g, '').trim();
+    // Collapse whitespace
+    cleaned = cleaned.replace(/\s+/g, ' ');
+    return cleaned;
+  }
+
+  // Filter to elements with actual extractable content (skip spacer rows)
+  const meaningfulElements = best.elements.filter(el => {
+    const text = el.textContent.trim();
+    if (text.length < 3) return false;
+    if (el.children.length === 0) return false;
+    return true;
+  });
+
+  const items = meaningfulElements.slice(0, _limit).map(el => {
     const item = {};
     const heading = el.querySelector('h1,h2,h3,h4,h5,h6,[role=heading]');
     if (heading) item.title = heading.textContent.trim().replace(/\s+/g, ' ');
 
-    // Prefer the link inside a heading or row header (primary link), else longest-text link
+    // Prefer link inside heading/th, then link with class containing "title",
+    // then first link that isn't a short domain-only link, then longest link
     const headingLink = el.querySelector('h1 a[href],h2 a[href],h3 a[href],h4 a[href],h5 a[href],h6 a[href],th a[href]');
-    const links = [...el.querySelectorAll('a[href]')].filter(a => a.textContent.trim().length > 0);
+    const titleClassLink = el.querySelector('[class*=title] > a[href],[class*=Title] > a[href],.titleline > a[href]');
+    const links = [...el.querySelectorAll('a[href]')].filter(a => {
+      const t = a.textContent.trim();
+      if (t.length === 0) return false;
+      // Skip sr-only links
+      if (isSrOnly(a) || a.closest('[aria-hidden="true"]')) return false;
+      return true;
+    });
     const longestLink = links.sort((a, b) => b.textContent.trim().length - a.textContent.trim().length)[0];
-    const link = headingLink || longestLink;
+    const link = headingLink || titleClassLink || longestLink;
     if (link) {
       if (!item.title) item.title = link.textContent.trim().replace(/\s+/g, ' ');
       item.url = link.href;
@@ -188,15 +219,20 @@ function extract(_scope, _limit) {
 
     const fields = [];
     for (const child of el.children) {
-      // Skip hidden children (display:none, visibility:hidden, hidden attr, aria-hidden)
+      // Skip hidden/sr-only children
       const style = (child.getAttribute('style') || '').toLowerCase();
       if (style.includes('display:none') || style.includes('display: none') ||
           style.includes('visibility:hidden') || style.includes('visibility: hidden')) continue;
       if (child.hidden || child.getAttribute('aria-hidden') === 'true') continue;
-      const txt = child.textContent.trim();
-      if (txt && txt.length > 0 && txt.length < 200) {
+      if (isSrOnly(child)) continue;
+      // Skip script/style tags
+      if (child.tagName === 'SCRIPT' || child.tagName === 'STYLE') continue;
+      let txt = cleanText(child.textContent);
+      if (txt && txt.length > 2 && txt.length < 200) {
         if (item.title && txt === item.title) continue;
         if (item.price && txt === item.price) continue;
+        // Skip UI chrome noise (single-word button labels, etc.)
+        if (/^(Star|Sponsor|Share|Like|Save|Follow|Built by|Unstar)$/i.test(txt)) continue;
         fields.push(txt);
       }
     }
@@ -205,18 +241,20 @@ function extract(_scope, _limit) {
     }
 
     if (Object.keys(item).length === 0) {
-      item.text = el.textContent.trim().substring(0, 200);
+      item.text = cleanText(el.textContent).substring(0, 200);
     }
 
     return item;
   });
 
+  // Only count items that produced at least one useful field
+  const nonEmpty = items.filter(i => i.title || i.url || i.text || i.fields);
+
   const patternParts = best.sig.split('|');
   let patternClasses = patternParts[1] || '';
-  // Truncate long class strings (e.g. Tailwind utility classes)
   if (patternClasses.length > 40) patternClasses = patternClasses.substring(0, 40) + '...';
   const patternLabel = patternParts[0] + (patternClasses ? '.' + patternClasses : '');
-  return JSON.stringify({ items, count: best.elements.length, pattern: patternLabel });
+  return JSON.stringify({ items: nonEmpty, count: meaningfulElements.length, pattern: patternLabel });
 }
 
 if (typeof module !== 'undefined') module.exports = extract;

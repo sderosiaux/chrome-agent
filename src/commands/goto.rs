@@ -12,10 +12,10 @@ pub struct GotoResult {
 
 pub async fn run(client: &CdpClient, url: &str, timeout_secs: u64) -> Result<GotoResult, crate::BoxError> {
     // Auto-prefix https:// if no scheme is provided
-    let url = if !url.contains("://") {
-        format!("https://{url}")
-    } else {
+    let url = if url.contains("://") {
         url.to_string()
+    } else {
+        format!("https://{url}")
     };
     let url = url.as_str();
 

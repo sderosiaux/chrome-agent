@@ -67,6 +67,8 @@ pub async fn output_action(
     if json_mode {
         let mut obj = json!({"ok": true, "message": msg});
         if inspect {
+            // Brief pause for navigation/re-render after click/fill before inspecting
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
             let snapshot = commands::inspect::run(client, false, max_depth, None, None).await?;
             obj["snapshot"] = json!(snapshot.text);
             if let Some(browser_s) = store.browsers.get_mut(browser_name) {
@@ -79,6 +81,7 @@ pub async fn output_action(
     } else {
         println!("{msg}");
         if inspect {
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
             let snapshot = commands::inspect::run(client, false, max_depth, None, None).await?;
             println!("{}", snapshot.text);
             if let Some(browser_s) = store.browsers.get_mut(browser_name) {

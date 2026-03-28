@@ -94,6 +94,11 @@ pub async fn run(
             parsed.text_content = crate::truncate::truncate_str(&parsed.text_content, max, "...").into_owned();
         }
 
+    // Warn when Readability extracted very little — page likely isn't an article
+    if parsed.text_content.len() < 200 {
+        return Err("Page has minimal readable content — likely not an article. Try: aibrowsr text --selector main".into());
+    }
+
     Ok(parsed)
 }
 
