@@ -483,6 +483,18 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                             if (param === 37446) return 'Intel Iris OpenGL Engine';
                             return getParam.call(this, param);
                         };
+                        // Fix CDP input leak: screenX/screenY == pageX/pageY reveals automation.
+                        // Add a random window offset so screen coords != page coords.
+                        // (CDP-Patches technique from github.com/Kaliiiiiiiiii-Vinyzu/CDP-Patches)
+                        const __screenOffset = { x: Math.floor(Math.random() * 100) + 50, y: Math.floor(Math.random() * 100) + 80 };
+                        const origMouseEvent = MouseEvent;
+                        window.MouseEvent = class extends origMouseEvent {
+                            constructor(type, init = {}) {
+                                if (init.screenX !== undefined) init.screenX += __screenOffset.x;
+                                if (init.screenY !== undefined) init.screenY += __screenOffset.y;
+                                super(type, init);
+                            }
+                        };
                     "#
                 }),
             )
