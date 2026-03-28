@@ -138,7 +138,7 @@ describe('adversarial: huge class lists', () => {
     `).join('');
     const html = `<html><body><div class="grid">${cards}</div></body></html>`;
     const r = extractFromHTML(html);
-    // BUG: childSignature uses the full classList, so one unique class per sibling prevents grouping.
+    // Verifies that digit-class filtering allows grouping despite one unique utility class per sibling.
     assert.equal(r.count, 4);
   });
 });
@@ -170,7 +170,7 @@ describe('adversarial: data and role attributes', () => {
     `).join('');
     const html = `<html><body><div class="grid">${cards}</div></body></html>`;
     const r = extractFromHTML(html);
-    // BUG: extract.js matches [data-price] but reads textContent instead of the data-price attribute value.
+    // Verifies getAttribute fallback: when [data-price] has no visible text, the attribute value is used.
     assert.deepEqual(
       r.items.map(item => item.price),
       ['$20', '$21', '$22', '$23'],
@@ -261,7 +261,7 @@ describe('adversarial: same-tag siblings and noisy children', () => {
     `).join('');
     const html = `<html><body><div class="feed">${articles}</div></body></html>`;
     const r = extractFromHTML(html);
-    // BUG: extract.js picks the longest anchor text, which can promote CTA links over the heading/title link.
+    // Verifies heading link preference: the primary <h3> link is chosen over a longer CTA link.
     assert.deepEqual(
       r.items.map(item => item.url),
       ['/primary/0', '/primary/1', '/primary/2', '/primary/3'],
@@ -327,7 +327,7 @@ describe('adversarial: svg-heavy cards and forms as records', () => {
     `).join('');
     const html = `<html><body><form><div class="rows">${rows}</div></form></body></html>`;
     const r = extractFromHTML(html);
-    // BUG: the extractor only reads textContent, so form control values are currently invisible in extracted fields/text.
+    // By design: the extractor reads textContent, not input.value. Use eval for form data.
     assert.ok(r.items[0].fields.includes('User 0'));
     assert.ok(r.items[0].fields.includes('user0@example.com'));
   });

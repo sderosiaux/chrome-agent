@@ -441,7 +441,7 @@ async fn dispatch_text(
     let full_length = text.chars().count();
     let (text, truncated) = if let Some(n) = truncate {
         if full_length > n {
-            (crate::truncate::truncate_str(&text, n, "..."), true)
+            (crate::truncate::truncate_str(&text, n, "...").into_owned(), true)
         } else {
             (text, false)
         }

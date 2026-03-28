@@ -639,15 +639,12 @@ async fn run(cli: Cli) -> Result<(), BoxError> {
             let uid_map = get_uid_map(&store, &cli.browser, &cli.page);
             let text = commands::text::run(&client, uid.as_deref(), selector.as_deref(), &uid_map).await?;
             let full_length = text.chars().count();
-            let (text, truncated) = if let Some(n) = truncate {
-                if full_length > n {
-                    (crate::truncate::truncate_str(&text, n, "..."), true)
+            let (text, truncated) = if let Some(n) = truncate
+                && full_length > n {
+                    (crate::truncate::truncate_str(&text, n, "...").into_owned(), true)
                 } else {
                     (text, false)
-                }
-            } else {
-                (text, false)
-            };
+                };
             if json_mode {
                 let mut obj = json!({"ok": true, "text": text});
                 if truncated {

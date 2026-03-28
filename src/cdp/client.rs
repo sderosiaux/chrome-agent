@@ -25,35 +25,20 @@ pub struct CdpClient {
     _dispatcher: tokio::task::JoinHandle<()>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum CdpClientError {
-    Transport(CdpTransportError),
+    #[error("transport: {0}")]
+    Transport(#[from] CdpTransportError),
+    #[error("serialization: {0}")]
     Serialization(serde_json::Error),
+    #[error("CDP error {code}: {message}")]
     Protocol { code: i64, message: String },
+    #[error("response parse: {0}")]
     ResponseParse(serde_json::Error),
+    #[error("timeout: {0}")]
     Timeout(String),
+    #[error("dispatcher task exited")]
     DispatcherGone,
-}
-
-impl std::fmt::Display for CdpClientError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Transport(e) => write!(f, "transport: {e}"),
-            Self::Serialization(e) => write!(f, "serialization: {e}"),
-            Self::Protocol { code, message } => write!(f, "CDP error {code}: {message}"),
-            Self::ResponseParse(e) => write!(f, "response parse: {e}"),
-            Self::Timeout(msg) => write!(f, "timeout: {msg}"),
-            Self::DispatcherGone => write!(f, "dispatcher task exited"),
-        }
-    }
-}
-
-impl std::error::Error for CdpClientError {}
-
-impl From<CdpTransportError> for CdpClientError {
-    fn from(e: CdpTransportError) -> Self {
-        Self::Transport(e)
-    }
 }
 
 impl CdpClient {

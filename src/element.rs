@@ -359,25 +359,17 @@ async fn wait_for_stabilization(client: &CdpClient) {
     // No navigation detected — return immediately, no 500ms penalty
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum ElementError {
+    #[error("{0}")]
     NotFound(String),
+    #[error("{0}")]
     Detached(String),
+    #[error("{0}")]
     NotInteractable(String),
+    #[error("{0}")]
     Action(String),
 }
-
-impl std::fmt::Display for ElementError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::NotFound(msg) | Self::Detached(msg) | Self::NotInteractable(msg) | Self::Action(msg) => {
-                write!(f, "{msg}")
-            }
-        }
-    }
-}
-
-impl std::error::Error for ElementError {}
 
 /// Click at explicit (x, y) coordinates using Input.dispatchMouseEvent.
 pub async fn click_at_coords(

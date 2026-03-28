@@ -483,21 +483,13 @@ fn auto_connect_error_message() -> String {
     )
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum BrowserError {
+    #[error("{0}")]
     Launch(String),
+    #[error("{0}")]
     NotFound(String),
 }
-
-impl std::fmt::Display for BrowserError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Launch(msg) | Self::NotFound(msg) => write!(f, "{msg}"),
-        }
-    }
-}
-
-impl std::error::Error for BrowserError {}
 
 #[cfg(test)]
 mod tests {

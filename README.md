@@ -1,16 +1,34 @@
 # aibrowsr
 
-Browser automation for AI agents. Single Rust binary, zero runtime dependencies, talks CDP directly to Chrome.
+**The browser tool that thinks like your agent does.**
 
-## Why
+Playwright, Puppeteer, Selenium — they were built for humans writing test scripts. aibrowsr was built for LLMs issuing commands. That distinction changes everything.
 
-Existing tools (Playwright, Puppeteer, Selenium) carry heavy runtimes and weren't designed for agents. Agents need:
-- **Minimum tokens** — a11y tree snapshots instead of raw HTML (~50 tokens vs ~2000)
-- **Minimum round-trips** — `--inspect` returns updated page state with every action
-- **Zero setup** — single binary, headless by default, no npm/Node required
-- **Persistent sessions** — login once, stay logged in across invocations
-- **Stable UIDs** — element identifiers based on `backendNodeId`, survive between inspects
-- **3 targeting modes** — uid from accessibility tree, CSS selectors, or coordinates
+```
+Playwright snapshot:   ~2,000 tokens of raw HTML
+aibrowsr inspect:          ~50 tokens of structured a11y tree
+```
+
+One `aibrowsr goto https://example.com --inspect` returns the page as a compact accessibility tree with stable element UIDs. The agent reads it, picks a UID, acts. No CSS selectors to guess, no DOM to parse, no flaky locators.
+
+```
+aibrowsr (single 3 MB Rust binary)
+    │ WebSocket
+    ▼
+Chrome (headless, no Node.js, no runtime deps)
+```
+
+### What makes it different
+
+- **40x fewer tokens** — a11y tree snapshots instead of raw HTML. Agents read what matters, skip the noise.
+- **Action + observe in 1 call** — every command accepts `--inspect` to return the updated page state. No extra round-trip.
+- **Stable UIDs** — element IDs based on Chrome's `backendNodeId`, not sequential counters. They survive between inspects. An agent can read a UID, wait 5 minutes, then click it.
+- **Zero setup** — single binary. No Node.js, no npm, no Playwright, no daemon. `npx aibrowsr goto https://...` works immediately.
+- **Stealth built-in** — 7 CDP patches bypass Cloudflare/Turnstile without fake Chrome flags. `Runtime.enable` is never called (the #1 detection vector).
+- **Smart extraction** — `read` for articles (Readability), `extract` for repeating data (MDR/DEPTA heuristics), `network` for API responses. Each returns structured data, not raw DOM.
+- **Agent-native errors** — every error includes a `hint` field suggesting the next action. `--json` mode exits 0 so agents parse stdout, not exit codes.
+- **10ms startup** — persistent sessions mean Chrome stays running between commands. No cold boot.
+- **Parallel agents** — `--browser agent1`, `--browser agent2`. Separate Chrome instances, no session corruption.
 
 ## Install
 
@@ -69,20 +87,6 @@ aibrowsr eval "document.title"
 # Screenshot (returns file path, not binary data)
 aibrowsr screenshot
 ```
-
-## How It Works
-
-```
-aibrowsr v0.2.5 (Rust, ~6.2K lines, 2.9 MB binary)
-    │
-    │ WebSocket (Chrome DevTools Protocol)
-    ▼
-Chrome / Chromium (headless by default)
-```
-
-No Node.js. No Playwright. No daemon required. Headless by default — `--headed` for debugging.
-
-UIDs are stable across inspects (based on Chrome's `backendNodeId`). The agent inspects, picks a uid, acts — even minutes later. When a11y tree isn't practical, CSS selectors and coordinates work as fallbacks. Click auto-falls back to JS `.click()` when the element has no box model.
 
 ## Commands
 
@@ -193,49 +197,27 @@ echo '{"cmd":"goto","url":"https://example.com","inspect":true}
 
 Each command returns one JSON line: `{"ok":true,...}` or `{"ok":false,"error":"..."}`. 10x faster than spawning aibrowsr per command.
 
-## Content Extraction
+## Content Extraction — 4 levels
+
+Pick the right tool for the job. Each returns structured data, not raw DOM.
 
 ```bash
-# Article content (Readability — like Firefox Reader Mode)
+# 1. Articles — Mozilla Readability (like Firefox Reader Mode)
 aibrowsr read
-# → # Article Title
-# → Clean article text without nav, footer, sidebar...
+# → ~300 tokens of clean markdown, no nav/footer/sidebar
 
-# Repeating data (products, news items, search results — no selectors needed)
+# 2. Repeating data — products, news items, search results (no selectors needed)
 aibrowsr extract
 # → Found 30 items (pattern: TR.athing.submission)
-# → 1. Title: "..." | URL: https://...
+# → 1. Title: "Show HN: ..." | URL: https://... | Price: "$99"
+# Uses MDR/DEPTA heuristics: sibling similarity, content heterogeneity, nav filtering
 
-# Full page text (scoped by selector)
+# 3. Scoped text — visible text from a specific section
 aibrowsr text --selector "[role=main]" --truncate 1000
 
-# Structured data via JS
-aibrowsr eval "JSON.stringify([...document.querySelectorAll('h2')].map(e => e.textContent))"
+# 4. API responses — skip the DOM entirely
+aibrowsr network --filter "api" --body
 ```
-
-## Structured Data Extraction
-
-Auto-detect repeating patterns (product grids, news feeds, tables, search results) and extract structured JSON — no selectors needed:
-
-```bash
-aibrowsr goto https://news.ycombinator.com
-aibrowsr extract
-# → Found 30 items (pattern: TR.athing.submission)
-# → 1. Title: "Show HN: A New Browser Tool" | URL: https://...
-# → 2. Title: "Rust 2025 Edition" | URL: https://...
-
-# Scope to a specific section
-aibrowsr extract --selector ".product-grid"
-
-# Limit results
-aibrowsr extract --limit 5
-
-# JSON output for agent consumption
-aibrowsr --json extract
-# → {"ok":true,"items":[{"title":"...","url":"...","price":"..."}],"count":30,"pattern":"TR.athing.submission"}
-```
-
-Uses MDR/DEPTA-inspired heuristics: sibling structural similarity, content heterogeneity scoring, text-to-link ratio filtering, semantic class detection, hidden element exclusion. Prefers rich data records over navigation links or ads.
 
 ## Stealth Mode
 

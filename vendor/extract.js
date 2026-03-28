@@ -212,7 +212,10 @@ function extract(_scope, _limit) {
   });
 
   const patternParts = best.sig.split('|');
-  const patternLabel = patternParts[0] + (patternParts[1] ? '.' + patternParts[1] : '');
+  let patternClasses = patternParts[1] || '';
+  // Truncate long class strings (e.g. Tailwind utility classes)
+  if (patternClasses.length > 40) patternClasses = patternClasses.substring(0, 40) + '...';
+  const patternLabel = patternParts[0] + (patternClasses ? '.' + patternClasses : '');
   return JSON.stringify({ items, count: best.elements.length, pattern: patternLabel });
 }
 

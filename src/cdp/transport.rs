@@ -106,7 +106,7 @@ async fn io_loop<S, R>(
             // --- Writer path: caller → WebSocket ---
             msg = outbound_rx.recv() => {
                 if let Some(text) = msg {
-                    if ws_write.send(Message::Text(text)).await.is_err() {
+                    if ws_write.send(Message::Text(text.into())).await.is_err() {
                         // WebSocket write failed — connection dead.
                         break;
                     }
@@ -122,7 +122,7 @@ async fn io_loop<S, R>(
             frame = ws_read.next() => {
                 match frame {
                     Some(Ok(Message::Text(text))) => {
-                        if inbound_tx.send(text).await.is_err() {
+                        if inbound_tx.send(text.to_string()).await.is_err() {
                             // Receiver dropped — nobody is reading.
                             break;
                         }
@@ -154,24 +154,15 @@ async fn io_loop<S, R>(
 }
 
 /// Errors produced by `CdpTransport`.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum CdpTransportError {
     /// Failed to establish the WebSocket connection.
+    #[error("WebSocket connect failed: {0}")]
     Connect(String),
     /// The transport channel is closed (background task exited).
+    #[error("transport closed")]
     Closed,
 }
-
-impl std::fmt::Display for CdpTransportError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Connect(reason) => write!(f, "WebSocket connect failed: {reason}"),
-            Self::Closed => write!(f, "transport closed"),
-        }
-    }
-}
-
-impl std::error::Error for CdpTransportError {}
 
 #[cfg(test)]
 mod tests {

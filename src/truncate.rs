@@ -1,12 +1,14 @@
+use std::borrow::Cow;
+
 /// Truncate a string to at most `max_chars` characters, appending `suffix` if truncated.
 /// Safe on all UTF-8 strings — never panics on multi-byte characters.
-pub fn truncate_str(s: &str, max_chars: usize, suffix: &str) -> String {
-    let char_count = s.chars().count();
-    if char_count <= max_chars {
-        return s.to_string();
+pub fn truncate_str<'a>(s: &'a str, max_chars: usize, suffix: &str) -> Cow<'a, str> {
+    if s.chars().count() <= max_chars {
+        return Cow::Borrowed(s);
     }
-    let truncated: String = s.chars().take(max_chars).collect();
-    format!("{truncated}{suffix}")
+    // Use char_indices for zero-copy byte index
+    let byte_idx = s.char_indices().nth(max_chars).map_or(s.len(), |(i, _)| i);
+    Cow::Owned(format!("{}{suffix}", &s[..byte_idx]))
 }
 
 #[cfg(test)]

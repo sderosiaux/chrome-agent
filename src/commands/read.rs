@@ -91,7 +91,7 @@ pub async fn run(
 
     if let Some(max) = truncate
         && parsed.text_content.chars().count() > max {
-            parsed.text_content = crate::truncate::truncate_str(&parsed.text_content, max, "...");
+            parsed.text_content = crate::truncate::truncate_str(&parsed.text_content, max, "...").into_owned();
         }
 
     Ok(parsed)

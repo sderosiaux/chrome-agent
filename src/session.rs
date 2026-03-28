@@ -191,16 +191,9 @@ fn is_process_alive(pid: u32) -> bool {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
 pub struct SessionError(pub String);
-
-impl std::fmt::Display for SessionError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl std::error::Error for SessionError {}
 
 #[cfg(test)]
 mod tests {

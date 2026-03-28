@@ -239,11 +239,7 @@ pub fn format_text(entries: &[NetworkEntry]) -> String {
         "-".repeat(110)
     );
     for e in entries {
-        let url_display = if e.url.chars().count() > 70 {
-            crate::truncate::truncate_str(&e.url, 67, "...")
-        } else {
-            e.url.clone()
-        };
+        let url_display = crate::truncate::truncate_str(&e.url, 67, "...");
         let status_str = if e.status == 0 { "-".to_string() } else { e.status.to_string() };
         let size_str = if e.size == 0 {
             "-".to_string()
@@ -277,12 +273,7 @@ async fn fetch_response_body(client: &CdpClient, request_id: &str) -> Option<Str
         .ok()?;
 
     let body = result.get("body")?.as_str()?;
-    let truncated = if body.chars().count() > 2000 {
-        crate::truncate::truncate_str(body, 2000, "...(truncated)")
-    } else {
-        body.to_string()
-    };
-    Some(truncated)
+    Some(crate::truncate::truncate_str(body, 2000, "...(truncated)").into_owned())
 }
 
 #[cfg(test)]
