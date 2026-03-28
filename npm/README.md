@@ -73,7 +73,7 @@ aibrowsr screenshot
 ## How It Works
 
 ```
-aibrowsr (Rust, ~5K lines)
+aibrowsr v0.2.0 (Rust, ~5.3K lines, 2.9 MB binary)
     │
     │ WebSocket (Chrome DevTools Protocol)
     ▼
@@ -271,6 +271,18 @@ aibrowsr --page main eval "document.title"   # → "App"
 aibrowsr --page docs eval "document.title"   # → "Docs"
 ```
 
+### Parallel Agents
+
+Multiple agents sharing the same browser corrupt each other's sessions. Isolate with `--browser`:
+
+```bash
+# Agent 1
+aibrowsr --browser agent1 goto https://example.com
+
+# Agent 2 (separate Chrome instance)
+aibrowsr --browser agent2 goto https://other.com
+```
+
 ## Using with AI Agents
 
 ### Skill (recommended)
@@ -320,7 +332,7 @@ google-chrome --remote-debugging-port=9222  # or launch manually
 | Network capture | Retroactive + live | No | No | Metadata only (no bodies) |
 | Console capture | Stealth-safe interceptor | No | Console messages | No |
 | Pipe mode | JSON stdin/stdout | No | No | No |
-| Code | ~5K lines | ~76K lines (69K Playwright fork) | ~12K lines | Playwright |
+| Code | ~5.3K lines | ~76K lines (69K Playwright fork) | ~12K lines | Playwright |
 
 ## License
 
