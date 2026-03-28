@@ -57,6 +57,63 @@ pub async fn scroll_to_load(client: &CdpClient) -> Result<(), crate::BoxError> {
     Ok(())
 }
 
+
+/// Extract structured data using the accessibility tree instead of DOM.
+/// Delegates to inspect with a role filter. Works on React SPAs (X.com)
+/// where DOM structure is opaque but a11y roles are clean.
+pub async fn run_a11y(
+    client: &CdpClient,
+    limit: usize,
+    scroll: bool,
+) -> Result<ExtractResult, crate::BoxError> {
+    let roles = ["article", "listitem", "row", "treeitem"];
+
+    for role in &roles {
+        let filter = vec![*role];
+        let snapshot = if scroll {
+            super::inspect::scroll_collect(client, false, None, Some(&filter), limit).await?
+        } else {
+            super::inspect::run(client, false, None, None, Some(&filter)).await?
+        };
+
+        let lines: Vec<&str> = snapshot.text.lines()
+            .filter(|l| l.trim().starts_with("uid="))
+            .collect();
+
+        if lines.is_empty() { continue; }
+        if lines.len() < 3 && !scroll { continue; }
+
+        let items: Vec<Value> = lines.iter()
+            .take(limit)
+            .map(|line| {
+                // Strip "uid=nXXX role " prefix to get the content text
+                let text = line.trim();
+                let text = if let Some(rest) = text.strip_prefix("uid=") {
+                    // Format: "uid=n123 article \"actual text here\""
+                    // Skip the "nXXX role " part
+                    if let Some((_uid_role, content)) = rest.split_once('"') {
+                        content.trim_end_matches('"')
+                    } else {
+                        rest.splitn(3, ' ').last().unwrap_or(rest)
+                    }
+                } else {
+                    text
+                };
+                json!({"text": text})
+            })
+            .collect();
+
+        let count = lines.len();
+        return Ok(ExtractResult {
+            items,
+            count,
+            pattern: format!("a11y:{role}"),
+        });
+    }
+
+    Err("No repeating a11y pattern found. Try: extract (DOM mode) or inspect --filter \"article\"".into())
+}
+
 pub async fn run(
     client: &CdpClient,
     selector: Option<&str>,

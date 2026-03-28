@@ -652,7 +652,12 @@ async fn dispatch_extract(
     if scroll {
         commands::extract::scroll_to_load(client).await?;
     }
-    let result = commands::extract::run(client, selector, limit).await?;
+    let a11y = cmd.get("a11y").and_then(Value::as_bool).unwrap_or(false);
+    let result = if a11y {
+        commands::extract::run_a11y(client, limit, scroll).await?
+    } else {
+        commands::extract::run(client, selector, limit).await?
+    };
     Ok(commands::extract::to_json(&result))
 }
 

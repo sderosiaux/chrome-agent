@@ -229,6 +229,9 @@ enum Command {
         /// Scroll to load lazy content before extracting (useful for infinite-scroll pages)
         #[arg(long)]
         scroll: bool,
+        /// Use accessibility tree instead of DOM (works on React SPAs like X.com)
+        #[arg(long)]
+        a11y: bool,
     },
 
     /// Evaluate JavaScript in the page
@@ -794,11 +797,15 @@ async fn run(cli: Cli) -> Result<(), BoxError> {
             }
         }
 
-        Command::Extract { selector, limit, scroll } => {
-            if scroll {
-                commands::extract::scroll_to_load(&client).await?;
-            }
-            let result = commands::extract::run(&client, selector.as_deref(), limit).await?;
+        Command::Extract { selector, limit, scroll, a11y } => {
+            let result = if a11y {
+                commands::extract::run_a11y(&client, limit, scroll).await?
+            } else {
+                if scroll {
+                    commands::extract::scroll_to_load(&client).await?;
+                }
+                commands::extract::run(&client, selector.as_deref(), limit).await?
+            };
             if json_mode {
                 json_output(&commands::extract::to_json(&result));
             } else {
