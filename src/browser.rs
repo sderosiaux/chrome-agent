@@ -10,6 +10,7 @@ pub struct BrowserOptions {
     pub ignore_https_errors: bool,
     pub stealth: bool,
     pub connect: Option<String>,
+    pub copy_cookies: bool,
 }
 
 impl Default for BrowserOptions {
@@ -20,6 +21,7 @@ impl Default for BrowserOptions {
             ignore_https_errors: false,
             stealth: false,
             connect: None,
+            copy_cookies: false,
         }
     }
 }
@@ -112,6 +114,11 @@ async fn launch_browser(opts: &BrowserOptions) -> Result<BrowserConnection, Brow
     std::fs::create_dir_all(&profile_dir).map_err(|e| {
         BrowserError::Launch(format!("Failed to create profile dir: {e}"))
     })?;
+
+    // Copy cookies from the user's real Chrome profile if requested
+    if opts.copy_cookies {
+        copy_chrome_cookies(&profile_dir)?;
+    }
 
     // Prevent concurrent launches: if DevToolsActivePort already exists, wait for it
     // Check for existing DevToolsActivePort — another process may have launched Chrome
@@ -457,6 +464,57 @@ fn find_chromium() -> Result<PathBuf, BrowserError> {
         "Could not find Chrome or Chromium. Install Chrome and ensure it's on your PATH."
             .into(),
     ))
+}
+
+/// Copy cookies (and Local State for decryption key) from the user's real Chrome profile.
+/// This gives the launched headless Chrome access to the user's logged-in sessions.
+fn copy_chrome_cookies(profile_dir: &Path) -> Result<(), BrowserError> {
+    let chrome_default = chrome_default_profile_dir()?;
+    let cookies_src = chrome_default.join("Cookies");
+    if !cookies_src.exists() {
+        return Err(BrowserError::Launch(
+            "Chrome cookies file not found. Is Chrome installed?".into(),
+        ));
+    }
+
+    // Copy Cookies database
+    let cookies_dst = profile_dir.join("Default");
+    std::fs::create_dir_all(&cookies_dst).map_err(|e| {
+        BrowserError::Launch(format!("Failed to create Default dir: {e}"))
+    })?;
+    std::fs::copy(&cookies_src, cookies_dst.join("Cookies")).map_err(|e| {
+        BrowserError::Launch(format!("Failed to copy Cookies: {e}"))
+    })?;
+    // Also copy WAL/SHM if they exist (SQLite journal files)
+    for ext in ["Cookies-journal", "Cookies-wal", "Cookies-shm"] {
+        let src = chrome_default.join(ext);
+        if src.exists() {
+            let _ = std::fs::copy(&src, cookies_dst.join(ext));
+        }
+    }
+
+    // Copy Local State (contains the encryption key for cookies on macOS/Windows)
+    let local_state_src = chrome_default.parent().map(|p| p.join("Local State"));
+    if let Some(src) = local_state_src
+        && src.exists() {
+            let dst = profile_dir.join("Local State");
+            let _ = std::fs::copy(&src, dst);
+        }
+
+    eprintln!("Copied cookies from Chrome profile");
+    Ok(())
+}
+
+/// Locate the user's default Chrome profile directory.
+fn chrome_default_profile_dir() -> Result<PathBuf, BrowserError> {
+    let base = if cfg!(target_os = "macos") {
+        dirs::home_dir().map(|h| h.join("Library/Application Support/Google/Chrome/Default"))
+    } else if cfg!(target_os = "windows") {
+        dirs::data_local_dir().map(|d| d.join("Google/Chrome/User Data/Default"))
+    } else {
+        dirs::config_dir().map(|c| c.join("google-chrome/Default"))
+    };
+    base.ok_or_else(|| BrowserError::Launch("Could not locate Chrome profile directory".into()))
 }
 
 /// Get the profile directory for a named browser instance.

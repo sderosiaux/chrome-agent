@@ -834,6 +834,7 @@ async fn connect_browser(
         ignore_https_errors: cli.ignore_https_errors,
         stealth: cli.stealth,
         connect: cli.connect.clone(),
+        copy_cookies: cli.copy_cookies,
     };
     let conn = browser::resolve_browser(&opts).await?;
     let client = CdpClient::connect(&conn.ws_endpoint).await?;

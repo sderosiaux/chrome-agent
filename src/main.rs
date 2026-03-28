@@ -78,6 +78,10 @@ pub(crate) struct Cli {
     #[arg(long)]
     pub(crate) max_depth: Option<usize>,
 
+    /// Copy cookies from your real Chrome profile (uses your logged-in sessions)
+    #[arg(long)]
+    pub(crate) copy_cookies: bool,
+
     /// Named page/tab within the browser (default: "default")
     #[arg(long, default_value = "default")]
     pub(crate) page: String,
@@ -489,6 +493,7 @@ async fn run(cli: Cli) -> Result<(), BoxError> {
                     ignore_https_errors: cli.ignore_https_errors,
                     stealth: cli.stealth,
                     connect: cli.connect.clone(),
+                    copy_cookies: cli.copy_cookies,
                 };
                 let conn = browser::resolve_browser(&opts).await?;
                 let client = CdpClient::connect(&conn.ws_endpoint).await?;
@@ -514,6 +519,7 @@ async fn run(cli: Cli) -> Result<(), BoxError> {
                 ignore_https_errors: cli.ignore_https_errors,
                 stealth: cli.stealth,
                 connect: cli.connect.clone(),
+                    copy_cookies: cli.copy_cookies,
             };
             let conn = browser::resolve_browser(&opts).await?;
             let client = CdpClient::connect(&conn.ws_endpoint).await?;
@@ -539,6 +545,7 @@ async fn run(cli: Cli) -> Result<(), BoxError> {
             ignore_https_errors: cli.ignore_https_errors,
             stealth: cli.stealth,
             connect: cli.connect.clone(),
+                    copy_cookies: cli.copy_cookies,
         };
         let conn = browser::resolve_browser(&opts).await?;
         let client = CdpClient::connect(&conn.ws_endpoint).await?;
