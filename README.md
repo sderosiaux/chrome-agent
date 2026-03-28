@@ -10,7 +10,7 @@
   <img src="docs/hero.png" alt="aibrowsr — AI agent looking through a browser's accessibility tree" width="700">
 </p>
 
-Give your agent a browser it can actually use.
+**Browser automation that speaks LLM.**
 
 Playwright returns 2,000 tokens of raw HTML. aibrowsr returns 50 tokens of accessibility tree with stable element IDs. No CSS selectors to write, no DOM to parse.
 
