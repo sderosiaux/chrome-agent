@@ -43,6 +43,26 @@ pub async fn run(client: &CdpClient, url: &str, timeout_secs: u64) -> Result<Got
         .wait_for_event("Page.loadEventFired", Duration::from_secs(timeout_secs))
         .await;
 
+    // Wait for DOM to stabilize (SPAs often render after loadEventFired).
+    // Uses MutationObserver: resolves once no DOM changes for 200ms, max 3s.
+    let _ = client
+        .call::<_, serde_json::Value>(
+            "Runtime.evaluate",
+            json!({
+                "expression": r"new Promise(resolve => {
+                    let timer = setTimeout(resolve, 3000);
+                    const obs = new MutationObserver(() => {
+                        clearTimeout(timer);
+                        timer = setTimeout(() => { obs.disconnect(); resolve(); }, 200);
+                    });
+                    obs.observe(document.body || document.documentElement, { childList: true, subtree: true });
+                })",
+                "awaitPromise": true,
+                "returnByValue": true,
+            }),
+        )
+        .await;
+
     // Get page title via Runtime.evaluate
     let eval_result: EvaluateResult = client
         .call(

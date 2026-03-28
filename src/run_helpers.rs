@@ -15,28 +15,37 @@ pub async fn connect_page(
     stealth: bool,
 ) -> Result<CdpClient, crate::BoxError> {
     let mut last_err = String::new();
-    for attempt in 0..5u32 {
+    for attempt in 0..8u32 {
         match crate::browser::get_page_ws_url(http_endpoint, target_id).await {
             Ok(page_ws) => match CdpClient::connect(&page_ws).await {
                 Ok(client) => {
+                    // Verify connection is alive with a lightweight call
+                    if let Err(e) = client.call::<_, serde_json::Value>(
+                        "Runtime.evaluate",
+                        json!({"expression": "1", "returnByValue": true}),
+                    ).await {
+                        last_err = format!("Connection verify failed: {e}");
+                        drop(client);
+                        if attempt < 7 {
+                            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                        }
+                        continue;
+                    }
                     // Setup: enable Page domain
                     if let Err(e) = client.enable("Page").await {
                         last_err = format!("Page.enable failed: {e}");
                         drop(client);
-                        if attempt < 4 {
+                        if attempt < 7 {
                             tokio::time::sleep(std::time::Duration::from_millis(300)).await;
                         }
                         continue;
                     }
                     // Console interceptor
                     commands::console::inject(&client).await;
-                    // Runtime.enable only in non-stealth
-                    if !stealth {
-                        let _ = client.enable("Runtime").await;
-                    }
-                    // Stealth patches
                     if stealth {
                         crate::setup::apply_stealth(&client).await;
+                    } else {
+                        let _ = client.enable("Runtime").await;
                     }
                     return Ok(client);
                 }
@@ -44,11 +53,11 @@ pub async fn connect_page(
             },
             Err(e) => last_err = e.to_string(),
         }
-        if attempt < 4 {
+        if attempt < 7 {
             tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         }
     }
-    Err(format!("Failed to connect to page after 5 attempts: {last_err}").into())
+    Err(format!("Failed to connect to page after 8 attempts: {last_err}").into())
 }
 
 
