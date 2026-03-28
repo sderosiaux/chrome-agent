@@ -383,7 +383,7 @@ pub fn cmd_close(browser_name: &str, purge: bool, json_mode: bool) -> Result<(),
         println!("{message}");
     }
 
-    session::save_session(&store)?;
+    session::save_session(&mut store)?;
     Ok(())
 }
 

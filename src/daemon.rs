@@ -48,7 +48,7 @@ pub async fn run_daemon(socket_path: &Path) -> Result<(), DaemonError> {
             let before = store.browsers.len();
             session::cleanup_stale(&mut store);
             if store.browsers.len() != before {
-                let _ = session::save_session(&store);
+                let _ = session::save_session(&mut store);
             }
             let _ = heartbeat_activity.send(()).await;
         }

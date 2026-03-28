@@ -33,7 +33,7 @@ pub async fn run_pipe(cli: &Cli) -> Result<(), crate::BoxError> {
         );
         resolve_page_target(&browser_client, browser_session, &cli.page).await?
     };
-    let _ = session::save_session(&store);
+    let _ = session::save_session(&mut store);
 
     let page_ws = browser::get_page_ws_url(http_endpoint, &target_id).await?;
     let client = CdpClient::connect(&page_ws).await?;
@@ -94,7 +94,7 @@ pub async fn run_pipe(cli: &Cli) -> Result<(), crate::BoxError> {
     }
 
     // EOF: save session and exit cleanly
-    let _ = session::save_session(&store);
+    let _ = session::save_session(&mut store);
     Ok(())
 }
 
@@ -131,7 +131,7 @@ pub async fn run_replay(
         );
         resolve_page_target(&browser_client, browser_session, &cli.page).await?
     };
-    let _ = session::save_session(&store);
+    let _ = session::save_session(&mut store);
 
     let page_ws = browser::get_page_ws_url(http_endpoint, &target_id).await?;
     let client = CdpClient::connect(&page_ws).await?;
@@ -180,7 +180,7 @@ pub async fn run_replay(
         emit(&response);
     }
 
-    let _ = session::save_session(&store);
+    let _ = session::save_session(&mut store);
     Ok(())
 }
 

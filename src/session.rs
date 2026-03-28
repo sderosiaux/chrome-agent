@@ -61,7 +61,7 @@ pub fn load_session() -> Result<SessionStore, SessionError> {
 }
 
 /// Save the session store to disk.
-pub fn save_session(store: &SessionStore) -> Result<(), SessionError> {
+pub fn save_session(store: &mut SessionStore) -> Result<(), SessionError> {
     let path = session_path()?;
 
     // Detect concurrent modification (another aibrowsr process touched the file)
@@ -97,6 +97,10 @@ pub fn save_session(store: &SessionStore) -> Result<(), SessionError> {
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
     }
+
+    // Update loaded_mtime so subsequent saves in the same process don't
+    // false-positive the concurrent modification warning.
+    store.loaded_mtime = std::fs::metadata(&path).ok().and_then(|m| m.modified().ok());
 
     Ok(())
 }

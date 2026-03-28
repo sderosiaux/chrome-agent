@@ -545,7 +545,7 @@ async fn run(cli: Cli) -> Result<(), BoxError> {
         resolve_page_target(&browser_client, browser_session, &cli.page).await?
     };
     // Save session immediately so Chrome PID is persisted even if CLI crashes later
-    let _ = session::save_session(&store);
+    let _ = session::save_session(&mut store);
 
     // Connect page-level CDP with retry + full setup (Page.enable, console, stealth)
     let client = connect_page(http_endpoint, &target_id, cli.stealth).await?;
@@ -931,7 +931,7 @@ async fn run(cli: Cli) -> Result<(), BoxError> {
     }
 
     // Save session
-    session::save_session(&store)?;
+    session::save_session(&mut store)?;
 
     Ok(())
 }
