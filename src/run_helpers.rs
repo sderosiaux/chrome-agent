@@ -73,7 +73,11 @@ pub async fn output_goto(
         }
         json_output(&obj);
     } else {
-        println!("{url} — {title}");
+        if title.is_empty() {
+            println!("{url}");
+        } else {
+            println!("{url} — {title}");
+        }
         if inspect {
             let snapshot = commands::inspect::run(client, false, max_depth, None, None).await?;
             page.uid_map = snapshot.uid_map;

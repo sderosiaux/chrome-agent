@@ -254,15 +254,35 @@ pub async fn press_key(
     client: &CdpClient,
     key: &str,
 ) -> Result<(), ElementError> {
-    // keyDown
+    // Map common key names to their virtual key codes and text values
+    let (vk_code, text) = match key {
+        "Enter" | "Return" => (13, Some("\r")),
+        "Tab" => (9, None),
+        "Escape" => (27, None),
+        "Backspace" => (8, None),
+        "Delete" => (46, None),
+        "ArrowUp" => (38, None),
+        "ArrowDown" => (40, None),
+        "ArrowLeft" => (37, None),
+        "ArrowRight" => (39, None),
+        "Space" | " " => (32, Some(" ")),
+        _ => (0, None),
+    };
+
+    // keyDown (with virtual key code for proper event dispatch)
+    let mut key_down = json!({
+        "type": "keyDown",
+        "key": key,
+    });
+    if vk_code > 0 {
+        key_down["windowsVirtualKeyCode"] = json!(vk_code);
+        key_down["nativeVirtualKeyCode"] = json!(vk_code);
+    }
+    if let Some(t) = text {
+        key_down["text"] = json!(t);
+    }
     client
-        .send(
-            "Input.dispatchKeyEvent",
-            json!({
-                "type": "keyDown",
-                "key": key,
-            }),
-        )
+        .send("Input.dispatchKeyEvent", key_down)
         .await
         .map_err(|e| ElementError::Action(format!("keyDown failed: {e}")))?;
 

@@ -341,7 +341,24 @@ async fn dispatch_wait(
 async fn dispatch_back(
     client: &CdpClient,
 ) -> Result<Value, Box<dyn std::error::Error>> {
-    client.send("Runtime.evaluate", json!({"expression": "history.back()"})).await?;
+    // Use CDP Page.getNavigationHistory + Page.navigateToHistoryEntry instead of
+    // history.back() — the JS approach can break the WebSocket connection in pipe mode
+    // because the page target changes during navigation.
+    let history: Value = client
+        .call("Page.getNavigationHistory", json!({}))
+        .await?;
+    let current_index = history.get("currentIndex").and_then(Value::as_i64).unwrap_or(0);
+    if current_index <= 0 {
+        return Ok(json!({"ok": true, "title": "", "message": "Already at first history entry"}));
+    }
+    let entries = history.get("entries").and_then(Value::as_array);
+    let prev_entry_id = entries
+        .and_then(|e| e.get(usize::try_from(current_index - 1).unwrap_or(0)))
+        .and_then(|e| e.get("id"))
+        .and_then(Value::as_i64)
+        .ok_or("Could not find previous history entry")?;
+
+    client.send("Page.navigateToHistoryEntry", json!({"entryId": prev_entry_id})).await?;
     let _ = client.wait_for_event("Page.loadEventFired", std::time::Duration::from_secs(5)).await;
 
     let title: crate::cdp::types::EvaluateResult = client

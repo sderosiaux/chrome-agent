@@ -484,9 +484,24 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // Save session immediately so Chrome PID is persisted even if CLI crashes later
     let _ = session::save_session(&store);
 
-    // Connect page-level CDP (for Page.*, Runtime.*, DOM.*, etc.)
-    let page_ws = browser::get_page_ws_url(http_endpoint, &target_id).await?;
-    let client = CdpClient::connect(&page_ws).await?;
+    // Connect page-level CDP with retry (browser may need time between invocations)
+    let client = {
+        let mut last_err = String::new();
+        let mut connected = None;
+        for attempt in 0..5 {
+            match browser::get_page_ws_url(http_endpoint, &target_id).await {
+                Ok(page_ws) => match CdpClient::connect(&page_ws).await {
+                    Ok(c) => { connected = Some(c); break; }
+                    Err(e) => { last_err = e.to_string(); }
+                },
+                Err(e) => { last_err = e.to_string(); }
+            }
+            if attempt < 4 {
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            }
+        }
+        connected.ok_or_else(|| format!("Failed to connect to page after 5 attempts: {last_err}"))?
+    };
     client.enable("Page").await?;
 
     // Inject console interceptor (stealth-safe, no Runtime.enable needed).
