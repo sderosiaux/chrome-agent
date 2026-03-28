@@ -92,6 +92,9 @@ enum Command {
         /// Max depth for inspect output (also accepted as global flag)
         #[arg(long)]
         max_depth: Option<usize>,
+        /// Wait for a CSS selector to appear after navigation
+        #[arg(long)]
+        wait_for: Option<String>,
     },
 
     /// Click an element by uid, CSS selector, or coordinates
@@ -508,9 +511,13 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // Execute command
     let json_mode = cli.json;
     match cli.command {
-        Command::Goto { url, inspect, max_depth } => {
+        Command::Goto { url, inspect, max_depth, wait_for } => {
             let depth = max_depth.or(cli.max_depth);
             let result = commands::goto::run(&client, &url, cli.timeout).await?;
+            // Wait for a selector to appear if requested
+            if let Some(ref selector) = wait_for {
+                commands::wait::run(&client, "selector", selector, cli.timeout).await?;
+            }
             output_goto(&client, &mut store, &cli.browser, &cli.page, &target_id, &result.url, &result.title, inspect, depth, json_mode).await?;
         }
 

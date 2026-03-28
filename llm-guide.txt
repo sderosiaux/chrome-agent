@@ -35,6 +35,7 @@ LLM USAGE GUIDE:
 
   Navigation:
     aibrowsr goto https://example.com              # navigate
+    aibrowsr goto https://spa.com --wait-for "main" # wait for selector after nav
     aibrowsr back                                  # history.back()
     aibrowsr scroll down                           # scroll page
     aibrowsr wait text "Success"                   # wait for content

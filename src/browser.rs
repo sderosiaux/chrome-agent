@@ -107,11 +107,27 @@ pub async fn resolve_browser(opts: &BrowserOptions) -> Result<BrowserConnection,
 }
 
 /// Launch a Chromium instance with remote debugging.
+/// Uses a lock file to prevent concurrent launches from racing.
 async fn launch_browser(opts: &BrowserOptions) -> Result<BrowserConnection, BrowserError> {
     let profile_dir = browser_profile_dir(&opts.name)?;
     std::fs::create_dir_all(&profile_dir).map_err(|e| {
         BrowserError::Launch(format!("Failed to create profile dir: {e}"))
     })?;
+
+    // Prevent concurrent launches: if DevToolsActivePort already exists, wait for it
+    let port_file = profile_dir.join("DevToolsActivePort");
+    if port_file.exists() {
+        if let Ok(ws) = wait_for_devtools_port(&port_file, Duration::from_secs(5)).await {
+            let http = extract_http_endpoint(&ws);
+            return Ok(BrowserConnection {
+                ws_endpoint: ws,
+                http_endpoint: Some(http),
+                pid: None, // unknown — another process launched it
+            });
+        }
+        // Port file exists but stale — remove and launch fresh
+        let _ = std::fs::remove_file(&port_file);
+    }
 
     let chromium_path = find_chromium()?;
 
