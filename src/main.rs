@@ -64,7 +64,7 @@ struct Cli {
     #[arg(long)]
     json: bool,
 
-    /// Stealth mode: hide automation fingerprints (navigator.webdriver, headless UA)
+    /// Stealth mode: 7 anti-detection patches (webdriver, UA, WebGL, input leak, Runtime.enable skipped)
     #[arg(long)]
     stealth: bool,
 
@@ -99,7 +99,7 @@ enum Command {
 
     /// Click an element by uid, CSS selector, or coordinates
     Click {
-        /// Element uid (e.g. "e5") — omit if using --selector or --xy
+        /// Element uid (e.g. "n47") — omit if using --selector or --xy
         uid: Option<String>,
         /// CSS selector to click
         #[arg(long)]
@@ -119,7 +119,7 @@ enum Command {
     Fill {
         /// Value to fill
         value: String,
-        /// Element uid (e.g. "e5") — omit if using --selector
+        /// Element uid (e.g. "n47") — omit if using --selector
         #[arg(long)]
         uid: Option<String>,
         /// CSS selector to fill
@@ -237,7 +237,7 @@ enum Command {
 
     /// Hover over an element by uid
     Hover {
-        /// Element uid (e.g. "e5")
+        /// Element uid (e.g. "n47")
         uid: String,
     },
 

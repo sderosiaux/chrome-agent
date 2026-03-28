@@ -1,6 +1,6 @@
 LLM USAGE GUIDE:
   Workflow: inspect -> read uids -> act (click/fill) -> inspect again.
-  Headless + stealth by default with --stealth. Use --json for structured output.
+  Headless by default. Add --stealth for bot-protected sites. Use --json for structured output.
 
   Quick start:
     aibrowsr goto https://example.com --inspect
