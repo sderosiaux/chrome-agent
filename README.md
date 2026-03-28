@@ -38,6 +38,8 @@ Chrome (headless, no Node.js, no runtime deps)
 - **Smart extraction** — `read` for articles (Readability), `extract` for repeating data (MDR/DEPTA heuristics), `network` for API responses. Each returns structured data, not raw DOM.
 - **Agent-native errors** — every error includes a `hint` field suggesting the next action. `--json` mode exits 0 so agents parse stdout, not exit codes.
 - **10ms startup** — persistent sessions mean Chrome stays running between commands. No cold boot.
+- **Reuse your login sessions** — `--copy-cookies` copies cookies from your real Chrome. Access X.com, Gmail, dashboards — no manual login needed.
+- **Lazy-load aware** — `extract --scroll` scrolls the page and waits for DOM mutations before extracting. YouTube: 17 → 73 items.
 - **Parallel agents** — `--browser agent1`, `--browser agent2`. Separate Chrome instances, no session corruption.
 
 ## Install
@@ -124,7 +126,7 @@ aibrowsr screenshot
 | `back` | Navigate back in history |
 | `screenshot [--filename name]` | Capture screenshot → file path |
 | `tabs` | List open browser tabs |
-| `extract [--selector "css"] [--limit N]` | Auto-detect repeating data records (tables, cards, lists) |
+| `extract [--selector "css"] [--limit N] [--scroll]` | Auto-detect repeating data (--scroll for lazy-loaded pages) |
 | `diff` | Compare current page state to last inspect snapshot |
 | `close [--purge]` | Close browser (--purge deletes profile/cookies) |
 | `status` | Show session info |
@@ -140,6 +142,7 @@ aibrowsr screenshot
 --stealth                Bypass bot detection (Cloudflare, Turnstile)
 --timeout <seconds>      Command timeout (default: 30)
 --max-depth <N>          Limit inspect tree depth (works with --inspect on any command)
+--copy-cookies           Copy cookies from your real Chrome (access logged-in sites)
 --ignore-https-errors    Accept self-signed certificates
 --json                   Structured JSON output for all commands
 ```
@@ -266,7 +269,26 @@ Real Chrome has genuine canvas/audio/codec fingerprints that Chromium lacks.
 |---|---|
 | None | `aibrowsr goto ...` |
 | Cloudflare/Turnstile | `aibrowsr --stealth goto ...` |
+| Logged-in sites | `aibrowsr --stealth --copy-cookies goto ...` |
 | DataDome/Kasada | `aibrowsr --connect` to real Chrome |
+
+## Logged-in Sessions
+
+Access sites where you're already logged in — no manual login needed:
+
+```bash
+# Copy cookies from your real Chrome profile
+aibrowsr --stealth --copy-cookies goto x.com/home --inspect
+# → Logged in as you. Sees your timeline, DMs, notifications.
+
+aibrowsr --copy-cookies goto mail.google.com --inspect
+# → Your Gmail inbox.
+
+aibrowsr --copy-cookies goto github.com/notifications --inspect
+# → Your GitHub notifications.
+```
+
+`--copy-cookies` copies the Cookies database from your Chrome Default profile into the aibrowsr browser profile. Works because both use the same macOS Keychain for cookie decryption. Your real Chrome stays untouched.
 
 ## JSON Mode
 

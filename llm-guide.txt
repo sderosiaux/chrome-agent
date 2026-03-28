@@ -13,6 +13,10 @@ LLM USAGE GUIDE:
     aibrowsr --stealth goto https://protected-site.com --inspect
     # Patches navigator.webdriver, chrome.runtime, UA, WebGL, input leak, skips Runtime.enable
 
+  Logged-in sites (X.com, Gmail, dashboards — use your Chrome cookies):
+    aibrowsr --stealth --copy-cookies goto x.com/home --inspect
+    # Copies cookies from your real Chrome profile. No manual login needed.
+
   Heavy bot protection (DataDome, Kasada — when --stealth isn't enough):
     # Use your real Chrome instead of bundled Chromium:
     google-chrome --remote-debugging-port=9222 &
@@ -37,6 +41,8 @@ LLM USAGE GUIDE:
     aibrowsr read --truncate 1000                  # capped at N chars
     aibrowsr text --selector "main" --truncate 500 # visible text of CSS-matched element
     aibrowsr text                                  # full page innerText (verbose)
+    aibrowsr extract                                # auto-detect repeating data (tables, cards, lists)
+    aibrowsr extract --scroll                      # scroll first for lazy-loaded pages (YouTube, Pinterest)
     aibrowsr eval "JSON.stringify(...)"            # structured data via JS
     aibrowsr eval --selector "h1" "el.textContent" # eval scoped to a CSS element (el = matched)
     aibrowsr network --filter "api" --body         # intercept API responses directly

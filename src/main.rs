@@ -30,6 +30,7 @@ const CLI_LONG_ABOUT: &str = "\
 aibrowsr — browser automation for AI agents. Controls Chrome via CDP.\n\
 Single binary, zero runtime dependencies. Named pages persist between invocations.\n\
 Use --stealth to bypass bot detection (Cloudflare, Turnstile).\n\
+Use --copy-cookies to access sites where you're already logged in (X.com, Gmail).\n\
 \n\
 Workflow: inspect → read uids → act (click/fill) → inspect again.\n\
 Use --inspect on action commands to combine action + observation in one call.";

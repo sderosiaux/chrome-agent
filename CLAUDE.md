@@ -64,6 +64,8 @@ cargo clippy -- -D warnings  # zero warnings enforced in CI
 - **Network capture** — retroactive via Performance API (stealth-safe) or live via Network domain
 - **Console capture** — stealth-safe interceptor via addScriptToEvaluateOnNewDocument
 - **Command aliases** — navigate/open/go, snap/snapshot/tree, js/execute, capture, tap
+- **`--copy-cookies`** — copies Cookies SQLite + Local State from user's real Chrome profile. Enables access to logged-in sites (X.com, Gmail) without `--connect`. macOS Keychain decrypts the cookies.
+- **`extract --scroll`** — scrolls page before extracting, uses `MutationObserver` to wait for lazy-loaded content. Uses `Math.max(body, documentElement)` for scroll height (YouTube fix). Max 10 iterations.
 - **Parallel agent isolation** — `--browser <name>` per agent. Session conflict detection via mtime.
 - **connect_page with 5x retry** — page-level CDP connection retries with 300ms backoff
 

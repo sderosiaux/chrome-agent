@@ -58,6 +58,7 @@ aibrowsr fill --selector "input[name=email]" "hello@test.com"
 |---|---|
 | None | `aibrowsr goto ...` |
 | Cloudflare/Turnstile | `aibrowsr --stealth goto ...` |
+| Logged-in sites (X, Gmail, etc.) | `aibrowsr --stealth --copy-cookies goto ...` |
 | DataDome/Kasada (Leboncoin, etc.) | Connect to real Chrome: see below |
 
 For heavy protection:
@@ -92,6 +93,7 @@ aibrowsr press Enter|Tab|Escape
 # Content extraction
 aibrowsr read [--truncate N]
 aibrowsr extract [--selector "css"] [--limit N]   # auto-detect repeating data (no selectors needed)
+aibrowsr extract --scroll                         # scroll first for lazy-loaded pages (YouTube, Pinterest)
 aibrowsr text [--selector "main"] [--truncate N]
 aibrowsr eval "expression" [--selector "css"]
 
