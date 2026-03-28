@@ -14,33 +14,45 @@
 
 Playwright, Puppeteer, Selenium — they were built for humans writing test scripts. aibrowsr was built for LLMs issuing commands. That distinction changes everything.
 
-```
-Playwright snapshot:   ~2,000 tokens of raw HTML
-aibrowsr inspect:          ~50 tokens of structured a11y tree
+```bash
+# Your agent runs this:
+aibrowsr goto news.ycombinator.com --inspect
+
+# Gets back ~50 tokens instead of ~2,000:
+uid=n1 RootWebArea "Hacker News"
+  uid=n50 heading "Hacker News" level=1
+  uid=n82 link "Show HN: A New Browser Tool"
+  uid=n97 link "Rust 2025 Edition Announced"
+  ...
+
+# Clicks a link, gets the new page state in the same call:
+aibrowsr click n82 --inspect
 ```
 
-One `aibrowsr goto https://example.com --inspect` returns the page as a compact accessibility tree with stable element UIDs. The agent reads it, picks a UID, acts. No CSS selectors to guess, no DOM to parse, no flaky locators.
+No CSS selectors to guess, no DOM to parse, no flaky locators. The agent reads UIDs, acts on them. They're stable across inspects — click `n82` now or 5 minutes from now.
 
 ```
-aibrowsr (single 3 MB Rust binary)
-    │ WebSocket
+aibrowsr (single 3 MB Rust binary, Rust 2024)
+    │ CDP over WebSocket
     ▼
 Chrome (headless, no Node.js, no runtime deps)
 ```
 
 ### What makes it different
 
-- **40x fewer tokens** — a11y tree snapshots instead of raw HTML. Agents read what matters, skip the noise.
-- **Action + observe in 1 call** — every command accepts `--inspect` to return the updated page state. No extra round-trip.
-- **Stable UIDs** — element IDs based on Chrome's `backendNodeId`, not sequential counters. They survive between inspects. An agent can read a UID, wait 5 minutes, then click it.
-- **Zero setup** — single binary. No Node.js, no npm, no Playwright, no daemon. `npx aibrowsr goto https://...` works immediately.
-- **Stealth built-in** — 7 CDP patches bypass Cloudflare/Turnstile without fake Chrome flags. `Runtime.enable` is never called (the #1 detection vector).
-- **Smart extraction** — `read` for articles (Readability), `extract` for repeating data (MDR/DEPTA heuristics), `network` for API responses. Each returns structured data, not raw DOM.
-- **Agent-native errors** — every error includes a `hint` field suggesting the next action. `--json` mode exits 0 so agents parse stdout, not exit codes.
-- **10ms startup** — persistent sessions mean Chrome stays running between commands. No cold boot.
-- **Reuse your login sessions** — `--copy-cookies` copies cookies from your real Chrome. Access X.com, Gmail, dashboards — no manual login needed.
-- **Lazy-load aware** — `extract --scroll` scrolls and waits for DOM mutations before extracting. `inspect --filter "article" --scroll --limit 50` collects items from virtualized infinite-scroll lists (X.com: 50 tweets from timeline).
-- **Parallel agents** — `--browser agent1`, `--browser agent2`. Separate Chrome instances, no session corruption.
+| Problem with existing tools | aibrowsr's answer |
+|---|---|
+| Playwright returns ~2K tokens of raw HTML | **40x fewer tokens** — a11y tree snapshots. Agents read what matters. |
+| Elements identified by CSS selectors that break | **Stable UIDs** — based on Chrome's `backendNodeId`, survive across inspects. |
+| Action then observe = 2 round-trips | **1 call** — every command accepts `--inspect`. Click + see result together. |
+| Need Node.js, npm, Playwright, 200MB runtime | **Single 3 MB binary**. `npx aibrowsr` works immediately. No deps. |
+| Headless detected by Cloudflare, Turnstile | **7 CDP stealth patches** built-in. `Runtime.enable` never called. |
+| Scraping requires writing selectors per site | **Smart extraction** — `read` (articles), `extract` (repeating data), `network` (APIs). |
+| Errors are stack traces agents can't parse | **Agent-native errors** — `{"ok":false, "error":"...", "hint":"try this"}` |
+| Each command cold-boots a browser | **10ms startup** — persistent sessions. Chrome stays alive between calls. |
+| Can't access logged-in sites | **`--copy-cookies`** — reuse your real Chrome sessions. X.com, Gmail, dashboards. |
+| Infinite scroll loads 10 items | **Scroll-collect** — `inspect --scroll --limit 50` collects from virtualized lists. X.com: 50 tweets. |
+| Parallel agents corrupt shared state | **`--browser <name>`** — isolated Chrome instances per agent. |
 
 ## Install
 
