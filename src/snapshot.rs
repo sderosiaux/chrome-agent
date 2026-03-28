@@ -586,4 +586,68 @@ mod tests {
         let (text, _) = format_ax_tree(&nodes, false, None, Some("e99"), None);
         assert!(text.contains("not found"));
     }
+
+    #[test]
+    fn bug_empty_tree() {
+        let nodes: Vec<AXNode> = vec![];
+        let (text, uid_map) = format_ax_tree(&nodes, false, None, None, None);
+        assert!(text.is_empty());
+        assert!(uid_map.is_empty());
+    }
+
+    #[test]
+    fn bug_all_ignored_nodes() {
+        let nodes = vec![
+            AXNode {
+                node_id: "1".into(),
+                ignored: true,
+                child_ids: Some(vec!["2".into()]),
+                parent_id: None,
+                ..default_ax_node()
+            },
+            AXNode {
+                node_id: "2".into(),
+                ignored: true,
+                child_ids: Some(vec![]),
+                parent_id: Some("1".into()),
+                ..default_ax_node()
+            },
+        ];
+        let (text, uid_map) = format_ax_tree(&nodes, false, None, None, None);
+        // All nodes ignored = empty output
+        assert!(text.is_empty());
+        assert!(uid_map.is_empty());
+    }
+
+    #[test]
+    fn bug_filter_no_match() {
+        let nodes = vec![AXNode {
+            node_id: "1".into(),
+            role: Some(make_ax_value("heading")),
+            name: Some(make_ax_value("Title")),
+            child_ids: Some(vec![]),
+            parent_id: None,
+            backend_dom_node_id: Some(1),
+            ..default_ax_node()
+        }];
+        // Filter for "button" but only heading exists
+        let (text, _) = format_ax_tree(&nodes, false, None, None, Some(&["button"]));
+        assert!(text.is_empty() || !text.contains("heading"));
+    }
+
+    #[test]
+    fn bug_content_center_empty_quad() {
+        use crate::cdp::types::BoxModel;
+        let model = BoxModel {
+            content: vec![],  // empty quad
+            padding: vec![],
+            border: vec![],
+            margin: vec![],
+            width: 0,
+            height: 0,
+        };
+        let (x, y) = model.content_center();
+        assert_eq!(x, 0.0);
+        assert_eq!(y, 0.0);
+    }
 }

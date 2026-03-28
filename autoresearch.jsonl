@@ -5,3 +5,4 @@
 {"n":4,"commit":"2d7d2e0","metric":11,"status":"keep","description":"fix JS injection in text --selector (manual escape → serde_json::to_string) + test","metrics":{},"timestamp":1774702964}
 {"n":5,"commit":"0d5b475","metric":11,"status":"keep","description":"fix pipe missing fill-form + hover commands","metrics":{},"timestamp":1774703130}
 {"n":6,"commit":"f0f5297","metric":14,"status":"keep","description":"add edge case tests: corrupt session, empty session, unknown ElementRef type","metrics":{},"timestamp":1774703170}
+{"n":7,"commit":"5c2d8d7","metric":18,"status":"keep","description":"add snapshot edge case tests: empty tree, all-ignored, filter no match, empty quad","metrics":{},"timestamp":1774703220}
