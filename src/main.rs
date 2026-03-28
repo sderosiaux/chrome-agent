@@ -199,6 +199,12 @@ enum Command {
         /// Only show nodes matching these roles (comma-separated, e.g. "button,link,textbox")
         #[arg(long)]
         filter: Option<String>,
+        /// Scroll to load lazy content before inspecting
+        #[arg(long)]
+        scroll: bool,
+        /// Collect N items by scrolling (for virtualized lists like X.com)
+        #[arg(long)]
+        limit: Option<usize>,
     },
 
     /// Show what changed since the last inspect
@@ -722,18 +728,29 @@ async fn run(cli: Cli) -> Result<(), BoxError> {
             }
         }
 
-        Command::Inspect { verbose, max_depth, uid, filter } => {
+        Command::Inspect { verbose, max_depth, uid, filter, scroll, limit } => {
+            if scroll {
+                commands::extract::scroll_to_load(&client).await?;
+            }
             let role_filter: Option<Vec<&str>> = filter.as_deref().map(|f| f.split(',').map(str::trim).collect());
-            let snapshot = commands::inspect::run(&client, verbose, max_depth, uid.as_deref(), role_filter.as_deref()).await?;
+
+            let (text, uid_map) = if let Some(max) = limit {
+                let result = commands::inspect::scroll_collect(&client, verbose, uid.as_deref(), role_filter.as_deref(), max).await?;
+                (result.text, result.uid_map)
+            } else {
+                let s = commands::inspect::run(&client, verbose, max_depth, uid.as_deref(), role_filter.as_deref()).await?;
+                (s.text, s.uid_map)
+            };
+
             if let Some(browser_s) = store.browsers.get_mut(&cli.browser) {
                 let page = session::ensure_page(browser_s, &cli.page, &target_id);
-                page.uid_map = snapshot.uid_map;
-                page.last_snapshot = Some(snapshot.text.clone());
+                page.uid_map = uid_map;
+                page.last_snapshot = Some(text.clone());
             }
             if json_mode {
-                json_output(&json!({"ok": true, "snapshot": snapshot.text}));
+                json_output(&json!({"ok": true, "snapshot": text}));
             } else {
-                println!("{}", snapshot.text);
+                println!("{text}");
             }
         }
 
