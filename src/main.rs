@@ -668,7 +668,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             // If --selector provided, wrap expression so `el` is the matched element
             let expr = if let Some(ref sel) = selector {
                 let escaped = serde_json::to_string(sel).unwrap_or_default();
-                format!("((el) => {{ return {expression} }})(document.querySelector({escaped}))")
+                format!("((el) => {{ if (!el) throw new Error('No element matches selector ' + {escaped}); return {expression} }})(document.querySelector({escaped}))")
             } else {
                 expression
             };

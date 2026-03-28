@@ -13,6 +13,8 @@ pub struct ConsoleEntry {
 /// JS snippet that monkey-patches console.log/warn/error/info and captures
 /// unhandled errors + promise rejections into `window.__aibrowsr_console`.
 const INTERCEPTOR_JS: &str = r"
+    if (!window.__aibrowsr_console_installed) {
+    window.__aibrowsr_console_installed = true;
     window.__aibrowsr_console = window.__aibrowsr_console || [];
     const __origConsole = {
         log: console.log.bind(console),
@@ -45,6 +47,7 @@ const INTERCEPTOR_JS: &str = r"
             timestamp: Date.now(),
         });
     });
+    } // end guard: __aibrowsr_console_installed
 ";
 
 /// Inject the console interceptor into the page.

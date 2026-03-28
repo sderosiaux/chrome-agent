@@ -159,6 +159,10 @@ pub fn error_hint(msg: &str) -> Option<&'static str> {
         Some("Page has no article structure. Try: aibrowsr text or aibrowsr text --selector \"main\"")
     } else if msg.contains("Provide a uid") || msg.contains("Provide --uid") {
         Some("Specify what to target: uid (e.g. n47), --selector \"css\", or --xy x,y")
+    } else if msg.contains("Evaluation error") || msg.contains("TypeError") || msg.contains("ReferenceError") || msg.contains("SyntaxError") {
+        Some("JS error in page context. Check expression syntax. Use --selector to scope to an element.")
+    } else if msg.contains("dispatcher task exited") || msg.contains("transport closed") {
+        Some("Browser connection lost. Try running the command again.")
     } else {
         None
     }
@@ -397,6 +401,8 @@ mod tests {
         assert!(error_hint("response parse error").is_some());
         assert!(error_hint("Readability failed").is_some());
         assert!(error_hint("Provide a uid").is_some());
+        assert!(error_hint("Evaluation error: TypeError: foo").is_some());
+        assert!(error_hint("dispatcher task exited").is_some());
         // Unknown errors should return None
         assert!(error_hint("something random").is_none());
     }
