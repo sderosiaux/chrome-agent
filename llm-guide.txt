@@ -32,6 +32,7 @@ LLM USAGE GUIDE:
     aibrowsr text --selector "main" --truncate 500 # visible text of CSS-matched element
     aibrowsr text                                  # full page innerText (verbose)
     aibrowsr eval "JSON.stringify(...)"            # structured data via JS
+    aibrowsr eval --selector "h1" "el.textContent" # eval scoped to a CSS element (el = matched)
 
   Navigation:
     aibrowsr goto https://example.com              # navigate

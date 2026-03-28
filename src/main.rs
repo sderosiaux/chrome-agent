@@ -196,8 +196,11 @@ enum Command {
 
     /// Evaluate JavaScript in the page
     Eval {
-        /// JS expression to evaluate
+        /// JS expression to evaluate (if --selector, `el` is the matched element)
         expression: String,
+        /// CSS selector — the matched element is available as `el` in the expression
+        #[arg(long)]
+        selector: Option<String>,
     },
 
     /// Wait for a condition (text, url, or selector)
@@ -680,12 +683,19 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        Command::Eval { expression } => {
+        Command::Eval { expression, selector } => {
+            // If --selector provided, wrap expression so `el` is the matched element
+            let expr = if let Some(ref sel) = selector {
+                let escaped = serde_json::to_string(sel).unwrap_or_default();
+                format!("((el) => {{ return {expression} }})(document.querySelector({escaped}))")
+            } else {
+                expression
+            };
             if json_mode {
-                let raw = commands::eval::run_raw(&client, &expression).await?;
+                let raw = commands::eval::run_raw(&client, &expr).await?;
                 json_output(&json!({"ok": true, "result": raw}));
             } else {
-                let result = commands::eval::run(&client, &expression).await?;
+                let result = commands::eval::run(&client, &expr).await?;
                 println!("{result}");
             }
         }
