@@ -7,10 +7,18 @@
 [![Rust 2024](https://img.shields.io/badge/Rust-2024_edition-orange)](https://doc.rust-lang.org/edition-guide/rust-2024/)
 
 <p align="center">
-  <img src="docs/hero.png" alt="chrome-agent — AI agent looking through a browser's accessibility tree" width="700">
+  <img src="docs/hero-logo.png" alt="chrome-agent — Browser automation for AI agents" width="500">
 </p>
 
-**Browser automation that speaks LLM.**
+<p align="center">
+  <strong>Browser automation that speaks LLM.</strong>
+</p>
+
+<p align="center">
+  <a href="README.md">English</a> | <a href="README.cn.md">简体中文</a>
+</p>
+
+> **Disclaimer:** This is an independent, community-driven project. It is not affiliated with, endorsed by, or sponsored by Google or the Chrome team.
 
 > You're not the user. Your LLM is.
 >
