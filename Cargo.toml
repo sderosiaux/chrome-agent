@@ -1,6 +1,6 @@
 [package]
 name = "chrome-agent"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2024"
 description = "Browser automation for AI agents. Single binary, zero deps, CDP direct to Chrome."
 license = "MIT"
