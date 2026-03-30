@@ -26,4 +26,4 @@ git tag "v${VERSION}"
 git push && git push --tags
 
 echo "Done. GitHub Actions will build binaries and publish to npm."
-echo "Monitor: https://github.com/sderosiaux/aibrowsr/actions"
+echo "Monitor: https://github.com/sderosiaux/chrome-agent/actions"
