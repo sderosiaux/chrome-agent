@@ -7,7 +7,7 @@ use crate::cdp::types::EvaluateResult;
 /// `const` or `let` declarations so that repeated `eval` calls don't fail with
 /// "Identifier already declared".  V8's completion-value semantics mean the
 /// block still returns the value of its last expression statement.
-fn maybe_block_scope(expression: &str) -> std::borrow::Cow<str> {
+fn maybe_block_scope(expression: &str) -> std::borrow::Cow<'_, str> {
     let t = expression.trim();
     let has_declaration = t.starts_with("const ")
         || t.starts_with("let ")
