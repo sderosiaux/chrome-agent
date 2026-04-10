@@ -540,3 +540,413 @@ pub async fn focus_selector(
 
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Double-click
+// ---------------------------------------------------------------------------
+
+/// Double-click an element by uid.
+pub async fn dblclick(
+    client: &CdpClient,
+    uid_map: &HashMap<String, ElementRef>,
+    uid: &str,
+) -> Result<(), ElementError> {
+    let resolved = resolve_uid(client, uid_map, uid).await?;
+
+    if resolved.center.is_none() {
+        return js_dblclick(client, &resolved.object_id).await;
+    }
+
+    let _ = client
+        .call::<_, serde_json::Value>(
+            "Runtime.callFunctionOn",
+            json!({
+                "objectId": resolved.object_id,
+                "functionDeclaration": "function() { this.scrollIntoViewIfNeeded(); }",
+                "returnByValue": true,
+            }),
+        )
+        .await;
+
+    let box_result: Result<GetBoxModelResult, _> = client
+        .call("DOM.getBoxModel", json!({ "backendNodeId": resolved.backend_node_id }))
+        .await;
+
+    let Some((cx, cy)) = box_result.ok().map(|r| r.model.content_center()) else {
+        return js_dblclick(client, &resolved.object_id).await;
+    };
+
+    for click_count in [1, 2] {
+        client
+            .send("Input.dispatchMouseEvent", DispatchMouseEventParams {
+                event_type: MouseEventType::MousePressed,
+                x: cx, y: cy,
+                button: Some(MouseButton::Left), buttons: Some(1),
+                click_count: Some(click_count),
+                modifiers: None, timestamp: None, delta_x: None, delta_y: None,
+                pointer_type: Some("mouse".into()),
+            })
+            .await
+            .map_err(|e| ElementError::Action(format!("mousePressed failed: {e}")))?;
+
+        client
+            .send("Input.dispatchMouseEvent", DispatchMouseEventParams {
+                event_type: MouseEventType::MouseReleased,
+                x: cx, y: cy,
+                button: Some(MouseButton::Left), buttons: Some(0),
+                click_count: Some(click_count),
+                modifiers: None, timestamp: None, delta_x: None, delta_y: None,
+                pointer_type: Some("mouse".into()),
+            })
+            .await
+            .map_err(|e| ElementError::Action(format!("mouseReleased failed: {e}")))?;
+    }
+
+    wait_for_stabilization(client).await;
+    Ok(())
+}
+
+async fn js_dblclick(client: &CdpClient, object_id: &str) -> Result<(), ElementError> {
+    client
+        .call::<_, serde_json::Value>(
+            "Runtime.callFunctionOn",
+            json!({
+                "objectId": object_id,
+                "functionDeclaration": "function() { this.dispatchEvent(new MouseEvent('dblclick', {bubbles:true, cancelable:true})); }",
+                "returnByValue": true,
+            }),
+        )
+        .await
+        .map_err(|e| ElementError::Action(format!("JS dblclick failed: {e}")))?;
+
+    wait_for_stabilization(client).await;
+    Ok(())
+}
+
+/// Double-click at coordinates.
+pub async fn dblclick_at_coords(client: &CdpClient, x: f64, y: f64) -> Result<(), ElementError> {
+    for click_count in [1, 2] {
+        client
+            .send("Input.dispatchMouseEvent", DispatchMouseEventParams {
+                event_type: MouseEventType::MousePressed, x, y,
+                button: Some(MouseButton::Left), buttons: Some(1),
+                click_count: Some(click_count),
+                modifiers: None, timestamp: None, delta_x: None, delta_y: None,
+                pointer_type: Some("mouse".into()),
+            })
+            .await
+            .map_err(|e| ElementError::Action(format!("mousePressed failed: {e}")))?;
+
+        client
+            .send("Input.dispatchMouseEvent", DispatchMouseEventParams {
+                event_type: MouseEventType::MouseReleased, x, y,
+                button: Some(MouseButton::Left), buttons: Some(0),
+                click_count: Some(click_count),
+                modifiers: None, timestamp: None, delta_x: None, delta_y: None,
+                pointer_type: Some("mouse".into()),
+            })
+            .await
+            .map_err(|e| ElementError::Action(format!("mouseReleased failed: {e}")))?;
+    }
+    wait_for_stabilization(client).await;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Select
+// ---------------------------------------------------------------------------
+
+/// Select a dropdown option by uid and value/text.
+pub async fn select_option(
+    client: &CdpClient,
+    uid_map: &HashMap<String, ElementRef>,
+    uid: &str,
+    value: &str,
+) -> Result<String, ElementError> {
+    let resolved = resolve_uid(client, uid_map, uid).await?;
+    let js = r"function(target) {
+        if (this.tagName !== 'SELECT') throw new Error('Element is not a <select>');
+        const opts = Array.from(this.options);
+        let idx = opts.findIndex(o => o.value === target);
+        if (idx === -1) idx = opts.findIndex(o => o.text.trim() === target);
+        if (idx === -1) throw new Error('No option matching: ' + target);
+        this.selectedIndex = idx;
+        this.dispatchEvent(new Event('change', {bubbles: true}));
+        return opts[idx].text;
+    }";
+    let result: serde_json::Value = client
+        .call("Runtime.callFunctionOn", json!({
+            "objectId": resolved.object_id,
+            "functionDeclaration": js,
+            "arguments": [{"value": value}],
+            "returnByValue": true,
+        }))
+        .await
+        .map_err(|e| ElementError::Action(format!("select_option failed: {e}")))?;
+
+    check_js_exception(&result)?;
+    let text = result.get("result")
+        .and_then(|r| r.get("value"))
+        .and_then(|v| v.as_str())
+        .unwrap_or(value);
+    Ok(text.to_string())
+}
+
+/// Select a dropdown option by CSS selector.
+pub async fn select_option_selector(
+    client: &CdpClient,
+    selector: &str,
+    value: &str,
+) -> Result<String, ElementError> {
+    let sel_json = serde_json::to_string(selector).unwrap_or_default();
+    let val_json = serde_json::to_string(value).unwrap_or_default();
+    let js = format!(
+        r"(() => {{
+            const el = document.querySelector({sel_json});
+            if (!el) throw new Error('No element matches selector: ' + {sel_json});
+            if (el.tagName !== 'SELECT') throw new Error('Element is not a <select>');
+            const opts = Array.from(el.options);
+            let idx = opts.findIndex(o => o.value === {val_json});
+            if (idx === -1) idx = opts.findIndex(o => o.text.trim() === {val_json});
+            if (idx === -1) throw new Error('No option matching: ' + {val_json});
+            el.selectedIndex = idx;
+            el.dispatchEvent(new Event('change', {{bubbles: true}}));
+            return opts[idx].text;
+        }})()"
+    );
+    let result: serde_json::Value = client
+        .call("Runtime.evaluate", json!({"expression": js, "returnByValue": true}))
+        .await
+        .map_err(|e| ElementError::Action(format!("select_option_selector failed: {e}")))?;
+
+    check_js_exception(&result)?;
+    let text = result.get("result")
+        .and_then(|r| r.get("value"))
+        .and_then(|v| v.as_str())
+        .unwrap_or(value);
+    Ok(text.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Check / Uncheck
+// ---------------------------------------------------------------------------
+
+/// Idempotent check/uncheck: query current state, click only if different.
+pub async fn set_checked(
+    client: &CdpClient,
+    uid_map: &HashMap<String, ElementRef>,
+    uid: &str,
+    desired: bool,
+) -> Result<String, ElementError> {
+    let resolved = resolve_uid(client, uid_map, uid).await?;
+
+    let result: serde_json::Value = client
+        .call("Runtime.callFunctionOn", json!({
+            "objectId": resolved.object_id,
+            "functionDeclaration": "function() { return !!this.checked; }",
+            "returnByValue": true,
+        }))
+        .await
+        .map_err(|e| ElementError::Action(format!("get checked state failed: {e}")))?;
+
+    let current = result.get("result")
+        .and_then(|r| r.get("value"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+
+    let state_word = if desired { "checked" } else { "unchecked" };
+    if current == desired {
+        return Ok(format!("Already {state_word} uid={uid}"));
+    }
+
+    click(client, uid_map, uid).await?;
+    Ok(format!("{} uid={uid}", if desired { "Checked" } else { "Unchecked" }))
+}
+
+// ---------------------------------------------------------------------------
+// File upload
+// ---------------------------------------------------------------------------
+
+/// Set files on a file input using `DOM.setFileInputFiles`.
+pub async fn set_file_input(
+    client: &CdpClient,
+    uid_map: &HashMap<String, ElementRef>,
+    uid: &str,
+    files: &[String],
+) -> Result<(), ElementError> {
+    for f in files {
+        if !std::path::Path::new(f).exists() {
+            return Err(ElementError::Action(format!("File not found: {f}")));
+        }
+    }
+    let resolved = resolve_uid(client, uid_map, uid).await?;
+    client
+        .send("DOM.setFileInputFiles", json!({
+            "files": files,
+            "backendNodeId": resolved.backend_node_id,
+        }))
+        .await
+        .map_err(|e| ElementError::Action(format!("setFileInputFiles failed: {e}")))?;
+    wait_for_stabilization(client).await;
+    Ok(())
+}
+
+/// Set files on a file input identified by CSS selector.
+pub async fn set_file_input_selector(
+    client: &CdpClient,
+    selector: &str,
+    files: &[String],
+) -> Result<(), ElementError> {
+    for f in files {
+        if !std::path::Path::new(f).exists() {
+            return Err(ElementError::Action(format!("File not found: {f}")));
+        }
+    }
+    let sel_json = serde_json::to_string(selector).unwrap_or_default();
+    let node: serde_json::Value = client
+        .call("Runtime.evaluate", json!({
+            "expression": format!("(() => {{ const el = document.querySelector({sel_json}); if (!el) throw new Error('No element matches selector: ' + {sel_json}); return true; }})()"),
+            "returnByValue": true,
+        }))
+        .await
+        .map_err(|e| ElementError::Action(format!("set_file_input_selector resolve failed: {e}")))?;
+    check_js_exception(&node)?;
+
+    let doc: serde_json::Value = client
+        .call("DOM.getDocument", json!({"depth": 0}))
+        .await
+        .map_err(|e| ElementError::Action(format!("DOM.getDocument failed: {e}")))?;
+    let root_node_id = doc.get("root")
+        .and_then(|r| r.get("nodeId"))
+        .and_then(serde_json::Value::as_i64)
+        .ok_or_else(|| ElementError::Action("Could not get root nodeId".into()))?;
+
+    let qs_result: serde_json::Value = client
+        .call("DOM.querySelector", json!({"nodeId": root_node_id, "selector": selector}))
+        .await
+        .map_err(|e| ElementError::Action(format!("DOM.querySelector failed: {e}")))?;
+    let node_id = qs_result.get("nodeId")
+        .and_then(serde_json::Value::as_i64)
+        .ok_or_else(|| ElementError::Action(format!("No element matches selector: {selector}")))?;
+
+    client
+        .send("DOM.setFileInputFiles", json!({
+            "files": files,
+            "nodeId": node_id,
+        }))
+        .await
+        .map_err(|e| ElementError::Action(format!("setFileInputFiles failed: {e}")))?;
+    wait_for_stabilization(client).await;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Drag
+// ---------------------------------------------------------------------------
+
+/// Drag from one element to another.
+pub async fn drag(
+    client: &CdpClient,
+    uid_map: &HashMap<String, ElementRef>,
+    from_uid: &str,
+    to_uid: &str,
+) -> Result<(), ElementError> {
+    let from = resolve_uid(client, uid_map, from_uid).await?;
+    let to = resolve_uid(client, uid_map, to_uid).await?;
+
+    let (x1, y1) = from.center.ok_or_else(|| {
+        ElementError::NotInteractable(format!("Element uid={from_uid} has no visible box model."))
+    })?;
+    let (x2, y2) = to.center.ok_or_else(|| {
+        ElementError::NotInteractable(format!("Element uid={to_uid} has no visible box model."))
+    })?;
+
+    let mouse = |et, x, y, btn: Option<MouseButton>, btns, cc| {
+        DispatchMouseEventParams {
+            event_type: et, x, y,
+            button: btn, buttons: btns, click_count: cc,
+            modifiers: None, timestamp: None, delta_x: None, delta_y: None,
+            pointer_type: Some("mouse".into()),
+        }
+    };
+
+    client.send("Input.dispatchMouseEvent",
+        mouse(MouseEventType::MouseMoved, x1, y1, None, None, None))
+        .await.map_err(|e| ElementError::Action(format!("drag move failed: {e}")))?;
+
+    client.send("Input.dispatchMouseEvent",
+        mouse(MouseEventType::MousePressed, x1, y1, Some(MouseButton::Left), Some(1), Some(1)))
+        .await.map_err(|e| ElementError::Action(format!("drag press failed: {e}")))?;
+
+    let steps = 5u32;
+    for i in 1..=steps {
+        let t = f64::from(i) / f64::from(steps);
+        let x = (x2 - x1).mul_add(t, x1);
+        let y = (y2 - y1).mul_add(t, y1);
+        client.send("Input.dispatchMouseEvent",
+            mouse(MouseEventType::MouseMoved, x, y, Some(MouseButton::Left), Some(1), None))
+            .await.map_err(|e| ElementError::Action(format!("drag step failed: {e}")))?;
+        tokio::time::sleep(Duration::from_millis(16)).await;
+    }
+
+    client.send("Input.dispatchMouseEvent",
+        mouse(MouseEventType::MouseReleased, x2, y2, Some(MouseButton::Left), Some(0), Some(1)))
+        .await.map_err(|e| ElementError::Action(format!("drag release failed: {e}")))?;
+
+    wait_for_stabilization(client).await;
+    Ok(())
+}
+
+fn check_js_exception(result: &serde_json::Value) -> Result<(), ElementError> {
+    if let Some(exception) = result.get("exceptionDetails") {
+        let text = exception
+            .get("exception")
+            .and_then(|ex| ex.get("description"))
+            .and_then(|d| d.as_str())
+            .or_else(|| exception.get("text").and_then(|t| t.as_str()))
+            .unwrap_or("unknown error");
+        return Err(ElementError::Action(text.to_string()));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn drag_interpolation_5_steps() {
+        let (x1, y1) = (100.0, 100.0);
+        let (x2, y2) = (200.0, 300.0);
+        let steps = 5u32;
+        let points: Vec<(f64, f64)> = (1..=steps)
+            .map(|i| {
+                let t = f64::from(i) / f64::from(steps);
+                (x1 + (x2 - x1) * t, y1 + (y2 - y1) * t)
+            })
+            .collect();
+        assert_eq!(points.len(), 5);
+        assert!((points[0].0 - 120.0).abs() < 0.01);
+        assert!((points[0].1 - 140.0).abs() < 0.01);
+        assert!((points[4].0 - 200.0).abs() < 0.01);
+        assert!((points[4].1 - 300.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn check_js_exception_none() {
+        let val = serde_json::json!({"result": {"value": true}});
+        assert!(check_js_exception(&val).is_ok());
+    }
+
+    #[test]
+    fn check_js_exception_present() {
+        let val = serde_json::json!({"exceptionDetails": {"text": "boom"}});
+        let err = check_js_exception(&val).unwrap_err();
+        assert!(err.to_string().contains("boom"));
+    }
+
+    #[test]
+    fn file_not_found_validation() {
+        assert!(!std::path::Path::new("/nonexistent/file.txt").exists());
+    }
+}

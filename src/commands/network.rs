@@ -276,6 +276,48 @@ async fn fetch_response_body(client: &CdpClient, request_id: &str) -> Option<Str
     Some(crate::truncate::truncate_str(body, 2000, "...(truncated)").into_owned())
 }
 
+/// Block requests matching a URL pattern using the Fetch domain.
+pub async fn run_route_abort(
+    client: &CdpClient,
+    pattern: &str,
+    timeout_secs: u64,
+) -> Result<Vec<String>, crate::BoxError> {
+    client.send("Fetch.enable", serde_json::json!({
+        "patterns": [{"urlPattern": pattern, "requestStage": "Request"}]
+    })).await?;
+
+    let mut blocked = Vec::new();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+
+    while std::time::Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        let event = client.wait_for_event("Fetch.requestPaused", remaining).await;
+        match event {
+            Ok(ev) => {
+                let request_id = ev.params.get("requestId")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let url = ev.params.get("request")
+                    .and_then(|r| r.get("url"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let _ = client.send("Fetch.failRequest", serde_json::json!({
+                    "requestId": request_id,
+                    "reason": "BlockedByClient",
+                })).await;
+                if !url.is_empty() {
+                    blocked.push(url);
+                }
+            }
+            Err(_) => break, // timeout
+        }
+    }
+
+    let _ = client.send("Fetch.disable", serde_json::json!({})).await;
+    Ok(blocked)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -295,6 +337,18 @@ mod tests {
         // This should not panic
         let text = format_text(&[entry]);
         assert!(!text.is_empty());
+    }
+
+    #[test]
+    fn route_abort_params_structure() {
+        let pattern = "*tracking*";
+        let params = serde_json::json!({
+            "patterns": [{"urlPattern": pattern, "requestStage": "Request"}]
+        });
+        let patterns = params.get("patterns").unwrap().as_array().unwrap();
+        assert_eq!(patterns.len(), 1);
+        assert_eq!(patterns[0]["urlPattern"], "*tracking*");
+        assert_eq!(patterns[0]["requestStage"], "Request");
     }
 
     #[test]

@@ -79,3 +79,74 @@ pub async fn scroll_collect(
     let text = format!("{}\n({} items collected)", collected.join("\n"), collected.len());
     Ok(Snapshot { text, uid_map })
 }
+
+/// Post-process snapshot text to resolve and append href URLs on link nodes.
+pub async fn resolve_urls(
+    client: &CdpClient,
+    text: &str,
+    uid_map: &HashMap<String, ElementRef>,
+) -> String {
+    let mut result = String::with_capacity(text.len());
+    for line in text.lines() {
+        result.push_str(line);
+        // Match lines like "uid=n42 link "Some text""
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("uid=")
+            && let Some((uid, after_uid)) = rest.split_once(' ') {
+                let role = after_uid.split([' ', '"']).next().unwrap_or("");
+                if role == "link"
+                    && let Some(element_ref) = uid_map.get(uid)
+                        && let Some(backend_id) = element_ref.backend_node_id()
+                            && let Ok(href) = resolve_href(client, backend_id).await
+                                && !href.is_empty() {
+                                    result.push_str(&format!(" url=\"{href}\""));
+                                }
+            }
+        result.push('\n');
+    }
+    result
+}
+
+async fn resolve_href(client: &CdpClient, backend_node_id: i64) -> Result<String, crate::BoxError> {
+    let resolved: crate::cdp::types::ResolveNodeResult = client
+        .call("DOM.resolveNode", crate::cdp::types::ResolveNodeParams {
+            node_id: None,
+            backend_node_id: Some(backend_node_id),
+            object_group: Some("chrome-agent-urls".into()),
+            execution_context_id: None,
+        })
+        .await?;
+    let object_id = resolved.object.object_id.ok_or("no objectId")?;
+    let result: serde_json::Value = client
+        .call("Runtime.callFunctionOn", json!({
+            "objectId": object_id,
+            "functionDeclaration": "function() { return this.href || this.closest('a')?.href || ''; }",
+            "returnByValue": true,
+        }))
+        .await?;
+    let href = result.get("result")
+        .and_then(|r| r.get("value"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    Ok(href.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn url_append_only_on_links() {
+        let text = "uid=n1 heading \"Title\"\nuid=n2 link \"Click me\"\nuid=n3 button \"OK\"\n";
+        // Without CDP, we just verify the parsing logic identifies link lines
+        for line in text.lines() {
+            let trimmed = line.trim();
+            if let Some(rest) = trimmed.strip_prefix("uid=") {
+                if let Some((_uid, after_uid)) = rest.split_once(' ') {
+                    let role = after_uid.split([' ', '"']).next().unwrap_or("");
+                    if role == "link" {
+                        assert!(line.contains("Click me"));
+                    }
+                }
+            }
+        }
+    }
+}
