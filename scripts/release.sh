@@ -19,6 +19,9 @@ require('fs').writeFileSync('./package.json', JSON.stringify(pkg, null, 2) + '\n
 "
 cd ..
 
+# Regenerate Cargo.lock with new version
+cargo check --quiet
+
 # Commit, tag, push
 git add Cargo.toml npm/package.json Cargo.lock
 git commit -m "release: v${VERSION}"
