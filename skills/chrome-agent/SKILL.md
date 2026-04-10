@@ -102,6 +102,7 @@ chrome-agent select --selector "#country" "France"
 
 # Checkboxes & radios (idempotent — no-op if already in desired state)
 chrome-agent check <uid>                                 # ensure checked
+chrome-agent check --selector "input[name=agree]"        # by CSS selector
 chrome-agent uncheck <uid>                               # ensure unchecked
 
 # File upload
@@ -149,13 +150,44 @@ chrome-agent close [--purge]
 
 ```bash
 --stealth      # 7 anti-detection patches (Cloudflare/Turnstile)
---json         # Structured JSON output: {"ok":true,...} or {"ok":false,"error":"...","hint":"..."}
+--json         # Structured JSON output (see below)
 --page <name>  # Named tabs (keep multiple pages open)
---max-depth N  # Limit inspect tree depth
+--max-depth N  # Limit inspect tree depth (saves tokens)
 --headed       # Show browser window (default is headless)
 --connect URL  # Use real Chrome (for DataDome/Kasada sites)
 --copy-cookies # Use cookies from your real Chrome profile
 ```
+
+## JSON Output Format
+
+All commands with `--json` return objects on stdout. Errors exit 1 but JSON is still on stdout.
+
+```
+Success: {"ok":true, ...command-specific fields...}
+Error:   {"ok":false, "error":"message", "hint":"what to do next"}
+```
+
+Per-command shapes:
+- `goto --inspect` → `{"ok":true, "url":"...", "title":"...", "snapshot":"uid=n1..."}`
+- `inspect` → `{"ok":true, "snapshot":"uid=n1 heading..."}`
+- `click/fill/select/check --inspect` → `{"ok":true, "message":"Clicked...", "snapshot":"..."}`
+- `click/fill/select/check` (no inspect) → `{"ok":true, "message":"Clicked uid=n12"}`
+- `read` → `{"ok":true, "title":"...", "text":"article content..."}`
+- `text` → `{"ok":true, "text":"visible text..."}`
+- `eval` → `{"ok":true, "result": <any JSON value>}`
+- `network` → `{"ok":true, "requests":[{"url":"...", "status":200, ...}]}`
+- `console` → `{"ok":true, "messages":[{"level":"error", "message":"..."}]}`
+- `batch` → `{"ok":true, "results":[...one result per command...]}`
+- `screenshot` → `{"ok":true, "path":"/path/to/file.png"}`
+
+## Token Budget
+
+An inspect of a typical page is ~50-200 tokens. To stay lean:
+- `--max-depth 2` for deep pages (limits tree to 2 levels)
+- `--filter "button,link"` to see only interactive elements (~10-30 tokens)
+- `--filter "link" --urls` when deciding which link to follow
+- `read --truncate 1000` caps article extraction
+- `text --selector "main" --truncate 500` for scoped visible text
 
 ## Important Rules
 
