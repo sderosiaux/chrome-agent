@@ -10,7 +10,7 @@ pub async fn run(
     value: &str,
 ) -> Result<String, crate::BoxError> {
     crate::element::fill(client, uid_map, uid, value).await?;
-    Ok(format!("Filled uid={uid} with {}", value.len(), ))
+    Ok(format!("Filled uid={uid} with {}", value.len()))
 }
 
 pub async fn run_form(

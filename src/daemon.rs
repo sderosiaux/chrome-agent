@@ -7,7 +7,7 @@ use tokio::sync::mpsc;
 
 use crate::session;
 
-const IDLE_TIMEOUT: Duration = Duration::from_secs(300); // 5 min
+const IDLE_TIMEOUT: Duration = Duration::from_mins(5);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(2);
 
 /// Run the micro-daemon. Blocks until idle timeout or explicit stop.

@@ -952,13 +952,13 @@ mod tests {
 
     #[test]
     fn drag_interpolation_5_steps() {
-        let (x1, y1) = (100.0, 100.0);
-        let (x2, y2) = (200.0, 300.0);
+        let (x1, y1): (f64, f64) = (100.0, 100.0);
+        let (x2, y2): (f64, f64) = (200.0, 300.0);
         let steps = 5u32;
         let points: Vec<(f64, f64)> = (1..=steps)
             .map(|i| {
                 let t = f64::from(i) / f64::from(steps);
-                (x1 + (x2 - x1) * t, y1 + (y2 - y1) * t)
+                ((x2 - x1).mul_add(t, x1), (y2 - y1).mul_add(t, y1))
             })
             .collect();
         assert_eq!(points.len(), 5);
