@@ -114,6 +114,14 @@ async fn launch_browser(opts: &BrowserOptions) -> Result<BrowserConnection, Brow
     std::fs::create_dir_all(&profile_dir).map_err(|e| {
         BrowserError::Launch(format!("Failed to create profile dir: {e}"))
     })?;
+    // Restrict the profile dir to the current user. It can hold cookies and the
+    // Local State decryption key copied from the user's real Chrome profile
+    // (--copy-cookies), so other local users must not be able to traverse it.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&profile_dir, std::fs::Permissions::from_mode(0o700));
+    }
 
     // Copy cookies from the user's real Chrome profile if requested
     if opts.copy_cookies {
