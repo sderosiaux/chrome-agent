@@ -1,0 +1,14 @@
+# Pinned toolchain: CI and local builds resolve to the same rustc/clippy.
+# Rationale: this repo gates the build on `clippy -D warnings` with the
+# pedantic + nursery groups, which are NOT covered by clippy's stability
+# guarantee. A rolling `stable` therefore breaks the build whenever a new
+# release adds or extends a lint — with zero source changes. Pinning makes
+# bumps deliberate (change the version here, re-run clippy, fix, commit).
+#
+# Keep this version in sync with the dtolnay/rust-toolchain@<version> refs
+# in .github/workflows/ci.yml and release.yml (the action does not read this
+# file). rustup auto-installs this toolchain on first cargo invocation.
+[toolchain]
+channel = "1.95.0"
+components = ["clippy", "rustfmt"]
+profile = "minimal"
