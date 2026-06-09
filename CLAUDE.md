@@ -51,6 +51,7 @@ cargo clippy -- -D warnings  # zero warnings enforced in CI
 ## Key Design Decisions
 
 - **Headless by default** — `--headed` for debug. Mode mismatch auto-kills old browser.
+- **Static Linux binaries** — Linux releases target musl (`x86_64`/`aarch64-unknown-linux-musl`) via `cargo-zigbuild`, producing fully static binaries with **zero glibc dependency** → run on any distro (fixes #3: `GLIBC_2.39 not found` on Ubuntu 22.04). Enabled by a pure-Rust dep graph: `ureq` runs with `default-features = false` (TLS off) since it only hits Chrome's local `http://127.0.0.1` endpoint, dropping `ring`/`rustls`. CI guards the graph against C-linking crates.
 - **`--stealth` mode** — 7 CDP patches: navigator.webdriver, chrome.runtime, WebGL, UA, Permissions, input screenX/pageX leak, Runtime.enable skipped. Bypasses Cloudflare/Turnstile.
 - **`--connect` for heavy protection** — DataDome/Kasada detect bundled Chromium fingerprints. Connect to real installed Chrome instead (`--connect http://127.0.0.1:9222`).
 - **Stable UIDs** — `n{backendNodeId}` instead of sequential `e1, e2`. Survive between inspects on same page. Change after SPA navigation (re-inspect needed).

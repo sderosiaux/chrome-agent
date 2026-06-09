@@ -49,7 +49,7 @@ Every token your agent spends understanding a page is a token it doesn't spend r
 This means:
 
 - **Accessibility tree over DOM.** Playwright returns ~2,000 tokens of raw HTML. chrome-agent returns ~50 tokens of a11y tree with stable element IDs. No CSS selectors to write, no DOM to parse.
-- **One binary, zero runtime.** 3 MB Rust binary. No Node.js, no npm, no Playwright runtime. `npx chrome-agent` just works.
+- **One binary, zero runtime.** 3 MB Rust binary. No Node.js, no npm, no Playwright runtime. `npx chrome-agent` just works. Linux builds are fully static (musl) — no glibc dependency, runs on any distro.
 - **Action + observation in one call.** `--inspect` on any action command returns the page state after the action. One round-trip instead of two.
 - **Errors are instructions.** Every error includes a `hint` field telling the agent what to do next. `{"ok":false, "error":"...", "hint":"run inspect"}`.
 - **Stealth by default intent.** 7 CDP patches including the detection vector nobody talks about (`Runtime.enable`). Connect to real Chrome for the hardest protections.

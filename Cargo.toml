@@ -20,7 +20,10 @@ futures-util = "0.3"
 dirs = "6"
 thiserror = "2"
 libc = "0.2"
-ureq = { version = "3", features = ["json"] }
+# TLS disabled: ureq only talks to Chrome's local HTTP endpoint (http://127.0.0.1).
+# Dropping the default rustls feature removes ring/rustls (C-ish deps) → pure-Rust
+# graph → fully static musl builds with zero glibc dependency. See release.yml.
+ureq = { version = "3", default-features = false }
 
 [lints.rust]
 unsafe_code = "deny"

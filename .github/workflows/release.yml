@@ -19,10 +19,10 @@ jobs:
           - target: aarch64-apple-darwin
             os: macos-latest
             artifact: chrome-agent-darwin-arm64
-          - target: x86_64-unknown-linux-gnu
+          - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
             artifact: chrome-agent-linux-x64
-          - target: aarch64-unknown-linux-gnu
+          - target: aarch64-unknown-linux-musl
             os: ubuntu-latest
             artifact: chrome-agent-linux-arm64
           - target: x86_64-pc-windows-msvc
@@ -39,14 +39,23 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install cross-compilation tools (Linux ARM64)
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
+      # Linux binaries are built fully static against musl: zero glibc dependency,
+      # so they run on every distro regardless of glibc version (fixes #3).
+      # cargo-zigbuild uses zig as a hermetic cross-linker — one toolchain for both
+      # x86_64 and aarch64. Versions are pinned for reproducibility.
+      - name: Install zig + cargo-zigbuild (Linux)
+        if: contains(matrix.target, 'linux')
         run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
-          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+          curl -sSL https://ziglang.org/download/0.13.0/zig-linux-x86_64-0.13.0.tar.xz | tar -xJ
+          echo "$PWD/zig-linux-x86_64-0.13.0" >> "$GITHUB_PATH"
+          cargo install cargo-zigbuild --version 0.22.3 --locked
 
-      - name: Build
+      - name: Build (Linux — static musl)
+        if: contains(matrix.target, 'linux')
+        run: cargo zigbuild --release --target ${{ matrix.target }}
+
+      - name: Build (macOS / Windows)
+        if: ${{ !contains(matrix.target, 'linux') }}
         run: cargo build --release --target ${{ matrix.target }}
 
       - name: Rename binary (Unix)
