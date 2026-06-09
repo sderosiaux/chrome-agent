@@ -46,7 +46,7 @@ pub async fn get_page_ws_url(
     // Retry a few times — Chrome may not be fully ready yet
     let mut last_err = BrowserError::NotFound("No attempts made".into());
     for _ in 0..5 {
-        match http_get_json(&url, Duration::from_millis(2000)).await {
+        match http_get_json(&url, Duration::from_secs(2)).await {
             Ok(list) => {
                 if let Some(pages) = list.as_array() {
                     for page in pages {
@@ -137,7 +137,7 @@ async fn launch_browser(opts: &BrowserOptions) -> Result<BrowserConnection, Brow
             let http = extract_http_endpoint(&ws);
             if http_get_json(
                 &format!("{http}/json/version"),
-                Duration::from_millis(1000),
+                Duration::from_secs(1),
             )
             .await
             .is_ok()
@@ -268,7 +268,7 @@ async fn fetch_ws_endpoint(base_url: &str) -> Result<String, BrowserError> {
         base_url.trim_end_matches('/')
     );
 
-    let response = http_get_json(&url, Duration::from_millis(2000)).await?;
+    let response = http_get_json(&url, Duration::from_secs(2)).await?;
 
     let ws_url = response
         .get("webSocketDebuggerUrl")

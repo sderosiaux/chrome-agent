@@ -168,9 +168,7 @@ pub fn ensure_page<'a>(
 
 /// Check if the daemon socket exists.
 pub fn daemon_socket_exists() -> bool {
-    daemon_socket_path()
-        .map(|p| p.exists())
-        .unwrap_or(false)
+    daemon_socket_path().is_ok_and(|p| p.exists())
 }
 
 /// Path to the daemon socket.

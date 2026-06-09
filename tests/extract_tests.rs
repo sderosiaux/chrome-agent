@@ -44,8 +44,7 @@ fn chrome_available() -> bool {
         if Command::new("which")
             .arg(candidate)
             .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
+            .is_ok_and(|o| o.status.success())
         {
             return true;
         }

@@ -139,12 +139,12 @@ mod tests {
         // Without CDP, we just verify the parsing logic identifies link lines
         for line in text.lines() {
             let trimmed = line.trim();
-            if let Some(rest) = trimmed.strip_prefix("uid=") {
-                if let Some((_uid, after_uid)) = rest.split_once(' ') {
-                    let role = after_uid.split([' ', '"']).next().unwrap_or("");
-                    if role == "link" {
-                        assert!(line.contains("Click me"));
-                    }
+            if let Some(rest) = trimmed.strip_prefix("uid=")
+                && let Some((_uid, after_uid)) = rest.split_once(' ')
+            {
+                let role = after_uid.split([' ', '"']).next().unwrap_or("");
+                if role == "link" {
+                    assert!(line.contains("Click me"));
                 }
             }
         }
