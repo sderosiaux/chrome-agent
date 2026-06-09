@@ -14,3 +14,15 @@ jobs:
       - run: cargo check
       - run: cargo clippy -- -D warnings
       - run: cargo test -- --test-threads=1
+      # Linux release binaries are fully static musl builds (issue #3). That only works
+      # while the dependency graph stays pure Rust — a C-linking crate (TLS/crypto backend)
+      # would reintroduce a glibc dependency. Fail fast if one sneaks back in.
+      - name: Guard pure-Rust dependency graph
+        run: |
+          for c in ring openssl-sys aws-lc-sys; do
+            if cargo tree -i "$c" >/dev/null 2>&1; then
+              echo "::error::Crate '$c' pulls in C code and breaks fully-static musl Linux builds (issue #3). Use a pure-Rust alternative or disable the offending feature."
+              exit 1
+            fi
+          done
+          echo "Dependency graph is pure Rust — static musl Linux builds stay portable."
