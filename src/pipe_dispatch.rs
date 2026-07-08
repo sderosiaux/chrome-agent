@@ -251,15 +251,21 @@ pub async fn dispatch_pdf(client: &CdpClient, cmd: &Value) -> Result<Value, crat
 
 pub async fn dispatch_wait(client: &CdpClient, default_timeout: u64, cmd: &Value) -> Result<Value, crate::BoxError> {
     let (what, pattern) = if let Some(w) = cmd.get("what").and_then(Value::as_str) {
-        let p = cmd.get("pattern").and_then(Value::as_str)
-            .ok_or("wait: missing \"pattern\" (use {\"what\":\"text\",\"pattern\":\"...\"})")?;
-        (w.to_string(), p.to_string())
+        // network-idle needs no pattern; other conditions do.
+        if w == "network-idle" {
+            (w.to_string(), String::new())
+        } else {
+            let p = cmd.get("pattern").and_then(Value::as_str)
+                .ok_or("wait: missing \"pattern\" (use {\"what\":\"text\",\"pattern\":\"...\"})")?;
+            (w.to_string(), p.to_string())
+        }
     } else if let Some(p) = cmd.get("text").and_then(Value::as_str) { ("text".into(), p.into()) }
     else if let Some(p) = cmd.get("url").and_then(Value::as_str) { ("url".into(), p.into()) }
     else if let Some(p) = cmd.get("selector").and_then(Value::as_str) { ("selector".into(), p.into()) }
-    else { return Err("wait: specify {\"what\":\"text\",\"pattern\":\"...\"} or {\"text\":\"...\"} or {\"url\":\"...\"} or {\"selector\":\"...\"}".into()); };
+    else { return Err("wait: specify {\"what\":\"text\",\"pattern\":\"...\"} or {\"text\":\"...\"} or {\"url\":\"...\"} or {\"selector\":\"...\"} or {\"what\":\"network-idle\"}".into()); };
     let timeout = cmd.get("timeout").and_then(Value::as_u64).unwrap_or(default_timeout);
-    let msg = commands::wait::run(client, &what, &pattern, timeout).await?;
+    let idle_ms = cmd.get("idle_ms").and_then(Value::as_u64).unwrap_or(500);
+    let msg = commands::wait::run(client, &what, &pattern, timeout, idle_ms).await?;
     Ok(json!({"ok": true, "message": msg}))
 }
 
@@ -403,7 +409,7 @@ pub async fn dispatch_fill_and_submit(client: &CdpClient, timeout: u64, cmd: &Va
     if let Some(pattern) = wait_for {
         let is_selector = pattern.contains('.') || pattern.contains('#') || pattern.contains('[') || pattern.contains('>');
         let wait_type = if is_selector { "selector" } else { "text" };
-        commands::wait::run(client, wait_type, pattern, timeout).await?;
+        commands::wait::run(client, wait_type, pattern, timeout, 500).await?;
     }
     let read_result = commands::read::run(client, false, None).await?;
     let message = format!("Filled {field_count} fields, submitted, waited for '{}'", wait_for.unwrap_or("none"));

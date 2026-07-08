@@ -366,15 +366,19 @@ pub enum Command {
         selector: Option<String>,
     },
 
-    /// Wait for a condition (text, url, or selector)
+    /// Wait for a condition (text, url, selector, or network-idle)
     Wait {
-        /// What to wait for: "text", "url", or "selector"
+        /// What to wait for: "text", "url", "selector", or "network-idle"
         what: String,
-        /// Pattern to match
+        /// Pattern to match (ignored for network-idle)
+        #[arg(default_value = "")]
         pattern: String,
         /// Timeout in seconds
         #[arg(long, default_value = "10")]
         timeout: u64,
+        /// For network-idle: required quiet window in milliseconds
+        #[arg(long, default_value = "500")]
+        idle_ms: u64,
     },
 
     /// Type text into the focused element (or focus a selector first)

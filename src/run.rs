@@ -177,7 +177,7 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
                 .collect::<Result<Vec<_>, _>>()?;
             let result = commands::goto::run(&client, &url, cli.timeout, &parsed_headers).await?;
             if let Some(ref selector) = wait_for {
-                commands::wait::run(&client, "selector", selector, cli.timeout).await?;
+                commands::wait::run(&client, "selector", selector, cli.timeout, 500).await?;
             }
             let _ = commands::history::append(&result.url, &result.title, &cli.page);
             output_goto(&client, &mut store, &cli.browser, &cli.page, &target_id, &result.url, &result.title, inspect, depth, json_mode).await?;
@@ -585,8 +585,8 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
             }
         }
 
-        Command::Wait { what, pattern, timeout } => {
-            let msg = commands::wait::run(&client, &what, &pattern, timeout).await?;
+        Command::Wait { what, pattern, timeout, idle_ms } => {
+            let msg = commands::wait::run(&client, &what, &pattern, timeout, idle_ms).await?;
             if json_mode {
                 json_output(&json!({"ok": true, "message": msg}));
             } else {
