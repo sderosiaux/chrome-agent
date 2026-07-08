@@ -52,6 +52,8 @@ pub async fn run_pipe(cli: &Cli) -> Result<(), crate::BoxError> {
     } else {
         client.enable("Runtime").await?;
     }
+    let dialog_policy = crate::setup::DialogPolicy::parse(&cli.dialog)?;
+    client.spawn_dialog_handler(dialog_policy, cli.dialog_text.clone());
 
     // Main loop: read JSON commands from stdin
     let stdin = BufReader::new(tokio::io::stdin());
@@ -116,6 +118,8 @@ pub async fn run_replay(
     commands::console::inject(&client).await;
     if cli.stealth { crate::setup::apply_stealth(&client).await; }
     else { client.enable("Runtime").await?; }
+    let dialog_policy = crate::setup::DialogPolicy::parse(&cli.dialog)?;
+    client.spawn_dialog_handler(dialog_policy, cli.dialog_text.clone());
 
     for line in content.lines() {
         let line = line.trim();

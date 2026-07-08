@@ -166,6 +166,8 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
     let _ = session::save_session(&mut store);
 
     let client = connect_page(http_endpoint, &target_id, cli.stealth).await?;
+    let dialog_policy = crate::setup::DialogPolicy::parse(&cli.dialog)?;
+    client.spawn_dialog_handler(dialog_policy, cli.dialog_text.clone());
 
     let json_mode = cli.json;
     match cli.command {

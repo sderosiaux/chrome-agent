@@ -61,6 +61,14 @@ pub struct Cli {
     #[arg(long, default_value = "default")]
     pub page: String,
 
+    /// How to answer JS dialogs (alert/confirm/prompt/beforeunload): accept, dismiss, or manual
+    #[arg(long, default_value = "accept")]
+    pub dialog: String,
+
+    /// Text to submit for `prompt()` dialogs when --dialog accept (default: empty)
+    #[arg(long)]
+    pub dialog_text: Option<String>,
+
     #[command(subcommand)]
     pub command: Command,
 }
