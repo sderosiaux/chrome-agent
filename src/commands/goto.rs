@@ -10,7 +10,28 @@ pub struct GotoResult {
     pub title: String,
 }
 
-pub async fn run(client: &CdpClient, url: &str, timeout_secs: u64) -> Result<GotoResult, crate::BoxError> {
+/// Parse a `"Name: Value"` header string into its (name, value) pair.
+///
+/// Splits on the FIRST colon so values may themselves contain colons
+/// (e.g. `"X-Trace: a:b:c"`). Both sides are trimmed. Errors when there is no
+/// colon or the name is empty.
+pub fn parse_header(raw: &str) -> Result<(String, String), crate::BoxError> {
+    let (name, value) = raw
+        .split_once(':')
+        .ok_or_else(|| format!("Invalid --header {raw:?}: expected \"Name: Value\""))?;
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(format!("Invalid --header {raw:?}: header name is empty").into());
+    }
+    Ok((name.to_string(), value.trim().to_string()))
+}
+
+pub async fn run(
+    client: &CdpClient,
+    url: &str,
+    timeout_secs: u64,
+    headers: &[(String, String)],
+) -> Result<GotoResult, crate::BoxError> {
     // Auto-prefix https:// if no scheme is provided
     let url = if url.contains("://") {
         url.to_string()
@@ -21,6 +42,19 @@ pub async fn run(client: &CdpClient, url: &str, timeout_secs: u64) -> Result<Got
 
     // Ensure Page domain is enabled so we receive loadEventFired
     client.enable("Page").await?;
+
+    // Apply extra HTTP headers (auth tokens, multi-tenant routing, etc.) before
+    // navigating. Requires the Network domain.
+    if !headers.is_empty() {
+        client.enable("Network").await?;
+        let map: serde_json::Map<String, serde_json::Value> = headers
+            .iter()
+            .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+            .collect();
+        client
+            .send("Network.setExtraHTTPHeaders", json!({ "headers": map }))
+            .await?;
+    }
 
     let nav_result: NavigateResult = client
         .call(
@@ -86,4 +120,48 @@ pub async fn run(client: &CdpClient, url: &str, timeout_secs: u64) -> Result<Got
         url: url.to_string(),
         title,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_header;
+
+    #[test]
+    fn parses_and_trims() {
+        let (n, v) = parse_header("Authorization: Bearer xyz").unwrap();
+        assert_eq!(n, "Authorization");
+        assert_eq!(v, "Bearer xyz");
+    }
+
+    #[test]
+    fn keeps_colons_in_value() {
+        let (n, v) = parse_header("X-Trace:  a:b:c ").unwrap();
+        assert_eq!(n, "X-Trace");
+        assert_eq!(v, "a:b:c");
+    }
+
+    #[test]
+    fn empty_value_is_allowed() {
+        let (n, v) = parse_header("X-Empty:").unwrap();
+        assert_eq!(n, "X-Empty");
+        assert_eq!(v, "");
+    }
+
+    #[test]
+    fn trims_nonempty_name_and_whitespace_value() {
+        // Guards against a partial-trim regression that the empty-name test can't catch.
+        let (n, v) = parse_header("  X-Foo :   ").unwrap();
+        assert_eq!(n, "X-Foo");
+        assert_eq!(v, "");
+    }
+
+    #[test]
+    fn rejects_missing_colon() {
+        assert!(parse_header("NoColonHere").is_err());
+    }
+
+    #[test]
+    fn rejects_empty_name() {
+        assert!(parse_header("   : value").is_err());
+    }
 }

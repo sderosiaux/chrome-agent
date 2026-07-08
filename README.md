@@ -143,7 +143,7 @@ chrome-agent screenshot
 
 | Command | What it does |
 |---------|------------|
-| `goto <url> [--inspect] [--max-depth N]` | Navigate. Auto-prefixes `https://` if missing. |
+| `goto <url> [--inspect] [--max-depth N] [--header "K: V"]` | Navigate. Auto-prefixes `https://`. `--header` (repeatable) sends extra HTTP headers. |
 | `back` | History back. |
 | `forward` | History forward. |
 | `close [--purge]` | Stop browser. `--purge` deletes cookies/profile. |
@@ -152,9 +152,10 @@ chrome-agent screenshot
 
 | Command | What it does |
 |---------|------------|
-| `inspect [--verbose] [--max-depth N] [--uid nN] [--filter "role,role"] [--scroll] [--limit N] [--urls]` | a11y tree with UIDs. `--scroll --limit` for infinite scroll. `--urls` resolves href on links. |
+| `inspect [--verbose] [--max-depth N] [--uid nN] [--filter "role,role"] [--scroll] [--limit N] [--urls] [--max-chars N] [--offset K]` | a11y tree with UIDs. `--scroll --limit` for infinite scroll. `--urls` resolves href on links. `--max-chars`/`--offset` cap and page the output. |
 | `diff` | What changed since last inspect. |
-| `screenshot [--filename name]` | Screenshot to file. |
+| `screenshot [--filename name] [--format jpeg\|png] [--quality N] [--max-width N] [--uid nN\|--selector "css"]` | Screenshot to file. JPEG/quality/max-width shrink it; `--uid`/`--selector` clip to one element. |
+| `pdf [--out name] [--landscape] [--background]` | Print the current page to a PDF file. |
 | `tabs` | List open tabs. |
 
 ### Interaction
@@ -180,6 +181,7 @@ chrome-agent screenshot
 | `scroll <down\|up\|uid>` | Scroll page or element into view. |
 | `hover <uid>` | Hover. |
 | `wait <text\|url\|selector> <pattern>` | Wait for a condition. |
+| `wait network-idle [--idle-ms N] [--timeout N]` | Wait until the network is quiet for `--idle-ms` (default 500). Beats fixed sleeps for SPA/XHR settle. |
 
 ### Content extraction
 
@@ -189,6 +191,7 @@ chrome-agent screenshot
 | `text [uid] [--selector "css"] [--truncate N]` | Visible text from page or element. |
 | `eval <expression> [--selector "css"]` | JS in page context. `el` = matched element. |
 | `extract [--selector "css"] [--limit N] [--scroll] [--a11y]` | Auto-detect repeating data. `--a11y` for React SPAs (X.com). |
+| `download <url> [--out path] [--timeout N]` | Download a URL fetched in-page, so cookies/auth carry over (login-gated files). Returns `{path,bytes,mime}`. |
 
 ### Monitoring
 
@@ -218,7 +221,11 @@ chrome-agent screenshot
 --max-depth <N>          Limit inspect depth
 --ignore-https-errors    Accept self-signed certs
 --json                   Structured JSON output
+--dialog <mode>          JS dialog policy: accept (default), dismiss, or manual
+--dialog-text <text>     Text to submit for prompt() dialogs when --dialog accept
 ```
+
+JS dialogs (`alert`/`confirm`/`prompt`/`beforeunload`) are auto-answered by default (`--dialog accept`) — a native dialog otherwise blocks the page with no DOM signal and the agent's next command hangs. Use `--dialog dismiss` to cancel them, or `--dialog manual` to opt out.
 
 ## The loop: inspect, act, inspect
 
@@ -361,6 +368,37 @@ chrome-agent console --level error    # errors + exceptions only
 
 Console capture uses an injected interceptor, not `Runtime.enable`.
 
+## Downloads, PDF, and token-safe screenshots
+
+Files are written under `~/.chrome-agent/tmp` (or your `--out` path) with `0600` perms; the path is printed on stdout. Binary bytes never hit stdout.
+
+```bash
+# Download a file, fetched inside the page so cookies/auth carry over.
+# Ideal for login-gated exports (invoices, CSVs, PDFs behind an auth wall).
+chrome-agent download https://app.com/reports/2024.csv --out ./2024.csv
+# {"ok":true,"path":"./2024.csv","bytes":48213,"mime":"text/csv"}
+
+# Print the current page to PDF.
+chrome-agent pdf --out invoice.pdf --background
+
+# Screenshots that don't blow up your context window.
+chrome-agent screenshot --format jpeg --quality 60 --max-width 1024
+chrome-agent screenshot --uid n42            # capture a single element (or --selector "css")
+```
+
+`download` uses an in-page `fetch` with `credentials:'include'`, so the request inherits the page's session. Click-triggered browser-native downloads are not handled — resolve the target href (`inspect --urls`) and download it directly.
+
+## Waiting for the network to settle
+
+```bash
+# Resolve once no requests are in flight for 500ms (tunable), bounded by --timeout.
+# Replaces fragile fixed sleeps on SPAs / XHR-heavy pages.
+chrome-agent wait network-idle
+chrome-agent wait network-idle --idle-ms 800 --timeout 20
+```
+
+Opt-in (enables the Network domain), so it stays off the stealth hot path.
+
 ## Pipe mode
 
 For agents that send many commands in sequence, pipe mode keeps a single connection open:
@@ -450,6 +488,12 @@ Claude Code permissions:
 | File upload | `upload` | `upload` | via selectors |
 | Drag and drop | `drag` | `drag` | via selectors |
 | Annotated screenshots | not yet | `screenshot --annotate` | not yet |
+| Element/token-safe screenshots | `screenshot --uid/--selector`, `--format jpeg`, `--max-width` | via options | via options |
+| PDF export | `pdf` (`Page.printToPDF`) | none | none |
+| File download | `download` (in-page fetch, auth-preserving) | `download` | via events |
+| Extra request headers | `goto --header` | yes | via context |
+| Network-idle wait | `wait network-idle` | yes | `browser_wait_for` |
+| JS dialog handling | auto (`--dialog accept/dismiss/manual`) | yes | `browser_handle_dialog` |
 | Live dashboard | no (lean) | yes (Next.js) | no |
 | Cloud providers | no (`--connect` to anything) | 5 built-in | no |
 | iOS/Safari | no | yes (WebDriver) | no |

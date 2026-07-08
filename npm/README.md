@@ -88,8 +88,8 @@ UIDs are stable across inspects (based on Chrome's `backendNodeId`). The agent i
 
 | Command | Description |
 |---------|------------|
-| `goto <url> [--inspect] [--max-depth N]` | Navigate to URL |
-| `inspect [--verbose] [--max-depth N] [--uid nN] [--filter "role,role"]` | Accessibility tree with stable uids |
+| `goto <url> [--inspect] [--max-depth N] [--header "K: V"]` | Navigate to URL. `--header` sends extra HTTP headers (repeatable) |
+| `inspect [--verbose] [--max-depth N] [--uid nN] [--filter "role,role"] [--max-chars N] [--offset K]` | Accessibility tree with stable uids. `--max-chars`/`--offset` cap and page the output |
 | `click <uid> [--inspect] [--max-depth N]` | Click by uid (JS fallback if no box model) |
 | `click --selector "css" [--inspect]` | Click by CSS selector |
 | `click --xy 100,200` | Click by coordinates |
@@ -103,12 +103,15 @@ UIDs are stable across inspects (based on Chrome's `backendNodeId`). The agent i
 | `console [--level error] [--clear]` | Show captured console.log/warn/error + JS exceptions |
 | `pipe` | Persistent connection: JSON stdin → JSON stdout |
 | `wait <text\|url\|selector> <pattern>` | Wait for condition |
+| `wait network-idle [--idle-ms N] [--timeout N]` | Wait until the network is quiet (SPA/XHR settle) |
 | `type <text> [--selector "css"]` | Type into focused/selected element |
 | `press <key>` | Press Enter, Tab, Escape, etc. |
 | `scroll <down\|up\|uid>` | Scroll page or element into view |
 | `hover <uid>` | Hover over element |
 | `back` | Navigate back in history |
-| `screenshot [--filename name]` | Capture screenshot → file path |
+| `screenshot [--filename name] [--format jpeg\|png] [--quality N] [--max-width N] [--uid nN\|--selector "css"]` | Screenshot → file path. JPEG/max-width shrink it; `--uid`/`--selector` clip to one element |
+| `pdf [--out name] [--landscape] [--background]` | Print the current page to a PDF file |
+| `download <url> [--out path] [--timeout N]` | Download a URL fetched in-page (cookies/auth preserved) → `{path,bytes,mime}` |
 | `tabs` | List open browser tabs |
 | `close [--purge]` | Close browser (--purge deletes profile/cookies) |
 | `status` | Show session info |
@@ -124,9 +127,14 @@ UIDs are stable across inspects (based on Chrome's `backendNodeId`). The agent i
 --stealth                Bypass bot detection (Cloudflare, Turnstile)
 --timeout <seconds>      Command timeout (default: 30)
 --max-depth <N>          Limit inspect tree depth (works with --inspect on any command)
+--copy-cookies           Use cookies from your real Chrome profile
+--dialog <mode>          JS dialog policy: accept (default), dismiss, or manual
+--dialog-text <text>     Text submitted for prompt() dialogs under --dialog accept
 --ignore-https-errors    Accept self-signed certificates
 --json                   Structured JSON output for all commands
 ```
+
+JS dialogs (`alert`/`confirm`/`prompt`/`beforeunload`) are auto-answered by default (`--dialog accept`) so the page never hangs on a blocking dialog.
 
 ## The Inspect → Act → Inspect Loop
 

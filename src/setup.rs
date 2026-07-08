@@ -6,6 +6,64 @@ use serde_json::json;
 
 use crate::cdp::client::CdpClient;
 
+/// How to answer JavaScript dialogs (`alert`/`confirm`/`prompt`/`beforeunload`).
+///
+/// A native dialog blocks the page with no DOM signal, so without this the
+/// agent's next command silently hangs. `Accept`/`Dismiss` auto-answer; `Manual`
+/// leaves dialogs alone (legacy behaviour).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DialogPolicy {
+    Accept,
+    Dismiss,
+    Manual,
+}
+
+impl DialogPolicy {
+    /// Parse the `--dialog` flag value (case-insensitive).
+    pub fn parse(s: &str) -> Result<Self, crate::BoxError> {
+        match s.to_ascii_lowercase().as_str() {
+            "accept" => Ok(Self::Accept),
+            "dismiss" => Ok(Self::Dismiss),
+            "manual" => Ok(Self::Manual),
+            other => {
+                Err(format!("Unknown --dialog {other:?}. Use \"accept\", \"dismiss\", or \"manual\".").into())
+            }
+        }
+    }
+
+    /// Whether a background handler should be installed for this policy.
+    #[must_use]
+    pub const fn auto_handles(self) -> bool {
+        !matches!(self, Self::Manual)
+    }
+}
+
+/// The concrete response to send to `Page.handleJavaScriptDialog`.
+#[derive(Debug, PartialEq, Eq)]
+pub struct DialogResponse {
+    pub accept: bool,
+    /// Text to submit for a `prompt()`; `None` for other dialog types.
+    pub prompt_text: Option<String>,
+}
+
+/// Decide how to answer a dialog of `dialog_type` under `policy`.
+///
+/// `Accept` confirms every dialog (for `beforeunload` this means "proceed" — the
+/// agent asked to navigate/close); `prompt` gets the supplied `--dialog-text`
+/// (empty string if none). `Dismiss` (and `Manual`, defensively) cancels.
+#[must_use]
+pub fn dialog_decision(policy: DialogPolicy, dialog_type: &str, text: Option<&str>) -> DialogResponse {
+    match policy {
+        DialogPolicy::Accept => DialogResponse {
+            accept: true,
+            prompt_text: (dialog_type == "prompt").then(|| text.unwrap_or("").to_string()),
+        },
+        DialogPolicy::Dismiss | DialogPolicy::Manual => {
+            DialogResponse { accept: false, prompt_text: None }
+        }
+    }
+}
+
 /// Apply stealth anti-detection patches. Must be called after `Page.enable`.
 pub async fn apply_stealth(client: &CdpClient) {
     let _ = client.enable("Network").await;
@@ -76,3 +134,74 @@ const STEALTH_PATCHES_JS: &str = r#"
         }
     };
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::{dialog_decision, DialogPolicy, DialogResponse};
+
+    #[test]
+    fn policy_parse_is_case_insensitive() {
+        assert_eq!(DialogPolicy::parse("Accept").unwrap(), DialogPolicy::Accept);
+        assert_eq!(DialogPolicy::parse("DISMISS").unwrap(), DialogPolicy::Dismiss);
+        assert_eq!(DialogPolicy::parse("manual").unwrap(), DialogPolicy::Manual);
+        assert!(DialogPolicy::parse("nope").is_err());
+    }
+
+    #[test]
+    fn only_manual_skips_handler() {
+        assert!(DialogPolicy::Accept.auto_handles());
+        assert!(DialogPolicy::Dismiss.auto_handles());
+        assert!(!DialogPolicy::Manual.auto_handles());
+    }
+
+    #[test]
+    fn accept_confirms_alert_and_confirm_without_prompt_text() {
+        for t in ["alert", "confirm"] {
+            assert_eq!(
+                dialog_decision(DialogPolicy::Accept, t, Some("ignored")),
+                DialogResponse { accept: true, prompt_text: None }
+            );
+        }
+    }
+
+    #[test]
+    fn accept_supplies_prompt_text() {
+        assert_eq!(
+            dialog_decision(DialogPolicy::Accept, "prompt", Some("hello")),
+            DialogResponse { accept: true, prompt_text: Some("hello".into()) }
+        );
+        // prompt with no --dialog-text defaults to empty string, still accepted.
+        assert_eq!(
+            dialog_decision(DialogPolicy::Accept, "prompt", None),
+            DialogResponse { accept: true, prompt_text: Some(String::new()) }
+        );
+    }
+
+    #[test]
+    fn accept_proceeds_through_beforeunload() {
+        // "proceed with navigation" == accept=true, no prompt text.
+        assert_eq!(
+            dialog_decision(DialogPolicy::Accept, "beforeunload", None),
+            DialogResponse { accept: true, prompt_text: None }
+        );
+    }
+
+    #[test]
+    fn dismiss_cancels_every_type() {
+        for t in ["alert", "confirm", "prompt", "beforeunload"] {
+            assert_eq!(
+                dialog_decision(DialogPolicy::Dismiss, t, Some("x")),
+                DialogResponse { accept: false, prompt_text: None }
+            );
+        }
+    }
+
+    #[test]
+    fn manual_falls_through_to_cancel() {
+        // Handler is gated out for Manual, but the arm is live: pin it to "cancel".
+        assert_eq!(
+            dialog_decision(DialogPolicy::Manual, "confirm", Some("x")),
+            DialogResponse { accept: false, prompt_text: None }
+        );
+    }
+}

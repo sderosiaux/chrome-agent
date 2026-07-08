@@ -24,8 +24,19 @@ pub async fn dispatch_goto(
     let url = cmd.get("url").and_then(Value::as_str).ok_or("goto: missing \"url\"")?;
     let inspect = cmd.get("inspect").and_then(Value::as_bool).unwrap_or(false);
     let max_depth = cmd_max_depth(cmd).or(global_max_depth);
+    let parsed_headers = cmd
+        .get("headers")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(Value::as_str)
+                .map(commands::goto::parse_header)
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .transpose()?
+        .unwrap_or_default();
 
-    let result = commands::goto::run(client, url, timeout).await?;
+    let result = commands::goto::run(client, url, timeout, &parsed_headers).await?;
     let _ = commands::history::append(&result.url, &result.title, page_name);
 
     let mut obj = json!({"ok": true, "url": result.url, "title": result.title});
@@ -117,7 +128,16 @@ pub async fn dispatch_inspect(
         page.last_snapshot = Some(snapshot.text.clone());
     }
 
-    Ok(json!({"ok": true, "snapshot": snapshot.text}))
+    let offset = cmd.get("offset").and_then(Value::as_u64).unwrap_or(0) as usize;
+    let max_chars = cmd.get("max_chars").and_then(Value::as_u64).map(|n| n as usize);
+    let paged = commands::inspect::paginate(&snapshot.text, offset, max_chars);
+    Ok(json!({
+        "ok": true,
+        "snapshot": paged.text,
+        "total_chars": paged.total_chars,
+        "truncated": paged.truncated,
+        "next_offset": paged.next_offset,
+    }))
 }
 
 pub async fn dispatch_diff(
@@ -184,22 +204,76 @@ pub async fn dispatch_text(
     Ok(obj)
 }
 
-pub async fn dispatch_screenshot(client: &CdpClient) -> Result<Value, crate::BoxError> {
-    let path = commands::screenshot::run(client, None).await?;
+pub async fn dispatch_screenshot(
+    client: &CdpClient,
+    store: &SessionStore,
+    browser_name: &str,
+    page_name: &str,
+    cmd: &Value,
+) -> Result<Value, crate::BoxError> {
+    let format = commands::screenshot::ImgFormat::parse(
+        cmd.get("format").and_then(Value::as_str).unwrap_or("png"),
+    )?;
+    let quality = cmd.get("quality").and_then(Value::as_u64).map(|q| q as u32);
+    let max_width = cmd.get("max_width").and_then(Value::as_u64).map(|w| w as u32);
+    let uid = cmd.get("uid").and_then(Value::as_str);
+    let selector = cmd.get("selector").and_then(Value::as_str);
+
+    let clip = if let Some(u) = uid {
+        let uid_map = get_uid_map(store, browser_name, page_name);
+        Some(crate::geometry::clip_for_uid(client, &uid_map, u).await?)
+    } else if let Some(sel) = selector {
+        Some(crate::geometry::clip_for_selector(client, sel).await?)
+    } else {
+        None
+    };
+
+    let opts = commands::screenshot::ScreenshotOpts {
+        filename: cmd.get("filename").and_then(Value::as_str),
+        format,
+        quality,
+        max_width,
+        clip,
+    };
+    let path = commands::screenshot::run(client, &opts).await?;
+    Ok(json!({"ok": true, "path": path}))
+}
+
+pub async fn dispatch_download(client: &CdpClient, default_timeout: u64, cmd: &Value) -> Result<Value, crate::BoxError> {
+    let url = cmd.get("url").and_then(Value::as_str).ok_or("download: missing \"url\"")?;
+    let out = cmd.get("out").and_then(Value::as_str);
+    let timeout = cmd.get("timeout").and_then(Value::as_u64).unwrap_or(default_timeout);
+    let result = commands::download::run(client, url, out, timeout).await?;
+    Ok(json!({"ok": true, "path": result.path, "bytes": result.bytes, "mime": result.mime}))
+}
+
+pub async fn dispatch_pdf(client: &CdpClient, cmd: &Value) -> Result<Value, crate::BoxError> {
+    let opts = commands::pdf::PdfOpts {
+        filename: cmd.get("filename").and_then(Value::as_str),
+        landscape: cmd.get("landscape").and_then(Value::as_bool).unwrap_or(false),
+        background: cmd.get("background").and_then(Value::as_bool).unwrap_or(false),
+    };
+    let path = commands::pdf::run(client, &opts).await?;
     Ok(json!({"ok": true, "path": path}))
 }
 
 pub async fn dispatch_wait(client: &CdpClient, default_timeout: u64, cmd: &Value) -> Result<Value, crate::BoxError> {
     let (what, pattern) = if let Some(w) = cmd.get("what").and_then(Value::as_str) {
-        let p = cmd.get("pattern").and_then(Value::as_str)
-            .ok_or("wait: missing \"pattern\" (use {\"what\":\"text\",\"pattern\":\"...\"})")?;
-        (w.to_string(), p.to_string())
+        // network-idle needs no pattern; other conditions do.
+        if w == "network-idle" {
+            (w.to_string(), String::new())
+        } else {
+            let p = cmd.get("pattern").and_then(Value::as_str)
+                .ok_or("wait: missing \"pattern\" (use {\"what\":\"text\",\"pattern\":\"...\"})")?;
+            (w.to_string(), p.to_string())
+        }
     } else if let Some(p) = cmd.get("text").and_then(Value::as_str) { ("text".into(), p.into()) }
     else if let Some(p) = cmd.get("url").and_then(Value::as_str) { ("url".into(), p.into()) }
     else if let Some(p) = cmd.get("selector").and_then(Value::as_str) { ("selector".into(), p.into()) }
-    else { return Err("wait: specify {\"what\":\"text\",\"pattern\":\"...\"} or {\"text\":\"...\"} or {\"url\":\"...\"} or {\"selector\":\"...\"}".into()); };
+    else { return Err("wait: specify {\"what\":\"text\",\"pattern\":\"...\"} or {\"text\":\"...\"} or {\"url\":\"...\"} or {\"selector\":\"...\"} or {\"what\":\"network-idle\"}".into()); };
     let timeout = cmd.get("timeout").and_then(Value::as_u64).unwrap_or(default_timeout);
-    let msg = commands::wait::run(client, &what, &pattern, timeout).await?;
+    let idle_ms = cmd.get("idle_ms").and_then(Value::as_u64).unwrap_or(500);
+    let msg = commands::wait::run(client, &what, &pattern, timeout, idle_ms).await?;
     Ok(json!({"ok": true, "message": msg}))
 }
 
@@ -323,7 +397,7 @@ pub async fn dispatch_navigate_and_read(
 ) -> Result<Value, crate::BoxError> {
     let url = cmd.get("url").and_then(Value::as_str).ok_or("navigate_and_read: missing \"url\"")?;
     let truncate = cmd.get("truncate").and_then(Value::as_u64).map(|v| v as usize);
-    let goto_result = commands::goto::run(client, url, timeout).await?;
+    let goto_result = commands::goto::run(client, url, timeout, &[]).await?;
     let _ = commands::history::append(&goto_result.url, &goto_result.title, page_name);
     let read_result = commands::read::run(client, false, truncate).await?;
     Ok(json!({"ok": true, "url": goto_result.url, "title": goto_result.title, "content": read_result.text_content}))
@@ -343,7 +417,7 @@ pub async fn dispatch_fill_and_submit(client: &CdpClient, timeout: u64, cmd: &Va
     if let Some(pattern) = wait_for {
         let is_selector = pattern.contains('.') || pattern.contains('#') || pattern.contains('[') || pattern.contains('>');
         let wait_type = if is_selector { "selector" } else { "text" };
-        commands::wait::run(client, wait_type, pattern, timeout).await?;
+        commands::wait::run(client, wait_type, pattern, timeout, 500).await?;
     }
     let read_result = commands::read::run(client, false, None).await?;
     let message = format!("Filled {field_count} fields, submitted, waited for '{}'", wait_for.unwrap_or("none"));
@@ -576,7 +650,9 @@ pub async fn dispatch_single(
         "eval" => dispatch_eval(client, cmd).await,
         "read" => dispatch_read(client, cmd).await,
         "text" => dispatch_text(client, store, browser_name, page_name, cmd).await,
-        "screenshot" => dispatch_screenshot(client).await,
+        "screenshot" => dispatch_screenshot(client, store, browser_name, page_name, cmd).await,
+        "pdf" => dispatch_pdf(client, cmd).await,
+        "download" => dispatch_download(client, timeout, cmd).await,
         "wait" => dispatch_wait(client, timeout, cmd).await,
         "back" => dispatch_back(client).await,
         "forward" => dispatch_forward(client).await,

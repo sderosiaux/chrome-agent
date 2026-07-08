@@ -166,14 +166,20 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
     let _ = session::save_session(&mut store);
 
     let client = connect_page(http_endpoint, &target_id, cli.stealth).await?;
+    let dialog_policy = crate::setup::DialogPolicy::parse(&cli.dialog)?;
+    client.spawn_dialog_handler(dialog_policy, cli.dialog_text.clone());
 
     let json_mode = cli.json;
     match cli.command {
-        Command::Goto { url, inspect, max_depth, wait_for } => {
+        Command::Goto { url, inspect, max_depth, wait_for, headers } => {
             let depth = max_depth.or(cli.max_depth);
-            let result = commands::goto::run(&client, &url, cli.timeout).await?;
+            let parsed_headers = headers
+                .iter()
+                .map(|h| commands::goto::parse_header(h))
+                .collect::<Result<Vec<_>, _>>()?;
+            let result = commands::goto::run(&client, &url, cli.timeout, &parsed_headers).await?;
             if let Some(ref selector) = wait_for {
-                commands::wait::run(&client, "selector", selector, cli.timeout).await?;
+                commands::wait::run(&client, "selector", selector, cli.timeout, 500).await?;
             }
             let _ = commands::history::append(&result.url, &result.title, &cli.page);
             output_goto(&client, &mut store, &cli.browser, &cli.page, &target_id, &result.url, &result.title, inspect, depth, json_mode).await?;
@@ -444,7 +450,7 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
             output_action(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, inspect, depth, json_mode).await?;
         }
 
-        Command::Inspect { verbose, max_depth, uid, filter, scroll, limit, urls } => {
+        Command::Inspect { verbose, max_depth, uid, filter, scroll, limit, urls, max_chars, offset } => {
             if scroll {
                 commands::extract::scroll_to_load(&client).await?;
             }
@@ -459,15 +465,24 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
             if urls {
                 text = commands::inspect::resolve_urls(&client, &text, &uid_map).await;
             }
+            // Persist the FULL snapshot so diff and uid lookups stay complete;
+            // paging only affects what we print/return.
             if let Some(browser_s) = store.browsers.get_mut(&cli.browser) {
                 let page = session::ensure_page(browser_s, &cli.page, &target_id);
                 page.uid_map = uid_map;
                 page.last_snapshot = Some(text.clone());
             }
+            let paged = commands::inspect::paginate(&text, offset, max_chars);
             if json_mode {
-                json_output(&json!({"ok": true, "snapshot": text}));
+                json_output(&json!({
+                    "ok": true,
+                    "snapshot": paged.text,
+                    "total_chars": paged.total_chars,
+                    "truncated": paged.truncated,
+                    "next_offset": paged.next_offset,
+                }));
             } else {
-                println!("{text}");
+                println!("{}", paged.text);
             }
         }
 
@@ -499,8 +514,54 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
             }
         }
 
-        Command::Screenshot { filename } => {
-            let path = commands::screenshot::run(&client, filename.as_deref()).await?;
+        Command::Screenshot { filename, format, quality, max_width, uid, selector } => {
+            if uid.is_some() && selector.is_some() {
+                return Err("Provide only one of uid or --selector for an element screenshot.".into());
+            }
+            let clip = if let Some(ref u) = uid {
+                let uid_map = get_uid_map(&store, &cli.browser, &cli.page);
+                Some(crate::geometry::clip_for_uid(&client, &uid_map, u).await?)
+            } else if let Some(ref sel) = selector {
+                Some(crate::geometry::clip_for_selector(&client, sel).await?)
+            } else {
+                None
+            };
+            let opts = commands::screenshot::ScreenshotOpts {
+                filename: filename.as_deref(),
+                format: commands::screenshot::ImgFormat::parse(&format)?,
+                quality,
+                max_width,
+                clip,
+            };
+            let path = commands::screenshot::run(&client, &opts).await?;
+            if json_mode {
+                json_output(&json!({"ok": true, "path": path}));
+            } else {
+                println!("{path}");
+            }
+        }
+
+        Command::Download { url, out, timeout } => {
+            let result = commands::download::run(&client, &url, out.as_deref(), timeout).await?;
+            if json_mode {
+                json_output(&json!({
+                    "ok": true,
+                    "path": result.path,
+                    "bytes": result.bytes,
+                    "mime": result.mime,
+                }));
+            } else {
+                println!("{} ({} bytes, {})", result.path, result.bytes, result.mime);
+            }
+        }
+
+        Command::Pdf { filename, landscape, background } => {
+            let opts = commands::pdf::PdfOpts {
+                filename: filename.as_deref(),
+                landscape,
+                background,
+            };
+            let path = commands::pdf::run(&client, &opts).await?;
             if json_mode {
                 json_output(&json!({"ok": true, "path": path}));
             } else {
@@ -540,8 +601,8 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
             }
         }
 
-        Command::Wait { what, pattern, timeout } => {
-            let msg = commands::wait::run(&client, &what, &pattern, timeout).await?;
+        Command::Wait { what, pattern, timeout, idle_ms } => {
+            let msg = commands::wait::run(&client, &what, &pattern, timeout, idle_ms).await?;
             if json_mode {
                 json_output(&json!({"ok": true, "message": msg}));
             } else {

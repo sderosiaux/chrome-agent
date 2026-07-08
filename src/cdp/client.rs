@@ -127,6 +127,65 @@ impl CdpClient {
         self.events_tx.subscribe()
     }
 
+    /// Install a background task that auto-answers JS dialogs
+    /// (`alert`/`confirm`/`prompt`/`beforeunload`) per `policy`.
+    ///
+    /// A native dialog blocks the page with no DOM signal; without this the next
+    /// command silently hangs. No-op for `DialogPolicy::Manual`. The Page domain
+    /// must be enabled for `Page.javascriptDialogOpening` to fire. The task lives
+    /// as long as the connection (it ends when the event channel closes).
+    pub fn spawn_dialog_handler(
+        &self,
+        policy: crate::setup::DialogPolicy,
+        prompt_text: Option<String>,
+    ) {
+        if !policy.auto_handles() {
+            return;
+        }
+        let mut rx = self.events();
+        let sender = self.sender.clone();
+        tokio::spawn(async move {
+            // High offset so our fire-and-forget ids never collide with the
+            // sequential request ids (unmatched responses are dropped harmlessly).
+            let mut local_id: u64 = 1 << 40;
+            loop {
+                match rx.recv().await {
+                    Ok(event) if event.method == "Page.javascriptDialogOpening" => {
+                        let dtype = event
+                            .params
+                            .get("type")
+                            .and_then(Value::as_str)
+                            .unwrap_or("alert");
+                        let message = event
+                            .params
+                            .get("message")
+                            .and_then(Value::as_str)
+                            .unwrap_or("");
+                        let decision =
+                            crate::setup::dialog_decision(policy, dtype, prompt_text.as_deref());
+                        let mut params = serde_json::json!({ "accept": decision.accept });
+                        if let Some(pt) = &decision.prompt_text {
+                            params["promptText"] = Value::String(pt.clone());
+                        }
+                        let request = serde_json::json!({
+                            "id": local_id,
+                            "method": "Page.handleJavaScriptDialog",
+                            "params": params,
+                        });
+                        local_id = local_id.wrapping_add(1);
+                        let _ = sender.send(request.to_string()).await;
+                        eprintln!(
+                            "dialog auto-{}: {dtype} {message:?}",
+                            if decision.accept { "accepted" } else { "dismissed" }
+                        );
+                    }
+                    Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+    }
+
     /// Wait for a specific CDP event matching the given method name.
     pub async fn wait_for_event(
         &self,

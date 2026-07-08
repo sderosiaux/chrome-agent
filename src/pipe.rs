@@ -8,11 +8,11 @@ use crate::cdp::client::CdpClient;
 use crate::commands;
 use crate::pipe_dispatch::{
     dispatch_back, dispatch_batch, dispatch_check, dispatch_click,
-    dispatch_console, dispatch_dblclick, dispatch_diff, dispatch_drag,
+    dispatch_console, dispatch_dblclick, dispatch_diff, dispatch_download, dispatch_drag,
     dispatch_eval, dispatch_extract, dispatch_fill, dispatch_fill_and_submit,
     dispatch_fill_form, dispatch_forward, dispatch_frame, dispatch_goto,
     dispatch_history, dispatch_hover, dispatch_inspect,
-    dispatch_navigate_and_read, dispatch_network, dispatch_press,
+    dispatch_navigate_and_read, dispatch_network, dispatch_pdf, dispatch_press,
     dispatch_read, dispatch_screenshot, dispatch_scroll, dispatch_select,
     dispatch_tabs, dispatch_text, dispatch_type, dispatch_upload,
     dispatch_wait,
@@ -52,6 +52,8 @@ pub async fn run_pipe(cli: &Cli) -> Result<(), crate::BoxError> {
     } else {
         client.enable("Runtime").await?;
     }
+    let dialog_policy = crate::setup::DialogPolicy::parse(&cli.dialog)?;
+    client.spawn_dialog_handler(dialog_policy, cli.dialog_text.clone());
 
     // Main loop: read JSON commands from stdin
     let stdin = BufReader::new(tokio::io::stdin());
@@ -116,6 +118,8 @@ pub async fn run_replay(
     commands::console::inject(&client).await;
     if cli.stealth { crate::setup::apply_stealth(&client).await; }
     else { client.enable("Runtime").await?; }
+    let dialog_policy = crate::setup::DialogPolicy::parse(&cli.dialog)?;
+    client.spawn_dialog_handler(dialog_policy, cli.dialog_text.clone());
 
     for line in content.lines() {
         let line = line.trim();
@@ -164,7 +168,9 @@ async fn dispatch(
         "eval" => dispatch_eval(client, cmd).await,
         "read" => dispatch_read(client, cmd).await,
         "text" => dispatch_text(client, store, browser_name, page_name, cmd).await,
-        "screenshot" => dispatch_screenshot(client).await,
+        "screenshot" => dispatch_screenshot(client, store, browser_name, page_name, cmd).await,
+        "pdf" => dispatch_pdf(client, cmd).await,
+        "download" => dispatch_download(client, timeout, cmd).await,
         "wait" => dispatch_wait(client, timeout, cmd).await,
         "back" => dispatch_back(client).await,
         "forward" => dispatch_forward(client).await,

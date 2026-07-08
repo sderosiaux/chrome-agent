@@ -61,6 +61,14 @@ pub struct Cli {
     #[arg(long, default_value = "default")]
     pub page: String,
 
+    /// How to answer JS dialogs (alert/confirm/prompt/beforeunload): accept, dismiss, or manual
+    #[arg(long, default_value = "accept")]
+    pub dialog: String,
+
+    /// Text to submit for `prompt()` dialogs when --dialog accept (default: empty)
+    #[arg(long)]
+    pub dialog_text: Option<String>,
+
     #[command(subcommand)]
     pub command: Command,
 }
@@ -81,6 +89,9 @@ pub enum Command {
         /// Wait for a CSS selector to appear after navigation
         #[arg(long)]
         wait_for: Option<String>,
+        /// Extra HTTP header "Name: Value" (repeatable) sent with the navigation
+        #[arg(long = "header")]
+        headers: Vec<String>,
     },
 
     /// Click an element by uid, CSS selector, or coordinates
@@ -290,6 +301,12 @@ pub enum Command {
         /// Include href URLs on link nodes
         #[arg(long)]
         urls: bool,
+        /// Cap output to N characters (appends a truncation note; keeps context small)
+        #[arg(long)]
+        max_chars: Option<usize>,
+        /// Skip the first K characters of output (paging; use with --max-chars)
+        #[arg(long, default_value = "0")]
+        offset: usize,
     },
 
     /// Show what changed since the last inspect
@@ -301,6 +318,49 @@ pub enum Command {
         /// Output filename (default: timestamped)
         #[arg(long)]
         filename: Option<String>,
+        /// Image format: png (default) or jpeg (smaller, use with --quality)
+        #[arg(long, default_value = "png")]
+        format: String,
+        /// JPEG quality 0-100 (ignored for png)
+        #[arg(long)]
+        quality: Option<u32>,
+        /// Downscale so the captured width fits within N CSS pixels (keeps files/tokens small)
+        #[arg(long)]
+        max_width: Option<u32>,
+        /// Capture only the element with this uid
+        #[arg(long)]
+        uid: Option<String>,
+        /// Capture only the element matching this CSS selector
+        #[arg(long)]
+        selector: Option<String>,
+    },
+
+    /// Download a URL to disk, fetched in-page so cookies/auth are preserved
+    ///
+    /// Click-triggered browser-native downloads are not supported; resolve the
+    /// target href (e.g. `inspect --urls`) and pass it here.
+    Download {
+        /// URL to download (fetched with the page's session)
+        url: String,
+        /// Output path or filename (default: derived from Content-Disposition/URL into ~/.chrome-agent/tmp)
+        #[arg(long)]
+        out: Option<String>,
+        /// Timeout in seconds
+        #[arg(long, default_value = "30")]
+        timeout: u64,
+    },
+
+    /// Print the current page to a PDF file
+    Pdf {
+        /// Output filename (default: timestamped)
+        #[arg(long)]
+        filename: Option<String>,
+        /// Landscape orientation
+        #[arg(long)]
+        landscape: bool,
+        /// Include background graphics/colors
+        #[arg(long)]
+        background: bool,
     },
 
     /// Auto-extract structured data from repeating page elements (lists, tables, cards)
@@ -329,15 +389,19 @@ pub enum Command {
         selector: Option<String>,
     },
 
-    /// Wait for a condition (text, url, or selector)
+    /// Wait for a condition (text, url, selector, or network-idle)
     Wait {
-        /// What to wait for: "text", "url", or "selector"
+        /// What to wait for: "text", "url", "selector", or "network-idle"
         what: String,
-        /// Pattern to match
+        /// Pattern to match (ignored for network-idle)
+        #[arg(default_value = "")]
         pattern: String,
         /// Timeout in seconds
         #[arg(long, default_value = "10")]
         timeout: u64,
+        /// For network-idle: required quiet window in milliseconds
+        #[arg(long, default_value = "500")]
+        idle_ms: u64,
     },
 
     /// Type text into the focused element (or focus a selector first)
