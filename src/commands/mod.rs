@@ -13,6 +13,7 @@ pub mod goto;
 pub mod history;
 pub mod inspect;
 pub mod network;
+pub mod pdf;
 pub mod read;
 pub mod record;
 pub mod screenshot;

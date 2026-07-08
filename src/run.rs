@@ -539,6 +539,20 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
             }
         }
 
+        Command::Pdf { filename, landscape, background } => {
+            let opts = commands::pdf::PdfOpts {
+                filename: filename.as_deref(),
+                landscape,
+                background,
+            };
+            let path = commands::pdf::run(&client, &opts).await?;
+            if json_mode {
+                json_output(&json!({"ok": true, "path": path}));
+            } else {
+                println!("{path}");
+            }
+        }
+
         Command::Extract { selector, limit, scroll, a11y } => {
             let result = if a11y {
                 commands::extract::run_a11y(&client, limit, scroll).await?

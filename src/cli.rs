@@ -327,6 +327,19 @@ pub enum Command {
         selector: Option<String>,
     },
 
+    /// Print the current page to a PDF file
+    Pdf {
+        /// Output filename (default: timestamped)
+        #[arg(long)]
+        filename: Option<String>,
+        /// Landscape orientation
+        #[arg(long)]
+        landscape: bool,
+        /// Include background graphics/colors
+        #[arg(long)]
+        background: bool,
+    },
+
     /// Auto-extract structured data from repeating page elements (lists, tables, cards)
     Extract {
         /// CSS selector to scope extraction (e.g. "main", ".results")

@@ -239,6 +239,16 @@ pub async fn dispatch_screenshot(
     Ok(json!({"ok": true, "path": path}))
 }
 
+pub async fn dispatch_pdf(client: &CdpClient, cmd: &Value) -> Result<Value, crate::BoxError> {
+    let opts = commands::pdf::PdfOpts {
+        filename: cmd.get("filename").and_then(Value::as_str),
+        landscape: cmd.get("landscape").and_then(Value::as_bool).unwrap_or(false),
+        background: cmd.get("background").and_then(Value::as_bool).unwrap_or(false),
+    };
+    let path = commands::pdf::run(client, &opts).await?;
+    Ok(json!({"ok": true, "path": path}))
+}
+
 pub async fn dispatch_wait(client: &CdpClient, default_timeout: u64, cmd: &Value) -> Result<Value, crate::BoxError> {
     let (what, pattern) = if let Some(w) = cmd.get("what").and_then(Value::as_str) {
         let p = cmd.get("pattern").and_then(Value::as_str)
@@ -627,6 +637,7 @@ pub async fn dispatch_single(
         "read" => dispatch_read(client, cmd).await,
         "text" => dispatch_text(client, store, browser_name, page_name, cmd).await,
         "screenshot" => dispatch_screenshot(client, store, browser_name, page_name, cmd).await,
+        "pdf" => dispatch_pdf(client, cmd).await,
         "wait" => dispatch_wait(client, timeout, cmd).await,
         "back" => dispatch_back(client).await,
         "forward" => dispatch_forward(client).await,
