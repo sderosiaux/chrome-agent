@@ -155,7 +155,13 @@ pub fn json_output(value: &serde_json::Value) {
 
 /// Provide a contextual hint for common errors.
 pub fn error_hint(msg: &str) -> Option<&'static str> {
-    if msg.contains("Connection refused") || msg.contains("No such file") {
+    // Chrome 136+ refuses CDP on the *default* user profile. chrome-agent launches
+    // its own dedicated profile so this only bites when --connect points at a Chrome
+    // started on the normal profile. Matched before the generic "Connection refused"
+    // branch so the actionable hint wins.
+    if msg.contains("Failed to connect to page") || msg.contains("DevToolsActivePort") {
+        Some("Could not attach over CDP. Chrome 136+ disables remote debugging on the default profile: drop --connect to let chrome-agent launch its own dedicated profile, or relaunch your Chrome with a separate --user-data-dir.")
+    } else if msg.contains("Connection refused") || msg.contains("No such file") {
         Some("Is Chrome running? Try: chrome-agent goto <url>")
     } else if msg.contains("uid=") && msg.contains("not found") {
         Some("Run `chrome-agent inspect` to refresh element uids")
@@ -439,5 +445,28 @@ mod tests {
         assert!(error_hint("batch: expected a JSON array").is_some());
         // Unknown errors should return None
         assert!(error_hint("something random").is_none());
+    }
+
+    #[test]
+    fn connect_failure_hints_at_chrome_136() {
+        // The page-attach failure and the missing-port marker both point the user
+        // at the Chrome 136+ default-profile restriction and the --connect workaround.
+        for msg in [
+            "Failed to connect to page after 8 attempts: Connection refused",
+            "DevToolsActivePort file doesn't exist",
+        ] {
+            let hint = error_hint(msg).expect("connect failure should have a hint");
+            assert!(hint.contains("136"), "hint should mention Chrome 136: {hint}");
+            assert!(hint.contains("--connect"), "hint should mention --connect: {hint}");
+        }
+    }
+
+    #[test]
+    fn plain_connection_refused_keeps_generic_hint() {
+        // A bare "Connection refused" (no page-attach context) must NOT be hijacked
+        // by the 136 branch — it keeps the generic "is Chrome running?" hint.
+        let hint = error_hint("Connection refused").unwrap();
+        assert!(hint.contains("Chrome running"));
+        assert!(!hint.contains("136"));
     }
 }
