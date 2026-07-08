@@ -81,6 +81,9 @@ pub enum Command {
         /// Wait for a CSS selector to appear after navigation
         #[arg(long)]
         wait_for: Option<String>,
+        /// Extra HTTP header "Name: Value" (repeatable) sent with the navigation
+        #[arg(long = "header")]
+        headers: Vec<String>,
     },
 
     /// Click an element by uid, CSS selector, or coordinates

@@ -169,9 +169,13 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
 
     let json_mode = cli.json;
     match cli.command {
-        Command::Goto { url, inspect, max_depth, wait_for } => {
+        Command::Goto { url, inspect, max_depth, wait_for, headers } => {
             let depth = max_depth.or(cli.max_depth);
-            let result = commands::goto::run(&client, &url, cli.timeout).await?;
+            let parsed_headers = headers
+                .iter()
+                .map(|h| commands::goto::parse_header(h))
+                .collect::<Result<Vec<_>, _>>()?;
+            let result = commands::goto::run(&client, &url, cli.timeout, &parsed_headers).await?;
             if let Some(ref selector) = wait_for {
                 commands::wait::run(&client, "selector", selector, cli.timeout).await?;
             }

@@ -24,8 +24,19 @@ pub async fn dispatch_goto(
     let url = cmd.get("url").and_then(Value::as_str).ok_or("goto: missing \"url\"")?;
     let inspect = cmd.get("inspect").and_then(Value::as_bool).unwrap_or(false);
     let max_depth = cmd_max_depth(cmd).or(global_max_depth);
+    let parsed_headers = cmd
+        .get("headers")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(Value::as_str)
+                .map(commands::goto::parse_header)
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .transpose()?
+        .unwrap_or_default();
 
-    let result = commands::goto::run(client, url, timeout).await?;
+    let result = commands::goto::run(client, url, timeout, &parsed_headers).await?;
     let _ = commands::history::append(&result.url, &result.title, page_name);
 
     let mut obj = json!({"ok": true, "url": result.url, "title": result.title});
@@ -332,7 +343,7 @@ pub async fn dispatch_navigate_and_read(
 ) -> Result<Value, crate::BoxError> {
     let url = cmd.get("url").and_then(Value::as_str).ok_or("navigate_and_read: missing \"url\"")?;
     let truncate = cmd.get("truncate").and_then(Value::as_u64).map(|v| v as usize);
-    let goto_result = commands::goto::run(client, url, timeout).await?;
+    let goto_result = commands::goto::run(client, url, timeout, &[]).await?;
     let _ = commands::history::append(&goto_result.url, &goto_result.title, page_name);
     let read_result = commands::read::run(client, false, truncate).await?;
     Ok(json!({"ok": true, "url": goto_result.url, "title": goto_result.title, "content": read_result.text_content}))
