@@ -204,8 +204,38 @@ pub async fn dispatch_text(
     Ok(obj)
 }
 
-pub async fn dispatch_screenshot(client: &CdpClient) -> Result<Value, crate::BoxError> {
-    let path = commands::screenshot::run(client, None).await?;
+pub async fn dispatch_screenshot(
+    client: &CdpClient,
+    store: &SessionStore,
+    browser_name: &str,
+    page_name: &str,
+    cmd: &Value,
+) -> Result<Value, crate::BoxError> {
+    let format = commands::screenshot::ImgFormat::parse(
+        cmd.get("format").and_then(Value::as_str).unwrap_or("png"),
+    )?;
+    let quality = cmd.get("quality").and_then(Value::as_u64).map(|q| q as u32);
+    let max_width = cmd.get("max_width").and_then(Value::as_u64).map(|w| w as u32);
+    let uid = cmd.get("uid").and_then(Value::as_str);
+    let selector = cmd.get("selector").and_then(Value::as_str);
+
+    let clip = if let Some(u) = uid {
+        let uid_map = get_uid_map(store, browser_name, page_name);
+        Some(crate::geometry::clip_for_uid(client, &uid_map, u).await?)
+    } else if let Some(sel) = selector {
+        Some(crate::geometry::clip_for_selector(client, sel).await?)
+    } else {
+        None
+    };
+
+    let opts = commands::screenshot::ScreenshotOpts {
+        filename: cmd.get("filename").and_then(Value::as_str),
+        format,
+        quality,
+        max_width,
+        clip,
+    };
+    let path = commands::screenshot::run(client, &opts).await?;
     Ok(json!({"ok": true, "path": path}))
 }
 
@@ -596,7 +626,7 @@ pub async fn dispatch_single(
         "eval" => dispatch_eval(client, cmd).await,
         "read" => dispatch_read(client, cmd).await,
         "text" => dispatch_text(client, store, browser_name, page_name, cmd).await,
-        "screenshot" => dispatch_screenshot(client).await,
+        "screenshot" => dispatch_screenshot(client, store, browser_name, page_name, cmd).await,
         "wait" => dispatch_wait(client, timeout, cmd).await,
         "back" => dispatch_back(client).await,
         "forward" => dispatch_forward(client).await,

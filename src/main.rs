@@ -1,3 +1,4 @@
+mod base64;
 mod browser;
 mod cdp;
 mod cli;
@@ -6,6 +7,7 @@ mod commands;
 mod daemon;
 mod element;
 mod element_ref;
+mod geometry;
 mod pipe;
 mod pipe_dispatch;
 mod run;

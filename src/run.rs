@@ -512,8 +512,26 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
             }
         }
 
-        Command::Screenshot { filename } => {
-            let path = commands::screenshot::run(&client, filename.as_deref()).await?;
+        Command::Screenshot { filename, format, quality, max_width, uid, selector } => {
+            if uid.is_some() && selector.is_some() {
+                return Err("Provide only one of uid or --selector for an element screenshot.".into());
+            }
+            let clip = if let Some(ref u) = uid {
+                let uid_map = get_uid_map(&store, &cli.browser, &cli.page);
+                Some(crate::geometry::clip_for_uid(&client, &uid_map, u).await?)
+            } else if let Some(ref sel) = selector {
+                Some(crate::geometry::clip_for_selector(&client, sel).await?)
+            } else {
+                None
+            };
+            let opts = commands::screenshot::ScreenshotOpts {
+                filename: filename.as_deref(),
+                format: commands::screenshot::ImgFormat::parse(&format)?,
+                quality,
+                max_width,
+                clip,
+            };
+            let path = commands::screenshot::run(&client, &opts).await?;
             if json_mode {
                 json_output(&json!({"ok": true, "path": path}));
             } else {

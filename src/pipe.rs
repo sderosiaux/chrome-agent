@@ -164,7 +164,7 @@ async fn dispatch(
         "eval" => dispatch_eval(client, cmd).await,
         "read" => dispatch_read(client, cmd).await,
         "text" => dispatch_text(client, store, browser_name, page_name, cmd).await,
-        "screenshot" => dispatch_screenshot(client).await,
+        "screenshot" => dispatch_screenshot(client, store, browser_name, page_name, cmd).await,
         "wait" => dispatch_wait(client, timeout, cmd).await,
         "back" => dispatch_back(client).await,
         "forward" => dispatch_forward(client).await,

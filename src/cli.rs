@@ -310,6 +310,21 @@ pub enum Command {
         /// Output filename (default: timestamped)
         #[arg(long)]
         filename: Option<String>,
+        /// Image format: png (default) or jpeg (smaller, use with --quality)
+        #[arg(long, default_value = "png")]
+        format: String,
+        /// JPEG quality 0-100 (ignored for png)
+        #[arg(long)]
+        quality: Option<u32>,
+        /// Downscale so the captured width fits within N CSS pixels (keeps files/tokens small)
+        #[arg(long)]
+        max_width: Option<u32>,
+        /// Capture only the element with this uid
+        #[arg(long)]
+        uid: Option<String>,
+        /// Capture only the element matching this CSS selector
+        #[arg(long)]
+        selector: Option<String>,
     },
 
     /// Auto-extract structured data from repeating page elements (lists, tables, cards)
