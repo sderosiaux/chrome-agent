@@ -8,7 +8,7 @@ use crate::cdp::client::CdpClient;
 use crate::commands;
 use crate::pipe_dispatch::{
     dispatch_back, dispatch_batch, dispatch_check, dispatch_click,
-    dispatch_console, dispatch_dblclick, dispatch_diff, dispatch_drag,
+    dispatch_console, dispatch_dblclick, dispatch_diff, dispatch_download, dispatch_drag,
     dispatch_eval, dispatch_extract, dispatch_fill, dispatch_fill_and_submit,
     dispatch_fill_form, dispatch_forward, dispatch_frame, dispatch_goto,
     dispatch_history, dispatch_hover, dispatch_inspect,
@@ -170,6 +170,7 @@ async fn dispatch(
         "text" => dispatch_text(client, store, browser_name, page_name, cmd).await,
         "screenshot" => dispatch_screenshot(client, store, browser_name, page_name, cmd).await,
         "pdf" => dispatch_pdf(client, cmd).await,
+        "download" => dispatch_download(client, timeout, cmd).await,
         "wait" => dispatch_wait(client, timeout, cmd).await,
         "back" => dispatch_back(client).await,
         "forward" => dispatch_forward(client).await,

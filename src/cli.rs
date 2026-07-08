@@ -335,6 +335,21 @@ pub enum Command {
         selector: Option<String>,
     },
 
+    /// Download a URL to disk, fetched in-page so cookies/auth are preserved
+    ///
+    /// Click-triggered browser-native downloads are not supported; resolve the
+    /// target href (e.g. `inspect --urls`) and pass it here.
+    Download {
+        /// URL to download (fetched with the page's session)
+        url: String,
+        /// Output path or filename (default: derived from Content-Disposition/URL into ~/.chrome-agent/tmp)
+        #[arg(long)]
+        out: Option<String>,
+        /// Timeout in seconds
+        #[arg(long, default_value = "30")]
+        timeout: u64,
+    },
+
     /// Print the current page to a PDF file
     Pdf {
         /// Output filename (default: timestamped)

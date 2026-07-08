@@ -541,6 +541,20 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
             }
         }
 
+        Command::Download { url, out, timeout } => {
+            let result = commands::download::run(&client, &url, out.as_deref(), timeout).await?;
+            if json_mode {
+                json_output(&json!({
+                    "ok": true,
+                    "path": result.path,
+                    "bytes": result.bytes,
+                    "mime": result.mime,
+                }));
+            } else {
+                println!("{} ({} bytes, {})", result.path, result.bytes, result.mime);
+            }
+        }
+
         Command::Pdf { filename, landscape, background } => {
             let opts = commands::pdf::PdfOpts {
                 filename: filename.as_deref(),

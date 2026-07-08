@@ -239,6 +239,14 @@ pub async fn dispatch_screenshot(
     Ok(json!({"ok": true, "path": path}))
 }
 
+pub async fn dispatch_download(client: &CdpClient, default_timeout: u64, cmd: &Value) -> Result<Value, crate::BoxError> {
+    let url = cmd.get("url").and_then(Value::as_str).ok_or("download: missing \"url\"")?;
+    let out = cmd.get("out").and_then(Value::as_str);
+    let timeout = cmd.get("timeout").and_then(Value::as_u64).unwrap_or(default_timeout);
+    let result = commands::download::run(client, url, out, timeout).await?;
+    Ok(json!({"ok": true, "path": result.path, "bytes": result.bytes, "mime": result.mime}))
+}
+
 pub async fn dispatch_pdf(client: &CdpClient, cmd: &Value) -> Result<Value, crate::BoxError> {
     let opts = commands::pdf::PdfOpts {
         filename: cmd.get("filename").and_then(Value::as_str),
@@ -644,6 +652,7 @@ pub async fn dispatch_single(
         "text" => dispatch_text(client, store, browser_name, page_name, cmd).await,
         "screenshot" => dispatch_screenshot(client, store, browser_name, page_name, cmd).await,
         "pdf" => dispatch_pdf(client, cmd).await,
+        "download" => dispatch_download(client, timeout, cmd).await,
         "wait" => dispatch_wait(client, timeout, cmd).await,
         "back" => dispatch_back(client).await,
         "forward" => dispatch_forward(client).await,

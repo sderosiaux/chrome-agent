@@ -4,6 +4,7 @@ pub mod click;
 pub mod console;
 pub mod dblclick;
 pub mod diff;
+pub mod download;
 pub mod drag;
 pub mod eval;
 pub mod extract;
