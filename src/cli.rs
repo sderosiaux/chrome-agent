@@ -290,6 +290,12 @@ pub enum Command {
         /// Include href URLs on link nodes
         #[arg(long)]
         urls: bool,
+        /// Cap output to N characters (appends a truncation note; keeps context small)
+        #[arg(long)]
+        max_chars: Option<usize>,
+        /// Skip the first K characters of output (paging; use with --max-chars)
+        #[arg(long, default_value = "0")]
+        offset: usize,
     },
 
     /// Show what changed since the last inspect

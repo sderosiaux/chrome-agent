@@ -444,7 +444,7 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
             output_action(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, inspect, depth, json_mode).await?;
         }
 
-        Command::Inspect { verbose, max_depth, uid, filter, scroll, limit, urls } => {
+        Command::Inspect { verbose, max_depth, uid, filter, scroll, limit, urls, max_chars, offset } => {
             if scroll {
                 commands::extract::scroll_to_load(&client).await?;
             }
@@ -459,15 +459,24 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
             if urls {
                 text = commands::inspect::resolve_urls(&client, &text, &uid_map).await;
             }
+            // Persist the FULL snapshot so diff and uid lookups stay complete;
+            // paging only affects what we print/return.
             if let Some(browser_s) = store.browsers.get_mut(&cli.browser) {
                 let page = session::ensure_page(browser_s, &cli.page, &target_id);
                 page.uid_map = uid_map;
                 page.last_snapshot = Some(text.clone());
             }
+            let paged = commands::inspect::paginate(&text, offset, max_chars);
             if json_mode {
-                json_output(&json!({"ok": true, "snapshot": text}));
+                json_output(&json!({
+                    "ok": true,
+                    "snapshot": paged.text,
+                    "total_chars": paged.total_chars,
+                    "truncated": paged.truncated,
+                    "next_offset": paged.next_offset,
+                }));
             } else {
-                println!("{text}");
+                println!("{}", paged.text);
             }
         }
 

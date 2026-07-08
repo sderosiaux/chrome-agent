@@ -117,7 +117,16 @@ pub async fn dispatch_inspect(
         page.last_snapshot = Some(snapshot.text.clone());
     }
 
-    Ok(json!({"ok": true, "snapshot": snapshot.text}))
+    let offset = cmd.get("offset").and_then(Value::as_u64).unwrap_or(0) as usize;
+    let max_chars = cmd.get("max_chars").and_then(Value::as_u64).map(|n| n as usize);
+    let paged = commands::inspect::paginate(&snapshot.text, offset, max_chars);
+    Ok(json!({
+        "ok": true,
+        "snapshot": paged.text,
+        "total_chars": paged.total_chars,
+        "truncated": paged.truncated,
+        "next_offset": paged.next_offset,
+    }))
 }
 
 pub async fn dispatch_diff(
