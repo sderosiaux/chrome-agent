@@ -73,6 +73,8 @@ LLM USAGE GUIDE:
     chrome-agent inspect --uid n50                     # subtree only
     chrome-agent inspect --filter "link" --urls        # links with resolved href URLs
     chrome-agent inspect --filter "article" --scroll --limit 50  # infinite scroll (X.com, feeds)
+    chrome-agent inspect --max-chars 4000              # cap output; appends a tail with the next --offset
+    chrome-agent inspect --max-chars 4000 --offset 4000  # page through a huge tree deterministically
 
   Content extraction (choose the right tool):
     chrome-agent read                                  # article/main content (Readability)
@@ -110,10 +112,28 @@ LLM USAGE GUIDE:
   Navigation:
     chrome-agent goto https://example.com              # navigate
     chrome-agent goto https://spa.com --wait-for "main" # wait for selector after nav
+    chrome-agent goto https://api.co --header "Authorization: Bearer XYZ"  # extra HTTP headers (repeatable)
     chrome-agent back                                  # history back
     chrome-agent forward                               # history forward
     chrome-agent scroll down                           # scroll page
     chrome-agent wait text "Success"                   # wait for content
+    chrome-agent wait network-idle                     # wait until network quiets (SPA/XHR settle)
+    chrome-agent wait network-idle --idle-ms 800 --timeout 20  # tune the quiet window
+
+  Downloads, PDF, screenshots (files land in ~/.chrome-agent/tmp; paths on stdout):
+    chrome-agent download https://site/report.pdf     # fetch in-page, keeps cookies/auth (login-gated files)
+    chrome-agent download https://site/f.csv --out ./data.csv   # choose the destination path
+    chrome-agent pdf --out page.pdf                    # print current page to PDF (Page.printToPDF)
+    chrome-agent pdf --landscape --background          # orientation + background graphics
+    chrome-agent screenshot                            # full page, PNG
+    chrome-agent screenshot --format jpeg --quality 60 --max-width 1024  # smaller file (fewer tokens if re-read)
+    chrome-agent screenshot --uid n42                  # capture just one element (or --selector "css")
+
+  Dialogs (alert/confirm/prompt/beforeunload) — auto-handled so the page never hangs:
+    # Default: --dialog accept. A native dialog otherwise blocks with no DOM signal.
+    chrome-agent --dialog dismiss click n20            # cancel every dialog instead
+    chrome-agent --dialog accept --dialog-text "hi" click n20   # answer prompt() with text
+    chrome-agent --dialog manual click n20             # opt out (legacy: dialogs left alone)
 
   Multi-tab:
     chrome-agent --page tab2 goto https://other.com
@@ -136,6 +156,8 @@ LLM USAGE GUIDE:
     chrome-agent history [--filter "pattern"]          # browsing history
     chrome-agent status                                # session info
     chrome-agent screenshot [--filename name]          # screenshot to file
+    chrome-agent pdf [--out name] [--landscape]        # current page to PDF
+    chrome-agent download <url> [--out path]           # download a URL (auth-preserving)
 
   Cleanup:
     chrome-agent close                                 # stop browser
@@ -154,3 +176,9 @@ LLM USAGE GUIDE:
     - After `frame <selector>`, re-inspect to get iframe UIDs. `frame main` to return.
     - --max-depth works on goto/click/fill --inspect too (not just standalone inspect).
     - --filter gives a flat list — great for finding interactive elements quickly.
+    - inspect --max-chars caps output and tells you the next --offset to page through.
+    - wait network-idle beats fixed sleeps for SPA/XHR settle (opt-in, off the stealth hot path).
+    - download uses an in-page fetch, so it keeps the page's login. Click-triggered
+      browser-native downloads are not supported — resolve the href (inspect --urls) and download it.
+    - JS dialogs auto-accept by default. Use --dialog dismiss/manual to change behavior.
+    - screenshot --format jpeg --max-width shrinks captures; --uid/--selector clips to one element.

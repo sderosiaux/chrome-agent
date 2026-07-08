@@ -1,7 +1,7 @@
-# chrome-agent v0.4.0
+# chrome-agent v0.4.3
 
 Single Rust binary for browser automation via CDP. Built for AI agents.
-~7.3K lines Rust, zero runtime dependencies, 3 MB binary.
+~8.7K lines Rust, zero runtime dependencies, 3 MB binary.
 
 ## Architecture
 
@@ -11,13 +11,15 @@ CLI (clap) → CDP Client (WebSocket) → Chrome
 
 | Module | Role |
 |--------|------|
-| `src/cli.rs` | CLI definition: `Cli` struct, `Command` enum (37 commands) |
+| `src/cli.rs` | CLI definition: `Cli` struct, `Command` enum (39 commands) |
 | `src/run.rs` | CLI command dispatch (match on Command enum) |
 | `src/pipe.rs` | Pipe mode: persistent connection, JSON stdin/stdout |
 | `src/pipe_dispatch.rs` | Pipe/batch command dispatchers (shared by pipe + batch + CLI batch) |
 | `src/cdp/` | WebSocket transport, message correlation, CDP types |
-| `src/commands/` | 23 command modules: goto, click, fill, inspect, eval, text, read, extract, diff, network, console, wait, screenshot, tabs, dblclick, select, check, upload, drag, frame, batch... |
+| `src/commands/` | 25 command modules: goto, click, fill, inspect, eval, text, read, extract, diff, network, console, wait, screenshot, pdf, download, tabs, dblclick, select, check, upload, drag, frame, batch... |
 | `src/element.rs` | uid/selector/coordinate resolution → CDP input dispatch, JS click fallback, dblclick, select, check, upload, drag |
+| `src/geometry.rs` | box-model → screenshot clip math (quad bounds, downscale factor), uid/selector clip resolution |
+| `src/base64.rs` | shared RFC 4648 decoder (screenshot/pdf/download) — no `base64` crate, keeps musl graph pure-Rust |
 | `src/element_ref.rs` | ElementRef abstraction (decouples from CDP internals) |
 | `src/snapshot.rs` | Accessibility tree → compact text with stable uids (backendNodeId), role filter + aliases |
 | `src/truncate.rs` | UTF-8 safe string truncation (prevents panics on multi-byte chars) |
@@ -81,8 +83,15 @@ cargo clippy -- -D warnings  # zero warnings enforced in CI
 - **`batch`** — CLI reads JSON array from stdin, dispatches sequentially via `pipe_dispatch::dispatch_single`. Pipe mode uses `"commands"` array field.
 - **`frame`** — uses `Page.getFrameTree` to find child frames, `Page.createIsolatedWorld` to get execution context. Only `<iframe>`, not `<frame>`/`<frameset>`.
 - **`inspect --urls`** — post-processes snapshot text, resolves href on link nodes via `DOM.resolveNode` + `Runtime.callFunctionOn`
+- **`inspect --max-chars`/`--offset`** — char-based, UTF-8-safe output paging via `inspect::paginate`. Full snapshot still persisted for diff/uid lookups; only the printed window is capped. Truncated output appends the next `--offset`.
+- **`goto --header`** — repeatable `"Name: Value"` (split on first colon) applied via `Network.setExtraHTTPHeaders` before navigate. `--post` intentionally not implemented (fragile over `Page.navigate`).
+- **`wait network-idle`** — enables Network domain, tracks in-flight requestIds (`InFlightTracker`), resolves after `--idle-ms` at zero in-flight, bounded by `--timeout`. Opt-in, off the stealth hot path.
+- **screenshot flags** — `--format jpeg`/`--quality`, `--max-width` (downscale via CDP `clip.scale`, no image crate), `--uid`/`--selector` clip via `DOM.getBoxModel` (`geometry::clip_for_*`). Never emits base64 on stdout.
+- **`pdf`** — `Page.printToPDF` (`transferMode: ReturnAsBase64`) → shared `base64::decode` → 0600 file, mirrors screenshot.
+- **`download <url>`** — in-page `fetch(url,{credentials:'include'})` → base64 in page → `base64::decode` → 0600 file. Auth-preserving. Filename from Content-Disposition (incl. RFC 5987 `filename*`) then URL. Click-triggered browser-native downloads NOT handled (resolve href + download).
+- **JS dialog auto-handling** — `CdpClient::spawn_dialog_handler` runs a background task on every connection (CLI + pipe) answering `Page.javascriptDialogOpening` via `Page.handleJavaScriptDialog` per `--dialog` (accept default | dismiss | manual) + `--dialog-text`. Pure decision in `setup::dialog_decision`; fire-and-forget request ids offset by `1<<40` to avoid collision.
 - **`network --abort`** — enables `Fetch` domain with URL pattern, intercepts `Fetch.requestPaused`, calls `Fetch.failRequest` with `BlockedByClient`
-- **File split** — main.rs (72 lines) → cli.rs (450), run.rs (745), pipe_dispatch.rs (608). All files under 1000 lines (hook-enforced).
+- **File split** — main.rs (72 lines) → cli.rs (450), run.rs (745), pipe_dispatch.rs (608). All files under 1000 lines (hook-enforced) — `element.rs` box-model helpers were split into `geometry.rs` for this reason.
 
 ## Gotchas
 
@@ -106,6 +115,10 @@ cargo clippy -- -D warnings  # zero warnings enforced in CI
 - `batch` CLI mode: uids change between invocations (new CDP connection = new backendNodeIds). Use pipe mode for uid-stable multi-command flows.
 - `select` on non-`<select>` element throws "Element is not a \<select\>". Custom dropdowns (React, MUI) need click + click approach.
 - `network --abort` is blocking: it runs for `--live N` seconds intercepting requests, then disables Fetch domain. Start abort before navigating to the page.
+- `download` is `--url`-only (in-page fetch). It cannot capture a click-initiated browser-native download — resolve the href (`inspect --urls`) and pass the URL. Large files are held in memory as base64 during transfer.
+- JS dialogs auto-accept by default. `beforeunload` under `accept` means "proceed" (the agent asked to navigate). Use `--dialog manual` to restore the old blocking behaviour. The handler logs to stderr, never stdout (safe for `--json`).
+- `wait network-idle` takes an empty pattern; other wait types still require one. In pipe mode use `{"cmd":"wait","what":"network-idle"}`.
+- `Page.captureScreenshot` `clip.scale` downsamples without any image crate — required to keep the musl dep graph pure-Rust (issue #3). Element clip uses the border-box bounds of `DOM.getBoxModel`.
 
 ## Linting
 

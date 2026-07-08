@@ -3,7 +3,7 @@ name: chrome-agent
 description: Browser automation for AI agents. Use when the user asks to interact with websites, scrape data, fill forms, take screenshots, or automate any browser task. Triggers on "open a website", "go to", "scrape", "fill the form", "click", "take a screenshot", "read this page", "search on", "check this site".
 metadata:
   author: sderosiaux
-  version: "0.4.0"
+  version: "0.4.3"
   tags: ["browser", "automation", "scraping", "chrome", "cdp"]
 ---
 
@@ -73,15 +73,17 @@ chrome-agent --connect http://127.0.0.1:9222 goto https://protected-site.com --i
 
 ```bash
 # Navigation
-chrome-agent goto <url> [--inspect] [--wait-for "selector"]
+chrome-agent goto <url> [--inspect] [--wait-for "selector"] [--header "K: V"]
 chrome-agent back
 chrome-agent forward
 chrome-agent scroll down|up|<uid>
+chrome-agent wait network-idle [--idle-ms N] [--timeout N]   # wait for XHR/SPA to settle
 
 # Inspection
 chrome-agent inspect [--max-depth N] [--filter "button,link"] [--uid nN] [--urls]
 chrome-agent inspect --filter "link" --urls              # links with resolved href URLs
 chrome-agent inspect --filter "article" --scroll --limit 50  # collect from infinite scroll
+chrome-agent inspect --max-chars 4000 [--offset 4000]    # cap/page huge trees (tail shows next --offset)
 
 # Click (3 targeting modes: uid, --selector, --xy)
 chrome-agent click <uid> [--inspect]
@@ -138,8 +140,12 @@ echo '[{"cmd":"goto","url":"..."},{"cmd":"inspect"},{"cmd":"click","uid":"n12"}]
 # Pipe mode (persistent connection, 10x faster for multi-step workflows)
 echo '{"cmd":"goto","url":"...","inspect":true}' | chrome-agent pipe
 
+# Files: screenshots, PDF, downloads (saved to ~/.chrome-agent/tmp; path on stdout)
+chrome-agent screenshot [--filename name] [--format jpeg] [--quality N] [--max-width N] [--uid nN|--selector "css"]
+chrome-agent pdf [--out name] [--landscape] [--background]        # current page to PDF
+chrome-agent download <url> [--out path]                          # auth-preserving (in-page fetch)
+
 # Other
-chrome-agent screenshot [--filename name]
 chrome-agent diff                                        # what changed since last inspect
 chrome-agent wait text|url|selector "pattern" [--timeout N]
 chrome-agent tabs
@@ -156,7 +162,11 @@ chrome-agent close [--purge]
 --headed       # Show browser window (default is headless)
 --connect URL  # Use real Chrome (for DataDome/Kasada sites)
 --copy-cookies # Use cookies from your real Chrome profile
+--dialog MODE  # JS dialog policy: accept (default) | dismiss | manual
+--dialog-text  # Text submitted for prompt() dialogs under --dialog accept
 ```
+
+JS dialogs (`alert`/`confirm`/`prompt`/`beforeunload`) are auto-accepted by default so the page never hangs. Use `--dialog dismiss` to cancel them.
 
 ## JSON Output Format
 
@@ -178,7 +188,9 @@ Per-command shapes:
 - `network` → `{"ok":true, "requests":[{"url":"...", "status":200, ...}]}`
 - `console` → `{"ok":true, "messages":[{"level":"error", "message":"..."}]}`
 - `batch` → `{"ok":true, "results":[...one result per command...]}`
-- `screenshot` → `{"ok":true, "path":"/path/to/file.png"}`
+- `screenshot`/`pdf` → `{"ok":true, "path":"/path/to/file"}`
+- `download` → `{"ok":true, "path":"...", "bytes":N, "mime":"..."}`
+- `inspect --max-chars` → adds `{"total_chars":N, "truncated":bool, "next_offset":N|null}`
 
 ## Token Budget
 
@@ -207,3 +219,6 @@ An inspect of a typical page is ~50-200 tokens. To stay lean:
 14. **batch for multi-step sequences** — pipe JSON array to stdin. Faster than separate CLI calls. UIDs from inspect are valid within the same batch.
 15. **close --purge** deletes browser profile (cookies, cache) when done.
 16. **Parallel agents**: use `--browser <unique-name>` to isolate sessions.
+17. **download is auth-preserving** — it fetches inside the page so logins carry over. It can't capture a click-triggered browser download; get the href with `inspect --urls` and pass the URL.
+18. **wait network-idle over sleeps** — for SPA/XHR settle, `wait network-idle` is deterministic; avoid guessing fixed timeouts.
+19. **screenshots can be large** — prefer `--format jpeg --max-width 1024` or `--uid`/`--selector` to keep files (and any re-read tokens) small.
