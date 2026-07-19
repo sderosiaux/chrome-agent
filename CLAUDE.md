@@ -1,7 +1,7 @@
-# chrome-agent v0.4.3
+# chrome-agent v0.5.1
 
 Single Rust binary for browser automation via CDP. Built for AI agents.
-~8.7K lines Rust, zero runtime dependencies, 3 MB binary.
+~8.8K lines Rust, zero runtime dependencies, 3 MB binary.
 
 ## Architecture
 
@@ -11,22 +11,23 @@ CLI (clap) → CDP Client (WebSocket) → Chrome
 
 | Module | Role |
 |--------|------|
-| `src/cli.rs` | CLI definition: `Cli` struct, `Command` enum (39 commands) |
+| `src/cli.rs` | CLI definition: `Cli` struct, `Command` enum (38 commands) |
 | `src/run.rs` | CLI command dispatch (match on Command enum) |
 | `src/pipe.rs` | Pipe mode: persistent connection, JSON stdin/stdout |
 | `src/pipe_dispatch.rs` | Pipe/batch command dispatchers (shared by pipe + batch + CLI batch) |
 | `src/cdp/` | WebSocket transport, message correlation, CDP types |
 | `src/commands/` | 25 command modules: goto, click, fill, inspect, eval, text, read, extract, diff, network, console, wait, screenshot, pdf, download, tabs, dblclick, select, check, upload, drag, frame, batch... |
-| `src/element.rs` | uid/selector/coordinate resolution → CDP input dispatch, JS click fallback, dblclick, select, check, upload, drag |
+| `src/element.rs` | uid/coordinate resolution → CDP input dispatch, JS click fallback, dblclick, select, check, upload, drag |
+| `src/element_selector.rs` | CSS-selector actions (click/dblclick/fill/focus) — split from element.rs for the 1000-line cap, re-exported via `pub use` |
 | `src/geometry.rs` | box-model → screenshot clip math (quad bounds, downscale factor), uid/selector clip resolution |
 | `src/base64.rs` | shared RFC 4648 decoder (screenshot/pdf/download) — no `base64` crate, keeps musl graph pure-Rust |
 | `src/element_ref.rs` | ElementRef abstraction (decouples from CDP internals) |
 | `src/snapshot.rs` | Accessibility tree → compact text with stable uids (backendNodeId), role filter + aliases |
 | `src/truncate.rs` | UTF-8 safe string truncation (prevents panics on multi-byte chars) |
-| `src/session.rs` | JSON session persistence (~/.chrome-agent/sessions.json, 0600 perms, conflict detection) |
+| `src/session.rs` | JSON session persistence (~/.chrome-agent/sessions.json, 0600 perms, flock + read-merge-write for parallel-safe saves) |
 | `src/browser.rs` | Chrome launch, auto-discovery, stale DevToolsActivePort cleanup, profile management |
 | `src/setup.rs` | 7 stealth patches (shared by run.rs + pipe.rs) |
-| `src/run_helpers.rs` | Shared output/error handling, connect_page with 5x retry |
+| `src/run_helpers.rs` | Shared output/error handling, connect_page with 8-attempt retry |
 | `src/daemon.rs` | Optional micro-daemon (Unix only), heartbeat, crash recovery |
 | `vendor/Readability.js` | Mozilla Readability (90KB, MIT) embedded via include_str! |
 | `vendor/extract.js` | MDR/DEPTA-inspired data record extraction (standalone, tested via jsdom) |
@@ -72,10 +73,10 @@ cargo clippy -- -D warnings  # zero warnings enforced in CI
 - **Command aliases** — navigate/open/go, snap/snapshot/tree, js/execute, capture, tap
 - **`--copy-cookies`** — copies Cookies SQLite + Local State from user's real Chrome profile. Enables access to logged-in sites (X.com, Gmail) without `--connect`. macOS Keychain decrypts the cookies.
 - **`extract --scroll`** — scrolls page before extracting, uses `MutationObserver` to wait for lazy-loaded content. Uses `Math.max(body, documentElement)` for scroll height (YouTube fix). Max 10 iterations.
-- **Parallel agent isolation** — `--browser <name>` per agent. Session conflict detection via mtime.
-- **connect_page with 5x retry** — page-level CDP connection retries with 300ms backoff
+- **Parallel agent isolation** — `--browser <name>` per agent. Saves are parallel-safe via an exclusive `flock` on `sessions.lock` + read-merge-write: each save re-reads the on-disk store under the lock, deletes only the browsers this process dropped since load, upserts its own, then atomically renames a per-PID temp file into place.
+- **connect_page with 8-attempt retry** — page-level CDP connection retries (up to 8 attempts) with 500ms/300ms backoff between tries
 - **`forward`** — symmetric to `back`, uses `Page.getNavigationHistory` + `Page.navigateToHistoryEntry`
-- **`dblclick`** — 4 mouse events (pressed/released x2 with click_count 1 then 2), JS fallback via `dblclick` MouseEvent
+- **`dblclick`** — 4 mouse events (pressed/released x2 with click_count 1 then 2), JS fallback via `dblclick` MouseEvent. `--selector` resolves the element's viewport-center coords then runs the native CDP double-click (`dblclick_selector`); it is a real double-click, not a single `click_selector`.
 - **`select`** — matches by `option.value` first, then by `option.text.trim()`. Dispatches `change` event.
 - **`check`/`uncheck`** — idempotent: queries `this.checked` via callFunctionOn, clicks only if state differs
 - **`upload`** — validates file paths exist before CDP call. Uses `DOM.setFileInputFiles` with backendNodeId (uid) or nodeId (selector)
@@ -91,7 +92,7 @@ cargo clippy -- -D warnings  # zero warnings enforced in CI
 - **`download <url>`** — in-page `fetch(url,{credentials:'include'})` → base64 in page → `base64::decode` → 0600 file. Auth-preserving. Filename from Content-Disposition (incl. RFC 5987 `filename*`) then URL. Click-triggered browser-native downloads NOT handled (resolve href + download).
 - **JS dialog auto-handling** — `CdpClient::spawn_dialog_handler` runs a background task on every connection (CLI + pipe) answering `Page.javascriptDialogOpening` via `Page.handleJavaScriptDialog` per `--dialog` (accept default | dismiss | manual) + `--dialog-text`. Pure decision in `setup::dialog_decision`; fire-and-forget request ids offset by `1<<40` to avoid collision.
 - **`network --abort`** — enables `Fetch` domain with URL pattern, intercepts `Fetch.requestPaused`, calls `Fetch.failRequest` with `BlockedByClient`
-- **File split** — main.rs (72 lines) → cli.rs (450), run.rs (745), pipe_dispatch.rs (608). All files under 1000 lines (hook-enforced) — `element.rs` box-model helpers were split into `geometry.rs` for this reason.
+- **File split** — main.rs (72 lines) → cli.rs (450), run.rs (745), pipe_dispatch.rs (608). All files under 1000 lines (hook-enforced) — `element.rs` box-model helpers were split into `geometry.rs`, and its CSS-selector actions into `element_selector.rs`, for this reason.
 
 ## Gotchas
 
