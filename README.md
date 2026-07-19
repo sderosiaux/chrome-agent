@@ -204,7 +204,7 @@ chrome-agent screenshot
 
 | Command | What it does |
 |---------|------------|
-| `frame <selector\|main>` | Switch execution context to an iframe (or back to main). |
+| `frame <selector\|main>` | Switch `eval`/`inspect` into an iframe (or back to main). Persists only within a `pipe`/`batch` process. |
 | `batch` | Execute multiple commands from a JSON array on stdin. |
 | `pipe` | Persistent JSON stdin/stdout connection. |
 
@@ -284,15 +284,19 @@ chrome-agent dblclick n42
 
 ## Iframes
 
-```bash
-# Switch into an iframe
-chrome-agent frame "#payment-iframe"
-chrome-agent inspect    # see iframe content
-chrome-agent fill --selector "input[name=card]" "4242424242424242"
+The `frame` switch binds `eval` and `inspect` to the iframe — but **only within one process**, so drive it through `pipe` (or `batch`), never as separate CLI calls:
 
-# Switch back to main page
-chrome-agent frame main
+```bash
+printf '%s\n' \
+  '{"cmd":"frame","target":"#payment-iframe"}' \
+  '{"cmd":"inspect"}' \
+  '{"cmd":"fill","uid":"n42","value":"4242424242424242"}' \
+  '{"cmd":"frame","target":"main"}' | chrome-agent pipe
 ```
+
+- Target the intended iframe precisely (e.g. `iframe[src*="checkout"]`); a bare `iframe` matches the first one in DOM order, often an ad `about:blank` slot.
+- `frame` scopes `eval`/`inspect`; it does **not** scope `--selector` targeting. Run `inspect` after the switch to get iframe uids, then act by uid (uids resolve across frames).
+- Each standalone `chrome-agent <cmd>` opens a fresh connection, so `chrome-agent frame …` followed by a separate `chrome-agent inspect` loses the switch. Use `pipe`/`batch`.
 
 ## Batch mode
 

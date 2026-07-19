@@ -24,6 +24,21 @@ fn maybe_block_scope(expression: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
+/// Build `Runtime.evaluate` params, scoping to the frame's isolated world
+/// when the `frame` command has bound one (issue #8). Without a binding the
+/// `contextId` is omitted and evaluation targets the top document as before.
+fn evaluate_params(client: &CdpClient, expression: &str) -> Value {
+    let mut params = json!({
+        "expression": expression,
+        "returnByValue": true,
+        "awaitPromise": true,
+    });
+    if let Some(ctx) = client.frame_context() {
+        params["contextId"] = json!(ctx.context_id);
+    }
+    params
+}
+
 /// Evaluate JS and return the raw `serde_json::Value` (for JSON mode).
 pub async fn run_raw(
     client: &CdpClient,
@@ -31,14 +46,7 @@ pub async fn run_raw(
 ) -> Result<Value, crate::BoxError> {
     let expression = maybe_block_scope(expression);
     let result: EvaluateResult = client
-        .call(
-            "Runtime.evaluate",
-            json!({
-                "expression": expression,
-                "returnByValue": true,
-                "awaitPromise": true,
-            }),
-        )
+        .call("Runtime.evaluate", evaluate_params(client, &expression))
         .await?;
 
     if let Some(exception) = &result.exception_details {
@@ -63,14 +71,7 @@ pub async fn run(
 ) -> Result<String, crate::BoxError> {
     let expression = maybe_block_scope(expression);
     let result: EvaluateResult = client
-        .call(
-            "Runtime.evaluate",
-            json!({
-                "expression": expression,
-                "returnByValue": true,
-                "awaitPromise": true,
-            }),
-        )
+        .call("Runtime.evaluate", evaluate_params(client, &expression))
         .await?;
 
     // Check for exception

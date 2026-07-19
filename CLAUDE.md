@@ -81,7 +81,7 @@ cargo clippy -- -D warnings  # zero warnings enforced in CI
 - **`upload`** — validates file paths exist before CDP call. Uses `DOM.setFileInputFiles` with backendNodeId (uid) or nodeId (selector)
 - **`drag`** — 5-step linear interpolation between source/destination centers, 16ms between moves for realism
 - **`batch`** — CLI reads JSON array from stdin, dispatches sequentially via `pipe_dispatch::dispatch_single`. Pipe mode uses `"commands"` array field.
-- **`frame`** — uses `Page.getFrameTree` to find child frames, `Page.createIsolatedWorld` to get execution context. Only `<iframe>`, not `<frame>`/`<frameset>`.
+- **`frame`** — resolves the iframe via `document.querySelector` → `DOM.describeNode` (owner `frameId`, so it targets the *specific* iframe matched, not just the first child frame), then `Page.createIsolatedWorld` for its execution context. The `(frameId, contextId)` is stored on the `CdpClient` (`set_frame_context`) so subsequent `eval` (via `contextId`) and `inspect` (via `getFullAXTree` `frameId`) scope to that frame. Cleared on navigation (goto/back/forward/navigate_and_read) since the isolated world dies with it. `frame main` clears the binding. Only `<iframe>`, not `<frame>`/`<frameset>`.
 - **`inspect --urls`** — post-processes snapshot text, resolves href on link nodes via `DOM.resolveNode` + `Runtime.callFunctionOn`
 - **`inspect --max-chars`/`--offset`** — char-based, UTF-8-safe output paging via `inspect::paginate`. Full snapshot still persisted for diff/uid lookups; only the printed window is capped. Truncated output appends the next `--offset`.
 - **`goto --header`** — repeatable `"Name: Value"` (split on first colon) applied via `Network.setExtraHTTPHeaders` before navigate. `--post` intentionally not implemented (fragile over `Page.navigate`).
@@ -112,6 +112,9 @@ cargo clippy -- -D warnings  # zero warnings enforced in CI
 - `press Enter` needs `windowsVirtualKeyCode: 13` + `text: "\r"` for form submission.
 - `drag` uses CDP mouse events (mousePressed/mouseMoved/mouseReleased). Works with mousedown-based DnD libs (Sortable.js, React DnD mouse backend). Does NOT work with HTML5 Drag and Drop API (requires dragstart/dragover/drop events).
 - `frame` only supports `<iframe>`, not legacy `<frameset>`/`<frame>`. Error message is clear.
+- `frame` binding only persists within a single `pipe`/`batch` process (state lives on the connection). CLI single commands each open a fresh connection, so `frame` can't carry over — use pipe mode for `frame → inspect → act` (issue #8).
+- `frame` scopes `eval` and `inspect`; it does NOT scope selector-based targeting (`click`/`fill --selector` still query the top document). Use `inspect` after the switch to get iframe uids, then act by uid (backendNodeId is page-global, works cross-frame).
+- `frame` uses an isolated world: `eval` sees the frame's DOM/`location` but NOT its main-world JS variables. `document.querySelector("iframe")` matches the *first* iframe in DOM order — on ad-heavy pages that's often an `about:blank` slot; pass a precise selector (e.g. `iframe[src*="…"]`) to hit the intended frame.
 - `batch` CLI mode: uids change between invocations (new CDP connection = new backendNodeIds). Use pipe mode for uid-stable multi-command flows.
 - `select` on non-`<select>` element throws "Element is not a \<select\>". Custom dropdowns (React, MUI) need click + click approach.
 - `network --abort` is blocking: it runs for `--live N` seconds intercepting requests, then disables Fetch domain. Start abort before navigating to the page.
