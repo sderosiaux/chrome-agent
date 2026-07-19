@@ -210,7 +210,15 @@ impl CdpClient {
                             if decision.accept { "accepted" } else { "dismissed" }
                         );
                     }
-                    Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    Ok(_) => {}
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        // A dropped Page.javascriptDialogOpening leaves the page
+                        // blocked with no DOM signal. Surface it on stderr (never
+                        // stdout, so --json stays clean) and keep handling.
+                        eprintln!(
+                            "dialog handler lagged: {n} event(s) dropped; a dialog may be unanswered"
+                        );
+                    }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
             }
@@ -224,6 +232,20 @@ impl CdpClient {
         timeout: std::time::Duration,
     ) -> Result<CdpEvent, CdpClientError> {
         let mut rx = self.events();
+        Self::wait_for_event_on(&mut rx, method, timeout).await
+    }
+
+    /// Wait for a specific CDP event on an already-subscribed receiver.
+    ///
+    /// Subscribe with [`Self::events`] *before* issuing the command that
+    /// triggers the event, then wait here — this avoids the race where a fast
+    /// (e.g. cached) response fires the event before a late subscription exists,
+    /// which would otherwise stall until the timeout.
+    pub async fn wait_for_event_on(
+        rx: &mut broadcast::Receiver<CdpEvent>,
+        method: &str,
+        timeout: std::time::Duration,
+    ) -> Result<CdpEvent, CdpClientError> {
         let result = tokio::time::timeout(timeout, async {
             loop {
                 match rx.recv().await {
@@ -308,4 +330,78 @@ async fn dispatch_loop(
 
     // Transport closed — clear pending so callers get RecvError.
     pending.lock().await.clear();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn event(method: &str) -> CdpEvent {
+        CdpEvent {
+            method: method.to_string(),
+            params: Value::Null,
+            session_id: None,
+        }
+    }
+
+    // A10b: an event fired AFTER we subscribe but BEFORE we start waiting must
+    // still be observed. This is the exact race goto.rs hits on cached loads —
+    // subscribing before navigate keeps the (buffered) event, so the wait
+    // returns immediately instead of stalling until timeout.
+    #[tokio::test]
+    async fn wait_for_event_on_sees_event_buffered_before_wait() {
+        let (tx, _) = broadcast::channel::<CdpEvent>(16);
+        let mut rx = tx.subscribe();
+        // Event arrives before we begin waiting; the receiver buffers it.
+        tx.send(event("Page.loadEventFired")).unwrap();
+
+        let got = CdpClient::wait_for_event_on(
+            &mut rx,
+            "Page.loadEventFired",
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("buffered event should be returned without timing out");
+        assert_eq!(got.method, "Page.loadEventFired");
+    }
+
+    // Contrast: subscribing AFTER the event was sent (the pre-fix ordering)
+    // misses it and hits the timeout — proving why the subscription must
+    // happen before the triggering command.
+    #[tokio::test]
+    async fn wait_for_event_on_misses_event_sent_before_subscribe() {
+        // Keep the initial receiver alive so `send` has a subscriber and succeeds;
+        // our `rx` subscribes afterwards and therefore never sees this event.
+        let (tx, _keep_alive) = broadcast::channel::<CdpEvent>(16);
+        tx.send(event("Page.loadEventFired")).unwrap();
+        let mut rx = tx.subscribe(); // too late — event is gone for this receiver
+
+        let err = CdpClient::wait_for_event_on(
+            &mut rx,
+            "Page.loadEventFired",
+            Duration::from_millis(50),
+        )
+        .await
+        .expect_err("late subscriber must miss the event and time out");
+        assert!(matches!(err, CdpClientError::Timeout(_)));
+    }
+
+    // Unrelated events are skipped; the target still resolves.
+    #[tokio::test]
+    async fn wait_for_event_on_skips_other_events() {
+        let (tx, _) = broadcast::channel::<CdpEvent>(16);
+        let mut rx = tx.subscribe();
+        tx.send(event("Page.frameNavigated")).unwrap();
+        tx.send(event("Page.loadEventFired")).unwrap();
+
+        let got = CdpClient::wait_for_event_on(
+            &mut rx,
+            "Page.loadEventFired",
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+        assert_eq!(got.method, "Page.loadEventFired");
+    }
 }

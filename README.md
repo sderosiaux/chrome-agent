@@ -38,7 +38,7 @@ chrome-agent is the opposite bet. Instead of adding features, it removes tokens.
 | **Stealth** | 7 native CDP patches (incl. `Runtime.enable` skip) | Delegated to cloud providers |
 | **Content extraction** | `read` (articles), `extract` (auto-detect lists/tables) | None built-in |
 | **Binary** | 3 MB, zero runtime | 3 MB + Next.js dashboard + cloud SDKs |
-| **Codebase** | 7K lines | 40K lines |
+| **Codebase** | ~8.8K lines | 40K lines |
 
 agent-browser gives you a platform with monitoring, cloud browsers, and visual debugging. chrome-agent gives your LLM the smallest possible representation of a webpage and gets out of the way. If your agent needs a dashboard, use agent-browser. If your agent needs to spend tokens on reasoning instead of page parsing, use this.
 
@@ -155,7 +155,7 @@ chrome-agent screenshot
 | `inspect [--verbose] [--max-depth N] [--uid nN] [--filter "role,role"] [--scroll] [--limit N] [--urls] [--max-chars N] [--offset K]` | a11y tree with UIDs. `--scroll --limit` for infinite scroll. `--urls` resolves href on links. `--max-chars`/`--offset` cap and page the output. |
 | `diff` | What changed since last inspect. |
 | `screenshot [--filename name] [--format jpeg\|png] [--quality N] [--max-width N] [--uid nN\|--selector "css"]` | Screenshot to file. JPEG/quality/max-width shrink it; `--uid`/`--selector` clip to one element. |
-| `pdf [--out name] [--landscape] [--background]` | Print the current page to a PDF file. |
+| `pdf [--filename name] [--landscape] [--background]` | Print the current page to a PDF file. |
 | `tabs` | List open tabs. |
 
 ### Interaction
@@ -383,7 +383,7 @@ chrome-agent download https://app.com/reports/2024.csv --out ./2024.csv
 # {"ok":true,"path":"./2024.csv","bytes":48213,"mime":"text/csv"}
 
 # Print the current page to PDF.
-chrome-agent pdf --out invoice.pdf --background
+chrome-agent pdf --filename invoice.pdf --background
 
 # Screenshots that don't blow up your context window.
 chrome-agent screenshot --format jpeg --quality 60 --max-width 1024
@@ -505,7 +505,7 @@ Claude Code permissions:
 | Iframe switching | `frame` | `frame` | via selectors |
 | Batch execution | `batch` (JSON stdin) | `batch` (JSON or quoted) | N/A |
 | AI chat built-in | no (the agent IS the LLM) | yes (AI Gateway) | N/A |
-| Codebase | ~7.3K lines | ~40K lines | Playwright |
+| Codebase | ~8.8K lines | ~40K lines | Playwright |
 | Design goal | minimal tokens, maximal autonomy | feature-complete platform | browser testing |
 
 ## License

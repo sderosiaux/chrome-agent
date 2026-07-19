@@ -3,7 +3,7 @@ name: chrome-agent
 description: Browser automation for AI agents. Use when the user asks to interact with websites, scrape data, fill forms, take screenshots, or automate any browser task. Triggers on "open a website", "go to", "scrape", "fill the form", "click", "take a screenshot", "read this page", "search on", "check this site".
 metadata:
   author: sderosiaux
-  version: "0.4.3"
+  version: "0.5.1"
   tags: ["browser", "automation", "scraping", "chrome", "cdp"]
 ---
 
@@ -146,7 +146,7 @@ echo '{"cmd":"goto","url":"...","inspect":true}' | chrome-agent pipe
 
 # Files: screenshots, PDF, downloads (saved to ~/.chrome-agent/tmp; path on stdout)
 chrome-agent screenshot [--filename name] [--format jpeg] [--quality N] [--max-width N] [--uid nN|--selector "css"]
-chrome-agent pdf [--out name] [--landscape] [--background]        # current page to PDF
+chrome-agent pdf [--filename name] [--landscape] [--background]   # current page to PDF
 chrome-agent download <url> [--out path]                          # auth-preserving (in-page fetch)
 
 # Other

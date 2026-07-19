@@ -73,7 +73,7 @@ chrome-agent screenshot
 ## How It Works
 
 ```
-chrome-agent v0.2.0 (Rust, ~5.3K lines, 2.9 MB binary)
+chrome-agent v0.5.1 (Rust, ~8.8K lines, 3 MB binary)
     │
     │ WebSocket (Chrome DevTools Protocol)
     ▼
@@ -110,7 +110,7 @@ UIDs are stable across inspects (based on Chrome's `backendNodeId`). The agent i
 | `hover <uid>` | Hover over element |
 | `back` | Navigate back in history |
 | `screenshot [--filename name] [--format jpeg\|png] [--quality N] [--max-width N] [--uid nN\|--selector "css"]` | Screenshot → file path. JPEG/max-width shrink it; `--uid`/`--selector` clip to one element |
-| `pdf [--out name] [--landscape] [--background]` | Print the current page to a PDF file |
+| `pdf [--filename name] [--landscape] [--background]` | Print the current page to a PDF file |
 | `download <url> [--out path] [--timeout N]` | Download a URL fetched in-page (cookies/auth preserved) → `{path,bytes,mime}` |
 | `tabs` | List open browser tabs |
 | `close [--purge]` | Close browser (--purge deletes profile/cookies) |
@@ -265,7 +265,7 @@ chrome-agent --json eval "1+1"
 chrome-agent --json read
 # → {"ok":true,"title":"...","text":"...","excerpt":"...","byline":"..."}
 
-# Errors also structured (exit 0 for agent parsing):
+# Errors also structured (exit 1, JSON still on stdout for agent parsing):
 chrome-agent --json click n99
 # → {"ok":false,"error":"Element uid=n99 not found.","hint":"Run 'chrome-agent inspect'"}
 ```
@@ -340,7 +340,7 @@ google-chrome --remote-debugging-port=9222  # or launch manually
 | Network capture | Retroactive + live | No | No | Metadata only (no bodies) |
 | Console capture | Stealth-safe interceptor | No | Console messages | No |
 | Pipe mode | JSON stdin/stdout | No | No | No |
-| Code | ~5.3K lines | ~76K lines (69K Playwright fork) | ~12K lines | Playwright |
+| Code | ~8.8K lines | ~76K lines (69K Playwright fork) | ~12K lines | Playwright |
 
 ## License
 

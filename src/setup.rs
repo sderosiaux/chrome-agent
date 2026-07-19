@@ -108,12 +108,13 @@ const STEALTH_PATCHES_JS: &str = r#"
     if (!window.chrome) window.chrome = {};
     if (!window.chrome.runtime) window.chrome.runtime = { connect: () => {}, sendMessage: () => {} };
     // Mask Permissions API inconsistency (headless returns "prompt" for notifications)
+    const perms = navigator.permissions;
     const origQuery = window.Permissions && Permissions.prototype.query;
-    if (origQuery) {
+    if (origQuery && perms) {
         Permissions.prototype.query = (params) => (
             params.name === 'notifications'
                 ? Promise.resolve({ state: Notification.permission })
-                : origQuery.call(Permissions.prototype, params)
+                : origQuery.call(perms, params)
         );
     }
     // Mask webGL vendor/renderer (headless gives "Google Inc." / "ANGLE")
@@ -123,6 +124,16 @@ const STEALTH_PATCHES_JS: &str = r#"
         if (param === 37446) return 'Intel Iris OpenGL Engine';
         return getParam.call(this, param);
     };
+    // WebGL2 is a sibling interface (does not inherit from WebGLRenderingContext),
+    // so its getParameter leaks the real headless vendor/renderer unless patched too.
+    if (typeof WebGL2RenderingContext !== 'undefined') {
+        const getParam2 = WebGL2RenderingContext.prototype.getParameter;
+        WebGL2RenderingContext.prototype.getParameter = function(param) {
+            if (param === 37445) return 'Intel Inc.';
+            if (param === 37446) return 'Intel Iris OpenGL Engine';
+            return getParam2.call(this, param);
+        };
+    }
     // Fix CDP input leak: screenX/screenY == pageX/pageY reveals automation.
     const __screenOffset = { x: Math.floor(Math.random() * 100) + 50, y: Math.floor(Math.random() * 100) + 80 };
     const origMouseEvent = MouseEvent;
@@ -137,7 +148,7 @@ const STEALTH_PATCHES_JS: &str = r#"
 
 #[cfg(test)]
 mod tests {
-    use super::{dialog_decision, DialogPolicy, DialogResponse};
+    use super::{dialog_decision, DialogPolicy, DialogResponse, STEALTH_PATCHES_JS};
 
     #[test]
     fn policy_parse_is_case_insensitive() {
@@ -202,6 +213,42 @@ mod tests {
         assert_eq!(
             dialog_decision(DialogPolicy::Manual, "confirm", Some("x")),
             DialogResponse { accept: false, prompt_text: None }
+        );
+    }
+
+    #[test]
+    fn permissions_patch_calls_query_on_the_instance_not_the_prototype() {
+        // A1 regression: `origQuery.call(Permissions.prototype, ...)` throws
+        // "Illegal invocation" because query must run against a real
+        // navigator.permissions instance, not the prototype. The patch must
+        // capture the instance and delegate to it.
+        assert!(
+            STEALTH_PATCHES_JS.contains("const perms = navigator.permissions;"),
+            "permissions instance must be captured"
+        );
+        assert!(
+            STEALTH_PATCHES_JS.contains("origQuery.call(perms, params)"),
+            "query must be invoked on the permissions instance"
+        );
+        assert!(
+            !STEALTH_PATCHES_JS.contains("origQuery.call(Permissions.prototype"),
+            "must not invoke query on the prototype (Illegal invocation)"
+        );
+    }
+
+    #[test]
+    fn webgl2_get_parameter_is_patched() {
+        // A6 regression: WebGL2RenderingContext does not inherit from
+        // WebGLRenderingContext, so its getParameter must be overridden
+        // separately or webgl2 contexts leak headless vendor/renderer.
+        assert!(
+            STEALTH_PATCHES_JS.contains("WebGL2RenderingContext.prototype.getParameter"),
+            "WebGL2 getParameter must be overridden"
+        );
+        // Existence-guarded so it does not throw where WebGL2 is unavailable.
+        assert!(
+            STEALTH_PATCHES_JS.contains("typeof WebGL2RenderingContext !== 'undefined'"),
+            "WebGL2 override must be existence-guarded"
         );
     }
 }

@@ -38,7 +38,7 @@ chrome-agent 是相反的策略：不是增加功能，而是减少 token。
 | **隐身模式** | 7 项原生 CDP 补丁（含 `Runtime.enable` 跳过） | 委托给云服务商 |
 | **内容提取** | `read`（文章）、`extract`（自动检测列表/表格） | 无内置功能 |
 | **二进制** | 3 MB，零运行时依赖 | 3 MB + Next.js 仪表盘 + 云 SDK |
-| **代码量** | 7K 行 | 40K 行 |
+| **代码量** | ~8.8K 行 | 40K 行 |
 
 agent-browser 提供带监控、云浏览器和可视化调试的平台。chrome-agent 给你的 LLM 提供最精简的网页表示，然后退出舞台。如果你的 Agent 需要仪表盘，用 agent-browser。如果你的 Agent 需要把 token 花在推理而不是解析页面上，用这个。
 
@@ -143,7 +143,7 @@ chrome-agent screenshot
 
 | 命令 | 功能 |
 |---------|------------|
-| `goto <url> [--inspect] [--max-depth N]` | 导航。缺少 `https://` 时自动补全。 |
+| `goto <url> [--inspect] [--max-depth N] [--header "K: V"]` | 导航。缺少 `https://` 时自动补全。`--header`（可重复）发送额外的 HTTP 请求头。 |
 | `back` | 浏览器后退。 |
 | `forward` | 浏览器前进。 |
 | `close [--purge]` | 停止浏览器。`--purge` 删除 cookie/配置。 |
@@ -152,9 +152,10 @@ chrome-agent screenshot
 
 | 命令 | 功能 |
 |---------|------------|
-| `inspect [--verbose] [--max-depth N] [--uid nN] [--filter "role,role"] [--scroll] [--limit N] [--urls]` | 带 UID 的无障碍树。`--scroll --limit` 用于无限滚动。`--urls` 解析链接 href。 |
+| `inspect [--verbose] [--max-depth N] [--uid nN] [--filter "role,role"] [--scroll] [--limit N] [--urls] [--max-chars N] [--offset K]` | 带 UID 的无障碍树。`--scroll --limit` 用于无限滚动。`--urls` 解析链接 href。`--max-chars`/`--offset` 限制并分页输出。 |
 | `diff` | 查看上次 inspect 以来的变化。 |
-| `screenshot [--filename name]` | 截图保存到文件。 |
+| `screenshot [--filename name] [--format jpeg\|png] [--quality N] [--max-width N] [--uid nN\|--selector "css"]` | 截图保存到文件。JPEG/quality/max-width 缩小体积；`--uid`/`--selector` 裁剪到单个元素。 |
+| `pdf [--filename name] [--landscape] [--background]` | 将当前页面打印为 PDF 文件。 |
 | `tabs` | 列出打开的标签页。 |
 
 ### 交互
@@ -180,6 +181,7 @@ chrome-agent screenshot
 | `scroll <down\|up\|uid>` | 滚动页面或将元素滚动到可见区域。 |
 | `hover <uid>` | 悬停。 |
 | `wait <text\|url\|selector> <pattern>` | 等待条件满足。 |
+| `wait network-idle [--idle-ms N] [--timeout N]` | 等待网络静默 `--idle-ms`（默认 500）后返回。比固定 sleep 更适合 SPA/XHR 稳定。 |
 
 ### 内容提取
 
@@ -189,6 +191,7 @@ chrome-agent screenshot
 | `text [uid] [--selector "css"] [--truncate N]` | 获取页面或元素的可见文本。 |
 | `eval <expression> [--selector "css"]` | 在页面上下文中执行 JS。`el` = 匹配的元素。 |
 | `extract [--selector "css"] [--limit N] [--scroll] [--a11y]` | 自动检测重复数据。`--a11y` 用于 React SPA（如 X.com）。 |
+| `download <url> [--out path] [--timeout N]` | 在页面内 fetch 下载 URL，因此 cookie/登录态自动带上（可下载需登录的文件）。返回 `{path,bytes,mime}`。 |
 
 ### 监控
 
@@ -201,7 +204,7 @@ chrome-agent screenshot
 
 | 命令 | 功能 |
 |---------|------------|
-| `frame <selector\|main>` | 切换到 iframe 上下文（或返回主页面）。 |
+| `frame <selector\|main>` | 将 `eval`/`inspect` 切换进 iframe（或切回主页面）。仅在单个 `pipe`/`batch` 进程内持续有效。 |
 | `batch` | 从 stdin 的 JSON 数组执行多条命令。 |
 | `pipe` | 持久化 JSON stdin/stdout 连接。 |
 
@@ -218,7 +221,11 @@ chrome-agent screenshot
 --max-depth <N>          限制 inspect 深度
 --ignore-https-errors    接受自签名证书
 --json                   结构化 JSON 输出
+--dialog <mode>          JS 对话框策略：accept（默认）、dismiss 或 manual
+--dialog-text <text>     当 --dialog accept 时，为 prompt() 对话框提交的文本
 ```
+
+JS 对话框（`alert`/`confirm`/`prompt`/`beforeunload`）默认自动应答（`--dialog accept`）—— 否则原生对话框会阻塞页面且没有任何 DOM 信号，Agent 的下一条命令会挂起。使用 `--dialog dismiss` 取消它们，或用 `--dialog manual` 退出自动应答。
 
 ## 核心循环：inspect、操作、inspect
 
@@ -277,15 +284,19 @@ chrome-agent dblclick n42
 
 ## iframe
 
-```bash
-# 切换到 iframe
-chrome-agent frame "#payment-iframe"
-chrome-agent inspect    # 查看 iframe 内容
-chrome-agent fill --selector "input[name=card]" "4242424242424242"
+`frame` 切换会把 `eval` 和 `inspect` 绑定到该 iframe —— 但**只在同一个进程内有效**，所以要通过 `pipe`（或 `batch`）驱动，绝不能用分开的 CLI 调用：
 
-# 切回主页面
-chrome-agent frame main
+```bash
+printf '%s\n' \
+  '{"cmd":"frame","target":"#payment-iframe"}' \
+  '{"cmd":"inspect"}' \
+  '{"cmd":"fill","uid":"n42","value":"4242424242424242"}' \
+  '{"cmd":"frame","target":"main"}' | chrome-agent pipe
 ```
+
+- 精确指定目标 iframe（例如 `iframe[src*="checkout"]`）；裸写 `iframe` 会匹配 DOM 顺序中的第一个，往往是广告的 `about:blank` 槽位。
+- `frame` 只作用于 `eval`/`inspect`，**不**作用于 `--selector` 定位。切换后先 `inspect` 拿到 iframe 内的 uid，再按 uid 操作（uid 跨 frame 均可解析）。
+- 每个独立的 `chrome-agent <cmd>` 都会打开一个全新连接，因此 `chrome-agent frame …` 后再单独执行 `chrome-agent inspect` 会丢失切换状态。请使用 `pipe`/`batch`。
 
 ## 批量模式
 
@@ -444,7 +455,7 @@ Claude Code 权限配置：
 | 隐身 | 7 项原生 CDP 补丁 | 委托给云服务商 | 无 |
 | 阅读模式 | `read`（Readability.js） | 无 | 无 |
 | 数据提取 | `extract`（自动检测重复数据） | 无 | 无 |
-| 代码量 | ~7.3K 行 | ~40K 行 | Playwright |
+| 代码量 | ~8.8K 行 | ~40K 行 | Playwright |
 | 设计目标 | 最少 token，最大自主性 | 功能完整平台 | 浏览器测试 |
 
 ## 许可证

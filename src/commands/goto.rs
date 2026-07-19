@@ -56,6 +56,11 @@ pub async fn run(
             .await?;
     }
 
+    // Subscribe to events BEFORE navigating so a fast/cached load that fires
+    // Page.loadEventFired before we start waiting is not missed (which would
+    // otherwise stall until the full timeout).
+    let mut events = client.events();
+
     let nav_result: NavigateResult = client
         .call(
             "Page.navigate",
@@ -72,10 +77,13 @@ pub async fn run(
         return Err(format!("Navigation failed: {error_text}").into());
     }
 
-    // Wait for Page.loadEventFired
-    let _ = client
-        .wait_for_event("Page.loadEventFired", Duration::from_secs(timeout_secs))
-        .await;
+    // Wait for Page.loadEventFired on the pre-navigate subscription.
+    let _ = CdpClient::wait_for_event_on(
+        &mut events,
+        "Page.loadEventFired",
+        Duration::from_secs(timeout_secs),
+    )
+    .await;
 
     // Wait for DOM to stabilize (SPAs often render after loadEventFired).
     // Uses MutationObserver: resolves once no DOM changes for 200ms, max 3s.

@@ -223,6 +223,46 @@ fn headed_goto_and_eval() {
 }
 
 #[test]
+fn dblclick_selector_fires_real_double_click() {
+    if !chrome_available() {
+        eprintln!("SKIP: Chrome not found");
+        return;
+    }
+
+    let b = TestBrowser::new("test-dblclick-selector");
+
+    // Fixture page: the button counts `click` vs `dblclick` events separately.
+    // Written to a temp file and loaded via file:// (avoids data:-URL encoding).
+    let html = "<!doctype html><html><body><button id=\"b\" \
+        onclick=\"window.__c=(window.__c||0)+1\" \
+        ondblclick=\"window.__d=(window.__d||0)+1\">x</button></body></html>";
+    let mut path = std::env::temp_dir();
+    path.push("chrome-agent-dblclick-selector-test.html");
+    std::fs::write(&path, html).expect("write fixture");
+    let url = format!("file://{}", path.display());
+
+    let (_, stderr, code) = run_cli(&["--browser", b.name(), "goto", &url]);
+    if code != 0 {
+        let _ = std::fs::remove_file(&path);
+        eprintln!("SKIP: goto fixture failed: {stderr}");
+        return;
+    }
+
+    let (_, _, code) = run_cli(&["--browser", b.name(), "dblclick", "--selector", "#b"]);
+    assert_eq!(code, 0, "dblclick --selector should succeed");
+
+    // The whole point of the fix: a selector double-click must fire `dblclick`,
+    // not just a single `click`. Pre-fix (click_selector → el.click()) left __d=0.
+    let (stdout, _, code) = run_cli(&["--browser", b.name(), "eval", "String(window.__d||0)"]);
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(code, 0, "eval should succeed");
+    assert!(
+        stdout.contains('1'),
+        "dblclick event must have fired once (window.__d), got: {stdout}"
+    );
+}
+
+#[test]
 fn headed_inspect_returns_uids() {
     if !chrome_available() {
         eprintln!("SKIP: Chrome not found");

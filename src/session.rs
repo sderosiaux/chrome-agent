@@ -12,9 +12,6 @@ const SESSION_FILE: &str = "sessions.json";
 pub struct SessionStore {
     #[serde(default)]
     pub browsers: HashMap<String, BrowserSession>,
-    /// Tracks the file modification time when loaded (not serialized).
-    #[serde(skip)]
-    pub loaded_mtime: Option<std::time::SystemTime>,
     /// Browser names present when this store was loaded. Used at save time to
     /// distinguish entries this process deliberately removed (delete from disk)
     /// from entries other processes added after our load (leave alone).
@@ -65,14 +62,11 @@ fn load_from(path: &Path) -> Result<SessionStore, SessionError> {
         return Ok(SessionStore::default());
     }
 
-    let mtime = std::fs::metadata(path).ok().and_then(|m| m.modified().ok());
-
     let contents = std::fs::read_to_string(path)
         .map_err(|e| SessionError(format!("Failed to read {}: {e}", path.display())))?;
 
     let mut store: SessionStore = serde_json::from_str(&contents)
         .map_err(|e| SessionError(format!("Failed to parse {}: {e}", path.display())))?;
-    store.loaded_mtime = mtime;
     store.loaded_names = store.browsers.keys().cloned().collect();
     Ok(store)
 }
@@ -131,7 +125,6 @@ fn save_to(path: &Path, store: &mut SessionStore) -> Result<(), SessionError> {
 
     // Our view is now the baseline for subsequent saves in this process.
     store.loaded_names = store.browsers.keys().cloned().collect();
-    store.loaded_mtime = std::fs::metadata(path).ok().and_then(|m| m.modified().ok());
 
     Ok(())
 }
@@ -316,19 +309,36 @@ mod tests {
 
     #[test]
     fn bug_session_corrupt_json() {
-        let dir = std::env::temp_dir().join("chrome-agent_test_corrupt");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("sessions.json");
+        let dir = tmp_dir("corrupt");
+        let path = dir.join(SESSION_FILE);
         std::fs::write(&path, "NOT VALID JSON {{{").unwrap();
-        let result: Result<SessionStore, _> = serde_json::from_str("NOT VALID JSON {{{");
-        assert!(result.is_err());
+        // Exercise the real load path: a corrupt file must surface a parse
+        // error (not panic, not silently default away the on-disk state).
+        let result = load_from(&path);
+        let err = result.expect_err("corrupt JSON should error").to_string();
+        assert!(err.contains("Failed to parse"), "unexpected error: {err}");
         std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn bug_session_empty_file() {
-        let result: Result<SessionStore, _> = serde_json::from_str("");
-        assert!(result.is_err());
+        let dir = tmp_dir("empty");
+        let path = dir.join(SESSION_FILE);
+        std::fs::write(&path, "").unwrap();
+        // An empty (e.g. externally truncated) file is not valid JSON. load_from
+        // surfaces the parse error rather than pretending the store was empty —
+        // the absent-file case (Ok(default)) is handled separately by the
+        // `!path.exists()` guard, verified below.
+        let err = load_from(&path)
+            .expect_err("empty file should error")
+            .to_string();
+        assert!(err.contains("Failed to parse"), "unexpected error: {err}");
+
+        // Contrast: a genuinely absent file loads a default (empty) store.
+        std::fs::remove_file(&path).unwrap();
+        let default = load_from(&path).expect("absent file should default");
+        assert!(default.browsers.is_empty());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
