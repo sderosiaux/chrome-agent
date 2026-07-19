@@ -11,7 +11,12 @@ use crate::cdp::types::EvaluateResult;
 #[serde(rename_all = "camelCase")]
 pub struct NetworkEntry {
     pub url: String,
-    pub method: String,
+    /// Resource classification, not an HTTP verb. Live mode stores the CDP
+    /// `ResourceType` (`Document`/`XHR`/`Script`/…); retroactive mode stores the
+    /// Resource Timing `initiatorType` (`xmlhttprequest`/`script`/`img`/…).
+    /// Neither CDP `responseReceived` nor the Resource Timing API exposes the
+    /// real HTTP method, so this is deliberately the resource type in both modes.
+    pub resource_type: String,
     pub status: u16,
     pub content_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -103,8 +108,8 @@ pub async fn run_retroactive(
 
             Some(NetworkEntry {
                 url,
-                method: "GET".to_string(), // Resource Timing API doesn't expose method
-                status: 0,                 // Resource Timing API doesn't expose status
+                resource_type: initiator.to_string(), // Resource Timing exposes initiatorType, not the HTTP method
+                status: 0,                             // Resource Timing API doesn't expose status
                 content_type,
                 body: None,
                 size,
@@ -187,7 +192,7 @@ pub async fn run_live(
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string();
-        let method = event
+        let resource_type = event
             .params
             .get("type")
             .and_then(Value::as_str)
@@ -212,7 +217,7 @@ pub async fn run_live(
 
         entries.push(NetworkEntry {
             url,
-            method,
+            resource_type,
             status,
             content_type,
             body,
@@ -276,24 +281,57 @@ async fn fetch_response_body(client: &CdpClient, request_id: &str) -> Option<Str
     Some(crate::truncate::truncate_str(body, 2000, "...(truncated)").into_owned())
 }
 
+/// Params for `Fetch.enable` that pause every request matching `pattern` at the
+/// request stage. Extracted so tests can assert the exact wire shape.
+fn fetch_enable_params(pattern: &str) -> Value {
+    json!({
+        "patterns": [{"urlPattern": pattern, "requestStage": "Request"}]
+    })
+}
+
+/// Params for `Fetch.failRequest` that abort a paused request. Extracted so
+/// tests can assert the exact wire shape.
+fn fail_request_params(request_id: &str) -> Value {
+    json!({
+        "requestId": request_id,
+        "reason": "BlockedByClient",
+    })
+}
+
 /// Block requests matching a URL pattern using the Fetch domain.
 pub async fn run_route_abort(
     client: &CdpClient,
     pattern: &str,
     timeout_secs: u64,
 ) -> Result<Vec<String>, crate::BoxError> {
-    client.send("Fetch.enable", serde_json::json!({
-        "patterns": [{"urlPattern": pattern, "requestStage": "Request"}]
-    })).await?;
+    client.send("Fetch.enable", fetch_enable_params(pattern)).await?;
 
+    // Subscribe ONCE, before the loop. Re-subscribing each iteration (as a fresh
+    // `wait_for_event` call would) drops any `Fetch.requestPaused` events emitted
+    // during the `Fetch.failRequest` round-trip, leaking blocked requests.
+    let mut rx = client.events();
     let mut blocked = Vec::new();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
 
     while std::time::Instant::now() < deadline {
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-        let event = client.wait_for_event("Fetch.requestPaused", remaining).await;
+        if remaining.is_zero() {
+            break;
+        }
+        let event = tokio::time::timeout(remaining, async {
+            loop {
+                match rx.recv().await {
+                    Ok(ev) if ev.method == "Fetch.requestPaused" => return Some(ev),
+                    Ok(_)
+                    | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+                }
+            }
+        })
+        .await;
+
         match event {
-            Ok(ev) => {
+            Ok(Some(ev)) => {
                 let request_id = ev.params.get("requestId")
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
@@ -302,15 +340,15 @@ pub async fn run_route_abort(
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
-                let _ = client.send("Fetch.failRequest", serde_json::json!({
-                    "requestId": request_id,
-                    "reason": "BlockedByClient",
-                })).await;
+                let _ = client
+                    .send("Fetch.failRequest", fail_request_params(request_id))
+                    .await;
                 if !url.is_empty() {
                     blocked.push(url);
                 }
             }
-            Err(_) => break, // timeout
+            // event channel closed, or timeout elapsed
+            Ok(None) | Err(_) => break,
         }
     }
 
@@ -327,7 +365,7 @@ mod tests {
         // Bug: &e.url[..67] panics on URLs with multi-byte chars
         let entry = NetworkEntry {
             url: "https://example.com/café/résumé/über/naïve/длинный".to_string(),
-            method: "GET".to_string(),
+            resource_type: "Document".to_string(),
             status: 200,
             content_type: "text/html".to_string(),
             size: 1000,
@@ -341,14 +379,17 @@ mod tests {
 
     #[test]
     fn route_abort_params_structure() {
-        let pattern = "*tracking*";
-        let params = serde_json::json!({
-            "patterns": [{"urlPattern": pattern, "requestStage": "Request"}]
-        });
+        // Assert the params the actual abort code path produces, not a literal
+        // rebuilt in the test body.
+        let params = fetch_enable_params("*tracking*");
         let patterns = params.get("patterns").unwrap().as_array().unwrap();
         assert_eq!(patterns.len(), 1);
         assert_eq!(patterns[0]["urlPattern"], "*tracking*");
         assert_eq!(patterns[0]["requestStage"], "Request");
+
+        let fail = fail_request_params("req-42");
+        assert_eq!(fail["requestId"], "req-42");
+        assert_eq!(fail["reason"], "BlockedByClient");
     }
 
     #[test]
@@ -356,7 +397,7 @@ mod tests {
         // Bug: &body[..2000] panics on bodies with multi-byte chars
         let entry = NetworkEntry {
             url: "https://example.com".to_string(),
-            method: "GET".to_string(),
+            resource_type: "XHR".to_string(),
             status: 200,
             content_type: "application/json".to_string(),
             size: 5000,
@@ -368,11 +409,31 @@ mod tests {
     }
 
     #[test]
+    fn entry_serializes_resource_type_not_method() {
+        // Regression: the field used to be `method` but held a CDP ResourceType
+        // (Document/XHR/Script) in live mode and a hardcoded "GET" in retroactive
+        // mode — mislabeled and inconsistent. It must now serialize as
+        // `resourceType` and never as `method`.
+        let entry = NetworkEntry {
+            url: "https://example.com/api".to_string(),
+            resource_type: "XHR".to_string(),
+            status: 200,
+            content_type: "application/json".to_string(),
+            size: 10,
+            duration_ms: 5,
+            body: None,
+        };
+        let v = serde_json::to_value(&entry).unwrap();
+        assert_eq!(v["resourceType"], "XHR");
+        assert!(v.get("method").is_none(), "must not emit a `method` key");
+    }
+
+    #[test]
     fn bug_body_preview_utf8_safe() {
         // Bug: &b[..200] panics on bodies with multi-byte chars
         let entry = NetworkEntry {
             url: "https://example.com".to_string(),
-            method: "GET".to_string(),
+            resource_type: "XHR".to_string(),
             status: 200,
             content_type: "application/json".to_string(),
             size: 500,

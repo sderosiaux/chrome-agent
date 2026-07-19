@@ -314,6 +314,17 @@ pub fn cmd_status(json_mode: bool) -> Result<(), crate::BoxError> {
     Ok(())
 }
 
+/// Message for `cmd_stop`, given whether we actually reached a live daemon.
+/// Pure so the stop decision can be unit-tested without a socket.
+#[cfg(any(unix, test))]
+const fn stop_message(reached_daemon: bool) -> &'static str {
+    if reached_daemon {
+        "Daemon stopped."
+    } else {
+        "Daemon is not running."
+    }
+}
+
 pub async fn cmd_stop(json_mode: bool) -> Result<(), crate::BoxError> {
     #[cfg(not(unix))]
     {
@@ -325,20 +336,34 @@ pub async fn cmd_stop(json_mode: bool) -> Result<(), crate::BoxError> {
 
     #[cfg(unix)]
     {
-    let socket_path = session::daemon_socket_path()?;
-    if !socket_path.exists() {
-        if json_mode {
-            json_output(&json!({"ok": true, "message": "Daemon is not running."}));
-        } else {
-            println!("Daemon is not running.");
-        }
-        return Ok(());
-    }
-
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::UnixStream;
 
-    let mut stream = UnixStream::connect(&socket_path).await?;
+    let socket_path = session::daemon_socket_path()?;
+
+    // Try to reach the daemon. A missing socket — or a stale one left by a
+    // crashed daemon (connect yields ECONNREFUSED) — both mean "not running".
+    // Don't let the raw connect error escape via `?`; clean the stale socket
+    // and report the friendly path instead.
+    let stream = if socket_path.exists() {
+        match UnixStream::connect(&socket_path).await {
+            Ok(stream) => Some(stream),
+            Err(_) => {
+                let _ = std::fs::remove_file(&socket_path);
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let Some(mut stream) = stream else {
+        let msg = stop_message(false);
+        if json_mode { json_output(&json!({"ok": true, "message": msg})); }
+        else { println!("{msg}"); }
+        return Ok(());
+    };
+
     stream
         .write_all(b"{\"command\":\"stop\"}\n")
         .await?;
@@ -347,11 +372,9 @@ pub async fn cmd_stop(json_mode: bool) -> Result<(), crate::BoxError> {
     let mut buf = Vec::new();
     let _ = stream.read_to_end(&mut buf).await;
 
-    if json_mode {
-        json_output(&json!({"ok": true, "message": "Daemon stopped."}));
-    } else {
-        println!("Daemon stopped.");
-    }
+    let msg = stop_message(true);
+    if json_mode { json_output(&json!({"ok": true, "message": msg})); }
+    else { println!("{msg}"); }
     Ok(())
     } // #[cfg(unix)]
 }
@@ -468,5 +491,14 @@ mod tests {
         let hint = error_hint("Connection refused").unwrap();
         assert!(hint.contains("Chrome running"));
         assert!(!hint.contains("136"));
+    }
+
+    #[test]
+    fn stop_message_reflects_daemon_reachability() {
+        // Regression for A3c: a stale socket (connect refused) must map to the
+        // friendly "not running" path, not a raw propagated error. The reached=false
+        // branch is exactly what cmd_stop selects when connect fails.
+        assert_eq!(stop_message(true), "Daemon stopped.");
+        assert_eq!(stop_message(false), "Daemon is not running.");
     }
 }

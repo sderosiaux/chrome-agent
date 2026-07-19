@@ -123,34 +123,21 @@ async fn launch_browser(opts: &BrowserOptions) -> Result<BrowserConnection, Brow
         let _ = std::fs::set_permissions(&profile_dir, std::fs::Permissions::from_mode(0o700));
     }
 
-    // Copy cookies from the user's real Chrome profile if requested
-    if opts.copy_cookies {
+    // Prevent concurrent launches: if DevToolsActivePort already exists and points
+    // at a live Chrome, reconnect to it instead of spawning a fresh instance.
+    let port_file = profile_dir.join("DevToolsActivePort");
+    let existing = try_reconnect_existing(&port_file).await;
+
+    // Copy cookies from the user's real Chrome profile only when we are about to
+    // spawn a *fresh* browser. Copying while reconnecting to a live managed Chrome
+    // would overwrite its in-use SQLite Cookies DB in place (corruption risk) and
+    // the copy would never be loaded anyway (silent auth no-op) — see FIX A5.
+    if should_copy_cookies(opts.copy_cookies, existing.is_some()) {
         copy_chrome_cookies(&profile_dir)?;
     }
 
-    // Prevent concurrent launches: if DevToolsActivePort already exists, wait for it
-    // Check for existing DevToolsActivePort — another process may have launched Chrome
-    let port_file = profile_dir.join("DevToolsActivePort");
-    if port_file.exists() {
-        if let Some(ws) = read_devtools_active_port(&port_file) {
-            // Verify the WebSocket is actually reachable (not stale)
-            let http = extract_http_endpoint(&ws);
-            if http_get_json(
-                &format!("{http}/json/version"),
-                Duration::from_secs(1),
-            )
-            .await
-            .is_ok()
-            {
-                return Ok(BrowserConnection {
-                    ws_endpoint: ws,
-                    http_endpoint: Some(http),
-                    pid: None,
-                });
-            }
-        }
-        // Port file exists but Chrome is dead — remove stale file and launch fresh
-        let _ = std::fs::remove_file(&port_file);
+    if let Some(conn) = existing {
+        return Ok(conn);
     }
 
     let chromium_path = find_chromium()?;
@@ -199,6 +186,44 @@ async fn launch_browser(opts: &BrowserOptions) -> Result<BrowserConnection, Brow
         http_endpoint: Some(http_endpoint),
         pid: Some(pid),
     })
+}
+
+/// Decide whether `--copy-cookies` should run for this launch.
+///
+/// Cookies must only be copied when spawning a *fresh* browser. When we are
+/// reconnecting to an already-running managed Chrome, copying would overwrite
+/// its live `SQLite` Cookies DB in place and would never be loaded by the running
+/// instance anyway (silent auth no-op).
+const fn should_copy_cookies(copy_requested: bool, reconnecting_to_live: bool) -> bool {
+    copy_requested && !reconnecting_to_live
+}
+
+/// Try to reconnect to a Chrome already described by a `DevToolsActivePort` file.
+///
+/// Returns `Some` when the port file points at a live, reachable browser.
+/// Returns `None` when there is no port file, or it is stale (Chrome dead) — in
+/// the stale case the file is removed so a fresh launch can proceed cleanly.
+async fn try_reconnect_existing(port_file: &Path) -> Option<BrowserConnection> {
+    if !port_file.exists() {
+        return None;
+    }
+    if let Some(ws) = read_devtools_active_port(port_file) {
+        // Verify the WebSocket is actually reachable (not stale)
+        let http = extract_http_endpoint(&ws);
+        if http_get_json(&format!("{http}/json/version"), Duration::from_secs(1))
+            .await
+            .is_ok()
+        {
+            return Some(BrowserConnection {
+                ws_endpoint: ws,
+                http_endpoint: Some(http),
+                pid: None,
+            });
+        }
+    }
+    // Port file exists but Chrome is dead — remove stale file and launch fresh
+    let _ = std::fs::remove_file(port_file);
+    None
 }
 
 /// Auto-discover a running Chrome instance with remote debugging enabled.
@@ -607,6 +632,41 @@ mod tests {
         let path = dir.join("DevToolsActivePort");
         std::fs::write(&path, "not_a_number\n").unwrap();
         assert!(read_devtools_active_port(&path).is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn should_copy_cookies_only_on_fresh_spawn() {
+        // Fresh spawn (no live browser to reconnect to): copy when requested.
+        assert!(should_copy_cookies(true, false));
+        // Reconnecting to a live managed Chrome: never copy, even if requested.
+        // (Regression for FIX A5 — copy used to run unconditionally.)
+        assert!(!should_copy_cookies(true, true));
+        // Not requested: never copy regardless of state.
+        assert!(!should_copy_cookies(false, false));
+        assert!(!should_copy_cookies(false, true));
+    }
+
+    #[tokio::test]
+    async fn try_reconnect_existing_none_when_absent() {
+        let dir = std::env::temp_dir().join("chrome-agent_test_reconnect_absent");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("DevToolsActivePort");
+        std::fs::remove_file(&path).ok();
+        assert!(try_reconnect_existing(&path).await.is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn try_reconnect_existing_removes_stale_file() {
+        let dir = std::env::temp_dir().join("chrome-agent_test_reconnect_stale");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("DevToolsActivePort");
+        // Valid format, but the port has no listening server → stale.
+        std::fs::write(&path, "59321\n/devtools/browser/dead-target\n").unwrap();
+        let result = try_reconnect_existing(&path).await;
+        assert!(result.is_none(), "unreachable port must not reconnect");
+        assert!(!path.exists(), "stale port file should be removed");
         std::fs::remove_dir_all(&dir).ok();
     }
 }

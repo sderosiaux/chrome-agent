@@ -123,7 +123,7 @@ pub async fn run(
         entries
     };
 
-    let limited: Vec<ConsoleEntry> = filtered.into_iter().take(limit).collect();
+    let limited = keep_recent(filtered, limit);
 
     if clear {
         let _ = client
@@ -138,6 +138,14 @@ pub async fn run(
     }
 
     Ok(limited)
+}
+
+/// Keep the most-recent `limit` entries of a chronological (oldest→newest)
+/// buffer, preserving order. Mirrors `history::run` so the agent sees the
+/// newest messages it just triggered rather than the oldest.
+fn keep_recent(mut entries: Vec<ConsoleEntry>, limit: usize) -> Vec<ConsoleEntry> {
+    let start = entries.len().saturating_sub(limit);
+    entries.split_off(start)
 }
 
 /// Format a timestamp (epoch ms) as HH:MM:SS.
@@ -166,4 +174,37 @@ pub fn format_text(entries: &[ConsoleEntry]) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(msg: &str, ts: u64) -> ConsoleEntry {
+        ConsoleEntry {
+            level: "log".to_string(),
+            message: msg.to_string(),
+            timestamp: ts,
+        }
+    }
+
+    #[test]
+    fn keep_recent_returns_newest_n_in_order() {
+        // Chronological buffer: oldest ("m0") → newest ("m4").
+        let entries: Vec<ConsoleEntry> = (0..5).map(|i| entry(&format!("m{i}"), i)).collect();
+
+        let limited = keep_recent(entries, 3);
+
+        // Must be the 3 most-recent, preserving oldest→newest order.
+        let msgs: Vec<&str> = limited.iter().map(|e| e.message.as_str()).collect();
+        assert_eq!(msgs, vec!["m2", "m3", "m4"]);
+    }
+
+    #[test]
+    fn keep_recent_shorter_than_limit_returns_all() {
+        let entries = vec![entry("a", 0), entry("b", 1)];
+        let limited = keep_recent(entries, 10);
+        let msgs: Vec<&str> = limited.iter().map(|e| e.message.as_str()).collect();
+        assert_eq!(msgs, vec!["a", "b"]);
+    }
 }

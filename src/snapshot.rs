@@ -117,10 +117,13 @@ fn format_ax_tree(
                 &mut output,
                 &mut tracking2,
             );
-            return (output, uid_map);
+            return (apply_role_filter(output, role_filter, max_depth), uid_map);
         }
 
-        // uid not found — fall through to full tree
+        // uid not found — return the diagnostic verbatim. Do NOT route it
+        // through the role filter: the message begins with "uid=" and would be
+        // stripped as a non-matching node, producing silent empty output — the
+        // exact confusion the filter's own empty-guard (below) tries to prevent.
         return (
             format!("uid={focus} not found in accessibility tree\n"),
             uid_map_full,
@@ -143,47 +146,57 @@ fn format_ax_tree(
     );
 
     // Post-filter by role if requested
-    let output = if let Some(roles) = role_filter {
-        // Expand role aliases so agents don't need to know exact ARIA role names
-        let expanded: Vec<String> = roles.iter().flat_map(|&r| {
-            let mut v = vec![(*r).to_string()];
-            match r.to_lowercase().as_str() {
-                "textbox" => { v.push("searchbox".into()); v.push("combobox".into()); }
-                "input" => { v.push("textbox".into()); v.push("searchbox".into()); v.push("combobox".into()); }
-                "button" => { v.push("menuitem".into()); }
-                _ => {}
-            }
-            v
-        }).collect();
-        let filtered: String = output
-            .lines()
-            .filter(|line| {
-                let trimmed = line.trim();
-                if let Some(after_uid) = trimmed.strip_prefix("uid=")
-                    && let Some(rest) = after_uid.split_once(' ') {
-                        let role = rest.1.split([' ', '"']).next().unwrap_or("");
-                        return expanded.iter().any(|r| r.eq_ignore_ascii_case(role));
-                    }
-                false
-            })
-            .fold(String::new(), |mut acc, line| {
-                acc.push_str(line.trim_start());
-                acc.push('\n');
-                acc
-            });
-        // Warn if filter matched nothing — likely the matching elements are deeper
-        // than max_depth. This prevents silent empty output that confuses agents.
-        if filtered.is_empty() && max_depth.is_some() {
-            format!("No elements matching filter {:?} found within --max-depth {}. Try increasing depth or removing --max-depth.\n",
-                roles, max_depth.unwrap_or(0))
-        } else {
-            filtered
-        }
-    } else {
-        output
-    };
+    let output = apply_role_filter(output, role_filter, max_depth);
 
     (output, uid_map)
+}
+
+/// Post-process rendered snapshot text, keeping only lines whose role matches
+/// `role_filter` (with alias expansion). Returns `output` unchanged when no
+/// filter is requested. When the filter matches nothing but a `max_depth` was
+/// set, returns a hint instead of silent empty output.
+///
+/// Applied on every rendering path — including the `focus_uid` subtree — so
+/// `inspect --uid nN --filter button` scopes to both the subtree and the role.
+fn apply_role_filter(output: String, role_filter: Option<&[&str]>, max_depth: Option<usize>) -> String {
+    let Some(roles) = role_filter else {
+        return output;
+    };
+    // Expand role aliases so agents don't need to know exact ARIA role names
+    let expanded: Vec<String> = roles.iter().flat_map(|&r| {
+        let mut v = vec![(*r).to_string()];
+        match r.to_lowercase().as_str() {
+            "textbox" => { v.push("searchbox".into()); v.push("combobox".into()); }
+            "input" => { v.push("textbox".into()); v.push("searchbox".into()); v.push("combobox".into()); }
+            "button" => { v.push("menuitem".into()); }
+            _ => {}
+        }
+        v
+    }).collect();
+    let filtered: String = output
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim();
+            if let Some(after_uid) = trimmed.strip_prefix("uid=")
+                && let Some(rest) = after_uid.split_once(' ') {
+                    let role = rest.1.split([' ', '"']).next().unwrap_or("");
+                    return expanded.iter().any(|r| r.eq_ignore_ascii_case(role));
+                }
+            false
+        })
+        .fold(String::new(), |mut acc, line| {
+            acc.push_str(line.trim_start());
+            acc.push('\n');
+            acc
+        });
+    // Warn if filter matched nothing — likely the matching elements are deeper
+    // than max_depth. This prevents silent empty output that confuses agents.
+    if filtered.is_empty() && max_depth.is_some() {
+        format!("No elements matching filter {:?} found within --max-depth {}. Try increasing depth or removing --max-depth.\n",
+            roles, max_depth.unwrap_or(0))
+    } else {
+        filtered
+    }
 }
 
 fn format_node(
@@ -585,6 +598,47 @@ mod tests {
         let (text, _) = format_ax_tree(&nodes, false, None, Some("n3"), None);
         assert!(text.contains("Submit"));
         assert!(!text.contains("Title"));
+    }
+
+    #[test]
+    fn focus_uid_applies_role_filter() {
+        // Regression (A10e): the focus_uid branch rendered the subtree but never
+        // applied role_filter. `inspect --uid n1 --filter button` must return only
+        // button-role descendants, not the whole subtree.
+        let nodes = vec![
+            AXNode {
+                node_id: "1".into(),
+                role: Some(make_ax_value("form")),
+                name: Some(make_ax_value("Signup")),
+                child_ids: Some(vec!["2".into(), "3".into()]),
+                parent_id: None,
+                backend_dom_node_id: Some(1),
+                ..default_ax_node()
+            },
+            AXNode {
+                node_id: "2".into(),
+                role: Some(make_ax_value("heading")),
+                name: Some(make_ax_value("Please sign up")),
+                child_ids: Some(vec![]),
+                parent_id: Some("1".into()),
+                backend_dom_node_id: Some(2),
+                ..default_ax_node()
+            },
+            AXNode {
+                node_id: "3".into(),
+                role: Some(make_ax_value("button")),
+                name: Some(make_ax_value("Submit")),
+                child_ids: Some(vec![]),
+                parent_id: Some("1".into()),
+                backend_dom_node_id: Some(3),
+                ..default_ax_node()
+            },
+        ];
+        // Focus the form (n1) AND filter to buttons: only the Submit button remains.
+        let (text, _) = format_ax_tree(&nodes, false, None, Some("n1"), Some(&["button"]));
+        assert!(text.contains("uid=n3 button \"Submit\""));
+        assert!(!text.contains("Please sign up")); // heading filtered out
+        assert!(!text.contains("form")); // focus root also filtered (not a button)
     }
 
     #[test]
