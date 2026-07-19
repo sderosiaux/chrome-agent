@@ -4,7 +4,7 @@ use crate::BoxError;
 use crate::browser::{self, BrowserOptions};
 use crate::cdp::client::CdpClient;
 use crate::cli::{Cli, Command, DaemonAction};
-use crate::run_helpers::{cmd_close, cmd_status, cmd_stop, connect_page, get_uid_map, json_output, output_action, output_goto, resolve_page_target};
+use crate::run_helpers::{cmd_close, cmd_status, cmd_stop, connect_page, get_uid_map, json_output, kill_pid, output_action, output_goto, resolve_page_target};
 use crate::{commands, pipe, session};
 
 pub async fn run(cli: Cli) -> Result<(), BoxError> {
@@ -88,6 +88,12 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
                 };
                 (conn, client)
             } else {
+                // Reconnect failed: the recorded browser is unreachable. Kill its
+                // pid before relaunching so a still-alive-but-unresponsive Chrome
+                // isn't orphaned (its session entry is about to be replaced).
+                if let Some(pid) = existing.pid {
+                    kill_pid(pid);
+                }
                 store.browsers.remove(&cli.browser);
                 let opts = BrowserOptions {
                     name: cli.browser.clone(),
@@ -103,14 +109,7 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
             }
         } else {
             if let Some(pid) = existing.pid {
-                #[cfg(unix)]
-                {
-                    let _ = std::process::Command::new("kill")
-                        .arg(pid.to_string())
-                        .stdout(std::process::Stdio::null())
-                        .stderr(std::process::Stdio::null())
-                        .status();
-                }
+                kill_pid(pid);
             }
             store.browsers.remove(&cli.browser);
             let opts = BrowserOptions {

@@ -379,6 +379,23 @@ pub async fn cmd_stop(json_mode: bool) -> Result<(), crate::BoxError> {
     } // #[cfg(unix)]
 }
 
+/// SIGKILL a managed-browser process (best-effort, unix only). Killing the
+/// main Chrome process is enough — its helper processes exit with it.
+pub fn kill_pid(pid: u32) {
+    #[cfg(unix)]
+    {
+        let _ = std::process::Command::new("kill")
+            .arg(pid.to_string())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+    }
+}
+
 pub fn cmd_close(browser_name: &str, purge: bool, json_mode: bool) -> Result<(), crate::BoxError> {
     let mut store = session::load_session()?;
 
@@ -387,18 +404,7 @@ pub fn cmd_close(browser_name: &str, purge: bool, json_mode: bool) -> Result<(),
     let message = match browser {
         Some(b) => {
             if let Some(pid) = b.pid {
-                #[cfg(unix)]
-                {
-                    let _ = std::process::Command::new("kill")
-                        .arg(pid.to_string())
-                        .stdout(std::process::Stdio::null())
-                        .stderr(std::process::Stdio::null())
-                        .status();
-                }
-                #[cfg(not(unix))]
-                {
-                    let _ = pid;
-                }
+                kill_pid(pid);
                 format!("Closed browser={browser_name} (pid={pid})")
             } else {
                 format!("Removed external browser session: {browser_name}")

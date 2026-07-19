@@ -86,6 +86,15 @@ fn close(browser: &str) {
         .output();
 }
 
+/// RAII guard: closes the browser on drop, incl. on panic/unwind, so a panic
+/// inside `run_pipe` can't leak the pipe process and its Chrome.
+struct BrowserGuard<'a>(&'a str);
+impl Drop for BrowserGuard<'_> {
+    fn drop(&mut self) {
+        close(self.0);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Positive: frame switch binds subsequent commands to the iframe
 // ---------------------------------------------------------------------------
@@ -97,6 +106,7 @@ fn frame_switch_scopes_eval_location_to_iframe() {
         return;
     }
     let browser = "test-frame-eval-loc";
+    let _guard = BrowserGuard(browser);
     let responses = run_pipe(
         browser,
         &[
@@ -128,6 +138,7 @@ fn frame_switch_scopes_eval_dom_to_iframe() {
         return;
     }
     let browser = "test-frame-eval-dom";
+    let _guard = BrowserGuard(browser);
     let responses = run_pipe(
         browser,
         &[
@@ -154,6 +165,7 @@ fn frame_switch_scopes_inspect_to_iframe() {
         return;
     }
     let browser = "test-frame-inspect";
+    let _guard = BrowserGuard(browser);
     let responses = run_pipe(
         browser,
         &[
@@ -187,6 +199,7 @@ fn frame_main_switches_back_to_top_document() {
         return;
     }
     let browser = "test-frame-main-back";
+    let _guard = BrowserGuard(browser);
     let responses = run_pipe(
         browser,
         &[
@@ -217,6 +230,7 @@ fn navigation_resets_frame_binding() {
         return;
     }
     let browser = "test-frame-nav-reset";
+    let _guard = BrowserGuard(browser);
     let responses = run_pipe(
         browser,
         &[
@@ -255,6 +269,7 @@ fn frame_on_non_iframe_element_errors() {
         return;
     }
     let browser = "test-frame-non-iframe";
+    let _guard = BrowserGuard(browser);
     let responses = run_pipe(
         browser,
         &[
@@ -280,6 +295,7 @@ fn frame_on_missing_selector_errors() {
         return;
     }
     let browser = "test-frame-missing";
+    let _guard = BrowserGuard(browser);
     let responses = run_pipe(
         browser,
         &[
@@ -305,6 +321,7 @@ fn frame_missing_target_field_errors() {
         return;
     }
     let browser = "test-frame-no-target";
+    let _guard = BrowserGuard(browser);
     let responses = run_pipe(
         browser,
         &[
@@ -331,6 +348,7 @@ fn without_frame_switch_eval_targets_top_document() {
         return;
     }
     let browser = "test-frame-control-eval";
+    let _guard = BrowserGuard(browser);
     let responses = run_pipe(
         browser,
         &[
@@ -355,6 +373,7 @@ fn without_frame_switch_inspect_shows_parent() {
         return;
     }
     let browser = "test-frame-control-inspect";
+    let _guard = BrowserGuard(browser);
     let responses = run_pipe(
         browser,
         &[

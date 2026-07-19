@@ -168,15 +168,25 @@ async fn launch_browser(opts: &BrowserOptions) -> Result<BrowserConnection, Brow
     cmd.stdout(Stdio::null());
     cmd.stderr(Stdio::null());
 
-    let child = cmd.spawn().map_err(|e| {
+    let mut child = cmd.spawn().map_err(|e| {
         BrowserError::Launch(format!("Failed to launch {}: {e}", chromium_path.display()))
     })?;
 
     let pid = child.id();
 
-    // Wait for DevToolsActivePort to appear
+    // Wait for DevToolsActivePort to appear. If it never shows (e.g. slow start
+    // under load), the spawned Chrome would otherwise be orphaned — `Child`'s
+    // drop does NOT kill the process and no pid was persisted yet, so `close`
+    // could never reap it. Kill the child before propagating the error.
     let port_file = profile_dir.join("DevToolsActivePort");
-    let ws_endpoint = wait_for_devtools_port(&port_file, Duration::from_secs(10)).await?;
+    let ws_endpoint = match wait_for_devtools_port(&port_file, Duration::from_secs(10)).await {
+        Ok(ws) => ws,
+        Err(e) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(e);
+        }
+    };
 
     // Extract http endpoint from ws URL: ws://127.0.0.1:PORT/... → http://127.0.0.1:PORT
     let http_endpoint = extract_http_endpoint(&ws_endpoint);
