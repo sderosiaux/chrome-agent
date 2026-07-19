@@ -33,8 +33,14 @@ pub async fn take_snapshot(
         .send("Accessibility.enable", serde_json::json!({}))
         .await?;
 
+    // Scope to the frame bound by the `frame` command, if any (issue #8).
+    // Omitting `frameId` yields the root frame's tree, preserving prior behavior.
+    let mut params = serde_json::json!({});
+    if let Some(ctx) = client.frame_context() {
+        params["frameId"] = serde_json::json!(ctx.frame_id);
+    }
     let result: GetFullAXTreeResult = client
-        .call("Accessibility.getFullAXTree", serde_json::json!({}))
+        .call("Accessibility.getFullAXTree", params)
         .await?;
 
     let (text, uid_map) = format_ax_tree(&result.nodes, verbose, max_depth, focus_uid, role_filter);

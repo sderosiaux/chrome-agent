@@ -12,6 +12,20 @@ use super::types::{CdpEvent, CdpMessage, CdpRequest, CdpResponse};
 
 type PendingMap = Arc<Mutex<HashMap<u64, oneshot::Sender<CdpResponse>>>>;
 
+/// Execution context bound to a specific frame by the `frame` command.
+///
+/// Once set, subsequent `eval` calls run in `context_id` (the frame's
+/// isolated world) and `inspect`/snapshot scope to `frame_id`. Navigating
+/// the top document invalidates the isolated world, so callers clear this
+/// on navigation to avoid sending a dead `contextId`.
+#[derive(Clone, Debug)]
+pub struct FrameContext {
+    /// `Page.FrameId` of the target frame.
+    pub frame_id: String,
+    /// `Runtime.ExecutionContextId` of the frame's isolated world.
+    pub context_id: i64,
+}
+
 /// High-level CDP client. Handles request/response correlation and event dispatch.
 ///
 /// Built on top of the split transport (`CdpSender` + `CdpReceiver`).
@@ -23,6 +37,10 @@ pub struct CdpClient {
     pending: PendingMap,
     events_tx: broadcast::Sender<CdpEvent>,
     _dispatcher: tokio::task::JoinHandle<()>,
+    /// Frame the `frame` command switched into, if any. Interior-mutable so
+    /// `eval`/`inspect` (which take `&self`) can read it without threading
+    /// state through every call site.
+    frame_ctx: std::sync::Mutex<Option<FrameContext>>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -60,7 +78,20 @@ impl CdpClient {
             pending,
             events_tx,
             _dispatcher: dispatcher,
+            frame_ctx: std::sync::Mutex::new(None),
         })
+    }
+
+    /// Return the frame context set by the `frame` command, if any.
+    pub fn frame_context(&self) -> Option<FrameContext> {
+        self.frame_ctx.lock().unwrap().clone()
+    }
+
+    /// Bind (`Some`) or clear (`None`) the current frame context. Setting it
+    /// scopes subsequent `eval`/`inspect` to that frame; clearing restores the
+    /// top document. Navigation clears it (the isolated world dies with it).
+    pub fn set_frame_context(&self, ctx: Option<FrameContext>) {
+        *self.frame_ctx.lock().unwrap() = ctx;
     }
 
     /// Send a CDP command and wait for the typed response.

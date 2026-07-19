@@ -37,6 +37,9 @@ pub async fn dispatch_goto(
         .unwrap_or_default();
 
     let result = commands::goto::run(client, url, timeout, &parsed_headers).await?;
+    // Navigation destroys any bound frame's isolated world — clear it so
+    // subsequent eval/inspect target the freshly loaded top document (issue #8).
+    client.set_frame_context(None);
     let _ = commands::history::append(&result.url, &result.title, page_name);
 
     let mut obj = json!({"ok": true, "url": result.url, "title": result.title});
@@ -290,6 +293,7 @@ pub async fn dispatch_back(client: &CdpClient) -> Result<Value, crate::BoxError>
         .and_then(Value::as_i64)
         .ok_or("Could not find previous history entry")?;
     client.send("Page.navigateToHistoryEntry", json!({"entryId": prev_entry_id})).await?;
+    client.set_frame_context(None); // history navigation invalidates any bound frame
     let _ = client.wait_for_event("Page.loadEventFired", std::time::Duration::from_secs(5)).await;
     let title: crate::cdp::types::EvaluateResult = client
         .call("Runtime.evaluate", json!({"expression": "document.title", "returnByValue": true})).await?;
@@ -311,6 +315,7 @@ pub async fn dispatch_forward(client: &CdpClient) -> Result<Value, crate::BoxErr
         .and_then(Value::as_i64)
         .ok_or("Could not find next history entry")?;
     client.send("Page.navigateToHistoryEntry", json!({"entryId": next_entry_id})).await?;
+    client.set_frame_context(None); // history navigation invalidates any bound frame
     let _ = client.wait_for_event("Page.loadEventFired", std::time::Duration::from_secs(5)).await;
     let title: crate::cdp::types::EvaluateResult = client
         .call("Runtime.evaluate", json!({"expression": "document.title", "returnByValue": true})).await?;
@@ -398,6 +403,7 @@ pub async fn dispatch_navigate_and_read(
     let url = cmd.get("url").and_then(Value::as_str).ok_or("navigate_and_read: missing \"url\"")?;
     let truncate = cmd.get("truncate").and_then(Value::as_u64).map(|v| v as usize);
     let goto_result = commands::goto::run(client, url, timeout, &[]).await?;
+    client.set_frame_context(None); // navigation invalidates any bound frame (issue #8)
     let _ = commands::history::append(&goto_result.url, &goto_result.title, page_name);
     let read_result = commands::read::run(client, false, truncate).await?;
     Ok(json!({"ok": true, "url": goto_result.url, "title": goto_result.title, "content": read_result.text_content}))

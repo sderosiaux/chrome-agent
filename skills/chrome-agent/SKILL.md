@@ -114,9 +114,13 @@ chrome-agent upload --selector "input[type=file]" /path/to/file.pdf
 # Drag and drop
 chrome-agent drag <from-uid> <to-uid>                    # mouse-event based drag
 
-# Iframes
-chrome-agent frame "#payment-iframe"                     # switch to iframe context
-chrome-agent frame main                                  # switch back to main page
+# Iframes — the frame switch persists only inside ONE process, so use pipe/batch:
+printf '%s\n' \
+  '{"cmd":"frame","target":"iframe[src*=\"checkout\"]"}' \
+  '{"cmd":"inspect"}' \
+  '{"cmd":"fill","uid":"n42","value":"..."}' \
+  '{"cmd":"frame","target":"main"}' | chrome-agent pipe
+# Separate CLI calls (frame then inspect) do NOT work — each is a fresh connection.
 
 # Content extraction
 chrome-agent read [--truncate N]
@@ -215,7 +219,7 @@ An inspect of a typical page is ~50-200 tokens. To stay lean:
 10. **Use --urls** on inspect to get link destinations: `inspect --filter "link" --urls`.
 11. **check/uncheck are idempotent** — "Already checked" if no change needed. Prefer over click for checkboxes.
 12. **select works by value or text** — `select --uid n5 "Option 2"` tries `option.value` first, then `option.text`.
-13. **frame before iframe interaction** — `frame "#iframe"` to enter, `frame main` to return. Re-inspect after switching.
+13. **frame is pipe/batch-only** — `frame` scopes `eval`+`inspect` to the iframe, but the binding lives on the connection, so it only persists inside one `pipe`/`batch` process (not across separate CLI calls). After switching, `inspect` for iframe uids then act by uid; `--selector` still hits the top document. `frame main` returns.
 14. **batch for multi-step sequences** — pipe JSON array to stdin. Faster than separate CLI calls. UIDs from inspect are valid within the same batch.
 15. **close --purge** deletes browser profile (cookies, cache) when done.
 16. **Parallel agents**: use `--browser <unique-name>` to isolate sessions.
