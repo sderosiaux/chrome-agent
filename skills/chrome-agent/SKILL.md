@@ -3,7 +3,7 @@ name: chrome-agent
 description: Browser automation for AI agents. Use when the user asks to interact with websites, scrape data, fill forms, take screenshots, or automate any browser task. Triggers on "open a website", "go to", "scrape", "fill the form", "click", "take a screenshot", "read this page", "search on", "check this site".
 metadata:
   author: sderosiaux
-  version: "0.5.1"
+  version: "0.6.0"
   tags: ["browser", "automation", "scraping", "chrome", "cdp"]
 ---
 
