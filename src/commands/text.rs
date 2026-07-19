@@ -154,13 +154,27 @@ mod tests {
 
     #[test]
     fn bug_selector_injection_escaped() {
-        // serde_json::to_string wraps in double quotes and escapes internals
-        let malicious = r"'); alert('xss";
-        let escaped = serde_json::to_string(malicious).unwrap();
-        assert!(escaped.starts_with('"'));
-        assert!(escaped.ends_with('"'));
-        // The single quotes are preserved (not dangerous in double-quoted JS string)
-        // The important thing: no way to break out of the double-quoted string
-        assert!(!escaped.contains(r#"\""#) || escaped.starts_with('"'));
+        // The selector builder embeds `serde_json::to_string(sel)` into a JS
+        // string literal. Assert the exact escaping it produces so a payload
+        // cannot break out of that literal.
+
+        // Single quotes are data inside a double-quoted JS string: kept verbatim.
+        let single = r"'); alert('xss";
+        assert_eq!(
+            serde_json::to_string(single).unwrap(),
+            "\"'); alert('xss\"",
+            "single quotes must be preserved, not the breakout vector"
+        );
+
+        // Double quotes ARE the breakout vector and must be backslash-escaped.
+        let double = r#"a"] ); fetch("evil"#;
+        let escaped = serde_json::to_string(double).unwrap();
+        assert_eq!(escaped, r#""a\"] ); fetch(\"evil""#);
+        // Every embedded double-quote is escaped: the payload stays inert data.
+        assert_eq!(escaped.matches(r#"\""#).count(), 2);
+
+        // Backslashes and newlines can't smuggle in an unescaped quote either.
+        assert_eq!(serde_json::to_string("x\\\"y").unwrap(), r#""x\\\"y""#);
+        assert_eq!(serde_json::to_string("a\nb").unwrap(), r#""a\nb""#);
     }
 }
