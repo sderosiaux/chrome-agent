@@ -358,7 +358,7 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
             }
 
             let msg = if let Some(ref sel) = selector {
-                crate::element::click_selector(&client, sel).await?;
+                crate::element::dblclick_selector(&client, sel).await?;
                 format!("Double-clicked selector '{sel}'")
             } else if let Some(ref coords) = xy {
                 if coords.len() != 2 {

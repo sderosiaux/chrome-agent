@@ -7,6 +7,7 @@ mod commands;
 mod daemon;
 mod element;
 mod element_ref;
+mod element_selector;
 mod geometry;
 mod pipe;
 mod pipe_dispatch;
