@@ -24,9 +24,13 @@ pub async fn run(client: &CdpClient, target: &str) -> Result<String, crate::BoxE
             }})()",
             sel = serde_json::to_string(target).unwrap_or_default()
         );
-        let result: serde_json::Value = client
-            .call("Runtime.evaluate", serde_json::json!({"expression": js}))
-            .await?;
+        let mut params = serde_json::json!({"expression": js});
+        // Resolve a nested iframe selector inside the currently bound frame,
+        // rather than always querying the top document.
+        if let Some(ctx) = client.frame_context() {
+            params["contextId"] = serde_json::json!(ctx.context_id);
+        }
+        let result: serde_json::Value = client.call("Runtime.evaluate", params).await?;
 
         if let Some(exc) = result.get("exceptionDetails") {
             let msg = exc.get("exception")
