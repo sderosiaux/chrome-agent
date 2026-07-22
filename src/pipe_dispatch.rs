@@ -278,8 +278,55 @@ pub async fn dispatch_download(client: &CdpClient, default_timeout: u64, cmd: &V
     let url = cmd.get("url").and_then(Value::as_str).ok_or("download: missing \"url\"")?;
     let out = cmd.get("out").and_then(Value::as_str);
     let timeout = cmd.get("timeout").and_then(Value::as_u64).unwrap_or(default_timeout);
-    let result = commands::download::run(client, url, out, timeout).await?;
+    let max_bytes = parse_download_max_bytes(cmd)?;
+    let result = commands::download::run(client, url, out, timeout, max_bytes).await?;
     Ok(json!({"ok": true, "path": result.path, "bytes": result.bytes, "mime": result.mime}))
+}
+
+fn parse_download_max_bytes(cmd: &Value) -> Result<usize, crate::BoxError> {
+    let value = match cmd.get("max_bytes") {
+        Some(value) => value
+            .as_u64()
+            .ok_or("download: max_bytes must be a positive integer")?,
+        None => commands::download::DEFAULT_MAX_BYTES as u64,
+    };
+    let value = usize::try_from(value).map_err(|_| "download: max_bytes exceeds platform limits")?;
+    if value == 0 {
+        return Err("download: max_bytes must be greater than zero".into());
+    }
+    Ok(value)
+}
+
+#[cfg(test)]
+mod download_limit_tests {
+    use super::*;
+
+    #[test]
+    fn pipe_download_max_bytes_defaults_and_rejects_zero() {
+        assert_eq!(
+            parse_download_max_bytes(&serde_json::json!({"cmd": "download"})).unwrap(),
+            67_108_864
+        );
+        assert_eq!(
+            parse_download_max_bytes(
+                &serde_json::json!({"cmd": "download", "max_bytes": 10})
+            )
+            .unwrap(),
+            10
+        );
+        assert!(
+            parse_download_max_bytes(
+                &serde_json::json!({"cmd": "download", "max_bytes": 0})
+            )
+            .is_err()
+        );
+        assert!(
+            parse_download_max_bytes(
+                &serde_json::json!({"cmd": "download", "max_bytes": "10"})
+            )
+            .is_err()
+        );
+    }
 }
 
 pub async fn dispatch_pdf(client: &CdpClient, cmd: &Value) -> Result<Value, crate::BoxError> {

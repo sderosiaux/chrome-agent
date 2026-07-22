@@ -12,6 +12,9 @@ pub struct DownloadResult {
     pub mime: String,
 }
 
+/// Default in-page download limit: 64 MiB.
+pub const DEFAULT_MAX_BYTES: usize = 64 * 1024 * 1024;
+
 /// Download `url` by fetching it inside the page, so the request inherits the
 /// page's cookies/session (auth-preserving). The bytes are returned as base64,
 /// decoded, and written to disk.
@@ -23,13 +26,48 @@ pub async fn run(
     url: &str,
     out: Option<&str>,
     timeout_secs: u64,
+    max_bytes: usize,
 ) -> Result<DownloadResult, crate::BoxError> {
+    if max_bytes == 0 {
+        return Err("download: max_bytes must be greater than zero".into());
+    }
     let url_lit = serde_json::to_string(url)?;
     let js = format!(
         r"(async () => {{
             const res = await fetch({url_lit}, {{ credentials: 'include' }});
             if (!res.ok) throw new Error('HTTP ' + res.status + ' fetching ' + {url_lit});
-            const buf = new Uint8Array(await res.arrayBuffer());
+            const maxBytes = {max_bytes};
+            const lengthHeader = res.headers.get('content-length');
+            if (lengthHeader !== null) {{
+                const announced = Number(lengthHeader);
+                if (Number.isFinite(announced) && announced > maxBytes) {{
+                    if (res.body) await res.body.cancel();
+                    throw new Error('download exceeded ' + maxBytes + ' bytes');
+                }}
+            }}
+
+            const chunks = [];
+            let total = 0;
+            if (res.body) {{
+                const reader = res.body.getReader();
+                while (true) {{
+                    const {{ done, value }} = await reader.read();
+                    if (done) break;
+                    total += value.byteLength;
+                    if (total > maxBytes) {{
+                        await reader.cancel();
+                        throw new Error('download exceeded ' + maxBytes + ' bytes');
+                    }}
+                    chunks.push(value);
+                }}
+            }}
+
+            const buf = new Uint8Array(total);
+            let offset = 0;
+            for (const chunk of chunks) {{
+                buf.set(chunk, offset);
+                offset += chunk.byteLength;
+            }}
             let bin = '';
             const CHUNK = 0x8000;
             for (let i = 0; i < buf.length; i += CHUNK) {{
@@ -39,6 +77,7 @@ pub async fn run(
                 data: btoa(bin),
                 mime: res.headers.get('content-type') || '',
                 cd: res.headers.get('content-disposition') || '',
+                bytes: total,
             }};
         }})()"
     );
@@ -54,15 +93,40 @@ pub async fn run(
     .map_err(|_| format!("download timed out after {timeout_secs}s fetching {url}"))??;
 
     if let Some(exc) = eval.exception_details {
-        return Err(format!("download failed: {}", exc.text).into());
+        let detail = exc
+            .exception
+            .as_ref()
+            .and_then(|exception| exception.description.as_deref())
+            .unwrap_or(&exc.text);
+        return Err(format!("download failed: {detail}").into());
     }
 
     let obj = eval.result.value.ok_or("download: page returned no data")?;
     let data = obj.get("data").and_then(|v| v.as_str()).ok_or("download: missing data")?;
     let mime = obj.get("mime").and_then(|v| v.as_str()).unwrap_or("").to_string();
     let cd = obj.get("cd").and_then(|v| v.as_str()).unwrap_or("");
+    let reported_bytes = obj
+        .get("bytes")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or("download: missing byte count")?;
+    let reported_bytes = usize::try_from(reported_bytes)
+        .map_err(|_| "download: byte count exceeds platform limits")?;
+
+    if reported_bytes > max_bytes {
+        return Err(format!("download exceeded {max_bytes} bytes").into());
+    }
 
     let bytes = crate::base64::decode(data)?;
+    if bytes.len() != reported_bytes {
+        return Err(format!(
+            "download: decoded byte count mismatch (reported {reported_bytes}, decoded {})",
+            bytes.len()
+        )
+        .into());
+    }
+    if bytes.len() > max_bytes {
+        return Err(format!("download exceeded {max_bytes} bytes").into());
+    }
 
     let path = resolve_out_path(out, cd, url)?;
     if let Some(parent) = path.parent() {
