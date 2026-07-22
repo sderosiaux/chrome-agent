@@ -25,8 +25,18 @@ use crate::cli::Cli;
 pub async fn run_pipe(cli: &Cli) -> Result<(), crate::BoxError> {
     let mut store = session::load_session()?;
     let want_headless = !cli.headed;
+    let requested_proxy = browser::normalized_proxy_option(
+        cli.connect.as_deref(),
+        cli.proxy_server.as_deref(),
+    )?;
 
-    let (conn, browser_client) = connect_browser(&mut store, cli, want_headless).await?;
+    let (conn, browser_client) = connect_browser(
+        &mut store,
+        cli,
+        want_headless,
+        requested_proxy.clone(),
+    )
+    .await?;
 
     let http_endpoint = conn.http_endpoint.as_deref().ok_or(
         "No HTTP endpoint available. Cannot resolve page WebSocket URL.",
@@ -34,7 +44,12 @@ pub async fn run_pipe(cli: &Cli) -> Result<(), crate::BoxError> {
 
     let target_id = {
         let browser_session = session::ensure_browser(
-            &mut store, &cli.browser, &conn.ws_endpoint, conn.pid, want_headless,
+            &mut store,
+            &cli.browser,
+            &conn.ws_endpoint,
+            conn.pid,
+            want_headless,
+            requested_proxy,
         );
         crate::run_helpers::resolve_page_target(&browser_client, browser_session, &cli.page).await?
     };
@@ -101,12 +116,27 @@ pub async fn run_replay(
 
     let mut store = session::load_session()?;
     let want_headless = !cli.headed;
-    let (conn, browser_client) = connect_browser(&mut store, cli, want_headless).await?;
+    let requested_proxy = browser::normalized_proxy_option(
+        cli.connect.as_deref(),
+        cli.proxy_server.as_deref(),
+    )?;
+    let (conn, browser_client) = connect_browser(
+        &mut store,
+        cli,
+        want_headless,
+        requested_proxy.clone(),
+    )
+    .await?;
 
     let http_endpoint = conn.http_endpoint.as_deref().ok_or("No HTTP endpoint available.")?;
     let target_id = {
         let browser_session = session::ensure_browser(
-            &mut store, &cli.browser, &conn.ws_endpoint, conn.pid, want_headless,
+            &mut store,
+            &cli.browser,
+            &conn.ws_endpoint,
+            conn.pid,
+            want_headless,
+            requested_proxy,
         );
         crate::run_helpers::resolve_page_target(&browser_client, browser_session, &cli.page).await?
     };
@@ -229,7 +259,10 @@ fn emit(value: &Value) {
 }
 
 async fn connect_browser(
-    store: &mut SessionStore, cli: &Cli, want_headless: bool,
+    store: &mut SessionStore,
+    cli: &Cli,
+    want_headless: bool,
+    requested_proxy: Option<String>,
 ) -> Result<(browser::BrowserConnection, CdpClient), crate::BoxError> {
     if let Some(existing) = store.browsers.get(&cli.browser) {
         let mode_matches = existing.headless == want_headless;
@@ -238,6 +271,7 @@ async fn connect_browser(
 
         if mode_matches {
             if let Ok(client) = CdpClient::connect(ws).await {
+                session::ensure_proxy_compatible(existing, requested_proxy.as_deref())?;
                 let conn = browser::BrowserConnection {
                     ws_endpoint: ws.clone(), http_endpoint: Some(http), pid: existing.pid,
                 };
@@ -259,7 +293,8 @@ async fn connect_browser(
     let opts = BrowserOptions {
         name: cli.browser.clone(), headless: want_headless,
         ignore_https_errors: cli.ignore_https_errors, stealth: cli.stealth,
-        connect: cli.connect.clone(), copy_cookies: cli.copy_cookies,
+        connect: cli.connect.clone(), proxy_server: requested_proxy,
+        copy_cookies: cli.copy_cookies,
     };
     let conn = browser::resolve_browser(&opts).await?;
     let client = CdpClient::connect(&conn.ws_endpoint).await?;

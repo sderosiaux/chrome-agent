@@ -3,6 +3,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 /// Options for launching or connecting to a browser.
+#[derive(Clone)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct BrowserOptions {
     pub name: String,
@@ -10,6 +11,7 @@ pub struct BrowserOptions {
     pub ignore_https_errors: bool,
     pub stealth: bool,
     pub connect: Option<String>,
+    pub proxy_server: Option<String>,
     pub copy_cookies: bool,
 }
 
@@ -21,6 +23,7 @@ impl Default for BrowserOptions {
             ignore_https_errors: false,
             stealth: false,
             connect: None,
+            proxy_server: None,
             copy_cookies: false,
         }
     }
@@ -85,9 +88,71 @@ pub fn validate_browser_name(name: &str) -> Result<(), BrowserError> {
     Ok(())
 }
 
+/// Validate and normalize a managed-browser proxy without ever echoing a submitted value.
+pub fn validate_proxy_server(value: &str) -> Result<String, BrowserError> {
+    let invalid = || {
+        BrowserError::Launch(
+            "Invalid proxy server <redacted-proxy>: expected http(s)://host:port or socks4/5://host:port"
+                .into(),
+        )
+    };
+    if value.trim() != value || value.chars().any(char::is_whitespace) {
+        return Err(invalid());
+    }
+    let (scheme, remainder) = value.split_once("://").ok_or_else(invalid)?;
+    let scheme = scheme.to_ascii_lowercase();
+    if !matches!(scheme.as_str(), "http" | "https" | "socks4" | "socks5") {
+        return Err(invalid());
+    }
+    if remainder.contains(['?', '#', '@']) {
+        return Err(invalid());
+    }
+    let authority = remainder.strip_suffix('/').unwrap_or(remainder);
+    if authority.contains('/') || authority.is_empty() {
+        return Err(invalid());
+    }
+    let (host, port) = if let Some(bracketed) = authority.strip_prefix('[') {
+        let (host, suffix) = bracketed.split_once(']').ok_or_else(invalid)?;
+        if host.is_empty() {
+            return Err(invalid());
+        }
+        let port = suffix.strip_prefix(':').ok_or_else(invalid)?;
+        (format!("[{}]", host.to_ascii_lowercase()), port)
+    } else {
+        let (host, port) = authority.rsplit_once(':').ok_or_else(invalid)?;
+        if host.contains(':') {
+            return Err(invalid());
+        }
+        (host.to_ascii_lowercase(), port)
+    };
+    if host.is_empty() || port.parse::<u16>().ok().is_none_or(|port| port == 0) {
+        return Err(invalid());
+    }
+    Ok(format!("{scheme}://{host}:{port}"))
+}
+
+/// Resolve the launch-only proxy contract shared by CLI, pipe, and replay modes.
+pub fn normalized_proxy_option(
+    connect: Option<&str>,
+    proxy_server: Option<&str>,
+) -> Result<Option<String>, BrowserError> {
+    if connect.is_some() && proxy_server.is_some() {
+        return Err(BrowserError::Launch(
+            "--proxy-server applies only when chrome-agent launches Chrome; configure the attached browser's proxy before using --connect"
+                .into(),
+        ));
+    }
+    proxy_server.map(validate_proxy_server).transpose()
+}
+
 /// Resolve a browser connection: either connect to an existing Chrome or launch one.
 pub async fn resolve_browser(opts: &BrowserOptions) -> Result<BrowserConnection, BrowserError> {
     validate_browser_name(&opts.name)?;
+    let mut resolved = opts.clone();
+    resolved.proxy_server = normalized_proxy_option(
+        resolved.connect.as_deref(),
+        resolved.proxy_server.as_deref(),
+    )?;
     if let Some(endpoint) = &opts.connect {
         if endpoint == "auto" {
             return auto_discover().await;
@@ -104,7 +169,7 @@ pub async fn resolve_browser(opts: &BrowserOptions) -> Result<BrowserConnection,
     }
 
     // No --connect: launch a managed browser
-    launch_browser(opts).await
+    launch_browser(&resolved).await
 }
 
 /// Launch a Chromium instance with remote debugging.
@@ -143,26 +208,7 @@ async fn launch_browser(opts: &BrowserOptions) -> Result<BrowserConnection, Brow
     let chromium_path = find_chromium()?;
 
     let mut cmd = Command::new(&chromium_path);
-    cmd.arg(format!("--user-data-dir={}", profile_dir.display()));
-    cmd.arg("--remote-debugging-port=0"); // auto-assign port
-    cmd.arg("--no-first-run");
-    cmd.arg("--no-default-browser-check");
-    cmd.arg("--disable-background-timer-throttling");
-    cmd.arg("--disable-backgrounding-occluded-windows");
-    cmd.arg("--disable-renderer-backgrounding");
-
-    if opts.headless {
-        cmd.arg("--headless=new");
-    }
-
-    if opts.ignore_https_errors {
-        cmd.arg("--ignore-certificate-errors");
-    }
-
-    if opts.stealth {
-        cmd.arg("--disable-infobars");
-        cmd.arg("--disable-component-extensions-with-background-pages");
-    }
+    cmd.args(managed_launch_args(&profile_dir, opts));
 
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::null());
@@ -196,6 +242,32 @@ async fn launch_browser(opts: &BrowserOptions) -> Result<BrowserConnection, Brow
         http_endpoint: Some(http_endpoint),
         pid: Some(pid),
     })
+}
+
+fn managed_launch_args(profile_dir: &Path, opts: &BrowserOptions) -> Vec<String> {
+    let mut args = vec![
+        format!("--user-data-dir={}", profile_dir.display()),
+        "--remote-debugging-port=0".into(),
+        "--no-first-run".into(),
+        "--no-default-browser-check".into(),
+        "--disable-background-timer-throttling".into(),
+        "--disable-backgrounding-occluded-windows".into(),
+        "--disable-renderer-backgrounding".into(),
+    ];
+    if let Some(proxy_server) = &opts.proxy_server {
+        args.push(format!("--proxy-server={proxy_server}"));
+    }
+    if opts.headless {
+        args.push("--headless=new".into());
+    }
+    if opts.ignore_https_errors {
+        args.push("--ignore-certificate-errors".into());
+    }
+    if opts.stealth {
+        args.push("--disable-infobars".into());
+        args.push("--disable-component-extensions-with-background-pages".into());
+    }
+    args
 }
 
 /// Decide whether `--copy-cookies` should run for this launch.
@@ -655,6 +727,61 @@ mod tests {
         // Not requested: never copy regardless of state.
         assert!(!should_copy_cookies(false, false));
         assert!(!should_copy_cookies(false, true));
+    }
+
+    #[test]
+    fn validates_and_normalizes_supported_proxy_urls() {
+        assert_eq!(
+            validate_proxy_server("HTTP://Proxy.Example:8080/").unwrap(),
+            "http://proxy.example:8080"
+        );
+        assert_eq!(
+            validate_proxy_server("socks5://127.0.0.1:1080").unwrap(),
+            "socks5://127.0.0.1:1080"
+        );
+    }
+
+    #[test]
+    fn rejects_unsafe_proxy_urls_without_echoing_credentials() {
+        for value in [
+            "http://user:secret@proxy.example:8080",
+            "ftp://proxy.example:21",
+            "http://proxy.example",
+            "http://proxy.example:8080/path",
+            "http://proxy.example:8080?token=secret",
+            "http://proxy.example:8080#secret",
+            "http://[]:8080",
+        ] {
+            let error = validate_proxy_server(value).unwrap_err().to_string();
+            assert!(error.contains("<redacted-proxy>"));
+            assert!(!error.contains("secret"));
+        }
+    }
+
+    #[test]
+    fn managed_launch_args_include_one_proxy_flag() {
+        let opts = BrowserOptions {
+            proxy_server: Some("http://127.0.0.1:8080".into()),
+            ..BrowserOptions::default()
+        };
+        let args = managed_launch_args(Path::new("/tmp/chrome-profile"), &opts);
+        assert_eq!(
+            args.iter()
+                .filter(|arg| arg.starts_with("--proxy-server="))
+                .collect::<Vec<_>>(),
+            vec![&"--proxy-server=http://127.0.0.1:8080".to_string()]
+        );
+    }
+
+    #[test]
+    fn attached_browser_rejects_launch_proxy() {
+        let error = normalized_proxy_option(
+            Some("http://127.0.0.1:9222"),
+            Some("http://127.0.0.1:8080"),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("applies only when chrome-agent launches Chrome"));
     }
 
     #[tokio::test]

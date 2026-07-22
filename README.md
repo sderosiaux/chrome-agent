@@ -214,6 +214,7 @@ chrome-agent screenshot
 --browser <name>         Named browser profile (default: "default")
 --page <name>            Named tab (default: "default")
 --connect [url]          Attach to a running Chrome
+--proxy-server <url>     Proxy a managed Chrome (http(s), socks4/5; explicit port required)
 --headed                 Show browser window (default: headless)
 --stealth                Anti-detection patches (Cloudflare, Turnstile)
 --copy-cookies           Use cookies from your real Chrome profile
@@ -224,6 +225,10 @@ chrome-agent screenshot
 --dialog <mode>          JS dialog policy: accept (default), dismiss, or manual
 --dialog-text <text>     Text to submit for prompt() dialogs when --dialog accept
 ```
+
+`--proxy-server` is launch-only and is persisted with the named browser session. Close or purge a
+running named browser before changing its proxy. Attached browsers (`--connect`) must be configured
+with their proxy before ChromeAgent attaches. Proxy URLs containing credentials are rejected.
 
 JS dialogs (`alert`/`confirm`/`prompt`/`beforeunload`) are auto-answered by default (`--dialog accept`) — a native dialog otherwise blocks the page with no DOM signal and the agent's next command hangs. Use `--dialog dismiss` to cancel them, or `--dialog manual` to opt out.
 
