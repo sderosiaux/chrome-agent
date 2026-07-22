@@ -193,7 +193,8 @@ fn goto_reports_the_settled_redirect_url() {
     let output = run(&browser, &["--json", "goto", &start_url]);
     assert!(
         output.status.success(),
-        "goto failed: {}",
+        "goto failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
     let response: Value = serde_json::from_slice(&output.stdout).expect("JSON goto response");
