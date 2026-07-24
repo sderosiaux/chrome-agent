@@ -11,6 +11,8 @@ use super::transport::{self, CdpSender, CdpTransportError};
 use super::types::{CdpEvent, CdpMessage, CdpRequest, CdpResponse};
 
 type PendingMap = Arc<Mutex<HashMap<u64, oneshot::Sender<CdpResponse>>>>;
+const DIALOG_REQUEST_ID_START: u64 = 1_000_000_000;
+const DIALOG_REQUEST_ID_MAX: u64 = i32::MAX as u64;
 
 /// Execution context bound to a specific frame by the `frame` command.
 ///
@@ -176,9 +178,11 @@ impl CdpClient {
         let mut rx = self.events();
         let sender = self.sender.clone();
         tokio::spawn(async move {
-            // High offset so our fire-and-forget ids never collide with the
-            // sequential request ids (unmatched responses are dropped harmlessly).
-            let mut local_id: u64 = 1 << 40;
+            // Keep fire-and-forget ids inside Chromium's accepted signed
+            // 32-bit range. Values such as 2^40 are silently ignored, leaving
+            // the dialog open and the command that triggered it blocked.
+            // This offset remains far above normal sequential request ids.
+            let mut local_id = DIALOG_REQUEST_ID_START;
             loop {
                 match rx.recv().await {
                     Ok(event) if event.method == "Page.javascriptDialogOpening" => {
@@ -203,7 +207,11 @@ impl CdpClient {
                             "method": "Page.handleJavaScriptDialog",
                             "params": params,
                         });
-                        local_id = local_id.wrapping_add(1);
+                        local_id = if local_id >= DIALOG_REQUEST_ID_MAX {
+                            DIALOG_REQUEST_ID_START
+                        } else {
+                            local_id + 1
+                        };
                         let _ = sender.send(request.to_string()).await;
                         eprintln!(
                             "dialog auto-{}: {dtype} {message:?}",

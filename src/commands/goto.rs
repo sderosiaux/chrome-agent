@@ -105,27 +105,37 @@ pub async fn run(
         )
         .await;
 
-    // Get page title via Runtime.evaluate
+    // Read the settled page state from the renderer. Page.navigate only echoes
+    // the requested URL; after an HTTP/client-side redirect the authoritative
+    // URL is location.href.
     let eval_result: EvaluateResult = client
         .call(
             "Runtime.evaluate",
             json!({
-                "expression": "document.title",
+                "expression": "({ url: location.href, title: document.title })",
                 "returnByValue": true,
             }),
         )
         .await?;
 
-    let title = eval_result
+    let page_state = eval_result
         .result
         .value
         .as_ref()
-        .and_then(|v| v.as_str())
+        .and_then(serde_json::Value::as_object);
+    let settled_url = page_state
+        .and_then(|state| state.get("url"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(url)
+        .to_string();
+    let title = page_state
+        .and_then(|state| state.get("title"))
+        .and_then(serde_json::Value::as_str)
         .unwrap_or("")
         .to_string();
 
     Ok(GotoResult {
-        url: url.to_string(),
+        url: settled_url,
         title,
     })
 }
