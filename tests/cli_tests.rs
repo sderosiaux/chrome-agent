@@ -65,6 +65,7 @@ fn help_shows_global_flags() {
     assert_eq!(code, 0);
     assert!(stdout.contains("--browser"));
     assert!(stdout.contains("--connect"));
+    assert!(stdout.contains("--proxy-server"));
     assert!(stdout.contains("--headed"));
     assert!(stdout.contains("--timeout"));
     assert!(stdout.contains("--ignore-https-errors"));

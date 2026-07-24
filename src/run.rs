@@ -70,6 +70,10 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
 
     // All other commands need a browser connection + CDP client
     let mut store = session::load_session()?;
+    let requested_proxy = browser::normalized_proxy_option(
+        cli.connect.as_deref(),
+        cli.proxy_server.as_deref(),
+    )?;
 
     let existing_mode = store.browsers.get(&cli.browser).map(|b| b.headless);
     let want_headless = existing_mode.unwrap_or(!cli.headed);
@@ -81,6 +85,7 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
 
         if mode_matches {
             if let Ok(client) = CdpClient::connect(ws).await {
+                session::ensure_proxy_compatible(existing, requested_proxy.as_deref())?;
                 let conn = browser::BrowserConnection {
                     ws_endpoint: ws.clone(),
                     http_endpoint: Some(http),
@@ -101,6 +106,7 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
                     ignore_https_errors: cli.ignore_https_errors,
                     stealth: cli.stealth,
                     connect: cli.connect.clone(),
+                    proxy_server: requested_proxy.clone(),
                     copy_cookies: cli.copy_cookies,
                 };
                 let conn = browser::resolve_browser(&opts).await?;
@@ -118,6 +124,7 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
                 ignore_https_errors: cli.ignore_https_errors,
                 stealth: cli.stealth,
                 connect: cli.connect.clone(),
+                proxy_server: requested_proxy.clone(),
                 copy_cookies: cli.copy_cookies,
             };
             let conn = browser::resolve_browser(&opts).await?;
@@ -141,6 +148,7 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
             ignore_https_errors: cli.ignore_https_errors,
             stealth: cli.stealth,
             connect: cli.connect.clone(),
+            proxy_server: requested_proxy.clone(),
             copy_cookies: cli.copy_cookies,
         };
         let conn = browser::resolve_browser(&opts).await?;
@@ -158,7 +166,8 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
             &cli.browser,
             &conn.ws_endpoint,
             conn.pid,
-            !cli.headed,
+            want_headless,
+            requested_proxy,
         );
         resolve_page_target(&browser_client, browser_session, &cli.page).await?
     };

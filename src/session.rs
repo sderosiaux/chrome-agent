@@ -28,6 +28,8 @@ pub struct BrowserSession {
     #[serde(default)]
     pub headless: bool,
     #[serde(default)]
+    pub proxy_server: Option<String>,
+    #[serde(default)]
     pub daemon_pid: Option<u32>,
     #[serde(default)]
     pub pages: HashMap<String, PageSession>,
@@ -211,6 +213,7 @@ pub fn ensure_browser<'a>(
     ws_endpoint: &str,
     pid: Option<u32>,
     headless: bool,
+    proxy_server: Option<String>,
 ) -> &'a mut BrowserSession {
     store
         .browsers
@@ -219,9 +222,24 @@ pub fn ensure_browser<'a>(
             ws_endpoint: ws_endpoint.to_string(),
             pid,
             headless,
+            proxy_server,
             daemon_pid: None,
             pages: HashMap::new(),
         })
+}
+
+/// Refuse to silently reuse a named managed browser with different proxy settings.
+pub fn ensure_proxy_compatible(
+    browser: &BrowserSession,
+    requested_proxy: Option<&str>,
+) -> Result<(), SessionError> {
+    if browser.proxy_server.as_deref() == requested_proxy {
+        return Ok(());
+    }
+    Err(SessionError(
+        "named browser is already running with different proxy settings; close or purge it, or select another browser name"
+            .into(),
+    ))
 }
 
 /// Ensure a page session entry exists, returning a mutable ref.
@@ -292,7 +310,14 @@ mod tests {
     fn session_roundtrip() {
         let mut store = SessionStore::default();
         let browser =
-            ensure_browser(&mut store, "test", "ws://localhost:9222", Some(1234), true);
+            ensure_browser(
+                &mut store,
+                "test",
+                "ws://localhost:9222",
+                Some(1234),
+                true,
+                Some("http://127.0.0.1:8080".into()),
+            );
         ensure_page(browser, "main", "target-abc");
 
         let json = serde_json::to_string(&store).unwrap();
@@ -303,8 +328,21 @@ mod tests {
         assert_eq!(b.ws_endpoint, "ws://localhost:9222");
         assert_eq!(b.pid, Some(1234));
         assert!(b.headless);
+        assert_eq!(b.proxy_server.as_deref(), Some("http://127.0.0.1:8080"));
         assert!(b.pages.contains_key("main"));
         assert_eq!(b.pages["main"].target_id, "target-abc");
+    }
+
+    #[test]
+    fn named_browser_proxy_must_match_before_reuse() {
+        let existing = browser("ws://localhost:9222");
+        assert!(ensure_proxy_compatible(&existing, None).is_ok());
+        assert!(
+            ensure_proxy_compatible(&existing, Some("http://127.0.0.1:8080"))
+                .unwrap_err()
+                .to_string()
+                .contains("different proxy settings")
+        );
     }
 
     #[test]
@@ -363,6 +401,7 @@ mod tests {
             ws_endpoint: ws.to_string(),
             pid: Some(1),
             headless: true,
+            proxy_server: None,
             daemon_pid: None,
             pages: HashMap::new(),
         }

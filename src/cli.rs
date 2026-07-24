@@ -40,6 +40,10 @@ pub struct Cli {
     #[arg(long)]
     pub connect: Option<String>,
 
+    /// Proxy server for a managed browser: http(s)://host:port or socks4/5://host:port
+    #[arg(long)]
+    pub proxy_server: Option<String>,
+
     /// Launch browser with a visible window (default is headless)
     #[arg(long)]
     pub headed: bool,
@@ -583,5 +587,18 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[test]
+    fn parses_managed_browser_proxy() {
+        let cli = Cli::try_parse_from([
+            "chrome-agent",
+            "--proxy-server",
+            "http://127.0.0.1:8080",
+            "status",
+        ])
+        .unwrap();
+
+        assert_eq!(cli.proxy_server.as_deref(), Some("http://127.0.0.1:8080"));
     }
 }
