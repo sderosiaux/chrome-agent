@@ -540,8 +540,8 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
             }
         }
 
-        Command::Download { url, out, timeout } => {
-            let result = commands::download::run(&client, &url, out.as_deref(), timeout).await?;
+        Command::Download { url, out, timeout, max_bytes } => {
+            let result = commands::download::run(&client, &url, out.as_deref(), timeout, max_bytes).await?;
             if json_mode {
                 json_output(&json!({
                     "ok": true,

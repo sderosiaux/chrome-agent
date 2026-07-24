@@ -1,5 +1,16 @@
 use clap::{Parser, Subcommand};
 
+fn parse_positive_usize(value: &str) -> Result<usize, String> {
+    let parsed = value
+        .parse::<usize>()
+        .map_err(|_| format!("invalid positive integer: {value}"))?;
+    if parsed == 0 {
+        Err("value must be greater than zero".to_string())
+    } else {
+        Ok(parsed)
+    }
+}
+
 const CLI_LONG_ABOUT: &str = "\
 chrome-agent — browser automation for AI agents. Controls Chrome via CDP.\n\
 Single binary, zero runtime dependencies. Named pages persist between invocations.\n\
@@ -348,6 +359,13 @@ pub enum Command {
         /// Timeout in seconds
         #[arg(long, default_value = "30")]
         timeout: u64,
+        /// Maximum response size in bytes
+        #[arg(
+            long,
+            default_value = "67108864",
+            value_parser = parse_positive_usize
+        )]
+        max_bytes: usize,
     },
 
     /// Print the current page to a PDF file
@@ -524,4 +542,46 @@ pub enum Command {
 pub enum DaemonAction {
     /// Start the daemon (foreground, used internally)
     Start,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn download_max_bytes_defaults_and_accepts_an_explicit_limit() {
+        let default = Cli::try_parse_from(["chrome-agent", "download", "https://example.com/a"])
+            .unwrap();
+        let explicit = Cli::try_parse_from([
+            "chrome-agent",
+            "download",
+            "https://example.com/a",
+            "--max-bytes",
+            "10",
+        ])
+        .unwrap();
+
+        assert!(matches!(
+            default.command,
+            Command::Download { max_bytes: 67_108_864, .. }
+        ));
+        assert!(matches!(
+            explicit.command,
+            Command::Download { max_bytes: 10, .. }
+        ));
+    }
+
+    #[test]
+    fn download_max_bytes_rejects_zero() {
+        assert!(
+            Cli::try_parse_from([
+                "chrome-agent",
+                "download",
+                "https://example.com/a",
+                "--max-bytes",
+                "0",
+            ])
+            .is_err()
+        );
+    }
 }

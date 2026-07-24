@@ -191,7 +191,7 @@ chrome-agent screenshot
 | `text [uid] [--selector "css"] [--truncate N]` | Visible text from page or element. |
 | `eval <expression> [--selector "css"]` | JS in page context. `el` = matched element. |
 | `extract [--selector "css"] [--limit N] [--scroll] [--a11y]` | Auto-detect repeating data. `--a11y` for React SPAs (X.com). |
-| `download <url> [--out path] [--timeout N]` | Download a URL fetched in-page, so cookies/auth carry over (login-gated files). Returns `{path,bytes,mime}`. |
+| `download <url> [--out path] [--timeout N] [--max-bytes N]` | Download a URL fetched in-page, so cookies/auth carry over (login-gated files). Rejects responses over 64 MiB by default. Returns `{path,bytes,mime}`. |
 
 ### Monitoring
 
