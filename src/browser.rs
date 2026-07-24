@@ -113,7 +113,8 @@ pub fn validate_proxy_server(value: &str) -> Result<String, BrowserError> {
     }
     let (host, port) = if let Some(bracketed) = authority.strip_prefix('[') {
         let (host, suffix) = bracketed.split_once(']').ok_or_else(invalid)?;
-        if host.is_empty() {
+        // Brackets are reserved for IPv6 literals; reject a bracketed hostname.
+        if host.parse::<std::net::Ipv6Addr>().is_err() {
             return Err(invalid());
         }
         let port = suffix.strip_prefix(':').ok_or_else(invalid)?;
@@ -739,6 +740,10 @@ mod tests {
             validate_proxy_server("socks5://127.0.0.1:1080").unwrap(),
             "socks5://127.0.0.1:1080"
         );
+        assert_eq!(
+            validate_proxy_server("http://[2001:DB8::1]:3128").unwrap(),
+            "http://[2001:db8::1]:3128"
+        );
     }
 
     #[test]
@@ -751,6 +756,7 @@ mod tests {
             "http://proxy.example:8080?token=secret",
             "http://proxy.example:8080#secret",
             "http://[]:8080",
+            "http://[proxy.example]:8080",
         ] {
             let error = validate_proxy_server(value).unwrap_err().to_string();
             assert!(error.contains("<redacted-proxy>"));
