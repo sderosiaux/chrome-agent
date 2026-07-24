@@ -42,7 +42,7 @@ pub async fn run(
                 const announced = Number(lengthHeader);
                 if (Number.isFinite(announced) && announced > maxBytes) {{
                     if (res.body) await res.body.cancel();
-                    throw new Error('download exceeded ' + maxBytes + ' bytes');
+                    throw new Error('download exceeded ' + maxBytes + ' bytes; raise --max-bytes to allow it');
                 }}
             }}
 
@@ -56,10 +56,20 @@ pub async fn run(
                     total += value.byteLength;
                     if (total > maxBytes) {{
                         await reader.cancel();
-                        throw new Error('download exceeded ' + maxBytes + ' bytes');
+                        throw new Error('download exceeded ' + maxBytes + ' bytes; raise --max-bytes to allow it');
                     }}
                     chunks.push(value);
                 }}
+            }} else {{
+                // No readable stream exposed (e.g. some cached/opaque responses):
+                // fall back to a bounded buffered read so content is not silently
+                // dropped as an empty download.
+                const fallback = new Uint8Array(await res.arrayBuffer());
+                if (fallback.byteLength > maxBytes) {{
+                    throw new Error('download exceeded ' + maxBytes + ' bytes; raise --max-bytes to allow it');
+                }}
+                total = fallback.byteLength;
+                chunks.push(fallback);
             }}
 
             const buf = new Uint8Array(total);
@@ -113,7 +123,7 @@ pub async fn run(
         .map_err(|_| "download: byte count exceeds platform limits")?;
 
     if reported_bytes > max_bytes {
-        return Err(format!("download exceeded {max_bytes} bytes").into());
+        return Err(format!("download exceeded {max_bytes} bytes; raise --max-bytes to allow it").into());
     }
 
     let bytes = crate::base64::decode(data)?;
@@ -125,7 +135,7 @@ pub async fn run(
         .into());
     }
     if bytes.len() > max_bytes {
-        return Err(format!("download exceeded {max_bytes} bytes").into());
+        return Err(format!("download exceeded {max_bytes} bytes; raise --max-bytes to allow it").into());
     }
 
     let path = resolve_out_path(out, cd, url)?;

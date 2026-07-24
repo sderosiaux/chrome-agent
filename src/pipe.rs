@@ -29,12 +29,16 @@ pub async fn run_pipe(cli: &Cli) -> Result<(), crate::BoxError> {
         cli.connect.as_deref(),
         cli.proxy_server.as_deref(),
     )?;
+    // Inherit a running named browser's proxy when the flag is omitted so a
+    // relaunch never silently drops it (see run.rs for the full rationale).
+    let effective_proxy = requested_proxy
+        .or_else(|| store.browsers.get(&cli.browser).and_then(|b| b.proxy_server.clone()));
 
     let (conn, browser_client) = connect_browser(
         &mut store,
         cli,
         want_headless,
-        requested_proxy.clone(),
+        effective_proxy.clone(),
     )
     .await?;
 
@@ -49,7 +53,7 @@ pub async fn run_pipe(cli: &Cli) -> Result<(), crate::BoxError> {
             &conn.ws_endpoint,
             conn.pid,
             want_headless,
-            requested_proxy,
+            effective_proxy,
         );
         crate::run_helpers::resolve_page_target(&browser_client, browser_session, &cli.page).await?
     };
@@ -120,11 +124,13 @@ pub async fn run_replay(
         cli.connect.as_deref(),
         cli.proxy_server.as_deref(),
     )?;
+    let effective_proxy = requested_proxy
+        .or_else(|| store.browsers.get(&cli.browser).and_then(|b| b.proxy_server.clone()));
     let (conn, browser_client) = connect_browser(
         &mut store,
         cli,
         want_headless,
-        requested_proxy.clone(),
+        effective_proxy.clone(),
     )
     .await?;
 
@@ -136,7 +142,7 @@ pub async fn run_replay(
             &conn.ws_endpoint,
             conn.pid,
             want_headless,
-            requested_proxy,
+            effective_proxy,
         );
         crate::run_helpers::resolve_page_target(&browser_client, browser_session, &cli.page).await?
     };
@@ -262,7 +268,7 @@ async fn connect_browser(
     store: &mut SessionStore,
     cli: &Cli,
     want_headless: bool,
-    requested_proxy: Option<String>,
+    effective_proxy: Option<String>,
 ) -> Result<(browser::BrowserConnection, CdpClient), crate::BoxError> {
     if let Some(existing) = store.browsers.get(&cli.browser) {
         let mode_matches = existing.headless == want_headless;
@@ -271,7 +277,7 @@ async fn connect_browser(
 
         if mode_matches {
             if let Ok(client) = CdpClient::connect(ws).await {
-                session::ensure_proxy_compatible(existing, requested_proxy.as_deref())?;
+                session::ensure_proxy_compatible(existing, effective_proxy.as_deref())?;
                 let conn = browser::BrowserConnection {
                     ws_endpoint: ws.clone(), http_endpoint: Some(http), pid: existing.pid,
                 };
@@ -293,7 +299,7 @@ async fn connect_browser(
     let opts = BrowserOptions {
         name: cli.browser.clone(), headless: want_headless,
         ignore_https_errors: cli.ignore_https_errors, stealth: cli.stealth,
-        connect: cli.connect.clone(), proxy_server: requested_proxy,
+        connect: cli.connect.clone(), proxy_server: effective_proxy,
         copy_cookies: cli.copy_cookies,
     };
     let conn = browser::resolve_browser(&opts).await?;

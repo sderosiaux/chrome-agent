@@ -228,16 +228,25 @@ pub fn ensure_browser<'a>(
         })
 }
 
-/// Refuse to silently reuse a named managed browser with different proxy settings.
+/// Guard proxy compatibility when reconnecting to a live named browser.
+///
+/// A managed browser's proxy is fixed at launch, so a running browser cannot
+/// change it. When no proxy is requested (the common case for follow-up
+/// commands), we inherit the browser's existing proxy silently. We only refuse
+/// when the caller explicitly asks for a *different* proxy than the one the
+/// browser was launched with.
 pub fn ensure_proxy_compatible(
     browser: &BrowserSession,
     requested_proxy: Option<&str>,
 ) -> Result<(), SessionError> {
-    if browser.proxy_server.as_deref() == requested_proxy {
+    let Some(requested) = requested_proxy else {
+        return Ok(());
+    };
+    if browser.proxy_server.as_deref() == Some(requested) {
         return Ok(());
     }
     Err(SessionError(
-        "named browser is already running with different proxy settings; close or purge it, or select another browser name"
+        "named browser is already running with a different proxy; close or purge it (chrome-agent --browser <name> close --purge), or select another browser name"
             .into(),
     ))
 }
@@ -341,8 +350,20 @@ mod tests {
             ensure_proxy_compatible(&existing, Some("http://127.0.0.1:8080"))
                 .unwrap_err()
                 .to_string()
-                .contains("different proxy settings")
+                .contains("different proxy")
         );
+    }
+
+    #[test]
+    fn proxied_browser_inherits_proxy_when_flag_omitted() {
+        let mut existing = browser("ws://localhost:9222");
+        existing.proxy_server = Some("http://127.0.0.1:8080".into());
+        // Follow-up command without --proxy-server inherits the running proxy.
+        assert!(ensure_proxy_compatible(&existing, None).is_ok());
+        // Same proxy is fine.
+        assert!(ensure_proxy_compatible(&existing, Some("http://127.0.0.1:8080")).is_ok());
+        // A different explicit proxy is refused.
+        assert!(ensure_proxy_compatible(&existing, Some("http://127.0.0.1:9090")).is_err());
     }
 
     #[test]

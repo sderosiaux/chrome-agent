@@ -78,6 +78,18 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
     let existing_mode = store.browsers.get(&cli.browser).map(|b| b.headless);
     let want_headless = existing_mode.unwrap_or(!cli.headed);
 
+    // A managed browser's proxy is fixed at launch and persisted per named
+    // browser. When relaunching an existing named browser (dead reconnect or
+    // mode switch), inherit its stored proxy unless the caller explicitly asked
+    // for one — otherwise omitting the flag would silently drop the proxy and
+    // route traffic directly. An explicit mismatch is caught on the live path
+    // by `ensure_proxy_compatible`.
+    let stored_proxy = store
+        .browsers
+        .get(&cli.browser)
+        .and_then(|b| b.proxy_server.clone());
+    let effective_proxy = requested_proxy.clone().or(stored_proxy);
+
     let (conn, browser_client) = if let Some(existing) = store.browsers.get(&cli.browser) {
         let mode_matches = existing.headless == want_headless;
         let ws = &existing.ws_endpoint;
@@ -106,7 +118,7 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
                     ignore_https_errors: cli.ignore_https_errors,
                     stealth: cli.stealth,
                     connect: cli.connect.clone(),
-                    proxy_server: requested_proxy.clone(),
+                    proxy_server: effective_proxy.clone(),
                     copy_cookies: cli.copy_cookies,
                 };
                 let conn = browser::resolve_browser(&opts).await?;
@@ -124,7 +136,7 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
                 ignore_https_errors: cli.ignore_https_errors,
                 stealth: cli.stealth,
                 connect: cli.connect.clone(),
-                proxy_server: requested_proxy.clone(),
+                proxy_server: effective_proxy.clone(),
                 copy_cookies: cli.copy_cookies,
             };
             let conn = browser::resolve_browser(&opts).await?;
@@ -148,7 +160,7 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
             ignore_https_errors: cli.ignore_https_errors,
             stealth: cli.stealth,
             connect: cli.connect.clone(),
-            proxy_server: requested_proxy.clone(),
+            proxy_server: effective_proxy.clone(),
             copy_cookies: cli.copy_cookies,
         };
         let conn = browser::resolve_browser(&opts).await?;
@@ -167,7 +179,7 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
             &conn.ws_endpoint,
             conn.pid,
             want_headless,
-            requested_proxy,
+            effective_proxy,
         );
         resolve_page_target(&browser_client, browser_session, &cli.page).await?
     };

@@ -508,6 +508,10 @@ pub enum Command {
     },
 
     /// Switch execution context to an iframe (or back to main)
+    ///
+    /// The selector is resolved inside the currently bound frame, so you can
+    /// descend into nested iframes. Use "main" to reset to the top document
+    /// before switching to a top-level sibling frame.
     Frame {
         /// CSS selector of the iframe, or "main" to return to top-level
         target: String,
