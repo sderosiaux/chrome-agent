@@ -3,7 +3,7 @@ name: chrome-agent
 description: Browser automation for AI agents. Use when the user asks to interact with websites, scrape data, fill forms, take screenshots, or automate any browser task. Triggers on "open a website", "go to", "scrape", "fill the form", "click", "take a screenshot", "read this page", "search on", "check this site".
 metadata:
   author: sderosiaux
-  version: "0.6.0"
+  version: "0.7.0"
   tags: ["browser", "automation", "scraping", "chrome", "cdp"]
 ---
 
@@ -147,7 +147,7 @@ echo '{"cmd":"goto","url":"...","inspect":true}' | chrome-agent pipe
 # Files: screenshots, PDF, downloads (saved to ~/.chrome-agent/tmp; path on stdout)
 chrome-agent screenshot [--filename name] [--format jpeg] [--quality N] [--max-width N] [--uid nN|--selector "css"]
 chrome-agent pdf [--filename name] [--landscape] [--background]   # current page to PDF
-chrome-agent download <url> [--out path]                          # auth-preserving (in-page fetch)
+chrome-agent download <url> [--out path] [--max-bytes N]          # auth-preserving (in-page fetch); rejects over 64 MiB by default
 
 # Other
 chrome-agent diff                                        # what changed since last inspect
@@ -165,6 +165,7 @@ chrome-agent close [--purge]
 --max-depth N  # Limit inspect tree depth (saves tokens)
 --headed       # Show browser window (default is headless)
 --connect URL  # Use real Chrome (for DataDome/Kasada sites)
+--proxy-server URL # Route a managed browser via a proxy (http(s)/socks4/5://host:port); launch-only
 --copy-cookies # Use cookies from your real Chrome profile
 --dialog MODE  # JS dialog policy: accept (default) | dismiss | manual
 --dialog-text  # Text submitted for prompt() dialogs under --dialog accept
