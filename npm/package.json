@@ -1,6 +1,6 @@
 {
   "name": "chrome-agent",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Browser automation for AI agents. Single binary, zero dependencies, CDP direct.",
   "type": "module",
   "bin": {
