@@ -46,7 +46,7 @@ pub fn diff_snapshots(old: &str, new: &str) -> Diff {
                 if old_line == new_line {
                     unchanged += 1;
                 } else {
-                    changed.push(format!("~ {old_line} -> {new_line}"));
+                    changed.push(render_change(old_line, new_line));
                 }
             }
         }
@@ -134,6 +134,62 @@ pub fn compare(old_url: Option<&str>, old_text: &str, new_url: &str, new_text: &
     }
 }
 
+/// Render a changed node, writing the part that stayed the same only once.
+///
+/// A node that only gained a value goes from repeating ~60 characters twice to stating the
+/// attribute that moved, and changed lines are the bulk of a form-filling flow. When the
+/// two lines share no identity (different role, or a name we can't tokenize) the whole line
+/// is the honest rendering, because there is nothing meaningful to hoist.
+fn render_change(old_line: &str, new_line: &str) -> String {
+    let whole = || format!("~ {old_line} -> {new_line}");
+    let (Some(old_tokens), Some(new_tokens)) = (tokenize(old_line), tokenize(new_line)) else {
+        return whole();
+    };
+    let shared = old_tokens
+        .iter()
+        .zip(&new_tokens)
+        .take_while(|(a, b)| a == b)
+        .count();
+    // Fewer than uid + role in common means the node changed identity, not just state.
+    if shared < 2 || shared == old_tokens.len() && shared == new_tokens.len() {
+        return whole();
+    }
+    let prefix = old_tokens[..shared].join(" ");
+    let old_rest = old_tokens[shared..].join(" ");
+    let new_rest = new_tokens[shared..].join(" ");
+    format!("~ {prefix} {old_rest} -> {new_rest}")
+}
+
+/// Split a snapshot line into space-separated tokens, keeping quoted runs whole.
+///
+/// Returns `None` when the quotes don't balance. Accessibility names are written into
+/// snapshots unescaped, so a name containing a quote makes the token boundaries ambiguous,
+/// and guessing at them would mangle the output. Callers fall back to the whole line.
+fn tokenize(line: &str) -> Option<Vec<&str>> {
+    let mut tokens = Vec::new();
+    let mut in_quotes = false;
+    let mut start = 0usize;
+    for (i, ch) in line.char_indices() {
+        match ch {
+            '"' => in_quotes = !in_quotes,
+            ' ' if !in_quotes => {
+                if i > start {
+                    tokens.push(&line[start..i]);
+                }
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    if in_quotes {
+        return None;
+    }
+    if start < line.len() {
+        tokens.push(&line[start..]);
+    }
+    Some(tokens)
+}
+
 /// Extract uid -> trimmed line from snapshot text.
 /// `(uid, line)` pairs in the order they appear in the snapshot.
 fn uid_lines(text: &str) -> Vec<(&str, &str)> {
@@ -152,6 +208,46 @@ fn uid_lines(text: &str) -> Vec<(&str, &str)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A changed line repeats the node twice today. Only the part that moved matters, and
+    /// changed lines dominate a form-filling flow, so the shared prefix is written once.
+    #[test]
+    fn a_changed_line_states_only_what_moved() {
+        let old = "uid=n11 textbox \"Email\" focusable value=\"\"\n";
+        let new = "uid=n11 textbox \"Email\" focusable value=\"a@b.c\"\n";
+        let d = diff_snapshots(old, new);
+        assert_eq!(
+            d.text.lines().next().unwrap(),
+            "~ uid=n11 textbox \"Email\" focusable value=\"\" -> value=\"a@b.c\"",
+            "shared tokens appear once"
+        );
+    }
+
+    /// Accessibility names are written unescaped, so a name can carry a stray quote and
+    /// make the token split ambiguous. When that happens, fall back to the whole line
+    /// rather than guess at token boundaries.
+    #[test]
+    fn an_unbalanced_quote_falls_back_to_the_whole_line() {
+        let old = "uid=n7 link \"\"WCAG 2.1\" ref\n";
+        let new = "uid=n7 link \"\"WCAG 2.2\" ref\n";
+        let d = diff_snapshots(old, new);
+        let line = d.text.lines().next().unwrap();
+        assert!(
+            line.contains("uid=n7 link \"\"WCAG 2.1\" ref -> uid=n7 link \"\"WCAG 2.2\" ref"),
+            "expected whole-line form, got {line}"
+        );
+    }
+
+    /// When every token differs there is no shared prefix to hoist, so the whole line is
+    /// the honest rendering.
+    #[test]
+    fn a_wholly_different_node_keeps_the_whole_line() {
+        let old = "uid=n3 button \"Save\"\n";
+        let new = "uid=n3 link \"Cancel\"\n";
+        let d = diff_snapshots(old, new);
+        let line = d.text.lines().next().unwrap();
+        assert_eq!(line, "~ uid=n3 button \"Save\" -> uid=n3 link \"Cancel\"");
+    }
 
     /// When the document changed, `text` carries a whole snapshot rather than a diff.
     /// Accessibility names go in unescaped (snapshot.rs writes `name` raw), so a name
@@ -195,7 +291,7 @@ mod tests {
                 "+ uid=n6 link \"F\"",
                 "- uid=n2 button \"B\"",
                 "- uid=n4 link \"D\"",
-                "~ uid=n3 link \"C\" -> uid=n3 link \"C changed\"",
+                "~ uid=n3 link \"C\" -> \"C changed\"",
             ],
             "added/removed/changed must each follow document order"
         );
