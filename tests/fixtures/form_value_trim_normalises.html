@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>form-values: input trims whitespace</title></head>
+<body>
+<!-- The app keeps the value but rewrites it. Verified: fill "  spaced out  "
+     exits 0 and #trim.value === "spaced out" (a11y value= token shows the trimmed form).
+     Expected verdict: normalised. Signal: read-back non-empty, !== requested,
+     and requested.trim() === read-back, which names the rewrite precisely. -->
+<h1>Trimming input</h1>
+<label for="trim">Username</label>
+<input id="trim" name="username" type="text" value="">
+<p id="marker">leading and trailing spaces are stripped</p>
+<script>
+  document.getElementById('trim').addEventListener('input', function (e) {
+    e.target.value = e.target.value.trim();
+  });
+</script>
+</body>
+</html>

@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>form-values: controlled input reverts</title></head>
+<body>
+<!-- Stand-in for a React controlled <input value={state}/> with no working onChange:
+     the input listener writes the state value straight back, synchronously, in the
+     same task as chrome-agent's dispatched 'input' event. No timers, no framework.
+     Verified: fill "typed-by-agent" exits 0, #ctrl.value === "locked-state".
+     The a11y diff STILL reports a change (focus), so diff-count says "changed".
+     Expected verdict: no_effect. Signal: read-back === value observed before the
+     action AND !== requested. -->
+<h1>Controlled input</h1>
+<label for="ctrl">Search</label>
+<input id="ctrl" name="q" type="text" value="locked-state">
+<p id="marker">this field is bound to component state</p>
+<script>
+  document.getElementById('ctrl').addEventListener('input', function (e) {
+    // Synchronous revert: runs inside the dispatchEvent() call chrome-agent makes.
+    e.target.value = 'locked-state';
+  });
+</script>
+</body>
+</html>

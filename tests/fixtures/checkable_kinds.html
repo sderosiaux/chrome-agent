@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html>
+<head><title>Checkable kinds</title></head>
+<body>
+<h1>Checkable kinds</h1>
+
+<!-- Native, starts unchecked -->
+<input id="native" type="checkbox">
+<label for="native">native checkbox</label>
+
+<!-- Native, starts checked: check must be a no-op, not a toggle -->
+<input id="native_on" type="checkbox" checked>
+<label for="native_on">native checkbox, already on</label>
+
+<!-- ARIA checkbox, starts checked. `el.checked` is undefined here, so a naive
+     truthiness read sees "unchecked" and clicking turns it OFF. -->
+<div id="aria_on" role="checkbox" aria-checked="true" tabindex="0"
+     onclick="this.setAttribute('aria-checked', this.getAttribute('aria-checked') === 'true' ? 'false' : 'true')">
+  aria checkbox, already on
+</div>
+
+<!-- ARIA checkbox, starts unchecked -->
+<div id="aria_off" role="checkbox" aria-checked="false" tabindex="0"
+     onclick="this.setAttribute('aria-checked', this.getAttribute('aria-checked') === 'true' ? 'false' : 'true')">
+  aria checkbox, off
+</div>
+
+<!-- Not checkable at all. HTMLInputElement always exposes .checked, so the
+     property exists and is meaningless. -->
+<input id="text" type="text" value="5">
+
+<!-- A radio cannot be unchecked by clicking it -->
+<input id="radio" type="radio" name="grp" checked>
+<label for="radio">radio</label>
+
+<!-- Clicks through, then the app puts it back -->
+<input id="reverts" type="checkbox" onclick="const el = this; setTimeout(() => { el.checked = false; }, 0)">
+<label for="reverts">reverts itself</label>
+
+</body>
+</html>

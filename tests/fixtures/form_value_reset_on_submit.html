@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>form-values: form resets on submit</title></head>
+<body>
+<!-- Two-step. The fill lands; the SUBMIT silently destroys it.
+     Verified sequence:
+       fill "a@b.c" --selector "#email"  -> ok, delta "~ uid=nN textbox  -> value=\"a@b.c\" focused"
+       click --selector "#submit"        -> ok, delta "~ uid=nN textbox value=\"a@b.c\" focused -> focused"
+       eval "#email.value"               -> ""
+     No navigation: preventDefault + form.reset(), so document_changed stays false and
+     uids stay valid. The only trace is the value= token disappearing from the a11y
+     line, because snapshot.rs writes value= only when non-empty.
+     Expected verdict for the click: changed, and it must surface that a field the
+     agent previously filled is now empty — otherwise the agent proceeds believing
+     the form still holds its input. -->
+<h1>Newsletter</h1>
+<form id="f" action="about:blank">
+  <label for="email">Email</label>
+  <input id="email" name="email" type="text" value="">
+  <button id="submit" type="submit">Send</button>
+</form>
+<p id="status">idle</p>
+<script>
+  document.getElementById('f').addEventListener('submit', function (e) {
+    e.preventDefault();
+    document.getElementById('status').textContent = 'sent';
+    document.getElementById('f').reset();
+  });
+</script>
+</body>
+</html>

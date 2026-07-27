@@ -1,0 +1,17 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>form-values: number rejects letters</title></head>
+<body>
+<!-- No page script. The REFUSAL comes from HTML's value sanitization algorithm
+     for type=number: a value that is not a valid floating-point number becomes "".
+     Verified: fill "abc" --selector "#num" exits 0 and #num.value === "".
+     The a11y diff still reports changed=2 because focus moved off the previous
+     field and onto the spinbutton, so a diff-count detector says "changed".
+     Expected verdict: no_effect. Read-back: #num.value === "" with a non-empty request. -->
+<h1>Number input</h1>
+<label for="num">Quantity</label>
+<input id="num" name="qty" type="number" value="">
+<input id="other" type="text" value="">
+<p id="marker">quantity accepts digits only</p>
+</body>
+</html>

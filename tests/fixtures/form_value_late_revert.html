@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>form-values: revert after the read window</title></head>
+<body>
+<!-- THE HONEST "WE CANNOT TELL" CASE.
+     The revert is scheduled with a FIXED 400ms setTimeout, deliberately longer than
+     output_action's 150ms settle sleep (src/run_helpers.rs) and attach_change_report's
+     150ms (src/pipe_dispatch.rs).
+     Verified: fill "vanishes" reports ok:true, changed:{added:1,changed:1} and a delta
+     containing value="vanishes"; one second later #late.value === "".
+     There is no signal available at read time. We MUST report changed and we MUST NOT
+     claim persistence. Timing is fixed at 400ms so the test is deterministic. -->
+<h1>Late revert</h1>
+<label for="late">Promo code</label>
+<input id="late" name="promo" type="text" value="">
+<p id="marker">validated 400ms after each keystroke</p>
+<script>
+  document.getElementById('late').addEventListener('input', function (e) {
+    // Fixed 400ms — chosen to sit just past the tool's 150ms settle window.
+    setTimeout(function () { e.target.value = ''; }, 400);
+  });
+</script>
+</body>
+</html>

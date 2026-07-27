@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>form-values: value already correct</title></head>
+<body>
+<!-- The retry-loop trap, mirror image of the disabled case.
+     Filling a field with the value it already holds changes nothing about the value.
+     Verified: fill "already-there" --selector "#pre" reports
+       changed:{added:0,changed:1,...}, delta "~ uid=nN textbox value=\"already-there\"  -> focused"
+     The single reported change is FOCUS. A detector that ignores focus concludes
+     no_effect and the agent retries the same fill forever; a detector that counts
+     changes concludes changed for the wrong reason.
+     Expected verdict: the postcondition holds (#pre.value === requested), so this must
+     NOT be no_effect. Report it as changed with an explicit "already satisfied" note,
+     or add a dedicated already_satisfied verdict. -->
+<h1>Prefilled input</h1>
+<label for="pre">Country</label>
+<input id="pre" name="country" type="text" value="already-there">
+<input id="other" type="text" value="">
+<p id="marker">prefilled from the saved profile</p>
+</body>
+</html>
