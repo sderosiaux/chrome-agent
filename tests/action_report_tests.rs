@@ -117,6 +117,62 @@ fn verdict_off_reports_only_the_action() {
     assert!(v["delta"].is_null(), "no delta was asked for: {v}");
 }
 
+/// Pipe has to answer the same way the CLI does. Two modes of the same tool disagreeing
+/// about what an action returns is the kind of thing an agent discovers the hard way.
+#[test]
+fn pipe_reports_changes_like_the_cli() {
+    if !chrome_available() {
+        eprintln!("SKIP: Chrome not found");
+        return;
+    }
+    let url = fixture_url("extract_cards.html");
+    let setup = "document.body.insertAdjacentHTML('afterbegin','<button id=go>Go</button>');\
+                 document.getElementById('go').onclick=function(){\
+                 document.body.insertAdjacentHTML('beforeend','<h4>added by the click</h4>')};1";
+    let script = format!(
+        "{}\n{}\n{}\n{}\n",
+        serde_json::json!({"cmd": "goto", "url": url}),
+        serde_json::json!({"cmd": "eval", "expression": setup}),
+        serde_json::json!({"cmd": "inspect"}),
+        serde_json::json!({"cmd": "click", "selector": "#go"}),
+    );
+
+    let last = run_pipe("pipe-report", &[], &script);
+    assert_eq!(last["changed"]["added"], 1, "pipe should report the added node: {last}");
+    assert!(
+        last["delta"].as_str().unwrap_or_default().contains("added by the click"),
+        "pipe delta should name what appeared: {last}"
+    );
+
+    let last = run_pipe("pipe-report-off", &["--verdict", "off"], &script);
+    assert!(last["changed"].is_null(), "--verdict off must reach pipe too: {last}");
+    assert!(last["delta"].is_null(), "--verdict off must reach pipe too: {last}");
+}
+
+/// Run a pipe script and return the last JSON response.
+fn run_pipe(browser: &str, extra: &[&str], script: &str) -> Value {
+    use std::io::Write as _;
+    use std::process::Stdio;
+
+    let mut args: Vec<&str> = vec!["--browser", browser];
+    args.extend_from_slice(extra);
+    args.push("pipe");
+    let mut child = Command::new(binary())
+        .args(&args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn pipe");
+    child.stdin.as_mut().unwrap().write_all(script.as_bytes()).unwrap();
+    drop(child.stdin.take());
+    let out = child.wait_with_output().expect("pipe output");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let last = stdout.lines().rfind(|l| !l.trim().is_empty()).unwrap_or("{}");
+    let _ = run_cli(&["--browser", browser, "close", "--purge"]);
+    serde_json::from_str(last).unwrap_or_else(|e| panic!("last pipe line was not JSON ({e}): {last}"))
+}
+
 /// A page can change more than an agent wants to read in one go, so the report is capped.
 #[test]
 fn the_change_report_respects_the_budget() {

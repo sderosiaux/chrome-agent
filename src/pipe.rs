@@ -94,7 +94,9 @@ pub async fn run_pipe(cli: &Cli) -> Result<(), crate::BoxError> {
 
         let response = dispatch(
             &client, &browser_client, &mut store,
-            &cli.browser, &cli.page, &target_id, cli.timeout, cli.max_depth, &cmd,
+            &cli.browser, &cli.page, &target_id, cli.timeout, cli.max_depth,
+            crate::run_helpers::ReportPolicy { changes: cli.verdict == "auto", budget: cli.budget },
+            &cmd,
         ).await;
 
         if let Some(ref path) = record_path {
@@ -174,7 +176,9 @@ pub async fn run_replay(
 
         let response = dispatch(
             &client, &browser_client, &mut store,
-            &cli.browser, &cli.page, &target_id, cli.timeout, cli.max_depth, &cmd,
+            &cli.browser, &cli.page, &target_id, cli.timeout, cli.max_depth,
+            crate::run_helpers::ReportPolicy { changes: cli.verdict == "auto", budget: cli.budget },
+            &cmd,
         ).await;
 
         emit(&response);
@@ -192,10 +196,23 @@ pub async fn run_replay(
 async fn dispatch(
     client: &CdpClient, browser_client: &CdpClient, store: &mut SessionStore,
     browser_name: &str, page_name: &str, target_id: &str,
-    timeout: u64, global_max_depth: Option<usize>, cmd: &Value,
+    timeout: u64, global_max_depth: Option<usize>,
+    report: crate::run_helpers::ReportPolicy, cmd: &Value,
 ) -> Value {
     let cmd_name = cmd.get("cmd").and_then(Value::as_str).unwrap_or("");
+    // Same contract as the CLI: an action says what it changed. Capture the baseline first,
+    // because a command run with `inspect` refreshes it itself.
+    let baseline = if report.changes && crate::pipe_dispatch::mutates_page(cmd_name) {
+        store
+            .browsers
+            .get(browser_name)
+            .and_then(|b| b.pages.get(page_name))
+            .and_then(|p| p.last_snapshot.clone().map(|t| (t, p.last_snapshot_url.clone())))
+    } else {
+        None
+    };
 
+    let mut value = {
     let result: Result<Value, crate::BoxError> = match cmd_name {
         "goto" => dispatch_goto(client, store, browser_name, page_name, target_id, timeout, global_max_depth, cmd).await,
         "click" => dispatch_click(client, store, browser_name, page_name, target_id, global_max_depth, cmd).await,
@@ -236,20 +253,31 @@ async fn dispatch(
         "fill_and_submit" | "fill-and-submit" => dispatch_fill_and_submit(client, timeout, cmd).await,
         "history" => dispatch_history(cmd),
         "frame" => dispatch_frame(client, cmd).await,
-        "batch" => dispatch_batch(client, browser_client, store, browser_name, page_name, target_id, timeout, global_max_depth, cmd).await,
+        "batch" => dispatch_batch(client, browser_client, store, browser_name, page_name, target_id, timeout, global_max_depth, report, cmd).await,
         "" => Err("Missing \"cmd\" field".into()),
         other => Err(format!("Unknown command: {other}").into()),
     };
 
+    // `result` must not outlive this block: BoxError is not Send, and an await with it
+    // still in scope would make every caller's future non-Send.
     match result {
         Ok(v) => v,
         Err(e) => {
             let msg = e.to_string();
             let mut obj = json!({"ok": false, "error": msg});
             if let Some(h) = error_hint(&msg) { obj["hint"] = json!(h); }
-            obj
+            return obj;
         }
     }
+    };
+    if let Some((old_text, old_url)) = baseline {
+        crate::pipe_dispatch::attach_change_report(
+            client, store, browser_name, page_name, target_id, report, &old_text,
+            old_url.as_deref(), &mut value,
+        )
+        .await;
+    }
+    value
 }
 
 // ---------------------------------------------------------------------------

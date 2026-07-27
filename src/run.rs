@@ -817,7 +817,7 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
                 let response = crate::pipe_dispatch::dispatch_single(
                     &client, &browser_client, &mut store,
                     &cli.browser, &cli.page, &target_id,
-                    cli.timeout, cli.max_depth, cmd,
+                    cli.timeout, cli.max_depth, policy, cmd,
                 ).await;
                 results.push(response);
             }
