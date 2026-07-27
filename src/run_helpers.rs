@@ -83,6 +83,7 @@ pub async fn output_action(
             if let Some(browser_s) = store.browsers.get_mut(browser_name) {
                 let page = session::ensure_page(browser_s, page_name, target_id);
                 page.last_snapshot = Some(snapshot.text);
+                page.last_snapshot_url = Some(snapshot.url);
                 page.uid_map = snapshot.uid_map;
             }
         }
@@ -96,6 +97,7 @@ pub async fn output_action(
             if let Some(browser_s) = store.browsers.get_mut(browser_name) {
                 let page = session::ensure_page(browser_s, page_name, target_id);
                 page.last_snapshot = Some(snapshot.text);
+                page.last_snapshot_url = Some(snapshot.url);
                 page.uid_map = snapshot.uid_map;
             }
         }
@@ -123,12 +125,20 @@ pub async fn output_goto(
         page_name,
         target_id,
     );
+    // The old document is gone, so every uid in the stored map now points at a node that
+    // no longer exists — and `backendNodeId` counters overlap between documents, so a
+    // stale uid can silently resolve to an unrelated element on the new page. Drop the
+    // map here; the `if inspect` branches below refill it when the caller asked to see
+    // the page. Without a fresh inspect the agent gets "uid not found" and a hint, which
+    // is the correct answer.
+    page.uid_map.clear();
     if json_mode {
         let mut obj = json!({"ok": true, "url": url, "title": title});
         if inspect {
             let snapshot = commands::inspect::run(client, false, max_depth, None, None).await?;
             obj["snapshot"] = json!(snapshot.text);
             page.last_snapshot = Some(snapshot.text);
+            page.last_snapshot_url = Some(snapshot.url);
             page.uid_map = snapshot.uid_map;
         }
         json_output(&obj);
@@ -142,6 +152,7 @@ pub async fn output_goto(
             let snapshot = commands::inspect::run(client, false, max_depth, None, None).await?;
             println!("{}", snapshot.text);
             page.last_snapshot = Some(snapshot.text);
+            page.last_snapshot_url = Some(snapshot.url);
             page.uid_map = snapshot.uid_map;
         }
     }

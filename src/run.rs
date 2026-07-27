@@ -475,12 +475,12 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
                 commands::extract::scroll_to_load(&client).await?;
             }
             let role_filter: Option<Vec<&str>> = filter.as_deref().map(|f| f.split(',').map(str::trim).collect());
-            let (mut text, uid_map) = if let Some(max) = limit {
+            let (mut text, uid_map, doc_url) = if let Some(max) = limit {
                 let result = commands::inspect::scroll_collect(&client, verbose, uid.as_deref(), role_filter.as_deref(), max).await?;
-                (result.text, result.uid_map)
+                (result.text, result.uid_map, result.url)
             } else {
                 let s = commands::inspect::run(&client, verbose, max_depth, uid.as_deref(), role_filter.as_deref()).await?;
-                (s.text, s.uid_map)
+                (s.text, s.uid_map, s.url)
             };
             if urls {
                 text = commands::inspect::resolve_urls(&client, &text, &uid_map).await;
@@ -491,6 +491,7 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
                 let page = session::ensure_page(browser_s, &cli.page, &target_id);
                 page.uid_map = uid_map;
                 page.last_snapshot = Some(text.clone());
+                page.last_snapshot_url = Some(doc_url);
             }
             let paged = commands::inspect::paginate(&text, offset, max_chars);
             if json_mode {
@@ -507,30 +508,41 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
         }
 
         Command::Diff => {
-            let old_snapshot = store
+            let page_state = store
                 .browsers
                 .get(&cli.browser)
-                .and_then(|b| b.pages.get(&cli.page))
-                .and_then(|p| p.last_snapshot.clone());
-            let old_text = old_snapshot.ok_or("No previous snapshot. Run 'chrome-agent inspect' first.")?;
+                .and_then(|b| b.pages.get(&cli.page));
+            let old_text = page_state
+                .and_then(|p| p.last_snapshot.clone())
+                .ok_or("No previous snapshot. Run 'chrome-agent inspect' first.")?;
+            let old_url = page_state.and_then(|p| p.last_snapshot_url.clone());
             let snapshot = commands::inspect::run(&client, false, None, None, None).await?;
-            let diff = commands::diff::diff_snapshots(&old_text, &snapshot.text);
-            let stats = commands::diff::diff_stats(&diff);
+            let result =
+                commands::diff::compare(old_url.as_deref(), &old_text, &snapshot.url, &snapshot.text);
             if let Some(browser_s) = store.browsers.get_mut(&cli.browser) {
                 let page = session::ensure_page(browser_s, &cli.page, &target_id);
                 page.last_snapshot = Some(snapshot.text);
+                page.last_snapshot_url = Some(snapshot.url);
                 page.uid_map = snapshot.uid_map;
             }
             if json_mode {
-                json_output(&json!({
+                let mut obj = json!({
                     "ok": true,
-                    "added": stats.added,
-                    "removed": stats.removed,
-                    "changed": stats.changed,
-                    "diff": diff.trim_end(),
-                }));
+                    "document_changed": result.document_changed,
+                    "added": result.stats.added,
+                    "removed": result.stats.removed,
+                    "changed": result.stats.changed,
+                    "diff": result.text.trim_end(),
+                });
+                if let Some(hint) = result.hint {
+                    obj["hint"] = json!(hint);
+                }
+                json_output(&obj);
             } else {
-                print!("{diff}");
+                if result.document_changed {
+                    println!("Page navigated — previous uids are gone. New page:");
+                }
+                print!("{}", result.text);
             }
         }
 
@@ -807,7 +819,8 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
                 ).await;
                 results.push(response);
             }
-            json_output(&json!({"ok": true, "results": results}));
+            let all_ok = results.iter().all(|r| r.get("ok").and_then(serde_json::Value::as_bool).unwrap_or(false));
+            json_output(&json!({"ok": all_ok, "results": results}));
         }
 
         // Already handled above
