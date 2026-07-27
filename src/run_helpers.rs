@@ -61,7 +61,37 @@ pub async fn connect_page(
 }
 
 
-/// Execute a command, optionally inspect after, and output result.
+/// What an action reports about the page once it has run.
+pub struct ActionReport {
+    /// `--inspect`: the whole tree.
+    pub inspect: bool,
+    /// `--verdict auto`: what changed since the last snapshot of this page.
+    pub changes: bool,
+    /// Character cap on the change report. 0 removes it.
+    pub budget: usize,
+    pub max_depth: Option<usize>,
+}
+
+/// Reporting policy taken from the global flags, before `cli.command` is consumed.
+#[derive(Clone, Copy)]
+pub struct ReportPolicy {
+    pub changes: bool,
+    pub budget: usize,
+}
+
+impl ReportPolicy {
+    /// Build the per-action report from the policy plus that command's own flags.
+    pub const fn for_action(self, inspect: bool, max_depth: Option<usize>) -> ActionReport {
+        ActionReport { inspect, changes: self.changes, budget: self.budget, max_depth }
+    }
+}
+
+/// Execute a command, report what it did to the page, and persist the new baseline.
+///
+/// By default an action now answers "what changed", not just "what I was asked to do".
+/// Without it the agent has to spend a second call to find out whether the click landed,
+/// and that extra turn is the cost this is meant to remove. `--verdict off` restores the
+/// older behaviour for callers that would rather have the latency back.
 pub async fn output_action(
     client: &CdpClient,
     store: &mut SessionStore,
@@ -69,37 +99,74 @@ pub async fn output_action(
     page_name: &str,
     target_id: &str,
     msg: String,
-    inspect: bool,
-    max_depth: Option<usize>,
+    report: &ActionReport,
     json_mode: bool,
 ) -> Result<(), crate::BoxError> {
-    if json_mode {
-        let mut obj = json!({"ok": true, "message": msg});
-        if inspect {
-            // Brief pause for navigation/re-render after click/fill before inspecting
-            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-            let snapshot = commands::inspect::run(client, false, max_depth, None, None).await?;
-            obj["snapshot"] = json!(snapshot.text);
-            if let Some(browser_s) = store.browsers.get_mut(browser_name) {
-                let page = session::ensure_page(browser_s, page_name, target_id);
-                page.last_snapshot = Some(snapshot.text);
-                page.last_snapshot_url = Some(snapshot.url);
-                page.uid_map = snapshot.uid_map;
+    let mut obj = json!({"ok": true, "message": msg});
+    let mut trailer = String::new();
+
+    if report.inspect || report.changes {
+        // Give a click or a fill a moment to land before reading the page back.
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        let snapshot = commands::inspect::run(client, false, report.max_depth, None, None).await?;
+
+        if report.changes {
+            let previous = store
+                .browsers
+                .get(browser_name)
+                .and_then(|b| b.pages.get(page_name))
+                .map(|p| (p.last_snapshot.clone(), p.last_snapshot_url.clone()));
+            if let Some((Some(old_text), old_url)) = previous {
+                let cmp = commands::diff::compare(
+                    old_url.as_deref(),
+                    &old_text,
+                    &snapshot.url,
+                    &snapshot.text,
+                );
+                let body = if report.budget == 0 {
+                    cmp.text.clone()
+                } else {
+                    crate::truncate::truncate_str(
+                        cmp.text.trim_end(),
+                        report.budget,
+                        "\n… truncated, run `inspect` for the rest",
+                    )
+                    .into_owned()
+                };
+                obj["changed"] = json!({
+                    "added": cmp.added,
+                    "removed": cmp.removed,
+                    "changed": cmp.changed,
+                    "unchanged": cmp.unchanged,
+                    "document_changed": cmp.document_changed,
+                });
+                obj["delta"] = json!(body);
+                if let Some(hint) = cmp.hint {
+                    obj["hint"] = json!(hint);
+                }
+                trailer = body;
             }
         }
+
+        if report.inspect {
+            obj["snapshot"] = json!(snapshot.text);
+            trailer.clone_from(&snapshot.text);
+        }
+
+        if let Some(browser_s) = store.browsers.get_mut(browser_name) {
+            let page = session::ensure_page(browser_s, page_name, target_id);
+            page.last_snapshot = Some(snapshot.text);
+            page.last_snapshot_url = Some(snapshot.url);
+            page.uid_map = snapshot.uid_map;
+        }
+    }
+
+    if json_mode {
         json_output(&obj);
     } else {
         println!("{msg}");
-        if inspect {
-            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-            let snapshot = commands::inspect::run(client, false, max_depth, None, None).await?;
-            println!("{}", snapshot.text);
-            if let Some(browser_s) = store.browsers.get_mut(browser_name) {
-                let page = session::ensure_page(browser_s, page_name, target_id);
-                page.last_snapshot = Some(snapshot.text);
-                page.last_snapshot_url = Some(snapshot.url);
-                page.uid_map = snapshot.uid_map;
-            }
+        if !trailer.is_empty() {
+            println!("{}", trailer.trim_end());
         }
     }
     Ok(())

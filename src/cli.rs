@@ -68,6 +68,16 @@ pub struct Cli {
     #[arg(long)]
     pub max_depth: Option<usize>,
 
+    /// What an action command reports after it runs.
+    /// `auto` (default) appends what changed on the page. `off` restores the older,
+    /// faster behaviour: the action is reported, the page is not re-read.
+    #[arg(long, default_value = "auto", value_parser = ["auto", "off"])]
+    pub verdict: String,
+
+    /// Character budget for the change report on an action. 0 removes the cap.
+    #[arg(long, default_value = "1200")]
+    pub budget: usize,
+
     /// Copy cookies from your real Chrome profile (uses your logged-in sessions)
     #[arg(long)]
     pub copy_cookies: bool,

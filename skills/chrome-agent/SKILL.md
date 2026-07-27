@@ -24,14 +24,18 @@ cargo install chrome-agent
 
 ## Core Workflow
 
-**inspect → read uids → act → inspect again**
+**inspect → read uids → act**
+
+An action reports what it changed on the page, so you don't need a second call to find out
+whether it landed. Re-inspect when you need fresh uids after a navigation, or when the
+report says `document_changed`.
 
 ```bash
 # Navigate and see the page
 chrome-agent goto https://example.com --inspect
 
-# Click by uid from the inspect output
-chrome-agent click n12 --inspect
+# Click by uid; the response says what changed
+chrome-agent click n12
 
 # Fill a form field
 chrome-agent fill --uid n20 "value"
@@ -168,6 +172,8 @@ chrome-agent close [--purge]
 --json         # Structured JSON output (see below)
 --page <name>  # Named tabs (keep multiple pages open)
 --max-depth N  # Limit inspect tree depth (saves tokens)
+--verdict MODE # auto (default): an action reports what changed. off: report the action only
+--budget N     # Cap that change report, in characters (default 1200; 0 = uncapped)
 --headed       # Show browser window (default is headless)
 --connect URL  # Use real Chrome (for DataDome/Kasada sites)
 --proxy-server URL # Route a managed browser via a proxy (http(s)/socks4/5://host:port); launch-only
@@ -190,8 +196,9 @@ Error:   {"ok":false, "error":"message", "hint":"what to do next"}
 Per-command shapes:
 - `goto --inspect` → `{"ok":true, "url":"...", "title":"...", "snapshot":"uid=n1..."}`
 - `inspect` → `{"ok":true, "snapshot":"uid=n1 heading..."}`
-- `click/fill/select/check --inspect` → `{"ok":true, "message":"Clicked...", "snapshot":"..."}`
-- `click/fill/select/check` (no inspect) → `{"ok":true, "message":"Clicked uid=n12"}`
+- `click/fill/select/check` → `{"ok":true, "message":"Clicked uid=n12", "changed":{"added":1,"removed":0,"changed":0,"unchanged":42,"document_changed":false}, "delta":"+ uid=n88 heading \"Saved\""}`
+- `click/fill/select/check --inspect` → the same, plus `"snapshot"` with the whole tree
+- `click/fill/select/check --verdict off` → `{"ok":true, "message":"Clicked uid=n12"}`
 - `read` → `{"ok":true, "title":"...", "text":"article content..."}`
 - `text` → `{"ok":true, "text":"visible text..."}`
 - `eval` → `{"ok":true, "result": <any JSON value>}`

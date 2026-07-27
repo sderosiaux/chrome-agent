@@ -247,6 +247,8 @@ chrome-agent screenshot
 --copy-cookies           Use cookies from your real Chrome profile
 --timeout <seconds>      Command timeout (default: 30)
 --max-depth <N>          Limit inspect depth
+--verdict <mode>         auto (default): an action reports what changed. off: report the action only
+--budget <chars>         Cap that change report (default 1200; 0 = uncapped)
 --ignore-https-errors    Accept self-signed certs
 --json                   Structured JSON output
 --dialog <mode>          JS dialog policy: accept (default), dismiss, or manual
@@ -259,7 +261,7 @@ with their proxy before ChromeAgent attaches. Proxy URLs containing credentials 
 
 JS dialogs (`alert`/`confirm`/`prompt`/`beforeunload`) are auto-answered by default (`--dialog accept`). A native dialog otherwise blocks the page with no DOM signal and the agent's next command hangs. Use `--dialog dismiss` to cancel them, or `--dialog manual` to opt out.
 
-## The loop: inspect, act, inspect
+## The loop: inspect, act
 
 ```bash
 chrome-agent goto https://app.com/login --inspect
@@ -268,12 +270,22 @@ chrome-agent goto https://app.com/login --inspect
 # uid=n63 button "Sign In" focusable
 
 chrome-agent fill --uid n52 "user@test.com"
+# ~ uid=n52 textbox "Email" focusable value="" -> value="user@test.com"
+
 chrome-agent fill --uid n58 "password123"
-chrome-agent click n63 --inspect
+chrome-agent click n63
+# Page navigated — previous uids are gone. New page:
 # uid=n101 heading "Dashboard" level=1
 ```
 
-UIDs stay the same between inspects as long as the DOM node exists.
+An action says what it changed, so there is no second call to find out whether it landed.
+That is the whole point: an agent loop pays for turns, not just for tokens.
+
+UIDs stay the same between inspects as long as the DOM node exists. After a navigation they
+are all reassigned, which is why the click above reports the page rather than a diff.
+
+`--verdict off` restores the older behaviour: the action is reported, the page is not read
+back. Faster, quieter, and you find out what happened on your next call.
 
 ## Content extraction
 
