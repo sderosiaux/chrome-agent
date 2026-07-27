@@ -1,6 +1,6 @@
 ---
 name: chrome-agent
-description: Browser automation for AI agents. Use when the user asks to interact with websites, scrape data, fill forms, take screenshots, or automate any browser task. Triggers on "open a website", "go to", "scrape", "fill the form", "click", "take a screenshot", "read this page", "search on", "check this site".
+description: Pull structured records out of a web page (product grids, search results, feeds, tables) with no CSS selectors and no model call spent reading HTML. Drives Chrome for everything else too: navigate, click, fill forms, screenshot, print to PDF, download files that sit behind a login, and get past bot detection. Runs locally as one binary, no API key, no cloud. Use when the user says scrape, extract the list of, get the data from, fill this form, log in to, click, take a screenshot, read this page, check this site, or when a site has no API.
 metadata:
   author: sderosiaux
   version: "0.7.0"
@@ -43,14 +43,19 @@ chrome-agent fill --selector "input[name=email]" "hello@test.com"
 
 ## Content Extraction (choose the right tool)
 
-| Tool | When | Tokens |
+Reach for `extract` first on anything that looks like a list. Token figures below are
+measured on the Hacker News front page with `./scripts/measure.sh`; they scale with the
+page, so treat them as relative cost, not as constants.
+
+| Tool | When | Tokens on HN |
 |------|------|--------|
-| `chrome-agent read` | Articles, blog posts, product pages | ~200-500 |
-| `chrome-agent extract` | Repeating data: product grids, news feeds, tables, search results | ~100-500 |
-| `chrome-agent text --selector "main"` | Scoped visible text | ~500-1000 |
-| `chrome-agent eval "JSON.stringify(...)"` | Structured data from DOM | Varies |
-| `chrome-agent inspect --filter "link" --urls` | Find links with their href URLs | ~50-200 |
-| `chrome-agent text` | Full page text (last resort) | ~5000+ |
+| `chrome-agent extract` | Repeating records: product grids, feeds, tables, search results. No selectors needed. | ~1,570 for all 30 records |
+| `chrome-agent read` | Articles, blog posts, product pages (Mozilla Readability) | ~950 |
+| `chrome-agent text --selector "main"` | Scoped visible text | ~1,040 unscoped |
+| `chrome-agent network --filter "api"` | The page fetched its data over XHR — take the payload | varies, often the cleanest |
+| `chrome-agent eval "JSON.stringify(...)"` | Specific attributes a record view doesn't carry | varies |
+| `chrome-agent inspect --filter "button,link"` | Finding what to act on, not reading content | ~1,735 |
+| `chrome-agent inspect` | Full accessibility tree with uids | ~5,650 |
 
 ## Bot Protection
 
@@ -212,7 +217,7 @@ An inspect of a typical page is ~50-200 tokens. To stay lean:
 2. **After SPA navigation** (back, forward, client-side routing), **re-inspect** — UIDs change on re-render.
 3. **For SPA detail pages**, prefer `goto <direct-url>` over `click` — click may open a modal.
 4. **Use `read` for articles**, `text --selector` for scoped extraction, `eval` for structured data.
-5. **Prefer inspect over screenshot** — ~50 tokens vs ~100K tokens.
+5. **Prefer inspect over screenshot** — a screenshot gives you no uids to act on, so you pay for the image and then inspect anyway.
 6. **UIDs are stable** (n47, n123) across inspects on the same page — based on backendNodeId.
 7. **--json errors exit 1** with `{"ok":false}` on stdout — parseable, check `ok` field.
 8. **--max-depth works everywhere** — on standalone inspect AND on goto/click/fill --inspect.

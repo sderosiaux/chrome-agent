@@ -11,7 +11,7 @@
 </p>
 
 <p align="center">
-  <strong>Browser automation that speaks LLM.</strong>
+  <strong>Turn a web page into records your agent can use, from one 3 MB binary.</strong>
 </p>
 
 <p align="center">
@@ -22,56 +22,99 @@
 
 > You're not the user. Your LLM is.
 >
-> You don't need to read this README. Your agent does. Install it, run `chrome-agent --help`, and let the LLM figure it out. The CLI embeds its own usage guide, every error comes with a hint for the next action, and `--json` mode outputs structured data an agent can parse without you writing a single adapter. This page is here because GitHub expects one.
+> You don't need to read this README. Your agent does. Install it, run `chrome-agent --help`, and let the LLM figure it out. The CLI embeds its own usage guide, every error comes with a hint for the next action, and `--json` gives an agent structured data without you writing an adapter. This page is here because GitHub expects one.
+
+## The one thing it does that others don't
+
+Every browser tool can hand a page to a model. The question is what shape it arrives in.
+
+```bash
+chrome-agent goto news.ycombinator.com
+chrome-agent --json extract --limit 30
+```
+
+```json
+{"ok":true,"count":30,"pattern":"TR.athing.submission","items":[
+  {"title":"PGSimCity - How PostgreSQL Works",
+   "url":"https://nikolays.github.io/PGSimCity/",
+   "fields":["PGSimCity - How PostgreSQL Works (nikolays.github.io)"]},
+  ...
+]}
+```
+
+No selectors. No model call to find the rows. The pattern is detected structurally, with
+MDR/DEPTA-style heuristics that score sibling similarity, content heterogeneity and
+text-to-link ratio.
+
+Measured on that page with [`scripts/measure.sh`](scripts/measure.sh), which you can run yourself:
+
+| what you hand the model | tokens | what it gets |
+|---|---|---|
+| `extract --limit 30` | **1,571** | 30 stories as records, with URLs |
+| `inspect` (accessibility tree) | 5,652 | the tree, stories mixed into the surrounding page |
+| raw HTML | 8,727 | everything, including markup nobody reads |
+
+All three contain the same 30 stories. Only the first hands them over as records. The
+others hand over the page and leave the model to find the stories in it, which you pay for
+twice: once in input tokens, again in the reasoning to parse them.
+
+How wide that gap is depends on the page. On a blog archive that is nothing but a list,
+`extract` returns ~12,500 tokens against ~16,100 for the tree, because there is little
+surrounding markup to strip. The win comes from pages where the records sit inside a lot of other page furniture.
+
+Every rival makes an agent either write per-site selectors, which break on the next deploy,
+or pay a model to read the DOM, which is the recurring cost this tooling exists to avoid.
 
 ## How is this different from agent-browser?
 
-[agent-browser](https://github.com/vercel-labs/agent-browser) (Vercel) is a feature-complete browser automation platform: dashboard, cloud providers, annotated screenshots, iOS support, AI chat, auth vault, 40K lines of Rust. It's excellent.
-
-chrome-agent is the opposite bet. Instead of adding features, it removes tokens.
+[agent-browser](https://github.com/vercel-labs/agent-browser) (Vercel) is the closest thing
+to this, it is also a Rust CLI built for agents, and it is well ahead: more features, more
+users, near-daily releases. If you want a platform, use it. Two honest differences:
 
 | | chrome-agent | agent-browser |
 |---|---|---|
-| **Page snapshot** | ~50 tokens (a11y noise stripped, 66% reduction) | ~200 tokens (full a11y tree) |
-| **Element IDs** | `backendNodeId` — stable across inspects | Sequential `@e1, @e2` — reassigned every snapshot |
-| **Action + observe** | `click n12 --inspect` (1 call) | `click @e1` then `snapshot` (2 calls) |
-| **Stealth** | 7 native CDP patches (incl. `Runtime.enable` skip) | Delegated to cloud providers |
-| **Content extraction** | `read` (articles), `extract` (auto-detect lists/tables) | None built-in |
-| **Binary** | 3 MB, zero runtime | 3 MB + Next.js dashboard + cloud SDKs |
-| **Codebase** | ~8.8K lines | 40K lines |
+| **Repeating-record extraction** | `extract`, structural, no LLM call | not built in; `read` returns readable text |
+| **Bot detection** | 7 in-binary CDP patches, `--connect` to real Chrome | no stealth in core; delegated to paid cloud providers |
+| **Process model** | one command, one connection, exits | background daemon |
+| **Element IDs** | `backendNodeId`, still valid on the next inspect of the same page | sequential `@e1`, reassigned on every snapshot |
+| **Browser-native downloads** | not supported, `download --url` only | supported |
+| **MCP server** | none | yes |
 
-agent-browser gives you a platform with monitoring, cloud browsers, and visual debugging. chrome-agent gives your LLM the smallest possible representation of a webpage and gets out of the way. If your agent needs a dashboard, use agent-browser. If your agent needs to spend tokens on reasoning instead of page parsing, use this.
+Where it is genuinely behind: agent-browser has click-triggered downloads, an encrypted
+credential vault, cloud provider integrations and an MCP mode. It also reuses your real
+Chrome profile, same as `--copy-cookies` here, so logged-in access is not a differentiator
+for either of us.
 
-## Philosophy
+## Why you shouldn't use chrome-agent
 
-Every token your agent spends understanding a page is a token it doesn't spend reasoning about the task. chrome-agent is built around one idea: **minimize the tokens between "what does this page look like?" and "what should I do next?"**
+Borrowed from [ripgrep](https://github.com/BurntSushi/ripgrep), because the fastest way to
+waste your afternoon is a README that only lists strengths.
 
-This means:
+- **You need a test framework.** Use Playwright. Assertions, retries, trace viewer, a
+  test runner, and Microsoft maintaining it.
+- **You want a supported product.** This is one person's project. No SLA, no roadmap
+  promises, no enterprise support.
+- **You need MCP.** There is no MCP server here. If your coding agent can't shell out, this is
+  the wrong tool.
+- **You need a browser fleet.** No cloud, no proxy pool, no CAPTCHA solving. Browserbase,
+  Steel and Browserless do that.
+- **Your target is behind DataDome or Kasada.** `--stealth` won't get you through. You'll
+  need `--connect` to a real Chrome, and even then, no promises.
+- **You need Firefox or Safari.** This speaks CDP. Chrome only.
 
-- **Accessibility tree over DOM.** Playwright returns ~2,000 tokens of raw HTML. chrome-agent returns ~50 tokens of a11y tree with stable element IDs. No CSS selectors to write, no DOM to parse.
-- **One binary, zero runtime.** 3 MB Rust binary. No Node.js, no npm, no Playwright runtime. `npx chrome-agent` just works. Linux builds are fully static (musl) — no glibc dependency, runs on any distro.
-- **Action + observation in one call.** `--inspect` on any action command returns the page state after the action. One round-trip instead of two.
-- **Errors are instructions.** Every error includes a `hint` field telling the agent what to do next. `{"ok":false, "error":"...", "hint":"run inspect"}`.
-- **Stealth by default intent.** 7 CDP patches including the detection vector nobody talks about (`Runtime.enable`). Connect to real Chrome for the hardest protections.
-- **Content extraction without selectors.** `read` for articles, `extract` for repeating data, `network` for API payloads. The agent never writes CSS selectors.
+## What it's built on
 
-This is not a general-purpose browser testing framework. It's a tool that makes an LLM effective at browsing the web.
-
-```bash
-chrome-agent goto news.ycombinator.com --inspect
-
-# ~50 tokens instead of ~2,000:
-uid=n1 RootWebArea "Hacker News"
-  uid=n50 heading "Hacker News" level=1
-  uid=n82 link "Show HN: A New Browser Tool"
-  uid=n97 link "Rust 2025 Edition Announced"
-  ...
-
-# Click + see the new page in one call:
-chrome-agent click n82 --inspect
-```
-
-UIDs are based on Chrome's `backendNodeId`. They don't change between inspects. Click `n82` now or five minutes from now.
+- **One binary, zero runtime.** No Node, no npm, no Playwright download. Linux builds are
+  static (musl), so they run on any distro without a glibc version to match.
+- **Errors are instructions.** Every failure carries a `hint` for the next action:
+  `{"ok":false,"error":"...","hint":"run inspect"}`.
+- **Stable element IDs.** uids come from Chrome's `backendNodeId`, so `n82` still points at
+  the same node on the next inspect. They do change after a navigation, and `diff` will
+  tell you when that happened instead of pretending to compare two different pages.
+- **Sessions persist.** Chrome stays alive between calls, so a command costs a connection,
+  not a browser launch.
+- **Parallel agents don't collide.** `--browser agent1`, `--browser agent2`, separate Chrome
+  instances and separate session state.
 
 ```
 chrome-agent (3 MB Rust binary)
@@ -79,22 +122,6 @@ chrome-agent (3 MB Rust binary)
     v
 Chrome (headless, no Node.js, no runtime)
 ```
-
-### Why this exists
-
-| If you've hit this... | chrome-agent does this instead |
-|---|---|
-| Playwright snapshots burn 2K tokens | a11y tree: ~50 tokens. 40x less context spent on page state. |
-| CSS selectors break after every deploy | UIDs from Chrome's `backendNodeId`. Stable as long as the DOM node exists. |
-| Click then inspect = 2 round-trips | `--inspect` on any command. One call, action + observation. |
-| 200MB of Node + npm + Playwright | 3 MB binary. `npx chrome-agent` works out of the box. |
-| Cloudflare blocks your headless Chrome | 7 CDP patches. `Runtime.enable` never called (the detection vector nobody talks about). |
-| Writing per-site scraping selectors | `read` for articles, `extract` for lists/tables/cards, `network` for API payloads. No selectors. |
-| Errors are stack traces | `{"ok":false, "error":"...", "hint":"run inspect"}` -- parseable, actionable. |
-| Each command launches a fresh browser | Sessions persist. Chrome stays alive between calls. ~10ms startup. |
-| Agent can't access your logged-in accounts | `--copy-cookies` grabs cookies from your real Chrome. Works with X.com, Gmail, dashboards. |
-| Infinite scroll shows 10 items | `inspect --scroll --limit 50` scrolls and collects. Tested on X.com: 50 tweets from a live timeline. |
-| Two agents sharing one browser = chaos | `--browser agent1`, `--browser agent2`. Separate Chrome instances. |
 
 ## Install
 
@@ -230,7 +257,7 @@ chrome-agent screenshot
 running named browser before changing its proxy. Attached browsers (`--connect`) must be configured
 with their proxy before ChromeAgent attaches. Proxy URLs containing credentials are rejected.
 
-JS dialogs (`alert`/`confirm`/`prompt`/`beforeunload`) are auto-answered by default (`--dialog accept`) — a native dialog otherwise blocks the page with no DOM signal and the agent's next command hangs. Use `--dialog dismiss` to cancel them, or `--dialog manual` to opt out.
+JS dialogs (`alert`/`confirm`/`prompt`/`beforeunload`) are auto-answered by default (`--dialog accept`). A native dialog otherwise blocks the page with no DOM signal and the agent's next command hangs. Use `--dialog dismiss` to cancel them, or `--dialog manual` to opt out.
 
 ## The loop: inspect, act, inspect
 
@@ -289,7 +316,7 @@ chrome-agent dblclick n42
 
 ## Iframes
 
-The `frame` switch binds `eval` and `inspect` to the iframe — but **only within one process**, so drive it through `pipe` (or `batch`), never as separate CLI calls:
+The `frame` switch binds `eval` and `inspect` to the iframe, but **only within one process**, so drive it through `pipe` (or `batch`), never as separate CLI calls:
 
 ```bash
 printf '%s\n' \
@@ -395,7 +422,7 @@ chrome-agent screenshot --format jpeg --quality 60 --max-width 1024
 chrome-agent screenshot --uid n42            # capture a single element (or --selector "css")
 ```
 
-`download` uses an in-page `fetch` with `credentials:'include'`, so the request inherits the page's session. Click-triggered browser-native downloads are not handled — resolve the target href (`inspect --urls`) and download it directly.
+`download` uses an in-page `fetch` with `credentials:'include'`, so the request inherits the page's session. Click-triggered browser-native downloads are not handled: resolve the target href (`inspect --urls`) and download it directly.
 
 ## Waiting for the network to settle
 
@@ -485,7 +512,7 @@ Claude Code permissions:
 | Language | Rust | Rust | TypeScript |
 | Binary | 3 MB, zero runtime | 3 MB CLI + dashboard + cloud providers | Node + Playwright |
 | Startup | ~10ms (session reuse) | daemon (fast after first) | cold start |
-| Token efficiency | ~50 tokens/page (a11y noise filtering) | ~200 tokens/page (a11y tree) | ~2,000 tokens (HTML) |
+| Page cost, HN front page | 5,652 tokens (`inspect`), 1,571 (`extract`, all 30 records) | not measured here | not measured here |
 | UID stability | `backendNodeId` (stable across inspects) | sequential `@e1, @e2` (reassigned per snapshot) | N/A (selectors) |
 | Action + observe | `--inspect` flag (1 call) | separate snapshot call | separate call |
 | Stealth | 7 native CDP patches | delegated to cloud providers | none |
