@@ -41,6 +41,18 @@ function extract(_scope, _limit) {
     return linkText / totalText;
   }
 
+  // Shortest link text we treat as a headline rather than a nav label.
+  const HEADLINE_LINK_CHARS = 25;
+
+  function longestLinkText(el) {
+    let max = 0;
+    for (const a of el.querySelectorAll('a[href]')) {
+      const len = a.textContent.trim().length;
+      if (len > max) max = len;
+    }
+    return max;
+  }
+
   function subtreeDepth(el) {
     if (!el.children.length) return 1;
     let max = 0;
@@ -98,21 +110,31 @@ function extract(_scope, _limit) {
     }
     // Merge groups with same tagName — a "featured" variant should join the base group
     // but skip hidden elements during merge
+    // A modifier variant shares the base class and adds to it ("item" vs "item featured").
+    // Rows that merely share a tag with no class in common are different record types
+    // (HN's story rows vs its subtext rows) and must stay apart, or the merged group wins
+    // on sheer count and mixes two kinds of record into one list.
+    const classesOf = (sig) => new Set(sig.split('|')[1].split('.').filter(Boolean));
     const tagGroups = {};
     for (const [sig, els] of Object.entries(groups)) {
       const tag = sig.split('|')[0];
       const visible = els.filter(e => isVisible(e));
       if (!visible.length) continue;
-      if (!tagGroups[tag]) tagGroups[tag] = { sig, els: [] };
-      tagGroups[tag].els.push(...visible);
-      if (visible.length > (tagGroups[tag].bestCount || 0)) {
-        tagGroups[tag].sig = sig;
-        tagGroups[tag].bestCount = visible.length;
-      }
+      if (!tagGroups[tag]) tagGroups[tag] = [];
+      tagGroups[tag].push({ sig, els: visible });
     }
-    for (const { sig, els } of Object.values(tagGroups)) {
-      if (els.length < 3 || groups[sig]?.length === els.length) continue;
-      groups[sig + '|merged'] = els;
+    for (const variants of Object.values(tagGroups)) {
+      if (variants.length < 2) continue;
+      const base = variants.reduce((a, b) => (b.els.length > a.els.length ? b : a));
+      const baseClasses = classesOf(base.sig);
+      if (!baseClasses.size) continue;
+      const merged = [];
+      for (const v of variants) {
+        const shares = [...classesOf(v.sig)].some((c) => baseClasses.has(c));
+        if (shares) merged.push(...v.els);
+      }
+      if (merged.length < 3 || merged.length === base.els.length) continue;
+      groups[base.sig + '|merged'] = merged;
     }
 
     for (const [sig, els] of Object.entries(groups)) {
@@ -129,9 +151,15 @@ function extract(_scope, _limit) {
       if (parentTag === 'BODY' || parentTag === 'HTML') score *= 0.5;
       if (parentTag === 'NAV' || parent.closest('nav,header,footer')) score *= 0.3;
 
+      // Link density flags navigation, where every link is a short label. A listing row
+      // whose headline is itself a link is legitimately link-heavy, so only penalise
+      // groups where no record carries a link with real text in it.
       const avgLinkRatio = rich.reduce((s, e) => s + linkTextRatio(e), 0) / rich.length;
-      if (avgLinkRatio > 0.85) score *= 0.2;
-      else if (avgLinkRatio > 0.7) score *= 0.5;
+      const avgLongestLink = rich.reduce((s, e) => s + longestLinkText(e), 0) / rich.length;
+      if (avgLongestLink < HEADLINE_LINK_CHARS) {
+        if (avgLinkRatio > 0.85) score *= 0.2;
+        else if (avgLinkRatio > 0.7) score *= 0.5;
+      }
 
       const avgHetero = rich.reduce((s, e) => s + heterogeneity(e), 0) / rich.length;
       if (avgHetero >= 3) score *= 1.3;
