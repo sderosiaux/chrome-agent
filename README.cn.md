@@ -11,7 +11,7 @@
 </p>
 
 <p align="center">
-  <strong>让 LLM 驾驭浏览器。</strong>
+  <strong>用一个 3 MB 的二进制文件，把网页变成 Agent 能直接用的记录。</strong>
 </p>
 
 <p align="center">
@@ -22,56 +22,75 @@
 
 > 用户不是你，是你的 LLM。
 >
-> 你不需要读这份 README，你的 Agent 才需要。安装后运行 `chrome-agent --help`，让 LLM 自己搞定。CLI 内嵌了完整的使用指南，每条错误都附带下一步操作提示，`--json` 模式输出结构化数据，Agent 无需任何适配器即可解析。这个页面只是因为 GitHub 需要一个。
+> 你不需要读这份 README，你的 Agent 才需要。安装后运行 `chrome-agent --help`，让 LLM 自己搞定。CLI 内嵌了完整的使用指南，每条错误都附带下一步操作提示，`--json` 给 Agent 结构化数据，你不用写任何适配器。这个页面只是因为 GitHub 需要一个。
+
+## 别人做不到的那一件事
+
+任何浏览器工具都能把页面交给模型。问题在于交过去的形状。
+
+```bash
+chrome-agent goto news.ycombinator.com
+chrome-agent --json extract --limit 30
+```
+
+```json
+{"ok":true,"count":30,"pattern":"TR.athing.submission","items":[
+  {"title":"PGSimCity - How PostgreSQL Works",
+   "url":"https://nikolays.github.io/PGSimCity/",
+   "fields":["PGSimCity - How PostgreSQL Works (nikolays.github.io)"]},
+  ...
+]}
+```
+
+不写选择器，也不花一次模型调用去找出这些行。模式是结构化识别出来的，用 MDR/DEPTA 风格的启发式规则给同级相似度、内容异质性和文本链接比打分。
+
+在这个页面上用 [`scripts/measure.sh`](scripts/measure.sh) 测得的结果，你可以自己跑一遍：
+
+| 你交给模型的东西 | token | 模型拿到什么 |
+|---|---|---|
+| `extract --limit 30` | **1,571** | 30 条新闻，带 URL 的记录 |
+| `inspect`（无障碍树） | 5,652 | 整棵树，新闻混在页面结构里 |
+| 原始 HTML | 8,727 | 全部内容，包括没人会读的标记 |
+
+三者包含同样的 30 条新闻。只有第一种把它们作为记录交出去。另外两种交的是页面，让模型自己在里面找新闻，而这个代价要付两次：一次在输入 token，一次在解析它们的推理上。
+
+差距有多大取决于页面。在一个本身就是列表的博客归档页上，`extract` 返回约 12,500 token，而树是约 16,100，因为可剥离的外围标记很少。优势来自记录被大量其他标记包围的页面。
+
+其他工具要么让 Agent 写逐站点的选择器（下次部署就失效），要么花一次模型调用去读 DOM，而后者正是这类工具本该省掉的经常性开销。
 
 ## 和 agent-browser 有什么不同？
 
-[agent-browser](https://github.com/vercel-labs/agent-browser)（Vercel）是一个功能完整的浏览器自动化平台：仪表盘、云服务商、标注截图、iOS 支持、AI 对话、凭证保险库，40K 行 Rust。它很优秀。
-
-chrome-agent 是相反的策略：不是增加功能，而是减少 token。
+[agent-browser](https://github.com/vercel-labs/agent-browser)（Vercel）是最接近的东西，同样是为 Agent 打造的 Rust CLI，而且遥遥领先：功能更多、用户更多、几乎每天发版。如果你要的是平台，用它。两个诚实的区别：
 
 | | chrome-agent | agent-browser |
 |---|---|---|
-| **页面快照** | ~50 token（无障碍树噪音过滤，减少 66%） | ~200 token（完整无障碍树） |
-| **元素 ID** | `backendNodeId` — 跨 inspect 稳定 | 顺序 `@e1, @e2` — 每次快照重新分配 |
-| **操作 + 观察** | `click n12 --inspect`（1 次调用） | `click @e1` 然后 `snapshot`（2 次调用） |
-| **隐身模式** | 7 项原生 CDP 补丁（含 `Runtime.enable` 跳过） | 委托给云服务商 |
-| **内容提取** | `read`（文章）、`extract`（自动检测列表/表格） | 无内置功能 |
-| **二进制** | 3 MB，零运行时依赖 | 3 MB + Next.js 仪表盘 + 云 SDK |
-| **代码量** | ~8.8K 行 | 40K 行 |
+| **重复记录提取** | `extract`，结构化，不调用 LLM | 无内置；`read` 返回可读文本 |
+| **反机器人检测** | 7 项内置 CDP 补丁，`--connect` 连真实 Chrome | 核心无隐身能力，委托给付费云服务商 |
+| **进程模型** | 一条命令，一个连接，执行完退出 | 后台守护进程 |
+| **元素 ID** | `backendNodeId`，同一页面下次 inspect 仍然有效 | 顺序 `@e1`，每次快照重新分配 |
+| **浏览器原生下载** | 不支持，只有 `download --url` | 支持 |
+| **MCP 服务** | 无 | 有 |
 
-agent-browser 提供带监控、云浏览器和可视化调试的平台。chrome-agent 给你的 LLM 提供最精简的网页表示，然后退出舞台。如果你的 Agent 需要仪表盘，用 agent-browser。如果你的 Agent 需要把 token 花在推理而不是解析页面上，用这个。
+它确实领先的地方：agent-browser 有点击触发的下载、加密的凭证保险库、云服务商集成和 MCP 模式。它同样复用你真实的 Chrome 配置文件，和这里的 `--copy-cookies` 一样，所以登录态访问对双方都不是差异点。
 
-## 设计理念
+## 什么情况下别用 chrome-agent
 
-Agent 花在理解页面上的每一个 token，都是它无法用来思考任务的 token。chrome-agent 围绕一个核心理念构建：**最小化从"这个页面长什么样？"到"我下一步该做什么？"之间的 token 消耗。**
+借用 [ripgrep](https://github.com/BurntSushi/ripgrep) 的做法，因为浪费你一下午最快的方式，就是一份只列优点的 README。
 
-具体来说：
+- **你需要测试框架。** 用 Playwright。断言、重试、trace viewer、测试运行器，还有微软在维护。
+- **你需要有支持的产品。** 这是一个人的项目。没有 SLA，没有路线图承诺，没有企业支持。
+- **你需要 MCP。** 这里没有 MCP 服务。如果你的编码 Agent 不能执行 shell，这不是合适的工具。
+- **你需要浏览器集群。** 没有云、没有代理池、没有验证码破解。Browserbase、Steel、Browserless 做这个。
+- **目标站点用 DataDome 或 Kasada。** `--stealth` 过不去。你得用 `--connect` 连真实 Chrome，即便如此也不保证。
+- **你需要 Firefox 或 Safari。** 这里说的是 CDP，只支持 Chrome。
 
-- **无障碍树优于 DOM。** Playwright 返回 ~2,000 token 的原始 HTML。chrome-agent 返回 ~50 token 的无障碍树，带有稳定的元素 ID。无需 CSS 选择器，无需解析 DOM。
-- **单一二进制，零运行时。** 3 MB Rust 二进制。无 Node.js，无 npm，无 Playwright 运行时。`npx chrome-agent` 直接可用。
-- **一次调用完成操作 + 观察。** 任意操作命令加 `--inspect` 就能返回操作后的页面状态。一次往返而非两次。
-- **错误即指令。** 每个错误都包含 `hint` 字段，告诉 Agent 下一步做什么。`{"ok":false, "error":"...", "hint":"run inspect"}`。
-- **隐身优先。** 7 项 CDP 补丁，包含没人提到的检测手段（`Runtime.enable`）。最强防护场景可连接到真实 Chrome。
-- **无需选择器的内容提取。** `read` 提取文章，`extract` 提取重复数据，`network` 获取 API 响应。Agent 永远不需要写 CSS 选择器。
+## 它建立在什么之上
 
-这不是通用的浏览器测试框架，而是让 LLM 高效浏览网页的工具。
-
-```bash
-chrome-agent goto news.ycombinator.com --inspect
-
-# ~50 个 token，而非 ~2,000：
-uid=n1 RootWebArea "Hacker News"
-  uid=n50 heading "Hacker News" level=1
-  uid=n82 link "Show HN: A New Browser Tool"
-  uid=n97 link "Rust 2025 Edition Announced"
-  ...
-
-# 点击 + 一次调用查看新页面：
-chrome-agent click n82 --inspect
-```
-
-UID 基于 Chrome 的 `backendNodeId`，在多次 inspect 之间保持不变。现在点击 `n82`，或者五分钟后再点击，都没问题。
+- **单一二进制，零运行时。** 无 Node，无 npm，无需下载 Playwright。Linux 构建是静态的（musl），任何发行版都能跑，不用对 glibc 版本。
+- **错误即指令。** 每次失败都带一个 `hint` 指出下一步：`{"ok":false,"error":"...","hint":"run inspect"}`。
+- **稳定的元素 ID。** uid 来自 Chrome 的 `backendNodeId`，所以 `n82` 下次 inspect 仍指向同一个节点。导航之后它们会变，而 `diff` 会告诉你什么时候发生了，而不是假装比较两个不同的页面。
+- **会话持久化。** Chrome 在调用之间保持运行，所以一条命令的代价是一个连接，不是启动一个浏览器。
+- **并行 Agent 不会互相干扰。** `--browser agent1`、`--browser agent2`，独立的 Chrome 实例和独立的会话状态。
 
 ```
 chrome-agent（3 MB Rust 二进制文件）
@@ -79,22 +98,6 @@ chrome-agent（3 MB Rust 二进制文件）
     v
 Chrome（无头模式，无 Node.js，无运行时依赖）
 ```
-
-### 为什么做这个
-
-| 如果你遇到了这些问题... | chrome-agent 的解决方式 |
-|---|---|
-| Playwright 快照消耗 2K token | 无障碍树：约 50 个 token。页面状态的上下文消耗减少 40 倍。 |
-| CSS 选择器每次部署都会失效 | 基于 Chrome `backendNodeId` 的 UID，只要 DOM 节点存在就保持稳定。 |
-| 点击后再 inspect = 2 次往返 | 任意命令加 `--inspect`，一次调用完成操作 + 观察。 |
-| 200MB 的 Node + npm + Playwright | 3 MB 二进制文件。`npx chrome-agent` 开箱即用。 |
-| Cloudflare 拦截无头 Chrome | 7 项 CDP 补丁。`Runtime.enable` 从不被调用（没人提到的检测手段）。 |
-| 为每个网站编写抓取选择器 | `read` 提取文章，`extract` 提取列表/表格/卡片，`network` 获取 API 响应。无需选择器。 |
-| 错误信息是堆栈跟踪 | `{"ok":false, "error":"...", "hint":"run inspect"}` — 可解析、可操作。 |
-| 每条命令都启动新浏览器 | 会话持久化。Chrome 在调用之间保持运行。启动约 10ms。 |
-| Agent 无法访问已登录的账号 | `--copy-cookies` 从真实 Chrome 获取 cookie。支持 X.com、Gmail、各种后台面板。 |
-| 无限滚动只显示 10 条 | `inspect --scroll --limit 50` 滚动并收集。已在 X.com 测试：从实时时间线获取 50 条推文。 |
-| 两个 Agent 共享一个浏览器 = 混乱 | `--browser agent1`、`--browser agent2`，独立的 Chrome 实例。 |
 
 ## 安装
 
@@ -449,7 +452,7 @@ Claude Code 权限配置：
 | 语言 | Rust | Rust | TypeScript |
 | 二进制 | 3 MB，零运行时 | 3 MB CLI + 仪表盘 + 云服务商 | Node + Playwright |
 | 启动速度 | ~10ms（会话复用） | 守护进程（首次后快速） | 冷启动 |
-| Token 效率 | ~50 token/页（无障碍树噪音过滤） | ~200 token/页（无障碍树） | ~2,000 token（HTML） |
+| 页面代价（HN 首页） | 5,652 token（`inspect`），1,571（`extract`，全部 30 条记录） | 此处未测量 | 此处未测量 |
 | UID 稳定性 | `backendNodeId`（跨 inspect 稳定） | 顺序 `@e1, @e2`（每次快照重新分配） | 不适用（选择器） |
 | 操作 + 观察 | `--inspect` 参数（1 次调用） | 单独 snapshot 调用 | 单独调用 |
 | 隐身 | 7 项原生 CDP 补丁 | 委托给云服务商 | 无 |
