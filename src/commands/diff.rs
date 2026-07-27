@@ -12,6 +12,19 @@ pub struct Diff {
     pub removed: usize,
     pub changed: usize,
     pub unchanged: usize,
+    /// Which node lost focus, and which gained it. Either can be absent: a page with
+    /// nothing focused yet has no `from`, and blurring without refocusing has no `to`.
+    /// Kept out of `changed`, because focus rewrites two nodes on every click and says
+    /// nothing about content, so counting it drowns the real signal.
+    pub focus_from: Option<String>,
+    pub focus_to: Option<String>,
+    /// Nodes carrying a sequential `e{n}` uid. Those are renumbered on every snapshot, so
+    /// they are never matched between two of them, only counted.
+    pub anonymous: usize,
+    /// Nodes present on both sides whose position in the document changed. Without this a
+    /// drag-and-drop reorder reads as "No changes detected": every uid and every line is
+    /// still there.
+    pub moved: usize,
 }
 
 /// Compare two snapshot texts and produce a compact diff.
@@ -30,6 +43,10 @@ pub fn diff_snapshots(old: &str, new: &str) -> Diff {
     // for an agent that sees the same page twice.
     let old_lines = uid_lines(old);
     let new_lines = uid_lines(new);
+    let anonymous = new_lines.iter().filter(|(uid, _)| is_anonymous(uid)).count();
+    // `e{n}` uids are positional, not identities. Pairing them would compare unrelated nodes.
+    let old_lines: Vec<_> = old_lines.into_iter().filter(|(uid, _)| !is_anonymous(uid)).collect();
+    let new_lines: Vec<_> = new_lines.into_iter().filter(|(uid, _)| !is_anonymous(uid)).collect();
     let old_by_uid: HashMap<&str, &str> = old_lines.iter().copied().collect();
     let new_by_uid: HashMap<&str, &str> = new_lines.iter().copied().collect();
 
@@ -37,6 +54,8 @@ pub fn diff_snapshots(old: &str, new: &str) -> Diff {
     let mut removed = Vec::new();
     let mut changed = Vec::new();
     let mut unchanged: usize = 0;
+    let mut focus_from: Option<String> = None;
+    let mut focus_to: Option<String> = None;
 
     // Removed and changed, in the order they appeared on the old page.
     for (uid, old_line) in &old_lines {
@@ -44,6 +63,13 @@ pub fn diff_snapshots(old: &str, new: &str) -> Diff {
             None => removed.push(format!("- {old_line}")),
             Some(new_line) => {
                 if old_line == new_line {
+                    unchanged += 1;
+                } else if let Some(gained) = focus_only_change(old_line, new_line) {
+                    if gained {
+                        focus_to = Some((*uid).to_string());
+                    } else {
+                        focus_from = Some((*uid).to_string());
+                    }
                     unchanged += 1;
                 } else {
                     changed.push(render_change(old_line, new_line));
@@ -59,16 +85,36 @@ pub fn diff_snapshots(old: &str, new: &str) -> Diff {
         }
     }
 
-    let has_changes = !added.is_empty() || !removed.is_empty() || !changed.is_empty();
+    let moved = count_moved(&old_lines, &new_lines);
+
+    // A focus move is not a content change, but it is something we observed, so the
+    // summary must not go on to say nothing happened.
+    let observed_something = !added.is_empty()
+        || !removed.is_empty()
+        || !changed.is_empty()
+        || moved > 0
+        || focus_from.is_some()
+        || focus_to.is_some();
     let mut out = String::new();
     for line in added.iter().chain(&removed).chain(&changed) {
         out.push_str(line);
         out.push('\n');
     }
+    if moved > 0 {
+        out.push_str(&format!("> {moved} elements moved\n"));
+    }
+    if focus_from.is_some() || focus_to.is_some() {
+        let f = focus_from.as_deref().unwrap_or("none");
+        let t = focus_to.as_deref().unwrap_or("none");
+        out.push_str(&format!("focus: {f} -> {t}\n"));
+    }
+    if anonymous > 0 {
+        out.push_str(&format!("? {anonymous} nodes without stable ids (not compared)\n"));
+    }
     if unchanged > 0 {
         out.push_str(&format!("= {unchanged} unchanged elements\n"));
     }
-    if !has_changes {
+    if !observed_something {
         out.push_str("No changes detected.\n");
     }
     Diff {
@@ -77,7 +123,40 @@ pub fn diff_snapshots(old: &str, new: &str) -> Diff {
         removed: removed.len(),
         changed: changed.len(),
         unchanged,
+        focus_from,
+        focus_to,
+        anonymous,
+        moved,
     }
+}
+
+/// `e{n}` uids come from nodes with no backendDOMNodeId and are numbered per snapshot.
+fn is_anonymous(uid: &str) -> bool {
+    uid.starts_with('e') && uid[1..].chars().all(|c| c.is_ascii_digit()) && uid.len() > 1
+}
+
+/// `Some(true)` when the node gained focus, `Some(false)` when it lost it, `None` when
+/// anything else about the node also changed.
+fn focus_only_change(old_line: &str, new_line: &str) -> Option<bool> {
+    let (old_tokens, new_tokens) = (tokenize(old_line)?, tokenize(new_line)?);
+    let had = old_tokens.contains(&"focused");
+    let has = new_tokens.contains(&"focused");
+    if had == has {
+        return None;
+    }
+    let strip = |t: &Vec<&str>| -> Vec<String> {
+        t.iter().filter(|x| **x != "focused").map(|x| (*x).to_string()).collect()
+    };
+    if strip(&old_tokens) == strip(&new_tokens) { Some(has) } else { None }
+}
+
+/// How many nodes present on both sides sit at a different position in the document.
+fn count_moved(old_lines: &[(&str, &str)], new_lines: &[(&str, &str)]) -> usize {
+    let new_set: std::collections::HashSet<&str> = new_lines.iter().map(|(u, _)| *u).collect();
+    let old_order: Vec<&str> = old_lines.iter().map(|(u, _)| *u).filter(|u| new_set.contains(u)).collect();
+    let old_set: std::collections::HashSet<&str> = old_lines.iter().map(|(u, _)| *u).collect();
+    let new_order: Vec<&str> = new_lines.iter().map(|(u, _)| *u).filter(|u| old_set.contains(u)).collect();
+    old_order.iter().zip(&new_order).filter(|(a, b)| a != b).count()
 }
 
 /// Outcome of comparing the stored snapshot against the live page.
@@ -88,6 +167,10 @@ pub struct Comparison {
     pub removed: usize,
     pub changed: usize,
     pub unchanged: usize,
+    pub moved: usize,
+    pub anonymous: usize,
+    pub focus_from: Option<String>,
+    pub focus_to: Option<String>,
     /// True when the live page is a different document from the stored snapshot.
     pub document_changed: bool,
     /// What the agent should do next, when that isn't obvious.
@@ -117,6 +200,10 @@ pub fn compare(old_url: Option<&str>, old_text: &str, new_url: &str, new_text: &
             removed: 0,
             changed: 0,
             unchanged: 0,
+            moved: 0,
+            anonymous: 0,
+            focus_from: None,
+            focus_to: None,
             document_changed: true,
             hint: Some("The page navigated, so uids from the previous snapshot no longer refer to anything. This is the new page; act on these uids."),
         };
@@ -129,6 +216,10 @@ pub fn compare(old_url: Option<&str>, old_text: &str, new_url: &str, new_text: &
         removed: diff.removed,
         changed: diff.changed,
         unchanged: diff.unchanged,
+        moved: diff.moved,
+        anonymous: diff.anonymous,
+        focus_from: diff.focus_from,
+        focus_to: diff.focus_to,
         document_changed: false,
         hint: None,
     }
@@ -157,7 +248,13 @@ fn render_change(old_line: &str, new_line: &str) -> String {
     let prefix = old_tokens[..shared].join(" ");
     let old_rest = old_tokens[shared..].join(" ");
     let new_rest = new_tokens[shared..].join(" ");
-    format!("~ {prefix} {old_rest} -> {new_rest}")
+    // One side can be empty when the shared prefix covers the whole shorter line; writing
+    // it as an empty field would leave a stray double space.
+    match (old_rest.is_empty(), new_rest.is_empty()) {
+        (true, _) => format!("~ {prefix} -> {new_rest}"),
+        (_, true) => format!("~ {prefix} {old_rest} ->"),
+        _ => format!("~ {prefix} {old_rest} -> {new_rest}"),
+    }
 }
 
 /// Split a snapshot line into space-separated tokens, keeping quoted runs whole.
@@ -208,6 +305,51 @@ fn uid_lines(text: &str) -> Vec<(&str, &str)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Moving focus rewrites two nodes and means nothing about content. Left in the counts
+    /// it is the single loudest source of noise: every click on a page reports "2 changed".
+    #[test]
+    fn moving_focus_is_reported_separately_from_content() {
+        let old = "uid=n1 link \"A\" focused\nuid=n2 button \"B\"\n";
+        let new = "uid=n1 link \"A\"\nuid=n2 button \"B\" focused\n";
+        let d = diff_snapshots(old, new);
+        assert_eq!(d.changed, 0, "focus moving is not a content change: {}", d.text);
+        assert_eq!(d.focus_from.as_deref(), Some("n1"), "{}", d.text);
+        assert_eq!(d.focus_to.as_deref(), Some("n2"), "{}", d.text);
+    }
+
+    /// A node with no backendDOMNodeId falls back to a sequential `e{n}` uid, renumbered on
+    /// every snapshot. Matching `e1` to `e1` pairs two unrelated nodes, which is the same
+    /// defect as matching uids across documents, one scope down.
+    #[test]
+    fn sequential_uids_are_never_matched_between_snapshots() {
+        let old = "uid=n1 heading \"Same\"\nuid=e1 generic \"first pass\"\n";
+        let new = "uid=n1 heading \"Same\"\nuid=e1 generic \"totally different node\"\n";
+        let d = diff_snapshots(old, new);
+        assert_eq!(d.changed, 0, "e-uids carry no identity, so nothing can be said to have changed: {}", d.text);
+        assert_eq!(d.anonymous, 1, "but their presence is worth reporting: {}", d.text);
+    }
+
+    /// Reordering keeps every uid and every line, so pairing by uid alone reports a
+    /// drag-and-drop as "No changes detected".
+    #[test]
+    fn a_reorder_does_not_read_as_no_change() {
+        let old = "uid=n1 listitem \"A\"\nuid=n2 listitem \"B\"\nuid=n3 listitem \"C\"\n";
+        let new = "uid=n3 listitem \"C\"\nuid=n1 listitem \"A\"\nuid=n2 listitem \"B\"\n";
+        let d = diff_snapshots(old, new);
+        assert!(d.moved > 0, "a reorder must not be invisible: {}", d.text);
+        assert!(!d.text.contains("No changes"), "{}", d.text);
+    }
+
+    /// The renderer hoists the shared prefix; when one side has nothing left it must not
+    /// leave a double space behind.
+    #[test]
+    fn a_changed_line_has_no_empty_side() {
+        let old = "uid=n1 link \"A\"\n";
+        let new = "uid=n1 link \"A\" focusable\n";
+        let d = diff_snapshots(old, new);
+        assert!(!d.text.contains("  ->"), "empty left side leaves a double space: {:?}", d.text);
+    }
 
     /// A changed line repeats the node twice today. Only the part that moved matters, and
     /// changed lines dominate a form-filling flow, so the shared prefix is written once.

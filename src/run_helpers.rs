@@ -138,9 +138,14 @@ pub async fn output_action(
                     "removed": cmp.removed,
                     "changed": cmp.changed,
                     "unchanged": cmp.unchanged,
+                    "moved": cmp.moved,
+                    "anonymous": cmp.anonymous,
                     "document_changed": cmp.document_changed,
                 });
                 obj["delta"] = json!(body);
+                if cmp.focus_from.is_some() || cmp.focus_to.is_some() {
+                    obj["focus"] = json!({"from": cmp.focus_from, "to": cmp.focus_to});
+                }
                 if let Some(hint) = cmp.hint {
                     obj["hint"] = json!(hint);
                 }
