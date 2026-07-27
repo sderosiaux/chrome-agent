@@ -643,13 +643,14 @@ pub async fn dispatch_batch(
     target_id: &str,
     timeout: u64,
     global_max_depth: Option<usize>,
+    report: crate::run_helpers::ReportPolicy,
     cmd: &Value,
 ) -> Result<Value, crate::BoxError> {
     let cmds = cmd.get("commands").and_then(Value::as_array)
         .ok_or("batch: missing \"commands\" array")?;
     let mut results = Vec::new();
     for c in cmds {
-        let r = dispatch_single(client, browser_client, store, browser_name, page_name, target_id, timeout, global_max_depth, c).await;
+        let r = dispatch_single(client, browser_client, store, browser_name, page_name, target_id, timeout, global_max_depth, report, c).await;
         results.push(r);
     }
     let all_ok = results.iter().all(|r| r.get("ok").and_then(Value::as_bool).unwrap_or(false));
@@ -668,9 +669,22 @@ pub async fn dispatch_single(
     target_id: &str,
     timeout: u64,
     global_max_depth: Option<usize>,
+    report: crate::run_helpers::ReportPolicy,
     cmd: &Value,
 ) -> Value {
     let cmd_name = cmd.get("cmd").and_then(Value::as_str).unwrap_or("");
+    // Capture the baseline before dispatching: a command run with `inspect` refreshes it
+    // itself, and comparing against the refreshed copy would report that nothing moved.
+    let baseline = if report.changes && mutates_page(cmd_name) {
+        store
+            .browsers
+            .get(browser_name)
+            .and_then(|b| b.pages.get(page_name))
+            .and_then(|p| p.last_snapshot.clone().map(|t| (t, p.last_snapshot_url.clone())))
+    } else {
+        None
+    };
+    let mut value = {
     let result: Result<Value, crate::BoxError> = match cmd_name {
         "goto" => dispatch_goto(client, store, browser_name, page_name, target_id, timeout, global_max_depth, cmd).await,
         "click" => dispatch_click(client, store, browser_name, page_name, target_id, global_max_depth, cmd).await,
@@ -711,14 +725,94 @@ pub async fn dispatch_single(
         "frame" => dispatch_frame(client, cmd).await,
         other => Err(unknown_cmd_error(other)),
     };
+    // `result` must not outlive this block: BoxError is not Send, and an await with it
+    // still in scope would make every caller's future non-Send.
     match result {
         Ok(v) => v,
         Err(e) => {
             let msg = e.to_string();
             let mut obj = json!({"ok": false, "error": msg});
             if let Some(h) = crate::run_helpers::error_hint(&msg) { obj["hint"] = json!(h); }
-            obj
+            return obj;
         }
+    }
+    };
+    if let Some((old_text, old_url)) = baseline {
+        attach_change_report(
+            client, store, browser_name, page_name, target_id, report, &old_text,
+            old_url.as_deref(), &mut value,
+        )
+        .await;
+    }
+    value
+}
+
+/// Commands that can move the page, and therefore owe the caller a change report.
+pub fn mutates_page(cmd: &str) -> bool {
+    matches!(
+        cmd,
+        "goto" | "navigate" | "open" | "go"
+            | "click" | "tap" | "dblclick" | "double_click" | "double-click"
+            | "fill" | "type" | "press" | "select" | "check" | "uncheck"
+            | "upload" | "drag" | "hover" | "scroll"
+            | "back" | "forward"
+            | "fill-form" | "fill_form" | "fillform"
+            | "navigate_and_read" | "navigate-and-read"
+            | "fill_and_submit" | "fill-and-submit"
+    )
+}
+
+/// Re-read the page after an action and say what moved, mirroring the CLI default.
+///
+/// Failures here are swallowed on purpose: the action itself already succeeded, and losing
+/// the report is a smaller problem than turning a successful action into an error.
+pub async fn attach_change_report(
+    client: &CdpClient,
+    store: &mut SessionStore,
+    browser_name: &str,
+    page_name: &str,
+    target_id: &str,
+    report: crate::run_helpers::ReportPolicy,
+    old_text: &str,
+    old_url: Option<&str>,
+    out: &mut Value,
+) {
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    let Ok(snapshot) = commands::inspect::run(client, false, None, None, None).await else {
+        return;
+    };
+    let cmp = commands::diff::compare(old_url, old_text, &snapshot.url, &snapshot.text);
+    let body = if report.budget == 0 {
+        cmp.text.clone()
+    } else {
+        crate::truncate::truncate_str(
+            cmp.text.trim_end(),
+            report.budget,
+            "\n… truncated, send {\"cmd\":\"inspect\"} for the rest",
+        )
+        .into_owned()
+    };
+    if let Some(obj) = out.as_object_mut() {
+        obj.insert(
+            "changed".into(),
+            json!({
+                "added": cmp.added,
+                "removed": cmp.removed,
+                "changed": cmp.changed,
+                "unchanged": cmp.unchanged,
+                "document_changed": cmp.document_changed,
+            }),
+        );
+        obj.insert("delta".into(), json!(body));
+        if let Some(hint) = cmp.hint {
+            obj.entry("hint").or_insert_with(|| json!(hint));
+        }
+    }
+    if let Some(browser_s) = store.browsers.get_mut(browser_name) {
+        let page = session::ensure_page(browser_s, page_name, target_id);
+        page.uid_map = snapshot.uid_map;
+        page.last_snapshot = Some(snapshot.text);
+        page.last_snapshot_url = Some(snapshot.url);
     }
 }
 
