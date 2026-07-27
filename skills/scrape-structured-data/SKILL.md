@@ -3,7 +3,7 @@ name: scrape-structured-data
 description: Get the repeating records off a web page (product grids, search results, job listings, news feeds, tables) as JSON, without writing CSS selectors and without spending a model call to read the HTML. Works on sites with no API, including ones behind a login or bot protection. Runs locally, one binary, no API key. Use when the user says scrape, extract the list of, get all the products/results/posts from, turn this page into JSON, or asks for data from a site that has no API.
 metadata:
   author: sderosiaux
-  version: "0.7.0"
+  version: "0.8.0"
   tags: ["scraping", "extract", "data", "json", "web"]
 ---
 

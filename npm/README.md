@@ -73,7 +73,7 @@ chrome-agent screenshot
 ## How It Works
 
 ```
-chrome-agent v0.7.0 (Rust, ~8.8K lines, 3 MB binary)
+chrome-agent v0.8.0 (Rust, ~10.2K lines, 3 MB binary)
     │
     │ WebSocket (Chrome DevTools Protocol)
     ▼
@@ -340,7 +340,7 @@ google-chrome --remote-debugging-port=9222  # or launch manually
 | Network capture | Retroactive + live | No | No | Metadata only (no bodies) |
 | Console capture | Stealth-safe interceptor | No | Console messages | No |
 | Pipe mode | JSON stdin/stdout | No | No | No |
-| Code | ~8.8K lines | ~76K lines (69K Playwright fork) | ~12K lines | Playwright |
+| Code | ~10.2K lines | ~76K lines (69K Playwright fork) | ~12K lines | Playwright |
 
 ## License
 

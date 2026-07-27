@@ -458,7 +458,7 @@ Claude Code 权限配置：
 | 隐身 | 7 项原生 CDP 补丁 | 委托给云服务商 | 无 |
 | 阅读模式 | `read`（Readability.js） | 无 | 无 |
 | 数据提取 | `extract`（自动检测重复数据） | 无 | 无 |
-| 代码量 | ~8.8K 行 | ~40K 行 | Playwright |
+| 代码量 | ~10.2K 行 | ~40K 行 | Playwright |
 | 设计目标 | 最少 token，最大自主性 | 功能完整平台 | 浏览器测试 |
 
 ## 许可证

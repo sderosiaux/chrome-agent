@@ -549,7 +549,7 @@ Claude Code permissions:
 | Iframe switching | `frame` | `frame` | via selectors |
 | Batch execution | `batch` (JSON stdin) | `batch` (JSON or quoted) | N/A |
 | AI chat built-in | no (the agent IS the LLM) | yes (AI Gateway) | N/A |
-| Codebase | ~8.8K lines | ~40K lines | Playwright |
+| Codebase | ~10.2K lines | ~40K lines | Playwright |
 | Design goal | minimal tokens, maximal autonomy | feature-complete platform | browser testing |
 
 ## License
