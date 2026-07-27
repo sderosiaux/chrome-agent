@@ -174,6 +174,40 @@ describe('fixture: extract_hn_like.html (HN-style news)', () => {
   });
 });
 
+describe('fixture: extract_hn_subtext.html (HN with real subtext rows)', () => {
+  const html = loadFixture('extract_hn_subtext.html');
+
+  it('returns one record per story, not one per table row', () => {
+    const r = extractFromHTML(html);
+    assert.equal(r.count, 5, `Expected 5 stories, got ${r.count}`);
+  });
+
+  it('never uses a timestamp or comment count as a title', () => {
+    const r = extractFromHTML(html);
+    for (const item of r.items) {
+      assert.doesNotMatch(item.title || '', /^\d+\s+(hours?|minutes?|days?)\s+ago$/i,
+        `Timestamp leaked into title: ${item.title}`);
+      assert.doesNotMatch(item.title || '', /^\d+\s+comments?$/i,
+        `Comment count leaked into title: ${item.title}`);
+    }
+  });
+
+  it('links each record to the story destination, not the discussion page', () => {
+    const r = extractFromHTML(html);
+    for (const item of r.items) {
+      assert.doesNotMatch(item.url || '', /item\?id=/,
+        `Record points at the HN discussion instead of the story: ${item.url}`);
+    }
+  });
+
+  it('captures the real story titles', () => {
+    const r = extractFromHTML(html);
+    const titles = r.items.map((i) => i.title);
+    assert.ok(titles.includes('PGSimCity - How PostgreSQL Works'), `Missing first story, got ${JSON.stringify(titles)}`);
+    assert.ok(titles.includes('We have proof automation now'), `Missing fourth story, got ${JSON.stringify(titles)}`);
+  });
+});
+
 describe('fixture: extract_nested_nav.html (feature page with nav)', () => {
   const html = loadFixture('extract_nested_nav.html');
 

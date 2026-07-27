@@ -10,6 +10,36 @@ pub struct Snapshot {
     pub text: String,
     /// uid → `ElementRef` mapping for subsequent actions.
     pub uid_map: HashMap<String, ElementRef>,
+    /// Document the snapshot was taken from. uids are `backendNodeId`s, and those
+    /// counters overlap between documents, so a uid only means something paired with
+    /// the document it came from. `diff` uses this to refuse comparing across a
+    /// navigation, where matching uids would pair unrelated nodes.
+    pub url: String,
+}
+
+/// Read `location.href`. `Runtime.evaluate` works without `Runtime.enable`, so this
+/// stays off the stealth hot path. Returns an empty string if the page won't answer,
+/// which callers treat as "identity unknown" rather than as a mismatch.
+pub async fn document_url(client: &CdpClient) -> String {
+    let mut params = serde_json::json!({
+        "expression": "location.href",
+        "returnByValue": true,
+    });
+    if let Some(ctx) = client.frame_context() {
+        params["contextId"] = serde_json::json!(ctx.context_id);
+    }
+    let evaluated: Result<crate::cdp::types::EvaluateResult, _> =
+        client.call("Runtime.evaluate", params).await;
+    let Ok(result) = evaluated else {
+        return String::new();
+    };
+    result
+        .result
+        .value
+        .as_ref()
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_string()
 }
 
 /// Take an accessibility tree snapshot of the current page.
@@ -44,8 +74,9 @@ pub async fn take_snapshot(
         .await?;
 
     let (text, uid_map) = format_ax_tree(&result.nodes, verbose, max_depth, focus_uid, role_filter);
+    let url = document_url(client).await;
 
-    Ok(Snapshot { text, uid_map })
+    Ok(Snapshot { text, uid_map, url })
 }
 
 /// Format `AXNode` list into indented text + uid map.

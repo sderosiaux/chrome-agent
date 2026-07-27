@@ -11,6 +11,7 @@ mod element_selector;
 mod geometry;
 mod pipe;
 mod pipe_dispatch;
+mod pipe_dispatch_actions;
 mod run;
 mod run_helpers;
 mod session;

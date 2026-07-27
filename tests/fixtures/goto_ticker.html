@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html>
+<head><title>Live ticker</title></head>
+<body>
+<h1>Live ticker</h1>
+<ul id="feed"></ul>
+<script>
+// Mutates forever, like a chat window, a live dashboard or a rotating ad slot.
+// A settle probe that re-arms on every mutation never resolves on a page like this.
+let n = 0;
+setInterval(() => {
+  const feed = document.getElementById('feed');
+  const li = document.createElement('li');
+  li.textContent = 'tick ' + (n++);
+  feed.appendChild(li);
+  if (feed.children.length > 10) feed.firstChild.remove();
+}, 50);
+</script>
+</body>
+</html>

@@ -17,6 +17,13 @@ pub struct SessionStore {
     /// from entries other processes added after our load (leave alone).
     #[serde(skip)]
     loaded_names: HashSet<String>,
+    /// Serialized value of each browser as we loaded it. At save time an entry that
+    /// still matches its loaded value is one we never touched, so we leave whatever
+    /// is on disk instead of republishing our copy. Without this, an agent that only
+    /// read the file would write its stale view of *other* agents' browsers back over
+    /// their newer state — a lost update between parallel `--browser <name>` agents.
+    #[serde(skip)]
+    loaded_entries: HashMap<String, String>,
 }
 
 /// Per-browser session state.
@@ -44,6 +51,11 @@ pub struct PageSession {
     pub uid_map: HashMap<String, ElementRef>,
     #[serde(default)]
     pub last_snapshot: Option<String>,
+    /// Document `last_snapshot` was taken from. uids are `backendNodeId`s and those
+    /// counters overlap between documents, so `diff` needs this to tell "the page
+    /// changed under me" from "I am looking at a different page entirely".
+    #[serde(default)]
+    pub last_snapshot_url: Option<String>,
 }
 
 /// Load the session store from disk. Returns empty store if file doesn't exist.
@@ -70,7 +82,18 @@ fn load_from(path: &Path) -> Result<SessionStore, SessionError> {
     let mut store: SessionStore = serde_json::from_str(&contents)
         .map_err(|e| SessionError(format!("Failed to parse {}: {e}", path.display())))?;
     store.loaded_names = store.browsers.keys().cloned().collect();
+    store.loaded_entries = snapshot_entries(&store.browsers);
     Ok(store)
+}
+
+/// Serialize each browser entry so save can tell "I changed this" from "I only read it".
+fn snapshot_entries(browsers: &HashMap<String, BrowserSession>) -> HashMap<String, String> {
+    browsers
+        .iter()
+        .filter_map(|(name, entry)| {
+            serde_json::to_string(entry).ok().map(|json| (name.clone(), json))
+        })
+        .collect()
 }
 
 /// Persist `store` to `path` under an exclusive lock, merging with whatever is
@@ -104,6 +127,14 @@ fn save_to(path: &Path, store: &mut SessionStore) -> Result<(), SessionError> {
         }
     }
     for (name, entry) in &store.browsers {
+        // Untouched since load: another agent may have advanced it while we were
+        // working, so keep the on-disk value rather than republishing our stale copy.
+        let untouched = serde_json::to_string(entry)
+            .ok()
+            .is_some_and(|json| store.loaded_entries.get(name) == Some(&json));
+        if untouched && merged.browsers.contains_key(name) {
+            continue;
+        }
         merged.browsers.insert(name.clone(), entry.clone());
     }
 
@@ -127,6 +158,7 @@ fn save_to(path: &Path, store: &mut SessionStore) -> Result<(), SessionError> {
 
     // Our view is now the baseline for subsequent saves in this process.
     store.loaded_names = store.browsers.keys().cloned().collect();
+    store.loaded_entries = snapshot_entries(&store.browsers);
 
     Ok(())
 }
@@ -264,6 +296,7 @@ pub fn ensure_page<'a>(
             target_id: target_id.to_string(),
             uid_map: HashMap::new(),
             last_snapshot: None,
+            last_snapshot_url: None,
         })
 }
 
@@ -314,6 +347,47 @@ pub struct SessionError(pub String);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Two agents work on their own `--browser` names at the same time. The one that
+    /// only *read* the other's entry must not write its stale copy back over it.
+    /// This is the lost update that made a concurrent agent lose its snapshot.
+    #[test]
+    fn a_reader_does_not_clobber_another_agents_concurrent_write() {
+        let dir = std::env::temp_dir().join(format!("chrome-agent-session-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("sessions.json");
+        let _ = std::fs::remove_file(&path);
+
+        // Agent A publishes its browser.
+        let mut a = SessionStore::default();
+        ensure_browser(&mut a, "agent-a", "ws://a", None, true, None);
+        save_to(&path, &mut a).unwrap();
+
+        // Agent B loads the file, so it now holds a copy of agent-a it never touched.
+        let mut b = load_from(&path).unwrap();
+        ensure_browser(&mut b, "agent-b", "ws://b", None, true, None);
+
+        // Agent A moves on and records a snapshot while B is still working.
+        let mut a2 = load_from(&path).unwrap();
+        let browser = a2.browsers.get_mut("agent-a").unwrap();
+        let page = ensure_page(browser, "default", "target-1");
+        page.last_snapshot = Some("uid=n1 RootWebArea".into());
+        save_to(&path, &mut a2).unwrap();
+
+        // B saves last. Its own entry must land, and A's snapshot must survive.
+        save_to(&path, &mut b).unwrap();
+
+        let final_state = load_from(&path).unwrap();
+        assert!(final_state.browsers.contains_key("agent-b"), "agent-b should be saved");
+        let snapshot = final_state.browsers["agent-a"].pages.get("default").and_then(|p| p.last_snapshot.as_deref());
+        assert_eq!(
+            snapshot,
+            Some("uid=n1 RootWebArea"),
+            "agent-a's snapshot was clobbered by an agent that only read it"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn session_roundtrip() {

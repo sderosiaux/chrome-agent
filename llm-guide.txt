@@ -1,10 +1,13 @@
 LLM USAGE GUIDE:
-  Workflow: inspect -> read uids -> act (click/fill/select/check) -> inspect again.
+  Workflow: inspect -> read uids -> act (click/fill/select/check).
+  An action tells you what it changed on the page, so you usually do NOT need to inspect
+  again to find out whether it landed. Re-inspect when you need fresh uids after a
+  navigation, or when the change report says document_changed.
   Headless by default. Add --stealth for bot-protected sites. Use --json for structured output.
 
   Quick start:
     chrome-agent goto https://example.com --inspect
-    chrome-agent click n12 --inspect
+    chrome-agent click n12                         # reports what changed; no second call needed
     chrome-agent fill --uid n20 "hello@example.com"
     chrome-agent select --uid n15 "California"
     chrome-agent read                              # article content (Readability)
@@ -169,8 +172,20 @@ LLM USAGE GUIDE:
     - UIDs (n47, n123) are stable across inspects on the same page.
     - After SPA navigation (back, forward, click that triggers route change), re-inspect — UIDs change.
     - For SPA product pages, prefer `goto <direct-url>` over `click` (avoids modal routing).
-    - Use `read` for articles, `text --selector` for scoped extraction, `eval` for structured data.
-    - Prefer inspect over screenshot (~50 vs ~100K tokens).
+    - Use `extract` for repeating records, `read` for articles, `text --selector` for scoped
+      extraction, `eval` for structured data. Reach for `extract` first on any list page:
+      on the HN front page it returns all 30 stories in ~1,570 tokens, against ~5,650 for a
+      full inspect and ~8,730 for the raw HTML.
+    - Prefer inspect over screenshot: a screenshot gives you no uids to act on, so you end up
+      paying for the image and then inspecting anyway.
+    - Actions report changes by default. `changed.document_changed: true` means the page
+      navigated and every previous uid is dead -- inspect before acting again. `added`/
+      `removed`/`changed` of 0 means the action had no visible effect on the page.
+    - --budget N caps that change report (default 1200 chars); --verdict off turns it off
+      entirely and restores the older, faster, quieter behaviour.
+    - A full inspect is not cheap on a real page (~5,650 tokens on the HN front page). Narrow
+      it with --filter or --max-depth when you only need the interactive elements
+      (--filter button,link on that same page is ~1,735).
     - Use --urls on inspect to get link destinations before deciding which to click.
     - check/uncheck are idempotent — prefer over click for checkboxes.
     - select matches by option value first, then by visible text.

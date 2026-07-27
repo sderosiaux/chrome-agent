@@ -4,7 +4,7 @@ use crate::BoxError;
 use crate::browser::{self, BrowserOptions};
 use crate::cdp::client::CdpClient;
 use crate::cli::{Cli, Command, DaemonAction};
-use crate::run_helpers::{cmd_close, cmd_status, cmd_stop, connect_page, get_uid_map, json_output, kill_pid, output_action, output_goto, resolve_page_target};
+use crate::run_helpers::{ReportPolicy, cmd_close, cmd_status, cmd_stop, connect_page, get_uid_map, json_output, kill_pid, output_action, output_goto, resolve_page_target};
 use crate::{commands, pipe, session};
 
 pub async fn run(cli: Cli) -> Result<(), BoxError> {
@@ -190,6 +190,7 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
     client.spawn_dialog_handler(dialog_policy, cli.dialog_text.clone());
 
     let json_mode = cli.json;
+    let policy = ReportPolicy { changes: cli.verdict == "auto", budget: cli.budget };
     match cli.command {
         Command::Goto { url, inspect, max_depth, wait_for, headers } => {
             let depth = max_depth.or(cli.max_depth);
@@ -230,7 +231,7 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
                 commands::click::run(&client, &uid_map, uid).await?
             };
 
-            output_action(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, inspect, depth, json_mode).await?;
+            output_action(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, &policy.for_action(inspect, depth), json_mode).await?;
         }
 
         Command::Fill { uid, selector, value, inspect, max_depth } => {
@@ -252,7 +253,7 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
                 commands::fill::run(&client, &uid_map, uid, &value).await?
             };
 
-            output_action(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, inspect, depth, json_mode).await?;
+            output_action(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, &policy.for_action(inspect, depth), json_mode).await?;
         }
 
         Command::FillForm { pairs, inspect, max_depth } => {
@@ -267,7 +268,7 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
                 .collect();
             let parsed = parsed?;
             let msg = commands::fill::run_form(&client, &uid_map, &parsed).await?;
-            output_action(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, inspect, depth, json_mode).await?;
+            output_action(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, &policy.for_action(inspect, depth), json_mode).await?;
         }
 
         Command::Text { uid, selector, truncate } => {
@@ -363,7 +364,7 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
                     .await?;
                 let title_str = title.result.value.as_ref().and_then(|v| v.as_str()).unwrap_or("");
                 let msg = format!("Navigated forward — {title_str}");
-                output_action(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, inspect, depth, json_mode).await?;
+                output_action(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, &policy.for_action(inspect, depth), json_mode).await?;
             }
         }
 
@@ -392,7 +393,7 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
                 commands::dblclick::run(&client, &uid_map, uid).await?
             };
 
-            output_action(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, inspect, depth, json_mode).await?;
+            output_action(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, &policy.for_action(inspect, depth), json_mode).await?;
         }
 
         Command::Select { value, uid, selector, inspect, max_depth } => {
@@ -414,7 +415,7 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
                 commands::select::run(&client, &uid_map, uid, &value).await?
             };
 
-            output_action(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, inspect, depth, json_mode).await?;
+            output_action(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, &policy.for_action(inspect, depth), json_mode).await?;
         }
 
         Command::Check { uid, selector, inspect, max_depth } => {
@@ -429,7 +430,7 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
                 let uid_map = get_uid_map(&store, &cli.browser, &cli.page);
                 commands::check::run(&client, &uid_map, uid, true).await?
             };
-            output_action(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, inspect, depth, json_mode).await?;
+            output_action(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, &policy.for_action(inspect, depth), json_mode).await?;
         }
 
         Command::Uncheck { uid, selector, inspect, max_depth } => {
@@ -444,7 +445,7 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
                 let uid_map = get_uid_map(&store, &cli.browser, &cli.page);
                 commands::check::run(&client, &uid_map, uid, false).await?
             };
-            output_action(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, inspect, depth, json_mode).await?;
+            output_action(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, &policy.for_action(inspect, depth), json_mode).await?;
         }
 
         Command::Upload { files, uid, selector, inspect, max_depth } => {
@@ -460,14 +461,14 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
                 let uid_map = get_uid_map(&store, &cli.browser, &cli.page);
                 commands::upload::run(&client, &uid_map, uid, &files).await?
             };
-            output_action(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, inspect, depth, json_mode).await?;
+            output_action(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, &policy.for_action(inspect, depth), json_mode).await?;
         }
 
         Command::Drag { from, to, inspect, max_depth } => {
             let depth = max_depth.or(cli.max_depth);
             let uid_map = get_uid_map(&store, &cli.browser, &cli.page);
             let msg = commands::drag::run(&client, &uid_map, &from, &to).await?;
-            output_action(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, inspect, depth, json_mode).await?;
+            output_action(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, &policy.for_action(inspect, depth), json_mode).await?;
         }
 
         Command::Inspect { verbose, max_depth, uid, filter, scroll, limit, urls, max_chars, offset } => {
@@ -475,12 +476,12 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
                 commands::extract::scroll_to_load(&client).await?;
             }
             let role_filter: Option<Vec<&str>> = filter.as_deref().map(|f| f.split(',').map(str::trim).collect());
-            let (mut text, uid_map) = if let Some(max) = limit {
+            let (mut text, uid_map, doc_url) = if let Some(max) = limit {
                 let result = commands::inspect::scroll_collect(&client, verbose, uid.as_deref(), role_filter.as_deref(), max).await?;
-                (result.text, result.uid_map)
+                (result.text, result.uid_map, result.url)
             } else {
                 let s = commands::inspect::run(&client, verbose, max_depth, uid.as_deref(), role_filter.as_deref()).await?;
-                (s.text, s.uid_map)
+                (s.text, s.uid_map, s.url)
             };
             if urls {
                 text = commands::inspect::resolve_urls(&client, &text, &uid_map).await;
@@ -491,6 +492,7 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
                 let page = session::ensure_page(browser_s, &cli.page, &target_id);
                 page.uid_map = uid_map;
                 page.last_snapshot = Some(text.clone());
+                page.last_snapshot_url = Some(doc_url);
             }
             let paged = commands::inspect::paginate(&text, offset, max_chars);
             if json_mode {
@@ -507,30 +509,42 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
         }
 
         Command::Diff => {
-            let old_snapshot = store
+            let page_state = store
                 .browsers
                 .get(&cli.browser)
-                .and_then(|b| b.pages.get(&cli.page))
-                .and_then(|p| p.last_snapshot.clone());
-            let old_text = old_snapshot.ok_or("No previous snapshot. Run 'chrome-agent inspect' first.")?;
+                .and_then(|b| b.pages.get(&cli.page));
+            let old_text = page_state
+                .and_then(|p| p.last_snapshot.clone())
+                .ok_or("No previous snapshot. Run 'chrome-agent inspect' first.")?;
+            let old_url = page_state.and_then(|p| p.last_snapshot_url.clone());
             let snapshot = commands::inspect::run(&client, false, None, None, None).await?;
-            let diff = commands::diff::diff_snapshots(&old_text, &snapshot.text);
-            let stats = commands::diff::diff_stats(&diff);
+            let result =
+                commands::diff::compare(old_url.as_deref(), &old_text, &snapshot.url, &snapshot.text);
             if let Some(browser_s) = store.browsers.get_mut(&cli.browser) {
                 let page = session::ensure_page(browser_s, &cli.page, &target_id);
                 page.last_snapshot = Some(snapshot.text);
+                page.last_snapshot_url = Some(snapshot.url);
                 page.uid_map = snapshot.uid_map;
             }
             if json_mode {
-                json_output(&json!({
+                let mut obj = json!({
                     "ok": true,
-                    "added": stats.added,
-                    "removed": stats.removed,
-                    "changed": stats.changed,
-                    "diff": diff.trim_end(),
-                }));
+                    "document_changed": result.document_changed,
+                    "added": result.added,
+                    "removed": result.removed,
+                    "changed": result.changed,
+                    "unchanged": result.unchanged,
+                    "diff": result.text.trim_end(),
+                });
+                if let Some(hint) = result.hint {
+                    obj["hint"] = json!(hint);
+                }
+                json_output(&obj);
             } else {
-                print!("{diff}");
+                if result.document_changed {
+                    println!("Page navigated — previous uids are gone. New page:");
+                }
+                print!("{}", result.text);
             }
         }
 
@@ -807,7 +821,8 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
                 ).await;
                 results.push(response);
             }
-            json_output(&json!({"ok": true, "results": results}));
+            let all_ok = results.iter().all(|r| r.get("ok").and_then(serde_json::Value::as_bool).unwrap_or(false));
+            json_output(&json!({"ok": all_ok, "results": results}));
         }
 
         // Already handled above

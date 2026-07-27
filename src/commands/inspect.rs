@@ -77,7 +77,8 @@ pub async fn scroll_collect(
 
     collected.truncate(limit);
     let text = format!("{}\n({} items collected)", collected.join("\n"), collected.len());
-    Ok(Snapshot { text, uid_map })
+    let url = crate::snapshot::document_url(client).await;
+    Ok(Snapshot { text, uid_map, url })
 }
 
 /// Post-process snapshot text to resolve and append href URLs on link nodes.

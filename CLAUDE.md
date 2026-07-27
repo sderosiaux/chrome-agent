@@ -63,6 +63,8 @@ cargo clippy -- -D warnings  # zero warnings enforced in CI
 - **ElementRef abstraction** — session stores `{"type":"backendNode","id":N}`, ready for BiDi
 - **Noise filtering** — StaticText/InlineTextBox stripped (66% token reduction), `--filter` by role with aliases (textbox→searchbox+combobox, input→all input roles, button→menuitem)
 - **`--json` mode** — errors exit 1 with `{"ok":false}` on stdout. Agents parse stdout for the error, exit code signals failure.
+- **Actions report what changed (CLI only, default on)** — `run_helpers::output_action` re-reads the page after an action and emits `changed{added,removed,changed,unchanged,document_changed}` + `delta`. Bounded by `--budget` (1200 chars, 0 = uncapped); `--verdict off` skips the read entirely and restores the pre-0.8 output and latency. Costs one `getFullAXTree` per action. **Pipe/batch dispatchers do NOT do this yet** — they still attach a snapshot only under `inspect`. The gap is smaller there because the connection persists, so `{"cmd":"diff"}` is one cheap round-trip, whereas each CLI call is a fresh process.
+- **Document identity** — `Snapshot.url` (from `location.href`, no `Runtime.enable`) is stored as `PageSession.last_snapshot_url`. `diff::compare` refuses to diff across documents: `backendNodeId` counters overlap between pages, so matching uids across a navigation pairs unrelated nodes. Measured on a real navigation: 328 bogus `~` lines, 18,764 tokens, versus 16,148 for simply re-inspecting the destination.
 - **Self-healing errors** — every error includes a `hint` field suggesting the next action
 - **Reader mode** — `read` injects Mozilla Readability.js for article extraction (~500 tokens vs ~15K)
 - **Content extraction hierarchy** — `read` (articles) > `extract` (repeating data) > `text --selector` (scoped) > `text` (full page) > `eval` (structured JS) > `network` (API responses)
@@ -111,6 +113,9 @@ cargo clippy -- -D warnings  # zero warnings enforced in CI
 - Parallel agents sharing `--browser default` corrupt each other's sessions. Use `--browser <unique>`.
 - Console interceptor is guarded against re-injection (`__chrome-agent_console_installed`).
 - `press Enter` needs `windowsVirtualKeyCode: 13` + `text: "\r"` for form submission.
+- `goto`'s settle probe is bounded at both ends: the quiet window starts immediately (a static page no longer pays a flat 3s) and the ceiling is never cleared by a mutation (a continuously-mutating page used to hang forever, since `awaitPromise` has no deadline and `--timeout` does not reach it).
+- `goto` clears `uid_map` but keeps `last_snapshot`/`last_snapshot_url`. Clearing the map stops a stale uid resolving to an unrelated node on the new page; keeping the snapshot is what lets `diff` report `document_changed` instead of erroring.
+- Session saves only rewrite browsers this process actually modified. `load_from` reads every browser in the file, so writing them all back made a reading agent clobber a concurrent agent's `uid_map`/`last_snapshot`.
 - `drag` uses CDP mouse events (mousePressed/mouseMoved/mouseReleased). Works with mousedown-based DnD libs (Sortable.js, React DnD mouse backend). Does NOT work with HTML5 Drag and Drop API (requires dragstart/dragover/drop events).
 - `frame` only supports `<iframe>`, not legacy `<frameset>`/`<frame>`. Error message is clear.
 - `frame` binding only persists within a single `pipe`/`batch` process (state lives on the connection). CLI single commands each open a fresh connection, so `frame` can't carry over — use pipe mode for `frame → inspect → act` (issue #8).

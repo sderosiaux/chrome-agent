@@ -7,6 +7,12 @@ use crate::element_ref::ElementRef;
 use crate::session::{self, SessionStore};
 use crate::commands;
 
+// Split out to stay under the 1000-line file cap; callers keep using `pipe_dispatch::*`.
+pub use crate::pipe_dispatch_actions::{
+    dispatch_check, dispatch_dblclick, dispatch_drag, dispatch_fill_and_submit, dispatch_fill_form,
+    dispatch_history, dispatch_hover, dispatch_navigate_and_read, dispatch_select, dispatch_upload,
+};
+
 // ---------------------------------------------------------------------------
 // Per-command dispatchers
 // ---------------------------------------------------------------------------
@@ -141,12 +147,12 @@ pub async fn dispatch_inspect(
     if scroll {
         commands::extract::scroll_to_load(client).await?;
     }
-    let (mut text, uid_map) = if let Some(max) = limit {
+    let (mut text, uid_map, doc_url) = if let Some(max) = limit {
         let result = commands::inspect::scroll_collect(client, verbose, uid, role_filter.as_deref(), max).await?;
-        (result.text, result.uid_map)
+        (result.text, result.uid_map, result.url)
     } else {
         let s = commands::inspect::run(client, verbose, max_depth, uid, role_filter.as_deref()).await?;
-        (s.text, s.uid_map)
+        (s.text, s.uid_map, s.url)
     };
     if urls {
         text = commands::inspect::resolve_urls(client, &text, &uid_map).await;
@@ -158,6 +164,7 @@ pub async fn dispatch_inspect(
         let page = session::ensure_page(browser_s, page_name, target_id);
         page.uid_map = uid_map;
         page.last_snapshot = Some(text.clone());
+        page.last_snapshot_url = Some(doc_url);
     }
 
     let offset = cmd.get("offset").and_then(Value::as_u64).unwrap_or(0) as usize;
@@ -179,23 +186,37 @@ pub async fn dispatch_diff(
     page_name: &str,
     target_id: &str,
 ) -> Result<Value, crate::BoxError> {
-    let old_text = store
+    let page_state = store
         .browsers.get(browser_name)
-        .and_then(|b| b.pages.get(page_name))
+        .and_then(|b| b.pages.get(page_name));
+    let old_text = page_state
         .and_then(|p| p.last_snapshot.clone())
         .ok_or("No previous snapshot. Run inspect first.")?;
+    let old_url = page_state.and_then(|p| p.last_snapshot_url.clone());
 
     let snapshot = commands::inspect::run(client, false, None, None, None).await?;
-    let diff = commands::diff::diff_snapshots(&old_text, &snapshot.text);
-    let stats = commands::diff::diff_stats(&diff);
+    let result = commands::diff::compare(old_url.as_deref(), &old_text, &snapshot.url, &snapshot.text);
 
     if let Some(browser_s) = store.browsers.get_mut(browser_name) {
         let page = session::ensure_page(browser_s, page_name, target_id);
         page.uid_map = snapshot.uid_map;
         page.last_snapshot = Some(snapshot.text);
+        page.last_snapshot_url = Some(snapshot.url);
     }
 
-    Ok(json!({"ok": true, "added": stats.added, "removed": stats.removed, "changed": stats.changed, "diff": diff.trim_end()}))
+    let mut out = json!({
+        "ok": true,
+        "document_changed": result.document_changed,
+        "added": result.added,
+        "removed": result.removed,
+        "changed": result.changed,
+        "unchanged": result.unchanged,
+        "diff": result.text.trim_end(),
+    });
+    if let Some(hint) = result.hint {
+        out["hint"] = json!(hint);
+    }
+    Ok(out)
 }
 
 pub async fn dispatch_eval(client: &CdpClient, cmd: &Value) -> Result<Value, crate::BoxError> {
@@ -486,196 +507,12 @@ pub async fn dispatch_extract(client: &CdpClient, cmd: &Value) -> Result<Value, 
     Ok(commands::extract::to_json(&result))
 }
 
-// ---------------------------------------------------------------------------
-// Composite dispatchers
-// ---------------------------------------------------------------------------
-
-pub async fn dispatch_navigate_and_read(
-    client: &CdpClient, _store: &mut SessionStore, _browser_name: &str, page_name: &str,
-    _target_id: &str, timeout: u64, cmd: &Value,
-) -> Result<Value, crate::BoxError> {
-    let url = cmd.get("url").and_then(Value::as_str).ok_or("navigate_and_read: missing \"url\"")?;
-    let truncate = cmd.get("truncate").and_then(Value::as_u64).map(|v| v as usize);
-    let goto_result = commands::goto::run(client, url, timeout, &[]).await?;
-    client.set_frame_context(None); // navigation invalidates any bound frame (issue #8)
-    let _ = commands::history::append(&goto_result.url, &goto_result.title, page_name);
-    let read_result = commands::read::run(client, false, truncate).await?;
-    Ok(json!({"ok": true, "url": goto_result.url, "title": goto_result.title, "content": read_result.text_content}))
-}
-
-pub async fn dispatch_fill_and_submit(client: &CdpClient, timeout: u64, cmd: &Value) -> Result<Value, crate::BoxError> {
-    let fields = cmd.get("fields").and_then(Value::as_array).ok_or("fill_and_submit: missing \"fields\" array")?;
-    let submit_selector = cmd.get("submit").and_then(Value::as_str).ok_or("fill_and_submit: missing \"submit\" selector")?;
-    let wait_for = cmd.get("wait_for").and_then(Value::as_str);
-    let field_count = fields.len();
-    for field in fields {
-        let selector = field.get("selector").and_then(Value::as_str).ok_or("fill_and_submit: each field needs \"selector\"")?;
-        let value = field.get("value").and_then(Value::as_str).ok_or("fill_and_submit: each field needs \"value\"")?;
-        crate::element::fill_selector(client, selector, value).await?;
-    }
-    crate::element::click_selector(client, submit_selector).await?;
-    if let Some(pattern) = wait_for {
-        let is_selector = pattern.contains('.') || pattern.contains('#') || pattern.contains('[') || pattern.contains('>');
-        let wait_type = if is_selector { "selector" } else { "text" };
-        commands::wait::run(client, wait_type, pattern, timeout, 500).await?;
-    }
-    let read_result = commands::read::run(client, false, None).await?;
-    let message = format!("Filled {field_count} fields, submitted, waited for '{}'", wait_for.unwrap_or("none"));
-    Ok(json!({"ok": true, "message": message, "content": read_result.text_content}))
-}
-
-pub fn dispatch_history(cmd: &Value) -> Result<Value, crate::BoxError> {
-    let filter = cmd.get("filter").and_then(Value::as_str);
-    let limit = cmd.get("limit").and_then(Value::as_u64).unwrap_or(20) as usize;
-    let entries = commands::history::run(filter, limit)?;
-    let entries_json: Vec<Value> = entries.iter()
-        .map(|e| json!({"ts": e.ts, "url": e.url, "title": e.title, "page": e.page})).collect();
-    Ok(json!({"ok": true, "entries": entries_json}))
-}
-
-pub async fn dispatch_fill_form(
-    client: &CdpClient, store: &mut SessionStore, browser_name: &str, page_name: &str,
-    target_id: &str, global_max_depth: Option<usize>, cmd: &Value,
-) -> Result<Value, crate::BoxError> {
-    let pairs = cmd.get("pairs").and_then(Value::as_array)
-        .ok_or("fill-form requires \"pairs\" array (e.g. [{\"uid\":\"n1\",\"value\":\"a\"}])")?;
-    let uid_map = crate::run_helpers::get_uid_map(store, browser_name, page_name);
-    for pair in pairs {
-        let uid = pair.get("uid").and_then(Value::as_str).ok_or("Each pair needs \"uid\"")?;
-        let value = pair.get("value").and_then(Value::as_str).ok_or("Each pair needs \"value\"")?;
-        crate::element::fill(client, &uid_map, uid, value).await?;
-    }
-    let inspect = cmd.get("inspect").and_then(Value::as_bool).unwrap_or(false);
-    let mut obj = json!({"ok": true, "message": format!("Filled {} fields", pairs.len())});
-    if inspect {
-        let max_depth = cmd.get("max_depth").and_then(Value::as_u64).map(|v| v as usize).or(global_max_depth);
-        let snapshot = commands::inspect::run(client, false, max_depth, None, None).await?;
-        obj["snapshot"] = json!(snapshot.text);
-        if let Some(browser_s) = store.browsers.get_mut(browser_name) {
-            let page = session::ensure_page(browser_s, page_name, target_id);
-            page.uid_map = snapshot.uid_map;
-        }
-    }
-    Ok(obj)
-}
-
-pub async fn dispatch_hover(
-    client: &CdpClient, store: &SessionStore, browser_name: &str, page_name: &str, cmd: &Value,
-) -> Result<Value, crate::BoxError> {
-    let uid = cmd.get("uid").and_then(Value::as_str).ok_or("hover requires \"uid\"")?;
-    let uid_map = crate::run_helpers::get_uid_map(store, browser_name, page_name);
-    crate::element::hover(client, &uid_map, uid).await?;
-    Ok(json!({"ok": true, "message": format!("Hovered uid={uid}")}))
-}
-
-// ---------------------------------------------------------------------------
-// New command dispatchers
-// ---------------------------------------------------------------------------
-
-pub async fn dispatch_dblclick(
-    client: &CdpClient, store: &mut SessionStore, browser_name: &str, page_name: &str,
-    target_id: &str, global_max_depth: Option<usize>, cmd: &Value,
-) -> Result<Value, crate::BoxError> {
-    let inspect = cmd.get("inspect").and_then(Value::as_bool).unwrap_or(false);
-    let max_depth = cmd_max_depth(cmd).or(global_max_depth);
-    // Hoist the `?` out of the `else if let` so the non-Send ControlFlow residual
-    // isn't held across the awaits below (keeps the future Send).
-    let xy = parse_xy(cmd)?;
-    let msg = if let Some(sel) = cmd.get("selector").and_then(Value::as_str) {
-        crate::element::dblclick_selector(client, sel).await?;
-        format!("Double-clicked selector '{sel}'")
-    } else if let Some((x, y)) = xy {
-        crate::element::dblclick_at_coords(client, x, y).await?;
-        format!("Double-clicked at ({x}, {y})")
-    } else if let Some(uid) = cmd.get("uid").and_then(Value::as_str) {
-        let uid_map = get_uid_map(store, browser_name, page_name);
-        crate::element::dblclick(client, &uid_map, uid).await?;
-        format!("Double-clicked uid={uid}")
-    } else {
-        return Err("dblclick: provide \"uid\", \"selector\", or \"xy\"".into());
-    };
-    let mut obj = json!({"ok": true, "message": msg});
-    if inspect {
-        let snapshot = attach_snapshot(client, store, browser_name, page_name, target_id, max_depth).await?;
-        obj["snapshot"] = json!(snapshot);
-    }
-    Ok(obj)
-}
-
-pub async fn dispatch_select(
-    client: &CdpClient, store: &mut SessionStore, browser_name: &str, page_name: &str,
-    target_id: &str, global_max_depth: Option<usize>, cmd: &Value,
-) -> Result<Value, crate::BoxError> {
-    let value = cmd.get("value").and_then(Value::as_str).ok_or("select: missing \"value\"")?;
-    let inspect = cmd.get("inspect").and_then(Value::as_bool).unwrap_or(false);
-    let max_depth = cmd_max_depth(cmd).or(global_max_depth);
-    let msg = if let Some(sel) = cmd.get("selector").and_then(Value::as_str) {
-        let text = crate::element::select_option_selector(client, sel, value).await?;
-        format!("Selected \"{text}\" on selector '{sel}'")
-    } else if let Some(uid) = cmd.get("uid").and_then(Value::as_str) {
-        let uid_map = get_uid_map(store, browser_name, page_name);
-        let text = crate::element::select_option(client, &uid_map, uid, value).await?;
-        format!("Selected \"{text}\" on uid={uid}")
-    } else {
-        return Err("select: provide \"uid\" or \"selector\"".into());
-    };
-    let mut obj = json!({"ok": true, "message": msg});
-    if inspect {
-        let snapshot = attach_snapshot(client, store, browser_name, page_name, target_id, max_depth).await?;
-        obj["snapshot"] = json!(snapshot);
-    }
-    Ok(obj)
-}
-
-pub async fn dispatch_check(
-    client: &CdpClient, store: &SessionStore, browser_name: &str, page_name: &str, cmd: &Value,
-) -> Result<Value, crate::BoxError> {
-    let desired = cmd.get("desired").and_then(Value::as_bool).unwrap_or(true);
-    let msg = if let Some(sel) = cmd.get("selector").and_then(Value::as_str) {
-        crate::element::set_checked_selector(client, sel, desired).await?
-    } else if let Some(uid) = cmd.get("uid").and_then(Value::as_str) {
-        let uid_map = get_uid_map(store, browser_name, page_name);
-        crate::element::set_checked(client, &uid_map, uid, desired).await?
-    } else {
-        return Err("check: provide \"uid\" or \"selector\"".into());
-    };
-    Ok(json!({"ok": true, "message": msg}))
-}
-
-pub async fn dispatch_upload(
-    client: &CdpClient, store: &SessionStore, browser_name: &str, page_name: &str, cmd: &Value,
-) -> Result<Value, crate::BoxError> {
-    let files: Vec<String> = cmd.get("files").and_then(Value::as_array)
-        .ok_or("upload: missing \"files\" array")?
-        .iter().filter_map(|v| v.as_str().map(String::from)).collect();
-    let msg = if let Some(uid) = cmd.get("uid").and_then(Value::as_str) {
-        let uid_map = get_uid_map(store, browser_name, page_name);
-        crate::element::set_file_input(client, &uid_map, uid, &files).await?;
-        format!("Uploaded {} file(s) to uid={uid}", files.len())
-    } else if let Some(sel) = cmd.get("selector").and_then(Value::as_str) {
-        crate::element::set_file_input_selector(client, sel, &files).await?;
-        format!("Uploaded {} file(s) to selector '{sel}'", files.len())
-    } else {
-        return Err("upload: provide \"uid\" or \"selector\"".into());
-    };
-    Ok(json!({"ok": true, "message": msg}))
-}
-
-pub async fn dispatch_drag(
-    client: &CdpClient, store: &SessionStore, browser_name: &str, page_name: &str, cmd: &Value,
-) -> Result<Value, crate::BoxError> {
-    let from = cmd.get("from").and_then(Value::as_str).ok_or("drag: missing \"from\" uid")?;
-    let to = cmd.get("to").and_then(Value::as_str).ok_or("drag: missing \"to\" uid")?;
-    let uid_map = get_uid_map(store, browser_name, page_name);
-    crate::element::drag(client, &uid_map, from, to).await?;
-    Ok(json!({"ok": true, "message": format!("Dragged uid={from} to uid={to}")}))
-}
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-async fn attach_snapshot(
+pub async fn attach_snapshot(
     client: &CdpClient, store: &mut SessionStore, browser_name: &str, page_name: &str,
     target_id: &str, max_depth: Option<usize>,
 ) -> Result<String, crate::BoxError> {
@@ -684,18 +521,19 @@ async fn attach_snapshot(
         let page = session::ensure_page(browser_s, page_name, target_id);
         page.uid_map = snapshot.uid_map;
         page.last_snapshot = Some(snapshot.text.clone());
+        page.last_snapshot_url = Some(snapshot.url.clone());
     }
     Ok(snapshot.text)
 }
 
-fn get_uid_map(store: &SessionStore, browser_name: &str, page_name: &str) -> HashMap<String, ElementRef> {
+pub fn get_uid_map(store: &SessionStore, browser_name: &str, page_name: &str) -> HashMap<String, ElementRef> {
     store.browsers.get(browser_name)
         .and_then(|b| b.pages.get(page_name))
         .map(|p| p.uid_map.clone())
         .unwrap_or_default()
 }
 
-fn cmd_max_depth(cmd: &Value) -> Option<usize> {
+pub fn cmd_max_depth(cmd: &Value) -> Option<usize> {
     cmd.get("max_depth").and_then(Value::as_u64).map(|v| v as usize)
 }
 
@@ -732,7 +570,7 @@ fn parse_text(cmd: &Value) -> TextArgs<'_> {
 
 /// Parse an optional `xy` coordinate pair (`"xy": [x, y]`) for click/dblclick.
 /// Returns `Ok(None)` when absent/null, an error when malformed.
-fn parse_xy(cmd: &Value) -> Result<Option<(f64, f64)>, crate::BoxError> {
+pub fn parse_xy(cmd: &Value) -> Result<Option<(f64, f64)>, crate::BoxError> {
     match cmd.get("xy") {
         None | Some(Value::Null) => Ok(None),
         Some(v) => {
@@ -814,7 +652,8 @@ pub async fn dispatch_batch(
         let r = dispatch_single(client, browser_client, store, browser_name, page_name, target_id, timeout, global_max_depth, c).await;
         results.push(r);
     }
-    Ok(json!({"ok": true, "results": results}))
+    let all_ok = results.iter().all(|r| r.get("ok").and_then(Value::as_bool).unwrap_or(false));
+    Ok(json!({"ok": all_ok, "results": results}))
 }
 
 /// Public entry point for dispatching a single pipe command.

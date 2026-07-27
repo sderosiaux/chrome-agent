@@ -85,17 +85,35 @@ pub async fn run(
     )
     .await;
 
-    // Wait for DOM to stabilize (SPAs often render after loadEventFired).
-    // Uses MutationObserver: resolves once no DOM changes for 200ms, max 3s.
+    // Wait for the DOM to stabilize (SPAs often render after loadEventFired): resolve once
+    // nothing has changed for QUIET, and never later than HARD.
+    //
+    // Both bounds matter. The quiet window starts immediately, so a page where nothing ever
+    // mutates resolves in QUIET rather than being charged the whole budget to discover that.
+    // And the ceiling is never cleared by a mutation, so a page that never goes quiet — a
+    // chat window, a live dashboard, a rotating ad slot — still returns. `awaitPromise` has
+    // no deadline of its own, so a probe that can fail to resolve holds the command open
+    // for as long as the page keeps moving.
     let _ = client
         .call::<_, serde_json::Value>(
             "Runtime.evaluate",
             json!({
                 "expression": r"new Promise(resolve => {
-                    let timer = setTimeout(resolve, 3000);
-                    const obs = new MutationObserver(() => {
-                        clearTimeout(timer);
-                        timer = setTimeout(() => { obs.disconnect(); resolve(); }, 200);
+                    const QUIET = 200, HARD = 3000;
+                    let settled = false, quiet = null, obs = null;
+                    const finish = () => {
+                        if (settled) return;
+                        settled = true;
+                        clearTimeout(quiet);
+                        clearTimeout(hard);
+                        if (obs) obs.disconnect();
+                        resolve();
+                    };
+                    quiet = setTimeout(finish, QUIET);
+                    const hard = setTimeout(finish, HARD);
+                    obs = new MutationObserver(() => {
+                        clearTimeout(quiet);
+                        quiet = setTimeout(finish, QUIET);
                     });
                     obs.observe(document.body || document.documentElement, { childList: true, subtree: true });
                 })",
