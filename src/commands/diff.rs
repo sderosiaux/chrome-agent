@@ -1,5 +1,19 @@
 use std::collections::HashMap;
 
+/// A comparison of two snapshots: the rendered text and the counts behind it.
+///
+/// The counts are produced by the comparison itself. Deriving them from the rendered
+/// text instead would mean counting `+ ` / `- ` / `~ ` line prefixes, and accessibility
+/// names go into the snapshot unescaped, so a name containing a newline splits a node
+/// across two lines and the second half reads as its own record.
+pub struct Diff {
+    pub text: String,
+    pub added: usize,
+    pub removed: usize,
+    pub changed: usize,
+    pub unchanged: usize,
+}
+
 /// Compare two snapshot texts and produce a compact diff.
 ///
 /// Lines are matched by uid prefix. Output format:
@@ -9,7 +23,7 @@ use std::collections::HashMap;
 /// ~ uid=n52 textbox value="" -> value="confirmed"
 /// = 15 unchanged elements
 /// ```
-pub fn diff_snapshots(old: &str, new: &str) -> String {
+pub fn diff_snapshots(old: &str, new: &str) -> Diff {
     // Walk both snapshots in document order. Looking uids up in a map is fine, but
     // *iterating* one would order the output by hash, so the same page state would
     // produce a different diff on every run: no golden test, and no prompt-cache hit
@@ -47,15 +61,7 @@ pub fn diff_snapshots(old: &str, new: &str) -> String {
 
     let has_changes = !added.is_empty() || !removed.is_empty() || !changed.is_empty();
     let mut out = String::new();
-    for line in &added {
-        out.push_str(line);
-        out.push('\n');
-    }
-    for line in &removed {
-        out.push_str(line);
-        out.push('\n');
-    }
-    for line in &changed {
+    for line in added.iter().chain(&removed).chain(&changed) {
         out.push_str(line);
         out.push('\n');
     }
@@ -65,14 +71,23 @@ pub fn diff_snapshots(old: &str, new: &str) -> String {
     if !has_changes {
         out.push_str("No changes detected.\n");
     }
-    out
+    Diff {
+        text: out,
+        added: added.len(),
+        removed: removed.len(),
+        changed: changed.len(),
+        unchanged,
+    }
 }
 
 /// Outcome of comparing the stored snapshot against the live page.
 pub struct Comparison {
     /// Diff text, or the fresh snapshot when the document changed under us.
     pub text: String,
-    pub stats: DiffStats,
+    pub added: usize,
+    pub removed: usize,
+    pub changed: usize,
+    pub unchanged: usize,
     /// True when the live page is a different document from the stored snapshot.
     pub document_changed: bool,
     /// What the agent should do next, when that isn't obvious.
@@ -98,39 +113,25 @@ pub fn compare(old_url: Option<&str>, old_text: &str, new_url: &str, new_text: &
     if changed_document {
         return Comparison {
             text: new_text.to_string(),
-            stats: DiffStats { added: 0, removed: 0, changed: 0 },
+            added: 0,
+            removed: 0,
+            changed: 0,
+            unchanged: 0,
             document_changed: true,
             hint: Some("The page navigated, so uids from the previous snapshot no longer refer to anything. This is the new page; act on these uids."),
         };
     }
 
     let diff = diff_snapshots(old_text, new_text);
-    let stats = diff_stats(&diff);
-    Comparison { text: diff, stats, document_changed: false, hint: None }
-}
-
-/// Count of added, removed, changed elements.
-pub struct DiffStats {
-    pub added: usize,
-    pub removed: usize,
-    pub changed: usize,
-}
-
-/// Parse diff output into counts.
-pub fn diff_stats(diff: &str) -> DiffStats {
-    let mut added = 0usize;
-    let mut removed = 0usize;
-    let mut changed = 0usize;
-    for line in diff.lines() {
-        if line.starts_with("+ ") {
-            added += 1;
-        } else if line.starts_with("- ") {
-            removed += 1;
-        } else if line.starts_with("~ ") {
-            changed += 1;
-        }
+    Comparison {
+        text: diff.text,
+        added: diff.added,
+        removed: diff.removed,
+        changed: diff.changed,
+        unchanged: diff.unchanged,
+        document_changed: false,
+        hint: None,
     }
-    DiffStats { added, removed, changed }
 }
 
 /// Extract uid -> trimmed line from snapshot text.
@@ -152,6 +153,32 @@ fn uid_lines(text: &str) -> Vec<(&str, &str)> {
 mod tests {
     use super::*;
 
+    /// When the document changed, `text` carries a whole snapshot rather than a diff.
+    /// Accessibility names go in unescaped (snapshot.rs writes `name` raw), so a name
+    /// containing a newline puts a line starting with "- " into that payload. Counts are
+    /// reported by the comparison itself, so such a line cannot be read back as a removal.
+    #[test]
+    fn a_changed_document_reports_no_edits_whatever_the_snapshot_contains() {
+        let old = "uid=n1 heading \"Old page\"\n";
+        let new = "uid=n1 heading \"Save\n- and exit\"\nuid=n2 button \"Go\"\n";
+        let c = compare(Some("https://a.example"), old, "https://b.example", new);
+        assert!(c.document_changed);
+        assert_eq!((c.added, c.removed, c.changed), (0, 0, 0), "no edit can be claimed across documents");
+        assert_eq!(c.text, new, "the caller gets the destination page");
+    }
+
+    /// Counts come from the comparison, not from re-reading the rendered text.
+    #[test]
+    fn counts_match_the_rendered_lines() {
+        let old = "uid=n1 heading \"A\"\nuid=n2 button \"B\"\n";
+        let new = "uid=n1 heading \"A changed\"\nuid=n3 link \"C\"\n";
+        let d = diff_snapshots(old, new);
+        assert_eq!((d.added, d.removed, d.changed, d.unchanged), (1, 1, 1, 0));
+        assert_eq!(d.text.lines().filter(|l| l.starts_with("+ ")).count(), d.added);
+        assert_eq!(d.text.lines().filter(|l| l.starts_with("- ")).count(), d.removed);
+        assert_eq!(d.text.lines().filter(|l| l.starts_with("~ ")).count(), d.changed);
+    }
+
     /// Output order follows the page, not the hash of a uid. Without this the same page
     /// state yields a different diff on every process, which defeats prompt caching and
     /// makes the output impossible to assert on.
@@ -160,7 +187,7 @@ mod tests {
         let old = "uid=n1 heading \"A\"\nuid=n2 button \"B\"\nuid=n3 link \"C\"\nuid=n4 link \"D\"\n";
         let new = "uid=n1 heading \"A\"\nuid=n3 link \"C changed\"\nuid=n5 link \"E\"\nuid=n6 link \"F\"\n";
         let result = diff_snapshots(old, new);
-        let lines: Vec<&str> = result.lines().filter(|l| !l.starts_with('=')).collect();
+        let lines: Vec<&str> = result.text.lines().filter(|l| !l.starts_with('=')).collect();
         assert_eq!(
             lines,
             vec![
@@ -178,7 +205,7 @@ mod tests {
     fn no_changes() {
         let snap = "uid=n1 heading \"Hello\"\nuid=n2 button \"OK\"\n";
         let result = diff_snapshots(snap, snap);
-        assert!(result.contains("No changes"));
+        assert!(result.text.contains("No changes"));
     }
 
     #[test]
@@ -186,12 +213,11 @@ mod tests {
         let old = "uid=n1 heading \"Hello\"\n";
         let new = "uid=n1 heading \"Hello\"\nuid=n2 button \"OK\"\n";
         let result = diff_snapshots(old, new);
-        assert!(result.contains("+ uid=n2 button \"OK\""));
-        assert!(result.contains("= 1 unchanged"));
-        let stats = diff_stats(&result);
-        assert_eq!(stats.added, 1);
-        assert_eq!(stats.removed, 0);
-        assert_eq!(stats.changed, 0);
+        assert!(result.text.contains("+ uid=n2 button \"OK\""));
+        assert!(result.text.contains("= 1 unchanged"));
+                assert_eq!(result.added, 1);
+        assert_eq!(result.removed, 0);
+        assert_eq!(result.changed, 0);
     }
 
     #[test]
@@ -199,9 +225,8 @@ mod tests {
         let old = "uid=n1 heading \"Hello\"\nuid=n2 button \"OK\"\n";
         let new = "uid=n1 heading \"Hello\"\n";
         let result = diff_snapshots(old, new);
-        assert!(result.contains("- uid=n2 button \"OK\""));
-        let stats = diff_stats(&result);
-        assert_eq!(stats.removed, 1);
+        assert!(result.text.contains("- uid=n2 button \"OK\""));
+                assert_eq!(result.removed, 1);
     }
 
     #[test]
@@ -209,9 +234,8 @@ mod tests {
         let old = "uid=n1 textbox value=\"\"\n";
         let new = "uid=n1 textbox value=\"hello\"\n";
         let result = diff_snapshots(old, new);
-        assert!(result.contains("~ uid=n1 textbox"));
-        let stats = diff_stats(&result);
-        assert_eq!(stats.changed, 1);
+        assert!(result.text.contains("~ uid=n1 textbox"));
+                assert_eq!(result.changed, 1);
     }
 
     #[test]
@@ -219,10 +243,10 @@ mod tests {
         let old = "uid=n1 heading \"Title\"\nuid=n2 button \"Submit\"\nuid=n3 textbox value=\"\"\n";
         let new = "uid=n1 heading \"Title\"\nuid=n3 textbox value=\"done\"\nuid=n4 heading \"Success\"\n";
         let result = diff_snapshots(old, new);
-        assert!(result.contains("+ uid=n4"));
-        assert!(result.contains("- uid=n2"));
-        assert!(result.contains("~ uid=n3"));
-        assert!(result.contains("= 1 unchanged"));
+        assert!(result.text.contains("+ uid=n4"));
+        assert!(result.text.contains("- uid=n2"));
+        assert!(result.text.contains("~ uid=n3"));
+        assert!(result.text.contains("= 1 unchanged"));
     }
 
     #[test]
@@ -230,7 +254,7 @@ mod tests {
         let old = "  uid=n1 heading \"Hello\"\n    uid=n2 button \"OK\"\n";
         let new = "  uid=n1 heading \"Hello\"\n    uid=n3 link \"New\"\n";
         let result = diff_snapshots(old, new);
-        assert!(result.contains("+ uid=n3"));
-        assert!(result.contains("- uid=n2"));
+        assert!(result.text.contains("+ uid=n3"));
+        assert!(result.text.contains("- uid=n2"));
     }
 }

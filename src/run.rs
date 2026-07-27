@@ -529,9 +529,10 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
                 let mut obj = json!({
                     "ok": true,
                     "document_changed": result.document_changed,
-                    "added": result.stats.added,
-                    "removed": result.stats.removed,
-                    "changed": result.stats.changed,
+                    "added": result.added,
+                    "removed": result.removed,
+                    "changed": result.changed,
+                    "unchanged": result.unchanged,
                     "diff": result.text.trim_end(),
                 });
                 if let Some(hint) = result.hint {
