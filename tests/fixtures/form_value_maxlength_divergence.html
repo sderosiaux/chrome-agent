@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>form-values: maxlength, fill vs type</title></head>
+<body>
+<!-- ONE element, TWO commands, TWO different honest verdicts.
+     maxlength constrains the editing pipeline, not the value IDL setter.
+     Verified on Chrome:
+       fill "ABCDEFGHIJ" --selector "#ml"  -> #ml.value === "ABCDEFGHIJ"  (10 chars, cap bypassed)
+       type "ABCDEFGHIJ" --selector "#ml"  -> #ml.value === "ABCDE"       (5 chars, cap applied)
+     So the verdict cannot be derived from the element alone; it depends on which
+     command was dispatched.
+     fill  -> changed, caveat "exceeds maxlength=5; a human could not produce this"
+     type  -> normalised (truncated to the cap) -->
+<h1>Capped input</h1>
+<label for="ml">Code</label>
+<input id="ml" name="code" type="text" maxlength="5" value="">
+<p id="marker">five characters maximum</p>
+</body>
+</html>

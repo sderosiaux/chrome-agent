@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>form-values: disabled input</title></head>
+<body>
+<!-- THE TRAP. chrome-agent's fill uses the native HTMLInputElement value setter,
+     which succeeds on a disabled input. Verified: after
+       chrome-agent fill "sneaky" --selector "#dis"
+     the command exits 0, #dis.value === "sneaky", and the a11y diff prints
+       ~ uid=nN textbox value="off" disabled -> value="sneaky" disabled
+     i.e. the tree evidence actively ARGUES FOR the wrong verdict.
+     A disabled control is not submitted with its form, so nothing was achieved.
+     Expected verdict: blocked. Precondition: #dis.disabled === true. -->
+<h1>Disabled input</h1>
+<form id="f" action="about:blank">
+  <label for="dis">Coupon</label>
+  <input id="dis" name="coupon" type="text" value="off" disabled>
+  <button id="submit" type="submit">Apply</button>
+</form>
+<p id="marker">the coupon field is disabled until a plan is chosen</p>
+</body>
+</html>

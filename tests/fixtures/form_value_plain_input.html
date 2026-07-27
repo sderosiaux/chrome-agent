@@ -1,0 +1,12 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>form-values: plain input</title></head>
+<body>
+<!-- Control case. Nothing rewrites the value. fill must land verbatim.
+     Expected verdict: changed. Read-back: #plain.value === "hello@example.com" -->
+<h1>Plain input</h1>
+<label for="plain">Email</label>
+<input id="plain" name="plain" type="text" value="">
+<p id="marker">no listener is attached to this input</p>
+</body>
+</html>

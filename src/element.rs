@@ -596,6 +596,80 @@ pub async fn select_option_selector(
 // Check / Uncheck
 // ---------------------------------------------------------------------------
 
+/// Classify a checkable and read its current state, as a JS expression taking `el`.
+///
+/// `el.checked` is the wrong reading twice over. Every `HTMLInputElement` exposes it, so a
+/// text input answers `false` and a click on it reports success while meaning nothing. And a
+/// `<div role="checkbox" aria-checked="true">` has no such property at all, so a truthiness
+/// read calls a checked box unchecked and the click turns it OFF while reporting success.
+const CHECKABLE_PROBE: &str = r"function (el) {
+  const tag = el.tagName;
+  const type = (el.type || '').toLowerCase();
+  const role = (el.getAttribute('role') || '').toLowerCase();
+  const ariaAttr = el.getAttribute('aria-checked');
+  const native = tag === 'INPUT' && (type === 'checkbox' || type === 'radio');
+  const aria = ariaAttr !== null ||
+    ['checkbox', 'radio', 'switch', 'menuitemcheckbox', 'menuitemradio'].indexOf(role) >= 0;
+  if (!native && !aria) {
+    return { kind: 'none', tag: tag, type: type, role: role };
+  }
+  const state = native
+    ? (el.indeterminate ? 'mixed' : (el.checked ? 'true' : 'false'))
+    : (ariaAttr === null ? 'false' : ariaAttr.toLowerCase());
+  return {
+    kind: native ? 'native' : 'aria',
+    radio: (native && type === 'radio') || role === 'radio' || role === 'menuitemradio',
+    state: state
+  };
+}";
+
+/// What the probe found: either the element can't be checked, or here is its state.
+struct Checkable {
+    kind: String,
+    radio: bool,
+    state: String,
+    tag: String,
+    ty: String,
+    role: String,
+}
+
+fn parse_probe(v: &serde_json::Value) -> Checkable {
+    let r = v.get("result").and_then(|r| r.get("value")).cloned().unwrap_or_default();
+    let s = |k: &str| r.get(k).and_then(serde_json::Value::as_str).unwrap_or_default().to_string();
+    Checkable {
+        kind: s("kind"),
+        radio: r.get("radio").and_then(serde_json::Value::as_bool).unwrap_or(false),
+        state: s("state"),
+        tag: s("tag"),
+        ty: s("type"),
+        role: s("role"),
+    }
+}
+
+/// Reject an element that cannot hold a checked state, or a radio asked to become unchecked.
+fn refuse_uncheckable(probe: &Checkable, desired: bool) -> Result<(), ElementError> {
+    if probe.kind == "none" {
+        let mut what = probe.tag.to_lowercase();
+        if !probe.ty.is_empty() {
+            what.push_str(&format!(" type={}", probe.ty));
+        }
+        if !probe.role.is_empty() {
+            what.push_str(&format!(" role={}", probe.role));
+        }
+        return Err(ElementError::Action(format!(
+            "<{what}> has no checked state. check/uncheck need an <input type=checkbox|radio> \
+             or an element with role=checkbox|radio|switch and aria-checked."
+        )));
+    }
+    if !desired && probe.radio {
+        return Err(ElementError::Action(
+            "A radio cannot be unchecked by clicking it. Select another radio in the group instead."
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Idempotent check/uncheck: query current state, click only if different.
 pub async fn set_checked(
     client: &CdpClient,
@@ -604,27 +678,40 @@ pub async fn set_checked(
     desired: bool,
 ) -> Result<String, ElementError> {
     let resolved = resolve_uid(client, uid_map, uid).await?;
+    let probe_fn = format!("function() {{ return ({CHECKABLE_PROBE})(this); }}");
 
-    let result: serde_json::Value = client
-        .call("Runtime.callFunctionOn", json!({
-            "objectId": resolved.object_id,
-            "functionDeclaration": "function() { return !!this.checked; }",
-            "returnByValue": true,
-        }))
-        .await
-        .map_err(|e| ElementError::Action(format!("get checked state failed: {e}")))?;
+    let read_state = |object_id: String, decl: String| async move {
+        client
+            .call::<_, serde_json::Value>("Runtime.callFunctionOn", json!({
+                "objectId": object_id,
+                "functionDeclaration": decl,
+                "returnByValue": true,
+            }))
+            .await
+            .map_err(|e| ElementError::Action(format!("read checked state failed: {e}")))
+    };
 
-    let current = result.get("result")
-        .and_then(|r| r.get("value"))
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false);
+    let before = parse_probe(&read_state(resolved.object_id.clone(), probe_fn.clone()).await?);
+    refuse_uncheckable(&before, desired)?;
 
+    let want = if desired { "true" } else { "false" };
     let state_word = if desired { "checked" } else { "unchecked" };
-    if current == desired {
+    if before.state == want {
         return Ok(format!("Already {state_word} uid={uid}"));
     }
 
     click(client, uid_map, uid).await?;
+
+    // Read it back: a click is a request, not a result. A handler can reject or revert it,
+    // and reporting "Checked" for a box that is still off is the one answer an agent cannot
+    // recover from.
+    let after = parse_probe(&read_state(resolved.object_id, probe_fn).await?);
+    if after.state != want {
+        return Err(ElementError::Action(format!(
+            "uid={uid} is still {} after the click; the page did not accept the change.",
+            if after.state == "mixed" { "indeterminate" } else { &after.state }
+        )));
+    }
     Ok(format!("{} uid={uid}", if desired { "Checked" } else { "Unchecked" }))
 }
 
@@ -635,15 +722,21 @@ pub async fn set_checked_selector(
     desired: bool,
 ) -> Result<String, ElementError> {
     let sel_json = serde_json::to_string(selector).unwrap_or_default();
-    let desired_js = if desired { "true" } else { "false" };
+    let want = if desired { "true" } else { "false" };
+    // One evaluation does probe, click and read-back, so all three bind the same node even
+    // if the document changes under us between round trips.
     let js = format!(
         r"(() => {{
             const el = document.querySelector({sel_json});
             if (!el) throw new Error('No element matches selector: ' + {sel_json});
-            const current = !!el.checked;
-            if (current === {desired_js}) return 'already';
+            const probe = ({CHECKABLE_PROBE});
+            const before = probe(el);
+            if (before.kind === 'none') return before;
+            if ({want} === 'false' && before.radio) return {{ kind: 'radio_locked' }};
+            if (before.state === '{want}') return {{ kind: before.kind, state: 'already' }};
             el.click();
-            return 'toggled';
+            const after = probe(el);
+            return {{ kind: before.kind, state: after.state === '{want}' ? 'ok' : after.state }};
         }})()"
     );
     let result: serde_json::Value = client
@@ -652,15 +745,26 @@ pub async fn set_checked_selector(
         .map_err(|e| ElementError::Action(format!("set_checked_selector failed: {e}")))?;
 
     check_js_exception(&result)?;
-    let action = result.get("result")
-        .and_then(|r| r.get("value"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("toggled");
+    let probe = parse_probe(&result);
+    if probe.kind == "radio_locked" {
+        return Err(ElementError::Action(
+            "A radio cannot be unchecked by clicking it. Select another radio in the group instead."
+                .into(),
+        ));
+    }
+    refuse_uncheckable(&probe, desired)?;
+
     let state_word = if desired { "checked" } else { "unchecked" };
-    if action == "already" {
-        Ok(format!("Already {state_word} selector '{selector}'"))
-    } else {
-        Ok(format!("{} selector '{selector}'", if desired { "Checked" } else { "Unchecked" }))
+    match probe.state.as_str() {
+        "already" => Ok(format!("Already {state_word} selector '{selector}'")),
+        "ok" => Ok(format!(
+            "{} selector '{selector}'",
+            if desired { "Checked" } else { "Unchecked" }
+        )),
+        other => Err(ElementError::Action(format!(
+            "selector '{selector}' is still {} after the click; the page did not accept the change.",
+            if other == "mixed" { "indeterminate" } else { other }
+        ))),
     }
 }
 

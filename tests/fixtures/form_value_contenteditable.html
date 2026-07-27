@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>form-values: contenteditable</title></head>
+<body>
+<!-- fill THROWS here. It calls the HTMLInputElement value setter with a div as the
+     receiver, and Chrome answers "TypeError: Illegal invocation".
+     Verified: fill "typed" --selector "#ce" exits 1 with
+       {"error":"TypeError: Illegal invocation ...",
+        "hint":"JS error in page context. Check expression syntax..."}
+     — the hint is wrong and unactionable, which is its own finding.
+     el.focus() runs BEFORE the throw, so the a11y tree still moves (focused flips).
+     A verdict layer keying on "did the tree move" would call a hard failure a success.
+     fill -> blocked (precondition: not an <input>/<textarea>/<select>)
+     type -> changed, but read-back is #ce.textContent, NOT .value (which is undefined),
+             and insertText inserts AT THE CARET: after focus() the caret sits at the
+             start, so "hello" + "edit me" === "helloedit me". Postcondition is
+             "contains", never "equals". The a11y node does expose value="helloedit me". -->
+<h1>Rich text field</h1>
+<div id="ce" contenteditable="true" role="textbox" aria-label="Message">edit me</div>
+<p id="marker">contenteditable, not an input element</p>
+</body>
+</html>

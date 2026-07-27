@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>form-values: phone mask reformats</title></head>
+<body>
+<!-- The mask makes the value LONGER than what was requested, so any heuristic built
+     on "did it get truncated / is it a prefix" reports the wrong thing.
+     Verified: fill "5551234567" exits 0 and #phone.value === "(555) 123-4567";
+     the a11y diff prints value="(555) 123-4567".
+     Expected verdict: normalised. Signal: read-back non-empty && !== requested.
+     Sub-signal that survives reformatting: digits-only projection is equal
+     ("5551234567" both sides), which is what lets the report say "reformatted,
+     not refused". -->
+<h1>Masked phone</h1>
+<label for="phone">Phone</label>
+<input id="phone" name="phone" type="text" value="" autocomplete="off">
+<p id="marker">US format applied as you type</p>
+<script>
+  document.getElementById('phone').addEventListener('input', function (e) {
+    var d = e.target.value.replace(/\D/g, '').slice(0, 10);
+    var out = d;
+    if (d.length > 6) out = '(' + d.slice(0, 3) + ') ' + d.slice(3, 6) + '-' + d.slice(6);
+    else if (d.length > 3) out = '(' + d.slice(0, 3) + ') ' + d.slice(3);
+    else if (d.length > 0) out = '(' + d;
+    e.target.value = out;
+  });
+</script>
+</body>
+</html>
