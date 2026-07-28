@@ -7,6 +7,12 @@
 use serde_json::json;
 
 use crate::cdp::client::CdpClient;
+
+/// Thrown JS arrives as "Error: message\n    at <anonymous>:3:19". The stack is noise in a
+/// field an agent reads to decide what to do next.
+fn first_line(text: &str) -> String {
+    text.lines().next().unwrap_or(text).trim_start_matches("Error: ").to_string()
+}
 use crate::element::{dblclick_at_coords, wait_for_stabilization, ElementError};
 
 /// Single-click an element matched by a CSS selector via `Runtime.evaluate`.
@@ -154,7 +160,7 @@ pub async fn fill_selector(
             .and_then(|d| d.as_str())
             .or_else(|| exception.get("text").and_then(|t| t.as_str()))
             .unwrap_or("unknown error");
-        return Err(ElementError::Action(text.to_string()));
+        return Err(ElementError::Action(first_line(text)));
     }
 
     let payload = result.get("result").and_then(|r| r.get("value")).cloned().unwrap_or_default();

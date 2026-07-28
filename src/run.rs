@@ -329,6 +329,12 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
                 .call("Runtime.evaluate", json!({"expression": "document.title", "returnByValue": true}))
                 .await?;
             let title_str = title.result.value.as_ref().and_then(|v| v.as_str()).unwrap_or("");
+            // Same as goto: the old document is gone, so every stored uid now points at a
+            // node that no longer exists, and backendNodeId counters overlap between
+            // documents so a stale one can silently resolve to an unrelated element.
+            if let Some(browser_s) = store.browsers.get_mut(&cli.browser) {
+                session::ensure_page(browser_s, &cli.page, &target_id).uid_map.clear();
+            }
             if json_mode {
                 json_output(&json!({"ok": true, "title": title_str}));
             } else {
@@ -652,11 +658,7 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
 
         Command::Wait { what, pattern, timeout, idle_ms } => {
             let msg = commands::wait::run(&client, &what, &pattern, timeout, idle_ms).await?;
-            if json_mode {
-                json_output(&json!({"ok": true, "message": msg}));
-            } else {
-                println!("{msg}");
-            }
+            output_action(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, &policy.for_action(false, None), json_mode).await?;
         }
 
         Command::Type { text, selector } => {
@@ -669,21 +671,13 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
             } else {
                 format!("Typed {} chars", text.len())
             };
-            if json_mode {
-                json_output(&json!({"ok": true, "message": msg}));
-            } else {
-                println!("{msg}");
-            }
+            output_action(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, &policy.for_action(false, None), json_mode).await?;
         }
 
         Command::Press { key } => {
             crate::element::press_key(&client, &key).await?;
             let msg = format!("Pressed {key}");
-            if json_mode {
-                json_output(&json!({"ok": true, "message": msg}));
-            } else {
-                println!("{msg}");
-            }
+            output_action(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, &policy.for_action(false, None), json_mode).await?;
         }
 
         Command::Scroll { target, px } => {
@@ -741,22 +735,14 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
                     format!("Scrolled uid={uid} into view")
                 }
             };
-            if json_mode {
-                json_output(&json!({"ok": true, "message": msg}));
-            } else {
-                println!("{msg}");
-            }
+            output_action(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, &policy.for_action(false, None), json_mode).await?;
         }
 
         Command::Hover { uid } => {
             let uid_map = get_uid_map(&store, &cli.browser, &cli.page);
             crate::element::hover(&client, &uid_map, &uid).await?;
             let msg = format!("Hovered uid={uid}");
-            if json_mode {
-                json_output(&json!({"ok": true, "message": msg}));
-            } else {
-                println!("{msg}");
-            }
+            output_action(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, &policy.for_action(false, None), json_mode).await?;
         }
 
         Command::Network { filter, body, live, limit, abort } => {
@@ -812,11 +798,7 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
 
         Command::Frame { target } => {
             let msg = commands::frame::run(&client, &target).await?;
-            if json_mode {
-                json_output(&json!({"ok": true, "message": msg}));
-            } else {
-                println!("{msg}");
-            }
+            output_action(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, &policy.for_action(false, None), json_mode).await?;
         }
 
         Command::Batch => {

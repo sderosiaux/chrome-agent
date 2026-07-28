@@ -72,21 +72,33 @@ fn fill_on(browser: &str, fixture: &str, selector: &str, value: &str) -> Option<
 #[test]
 fn filling_a_control_disabled_by_its_fieldset_is_refused() {
     let b = TestBrowser("fill-fieldset");
-    let Some((v, code)) = fill_on(b.0, "form_value_disabled_input.html", "#f", "1234") else {
+    let Some((v, code)) = fill_on(b.0, "form_value_disabled_input.html", "#dis", "1234") else {
         return;
     };
     assert_ne!(code, 0, "a disabled control cannot be filled: {v}");
     assert_eq!(v["ok"], false, "{v}");
+    assert!(
+        v["error"].as_str().unwrap_or_default().contains("disabled"),
+        "and the reason must be the disabled state, not some other failure: {v}"
+    );
 }
 
 /// A readonly input refuses the value too, and for a reason we can read before acting.
 #[test]
 fn filling_a_readonly_input_is_refused() {
     let b = TestBrowser("fill-readonly");
-    let Some((v, code)) = fill_on(b.0, "form_value_readonly_input.html", "#f", "1234") else {
+    let Some((v, code)) = fill_on(b.0, "form_value_readonly_input.html", "#ro", "1234") else {
         return;
     };
     assert_ne!(code, 0, "a readonly input cannot be filled: {v}");
+    assert!(
+        v["error"].as_str().unwrap_or_default().contains("readonly"),
+        "and the reason must name it: {v}"
+    );
+    assert!(
+        !v["error"].as_str().unwrap_or_default().contains("    at "),
+        "a JS stack trace is noise in an agent's error field: {v}"
+    );
 }
 
 /// The one that matters most. A mask rewrites the value, and the request is neither

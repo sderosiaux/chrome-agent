@@ -776,7 +776,6 @@ pub fn mutates_page(cmd: &str) -> bool {
         "click" | "tap" | "dblclick" | "double_click" | "double-click"
             | "fill" | "type" | "press" | "select" | "check" | "uncheck"
             | "upload" | "drag" | "hover" | "scroll"
-            | "back" | "forward"
             | "fill-form" | "fill_form" | "fillform"
             | "fill_and_submit" | "fill-and-submit"
     )

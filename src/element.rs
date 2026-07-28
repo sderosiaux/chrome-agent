@@ -280,7 +280,9 @@ pub async fn fill(
             .and_then(|d| d.as_str())
             .or_else(|| exception.get("text").and_then(|t| t.as_str()))
             .unwrap_or("unknown error");
-        return Err(ElementError::Action(text.to_string()));
+        return Err(ElementError::Action(
+            text.lines().next().unwrap_or(text).trim_start_matches("Error: ").to_string(),
+        ));
     }
 
     let payload = result.get("result").and_then(|r| r.get("value")).cloned().unwrap_or_default();
@@ -631,7 +633,9 @@ pub fn check_js_exception(result: &serde_json::Value) -> Result<(), ElementError
             .and_then(|d| d.as_str())
             .or_else(|| exception.get("text").and_then(|t| t.as_str()))
             .unwrap_or("unknown error");
-        return Err(ElementError::Action(text.to_string()));
+        return Err(ElementError::Action(
+            text.lines().next().unwrap_or(text).trim_start_matches("Error: ").to_string(),
+        ));
     }
     Ok(())
 }
