@@ -134,3 +134,22 @@ fn filling_past_maxlength_lands_verbatim_but_says_so() {
     let caveat = v["value"]["caveat"].as_str().unwrap_or_default();
     assert!(caveat.contains("maxlength=5"), "the cap that was bypassed must be named: {v}");
 }
+
+/// The response goes to stdout, into the agent's transcript and into any `--record` file.
+/// A password must not travel with it. What the caller still needs is whether the write
+/// landed verbatim, and that survives redaction.
+#[test]
+fn a_password_field_is_never_echoed_back() {
+    let b = TestBrowser("fill-secret");
+    let Some((v, code)) = fill_on(b.0, "form_value_password.html", "#p", "topsecret123") else {
+        return;
+    };
+    assert_eq!(code, 0, "{v}");
+    assert_eq!(v["value"]["redacted"], true, "{v}");
+    assert_eq!(v["value"]["verbatim"], true, "the useful part survives: {v}");
+    assert_eq!(v["value"]["requested_length"], 12, "{v}");
+    assert!(
+        !serde_json::to_string(&v).unwrap_or_default().contains("topsecret123"),
+        "the secret must not appear anywhere in the response: {v}"
+    );
+}

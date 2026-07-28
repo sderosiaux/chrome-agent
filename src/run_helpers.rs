@@ -89,11 +89,20 @@ impl ReportPolicy {
 /// What a fill put in, and what the page kept. Emitted on every fill so a value that was
 /// reformatted, truncated or rejected is visible rather than hidden behind "Filled".
 pub fn fill_value_report(outcome: &crate::element::FillOutcome) -> serde_json::Value {
-    let mut v = json!({
-        "requested": outcome.requested,
-        "actual": outcome.actual,
-        "verbatim": outcome.verbatim(),
-    });
+    let mut v = if outcome.sensitive {
+        json!({
+            "redacted": true,
+            "requested_length": outcome.requested.chars().count(),
+            "actual_length": outcome.actual.as_ref().map(|a| a.chars().count()),
+            "verbatim": outcome.verbatim(),
+        })
+    } else {
+        json!({
+            "requested": outcome.requested,
+            "actual": outcome.actual,
+            "verbatim": outcome.verbatim(),
+        })
+    };
     if let Some(caveat) = &outcome.caveat {
         v["caveat"] = json!(caveat);
     }

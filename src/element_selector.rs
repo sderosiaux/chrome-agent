@@ -133,7 +133,9 @@ pub async fn fill_selector(
             el.dispatchEvent(new Event('change', {{bubbles: true}}));
             return {{
                 value: el.value === undefined ? null : String(el.value),
-                maxLength: typeof el.maxLength === 'number' ? el.maxLength : null
+                maxLength: typeof el.maxLength === 'number' ? el.maxLength : null,
+                sensitive: el.type === 'password' ||
+                    /password|cc-number|cc-csc|one-time-code/i.test(el.autocomplete || '')
             }};
         }})()",
         sel = serde_json::to_string(selector).unwrap_or_default(),
@@ -158,8 +160,11 @@ pub async fn fill_selector(
     let payload = result.get("result").and_then(|r| r.get("value")).cloned().unwrap_or_default();
     let actual = payload.get("value").and_then(serde_json::Value::as_str).map(str::to_string);
     let max_length = payload.get("maxLength").and_then(serde_json::Value::as_i64);
+    let sensitive = payload.get("sensitive").and_then(serde_json::Value::as_bool).unwrap_or(false);
     wait_for_stabilization(nav_events).await;
-    Ok(crate::element::FillOutcome::new(value, actual).with_max_length(max_length))
+    Ok(crate::element::FillOutcome::new(value, actual)
+        .with_max_length(max_length)
+        .secret(sensitive))
 }
 
 /// Focus an element matched by a CSS selector via `Runtime.evaluate`.

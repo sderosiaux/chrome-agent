@@ -178,6 +178,11 @@ async fn js_click(client: &CdpClient, object_id: &str) -> Result<(), ElementErro
 pub struct FillOutcome {
     pub requested: String,
     pub actual: Option<String>,
+    /// The field holds a secret, so neither value may be reported. The response still says
+    /// whether the write landed verbatim and how long it is, which is what the caller
+    /// needs, without putting a password on stdout, into an agent transcript and into any
+    /// `--record` file.
+    pub sensitive: bool,
     /// Set when the value that landed could not have been typed by a person: `maxlength`
     /// constrains the editing pipeline, not the value setter, so a programmatic fill walks
     /// straight past it and the form will reject the field on submit.
@@ -186,7 +191,13 @@ pub struct FillOutcome {
 
 impl FillOutcome {
     pub fn new(requested: &str, actual: Option<String>) -> Self {
-        Self { requested: requested.to_string(), actual, caveat: None }
+        Self { requested: requested.to_string(), actual, caveat: None, sensitive: false }
+    }
+
+    /// Mark the outcome as holding a secret.
+    pub const fn secret(mut self, sensitive: bool) -> Self {
+        self.sensitive = sensitive;
+        self
     }
 
     /// Attach the over-the-cap caveat when a `maxlength` was bypassed.
@@ -241,7 +252,9 @@ pub async fn fill(
             this.dispatchEvent(new Event('change', {bubbles: true}));
             return {
                 value: this.value === undefined ? null : String(this.value),
-                maxLength: typeof this.maxLength === 'number' ? this.maxLength : null
+                maxLength: typeof this.maxLength === 'number' ? this.maxLength : null,
+                sensitive: this.type === 'password' ||
+                    /password|cc-number|cc-csc|one-time-code/i.test(this.autocomplete || '')
             };
         }".to_string();
 
@@ -273,8 +286,9 @@ pub async fn fill(
     let payload = result.get("result").and_then(|r| r.get("value")).cloned().unwrap_or_default();
     let actual = payload.get("value").and_then(serde_json::Value::as_str).map(str::to_string);
     let max_length = payload.get("maxLength").and_then(serde_json::Value::as_i64);
+    let sensitive = payload.get("sensitive").and_then(serde_json::Value::as_bool).unwrap_or(false);
     wait_for_stabilization(nav_events).await;
-    Ok(FillOutcome::new(value, actual).with_max_length(max_length))
+    Ok(FillOutcome::new(value, actual).with_max_length(max_length).secret(sensitive))
 }
 
 /// Type text character by character using Input.insertText.
@@ -814,7 +828,7 @@ pub async fn set_checked_selector(
             const probe = ({CHECKABLE_PROBE});
             const before = probe(el);
             if (before.kind === 'none') return before;
-            if ({want} === 'false' && before.radio) return {{ kind: 'radio_locked' }};
+            if ('{want}' === 'false' && before.radio) return {{ kind: 'radio_locked' }};
             if (before.state === '{want}') return {{ kind: before.kind, state: 'already' }};
             el.click();
             const after = probe(el);
