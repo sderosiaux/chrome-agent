@@ -112,7 +112,7 @@ fn navigation_keys_reach_the_page() {
     }
 }
 
-/// `'.'` is ASCII 46, which is also VK_DELETE. Deriving a virtual key code from the
+/// A full stop is ASCII 46, which is also `VK_DELETE`. Deriving a virtual key code from the
 /// character's byte therefore turned `press .` into a delete: verified, a field holding
 /// "XYZ" with the caret at 0 became "YZ", reported as success.
 #[test]
@@ -136,7 +136,7 @@ fn punctuation_types_instead_of_deleting() {
     );
 }
 
-/// ``Input.insertText` goes to whatever holds focus. With focus on BODY it goes nowhere,
+/// Text insertion goes to whatever holds focus. With focus on BODY it goes nowhere,
 /// and the message was built from the request rather than from the page.
 #[test]
 fn typing_with_nothing_focused_is_refused() {
