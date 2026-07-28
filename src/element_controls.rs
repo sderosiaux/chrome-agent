@@ -180,6 +180,13 @@ pub async fn set_checked(
             }))
             .await
             .map_err(|e| ElementError::Action(format!("read checked state failed: {e}")))
+            .and_then(|v| {
+                // A throwing probe used to yield an empty kind, sail past the refusal and
+                // click the element anyway — blaming the page for our own read failure
+                // while mutating it unasked.
+                check_js_exception(&v)?;
+                Ok(v)
+            })
     };
 
     let before = parse_probe(&read_state(resolved.object_id.clone(), probe_fn.clone()).await?);
@@ -226,12 +233,19 @@ pub async fn set_checked_selector(
             if ('{want}' === 'false' && before.radio) return {{ kind: 'radio_locked' }};
             if (before.state === '{want}') return {{ kind: before.kind, state: 'already' }};
             el.click();
-            const after = probe(el);
-            return {{ kind: before.kind, state: after.state === '{want}' ? 'ok' : after.state }};
+            // Read back after the microtask queue drains: a handler that reverts the
+            // change in a promise or a timeout is invisible to a synchronous read.
+            return new Promise(resolve => setTimeout(() => {{
+                const after = probe(el);
+                resolve({{ kind: before.kind, state: after.state === '{want}' ? 'ok' : after.state }});
+            }}, 60));
         }})()"
     );
     let result: serde_json::Value = client
-        .call("Runtime.evaluate", json!({"expression": js, "returnByValue": true}))
+        .call(
+            "Runtime.evaluate",
+            json!({"expression": js, "returnByValue": true, "awaitPromise": true}),
+        )
         .await
         .map_err(|e| ElementError::Action(format!("set_checked_selector failed: {e}")))?;
 

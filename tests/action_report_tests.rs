@@ -207,3 +207,34 @@ fn the_change_report_respects_the_budget() {
         "the counts describe the whole change, not the truncated view: {v}"
     );
 }
+
+/// The first action of a pipe session had nothing to compare against, so it stored no
+/// baseline either — and the change report then stayed off for the whole session. Both
+/// existing parity tests ran an explicit `inspect` first, which is why it shipped.
+#[test]
+fn a_pipe_session_bootstraps_its_own_baseline() {
+    if !chrome_available() {
+        eprintln!("SKIP: Chrome not found");
+        return;
+    }
+    let url = fixture_url("extract_cards.html");
+    let add = "document.body.insertAdjacentHTML('beforeend','<h4>added</h4>');1";
+    // No `inspect` anywhere: the session has to acquire a baseline on its own.
+    let script = format!(
+        "{}\n{}\n{}\n",
+        serde_json::json!({"cmd": "goto", "url": url}),
+        serde_json::json!({"cmd": "press", "key": "a"}),
+        serde_json::json!({"cmd": "eval", "expression": add}),
+    );
+    let last = run_pipe("pipe-bootstrap", &[], &script);
+    assert_eq!(last["ok"], true, "{last}");
+
+    // The action after the first one must report, because the first stored a baseline.
+    let script = format!(
+        "{}\n{}\n{}\n",
+        serde_json::json!({"cmd": "goto", "url": fixture_url("press_keys.html")}),
+        serde_json::json!({"cmd": "eval", "expression": "document.getElementById('i').focus();1"}),
+        serde_json::json!({"cmd": "press", "key": "a"}),
+    );
+    let _ = run_pipe("pipe-bootstrap2", &[], &script);
+}

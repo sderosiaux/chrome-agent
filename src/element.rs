@@ -293,6 +293,43 @@ pub async fn fill(
     Ok(FillOutcome::new(value, actual).with_max_length(max_length).secret(sensitive))
 }
 
+/// Refuse to type when nothing editable holds focus.
+///
+/// `Input.insertText` goes to whatever is focused. With focus on BODY it goes nowhere, and
+/// the old message was built from `text.len()` — a claim about the request, never about the
+/// page. Verified: `type "hello"` with nothing focused reported "Typed 5 chars" and left
+/// the page untouched.
+pub async fn require_editable_focus(client: &CdpClient) -> Result<(), ElementError> {
+    let probe = r"(() => {
+        const a = document.activeElement;
+        if (!a || a === document.body || a === document.documentElement) return 'none';
+        const tag = a.tagName;
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || a.isContentEditable) return 'ok';
+        return tag.toLowerCase();
+    })()";
+    let result: serde_json::Value = client
+        .call("Runtime.evaluate", json!({"expression": probe, "returnByValue": true}))
+        .await
+        .map_err(|e| ElementError::Action(format!("focus check failed: {e}")))?;
+    let state = result
+        .get("result")
+        .and_then(|r| r.get("value"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("none");
+    match state {
+        "ok" => Ok(()),
+        "none" => Err(ElementError::Action(
+            "Nothing editable has focus, so there is nowhere to type. Focus a field first: \
+             click its uid, or use `fill --selector` to set a value directly."
+                .into(),
+        )),
+        other => Err(ElementError::Action(format!(
+            "Focus is on a <{other}>, which does not accept typing. Focus an input, a \
+             textarea or a contenteditable element first."
+        ))),
+    }
+}
+
 /// Type text character by character using Input.insertText.
 pub async fn type_text(
     client: &CdpClient,
@@ -346,7 +383,16 @@ pub async fn press_key(
         // and nothing is inserted, so `press a` reported success and typed nothing.
         _ if key.chars().count() == 1 => {
             let ch = key.chars().next().unwrap_or(' ');
-            (u32::from(ch.to_ascii_uppercase() as u8), Some(key))
+            // Only alphanumerics have a virtual key code equal to their uppercase ASCII
+            // byte. Deriving one for punctuation lands on an editing or navigation key:
+            // '.' is 46, which is VK_DELETE, so `press .` deleted a character and reported
+            // success. Send 0 and let Chrome insert from `text` alone.
+            let vk = if ch.is_ascii_alphanumeric() {
+                u32::from(ch.to_ascii_uppercase() as u8)
+            } else {
+                0
+            };
+            (vk, Some(key))
         }
         // Anything else would go out with virtual key code 0, which no handler reads as a
         // key. Saying so beats reporting success for an event that means nothing.

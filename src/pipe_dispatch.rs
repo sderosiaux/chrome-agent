@@ -459,6 +459,7 @@ pub async fn dispatch_type(client: &CdpClient, cmd: &Value) -> Result<Value, cra
     let text = cmd.get("text").and_then(Value::as_str).ok_or("type: missing \"text\"")?;
     let selector = cmd.get("selector").and_then(Value::as_str);
     if let Some(sel) = selector { crate::element::focus_selector(client, sel).await?; }
+    crate::element::require_editable_focus(client).await?;
     crate::element::type_text(client, text).await?;
     let msg = if let Some(sel) = selector { format!("Typed {} chars into selector '{sel}'", text.len()) }
     else { format!("Typed {} chars", text.len()) };
@@ -698,10 +699,11 @@ pub async fn dispatch_single(
             .browsers
             .get(browser_name)
             .and_then(|b| b.pages.get(page_name))
-            .and_then(|p| {
-                p.last_snapshot
-                    .clone()
-                    .map(|t| (t, p.last_snapshot_frame.clone().zip(p.last_snapshot_loader.clone())))
+            .map(|p| {
+                (
+                    p.last_snapshot.clone(),
+                    p.last_snapshot_frame.clone().zip(p.last_snapshot_loader.clone()),
+                )
             })
     } else {
         None
@@ -761,7 +763,7 @@ pub async fn dispatch_single(
     };
     if let Some((old_text, old_url)) = baseline {
         attach_change_report(
-            client, store, browser_name, page_name, target_id, report, &old_text,
+            client, store, browser_name, page_name, target_id, report, old_text.as_deref(),
             old_url, &mut value,
         )
         .await;
@@ -792,12 +794,26 @@ pub async fn attach_change_report(
     page_name: &str,
     target_id: &str,
     report: crate::run_helpers::ReportPolicy,
-    old_text: &str,
+    old_text: Option<&str>,
     stored: Option<(String, String)>,
     out: &mut Value,
 ) {
     crate::snapshot::settle(client, 100, 1000).await;
     let Ok(snapshot) = commands::inspect::run(client, false, None, None, None).await else {
+        return;
+    };
+    // Store the fresh snapshot whatever happens: without this the very first action of a
+    // session had no baseline, so it wrote none, so the session never acquired one and the
+    // change report stayed silently off for its whole life.
+    let Some(old_text) = old_text else {
+        if let Some(browser_s) = store.browsers.get_mut(browser_name) {
+            let page = session::ensure_page(browser_s, page_name, target_id);
+            page.uid_map = snapshot.uid_map;
+            page.last_snapshot = Some(snapshot.text);
+            let (f, l) = snapshot.identity.map_or((None, None), |(f, l)| (Some(f), Some(l)));
+            page.last_snapshot_frame = f;
+            page.last_snapshot_loader = l;
+        }
         return;
     };
     let identity = commands::diff::Identity::from_loader(

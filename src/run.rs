@@ -665,6 +665,7 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
             if let Some(ref sel) = selector {
                 crate::element::focus_selector(&client, sel).await?;
             }
+            crate::element::require_editable_focus(&client).await?;
             crate::element::type_text(&client, &text).await?;
             let msg = if let Some(sel) = &selector {
                 format!("Typed {} chars into selector '{sel}'", text.len())

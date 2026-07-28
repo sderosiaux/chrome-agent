@@ -111,3 +111,49 @@ fn navigation_keys_reach_the_page() {
         assert!(log.contains(key), "the page should have seen {key}: {log}");
     }
 }
+
+/// `'.'` is ASCII 46, which is also VK_DELETE. Deriving a virtual key code from the
+/// character's byte therefore turned `press .` into a delete: verified, a field holding
+/// "XYZ" with the caret at 0 became "YZ", reported as success.
+#[test]
+fn punctuation_types_instead_of_deleting() {
+    let b = TestBrowser("press-punct");
+    if !open_and_focus(b.0) {
+        return;
+    }
+    let (_, code) = run_cli(&[
+        "--browser", b.0, "eval",
+        "const i=document.getElementById('i'); i.value='XYZ'; i.focus(); i.setSelectionRange(0,0); 1",
+    ]);
+    assert_eq!(code, 0);
+    let (out, code) = run_cli(&["--browser", b.0, "--verdict", "off", "--json", "press", "."]);
+    assert_eq!(code, 0, "{out}");
+    let (value, _) = run_cli(&["--browser", b.0, "eval", "document.getElementById('i').value"]);
+    assert_eq!(
+        value.trim().trim_matches('"'),
+        ".XYZ",
+        "the character must be inserted, and nothing deleted"
+    );
+}
+
+/// `Input.insertText` goes to whatever holds focus. With focus on BODY it goes nowhere,
+/// and the message was built from the request rather than from the page.
+#[test]
+fn typing_with_nothing_focused_is_refused() {
+    let b = TestBrowser("type-nofocus");
+    if !chrome_available() {
+        eprintln!("SKIP: Chrome not found");
+        return;
+    }
+    let (_, code) = run_cli(&["--browser", b.0, "goto", &fixture_url("press_keys.html")]);
+    if code != 0 {
+        return;
+    }
+    let (out, code) = run_cli(&["--browser", b.0, "--verdict", "off", "--json", "type", "hello"]);
+    let v: Value = serde_json::from_str(&out).unwrap_or(Value::Null);
+    assert_ne!(code, 0, "typing into nothing should fail: {v}");
+    assert!(
+        v["error"].as_str().unwrap_or_default().contains("focus"),
+        "and say why: {v}"
+    );
+}
