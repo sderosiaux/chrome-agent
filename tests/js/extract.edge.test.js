@@ -536,3 +536,46 @@ describe('adversarial: special characters in class names', () => {
     assert.ok(r.pattern.includes('result'), `pattern should reference result class: ${r.pattern}`);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Ambiguity: when a second pattern scores close to the winner, the caller has to
+// be told. Silently returning one of two plausible lists is the failure an agent
+// cannot detect on its own.
+// ---------------------------------------------------------------------------
+
+describe('ambiguous pages', () => {
+  const twoLists = `
+    <main>
+      <section id="products">
+        <div class="row"><h3>Widget A</h3><p>10 EUR</p><a href="/a">buy</a></div>
+        <div class="row"><h3>Widget B</h3><p>20 EUR</p><a href="/b">buy</a></div>
+        <div class="row"><h3>Widget C</h3><p>30 EUR</p><a href="/c">buy</a></div>
+        <div class="row"><h3>Widget D</h3><p>40 EUR</p><a href="/d">buy</a></div>
+      </section>
+      <section id="posts">
+        <article><h3>Post one</h3><p>body one</p><a href="/1">read</a></article>
+        <article><h3>Post two</h3><p>body two</p><a href="/2">read</a></article>
+        <article><h3>Post three</h3><p>body three</p><a href="/3">read</a></article>
+        <article><h3>Post four</h3><p>body four</p><a href="/4">read</a></article>
+      </section>
+    </main>`;
+
+  it('names the runner-up when two patterns are comparable', () => {
+    const r = extractFromHTML(twoLists);
+    assert.ok(r.count >= 3, `should find one of the lists, got ${r.count}`);
+    assert.ok(r.alternatives, `an ambiguous page must say so: ${JSON.stringify(r)}`);
+    assert.ok(Array.isArray(r.alternatives) && r.alternatives.length >= 1,
+      `and name the other candidate: ${JSON.stringify(r.alternatives)}`);
+    assert.ok(r.hint && /selector/.test(r.hint), `and say how to disambiguate: ${r.hint}`);
+  });
+
+  it('stays quiet when there is only one plausible pattern', () => {
+    const single = `<main><ul>
+      <li><h3>Only A</h3><p>text a</p><a href="/a">go</a></li>
+      <li><h3>Only B</h3><p>text b</p><a href="/b">go</a></li>
+      <li><h3>Only C</h3><p>text c</p><a href="/c">go</a></li>
+    </ul></main>`;
+    const r = extractFromHTML(single);
+    assert.ok(!r.alternatives, `no ambiguity to report: ${JSON.stringify(r.alternatives)}`);
+  });
+});
