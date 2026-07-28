@@ -211,6 +211,8 @@ pub async fn dispatch_diff(
         "removed": result.removed,
         "changed": result.changed,
         "unchanged": result.unchanged,
+                    "moved": result.moved,
+                    "anonymous": result.anonymous,
         "diff": result.text.trim_end(),
     });
     if let Some(hint) = result.hint {
@@ -800,10 +802,15 @@ pub async fn attach_change_report(
                 "removed": cmp.removed,
                 "changed": cmp.changed,
                 "unchanged": cmp.unchanged,
+                    "moved": cmp.moved,
+                    "anonymous": cmp.anonymous,
                 "document_changed": cmp.document_changed,
             }),
         );
         obj.insert("delta".into(), json!(body));
+        if cmp.focus_from.is_some() || cmp.focus_to.is_some() {
+            obj.insert("focus".into(), json!({"from": cmp.focus_from, "to": cmp.focus_to}));
+        }
         if let Some(hint) = cmp.hint {
             obj.entry("hint").or_insert_with(|| json!(hint));
         }

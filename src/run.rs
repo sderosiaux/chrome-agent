@@ -534,8 +534,13 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
                     "removed": result.removed,
                     "changed": result.changed,
                     "unchanged": result.unchanged,
+                    "moved": result.moved,
+                    "anonymous": result.anonymous,
                     "diff": result.text.trim_end(),
                 });
+                if result.focus_from.is_some() || result.focus_to.is_some() {
+                    obj["focus"] = json!({"from": result.focus_from, "to": result.focus_to});
+                }
                 if let Some(hint) = result.hint {
                     obj["hint"] = json!(hint);
                 }
