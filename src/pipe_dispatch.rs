@@ -773,13 +773,11 @@ pub async fn dispatch_single(
 pub fn mutates_page(cmd: &str) -> bool {
     matches!(
         cmd,
-        "goto" | "navigate" | "open" | "go"
-            | "click" | "tap" | "dblclick" | "double_click" | "double-click"
+        "click" | "tap" | "dblclick" | "double_click" | "double-click"
             | "fill" | "type" | "press" | "select" | "check" | "uncheck"
             | "upload" | "drag" | "hover" | "scroll"
             | "back" | "forward"
             | "fill-form" | "fill_form" | "fillform"
-            | "navigate_and_read" | "navigate-and-read"
             | "fill_and_submit" | "fill-and-submit"
     )
 }
