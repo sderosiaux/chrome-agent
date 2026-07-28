@@ -217,6 +217,7 @@ pub async fn dispatch_diff(
     let mut out = json!({
         "ok": true,
         "document_changed": result.document_changed,
+        "identity_known": result.identity_known,
         "added": result.added,
         "removed": result.removed,
         "changed": result.changed,
@@ -225,6 +226,9 @@ pub async fn dispatch_diff(
                     "anonymous": result.anonymous,
         "diff": result.text.trim_end(),
     });
+    if result.focus_from.is_some() || result.focus_to.is_some() {
+        out["focus"] = json!({"from": result.focus_from, "to": result.focus_to});
+    }
     if let Some(hint) = result.hint {
         out["hint"] = json!(hint);
     }

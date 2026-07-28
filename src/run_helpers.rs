@@ -151,7 +151,10 @@ pub async fn output_action_with(
         // Wait for the page to stop reacting rather than for a fixed guess: a page that
         // does nothing costs a quiet window, one that renders late is still caught.
         crate::snapshot::settle(client, 100, 1000).await;
-        let snapshot = commands::inspect::run(client, false, report.max_depth, None, None).await?;
+        // The baseline is always full depth. Storing a `--max-depth` view would make the
+        // next comparison read every node the limit cut off as newly added: verified, an
+        // action with `--max-depth 1` then a plain `diff` invented additions.
+        let snapshot = commands::inspect::run(client, false, None, None, None).await?;
 
         if report.changes {
             let previous = store
@@ -202,8 +205,17 @@ pub async fn output_action_with(
         }
 
         if report.inspect {
-            obj["snapshot"] = json!(snapshot.text);
-            trailer.clone_from(&snapshot.text);
+            // The caller asked to see the tree at their depth; the baseline above stays
+            // full so the two never get confused.
+            let shown = if report.max_depth.is_some() {
+                commands::inspect::run(client, false, report.max_depth, None, None)
+                    .await
+                    .map_or_else(|_| snapshot.text.clone(), |s| s.text)
+            } else {
+                snapshot.text.clone()
+            };
+            obj["snapshot"] = json!(shown);
+            trailer.clone_from(&shown);
         }
 
         if let Some(browser_s) = store.browsers.get_mut(browser_name) {
