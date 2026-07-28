@@ -147,12 +147,12 @@ pub async fn dispatch_inspect(
     if scroll {
         commands::extract::scroll_to_load(client).await?;
     }
-    let (mut text, uid_map, doc_url) = if let Some(max) = limit {
+    let (mut text, uid_map, doc_url, doc_identity) = if let Some(max) = limit {
         let result = commands::inspect::scroll_collect(client, verbose, uid, role_filter.as_deref(), max).await?;
-        (result.text, result.uid_map, result.url)
+        (result.text, result.uid_map, result.url, result.identity)
     } else {
         let s = commands::inspect::run(client, verbose, max_depth, uid, role_filter.as_deref()).await?;
-        (s.text, s.uid_map, s.url)
+        (s.text, s.uid_map, s.url, s.identity)
     };
     if urls {
         text = commands::inspect::resolve_urls(client, &text, &uid_map).await;
@@ -165,6 +165,9 @@ pub async fn dispatch_inspect(
         page.uid_map = uid_map;
         page.last_snapshot = Some(text.clone());
         page.last_snapshot_url = Some(doc_url);
+        let (f, l) = doc_identity.map_or((None, None), |(f, l)| (Some(f), Some(l)));
+        page.last_snapshot_frame = f;
+        page.last_snapshot_loader = l;
     }
 
     let offset = cmd.get("offset").and_then(Value::as_u64).unwrap_or(0) as usize;
@@ -192,16 +195,24 @@ pub async fn dispatch_diff(
     let old_text = page_state
         .and_then(|p| p.last_snapshot.clone())
         .ok_or("No previous snapshot. Run inspect first.")?;
-    let old_url = page_state.and_then(|p| p.last_snapshot_url.clone());
+    let stored = page_state
+        .and_then(|p| p.last_snapshot_frame.clone().zip(p.last_snapshot_loader.clone()));
 
     let snapshot = commands::inspect::run(client, false, None, None, None).await?;
-    let result = commands::diff::compare(old_url.as_deref(), &old_text, &snapshot.url, &snapshot.text);
+    let identity = commands::diff::Identity::from_loader(
+        stored.as_ref().map(|(f, l)| (f.as_str(), l.as_str())),
+        snapshot.identity.as_ref().map(|(f, l)| (f.as_str(), l.as_str())),
+    );
+    let result = commands::diff::compare(identity, &old_text, &snapshot.text);
 
     if let Some(browser_s) = store.browsers.get_mut(browser_name) {
         let page = session::ensure_page(browser_s, page_name, target_id);
         page.uid_map = snapshot.uid_map;
         page.last_snapshot = Some(snapshot.text);
         page.last_snapshot_url = Some(snapshot.url);
+            let (f, l) = snapshot.identity.map_or((None, None), |(f, l)| (Some(f), Some(l)));
+            page.last_snapshot_frame = f;
+            page.last_snapshot_loader = l;
     }
 
     let mut out = json!({
@@ -524,6 +535,9 @@ pub async fn attach_snapshot(
         page.uid_map = snapshot.uid_map;
         page.last_snapshot = Some(snapshot.text.clone());
         page.last_snapshot_url = Some(snapshot.url.clone());
+        let (f, l) = snapshot.identity.clone().map_or((None, None), |(f, l)| (Some(f), Some(l)));
+        page.last_snapshot_frame = f;
+        page.last_snapshot_loader = l;
     }
     Ok(snapshot.text)
 }
@@ -682,7 +696,11 @@ pub async fn dispatch_single(
             .browsers
             .get(browser_name)
             .and_then(|b| b.pages.get(page_name))
-            .and_then(|p| p.last_snapshot.clone().map(|t| (t, p.last_snapshot_url.clone())))
+            .and_then(|p| {
+                p.last_snapshot
+                    .clone()
+                    .map(|t| (t, p.last_snapshot_frame.clone().zip(p.last_snapshot_loader.clone())))
+            })
     } else {
         None
     };
@@ -742,7 +760,7 @@ pub async fn dispatch_single(
     if let Some((old_text, old_url)) = baseline {
         attach_change_report(
             client, store, browser_name, page_name, target_id, report, &old_text,
-            old_url.as_deref(), &mut value,
+            old_url, &mut value,
         )
         .await;
     }
@@ -776,14 +794,18 @@ pub async fn attach_change_report(
     target_id: &str,
     report: crate::run_helpers::ReportPolicy,
     old_text: &str,
-    old_url: Option<&str>,
+    stored: Option<(String, String)>,
     out: &mut Value,
 ) {
     tokio::time::sleep(std::time::Duration::from_millis(150)).await;
     let Ok(snapshot) = commands::inspect::run(client, false, None, None, None).await else {
         return;
     };
-    let cmp = commands::diff::compare(old_url, old_text, &snapshot.url, &snapshot.text);
+    let identity = commands::diff::Identity::from_loader(
+        stored.as_ref().map(|(f, l)| (f.as_str(), l.as_str())),
+        snapshot.identity.as_ref().map(|(f, l)| (f.as_str(), l.as_str())),
+    );
+    let cmp = commands::diff::compare(identity, old_text, &snapshot.text);
     let body = if report.budget == 0 {
         cmp.text.clone()
     } else {
@@ -805,6 +827,7 @@ pub async fn attach_change_report(
                     "moved": cmp.moved,
                     "anonymous": cmp.anonymous,
                 "document_changed": cmp.document_changed,
+                    "identity_known": cmp.identity_known,
             }),
         );
         obj.insert("delta".into(), json!(body));
@@ -820,6 +843,9 @@ pub async fn attach_change_report(
         page.uid_map = snapshot.uid_map;
         page.last_snapshot = Some(snapshot.text);
         page.last_snapshot_url = Some(snapshot.url);
+            let (f, l) = snapshot.identity.map_or((None, None), |(f, l)| (Some(f), Some(l)));
+            page.last_snapshot_frame = f;
+            page.last_snapshot_loader = l;
     }
 }
 

@@ -15,6 +15,36 @@ pub struct Snapshot {
     /// the document it came from. `diff` uses this to refuse comparing across a
     /// navigation, where matching uids would pair unrelated nodes.
     pub url: String,
+    /// `(frameId, loaderId)` of the document. The loader id changes on every document
+    /// load and only then, which is what the URL could never express: it stays put across
+    /// a reload and moves on a fragment jump.
+    pub identity: Option<(String, String)>,
+}
+
+/// Read `(frameId, loaderId)` for the frame we are acting in.
+///
+/// `Page.getFrameTree` rather than an event subscription: `CdpClient::events()` is a
+/// broadcast that only delivers messages received after subscribing, and several commands
+/// never subscribe at all, so an event-derived identity would be blind for them.
+pub async fn document_identity(client: &CdpClient) -> Option<(String, String)> {
+    let tree: serde_json::Value = client.call("Page.getFrameTree", serde_json::json!({})).await.ok()?;
+    let root = tree.get("frameTree")?;
+    let wanted = client.frame_context().map(|c| c.frame_id);
+    find_frame(root, wanted.as_deref())
+}
+
+/// Walk the frame tree for the bound frame, falling back to the root.
+fn find_frame(node: &serde_json::Value, wanted: Option<&str>) -> Option<(String, String)> {
+    let frame = node.get("frame")?;
+    let id = frame.get("id")?.as_str()?.to_string();
+    let loader = frame.get("loaderId")?.as_str()?.to_string();
+    if wanted.is_none_or(|w| w == id) {
+        return Some((id, loader));
+    }
+    node.get("childFrames")?
+        .as_array()?
+        .iter()
+        .find_map(|child| find_frame(child, wanted))
 }
 
 /// Read `location.href`. `Runtime.evaluate` works without `Runtime.enable`, so this
@@ -75,8 +105,9 @@ pub async fn take_snapshot(
 
     let (text, uid_map) = format_ax_tree(&result.nodes, verbose, max_depth, focus_uid, role_filter);
     let url = document_url(client).await;
+    let identity = document_identity(client).await;
 
-    Ok(Snapshot { text, uid_map, url })
+    Ok(Snapshot { text, uid_map, url, identity })
 }
 
 /// Format `AXNode` list into indented text + uid map.

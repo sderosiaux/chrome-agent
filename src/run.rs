@@ -476,12 +476,12 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
                 commands::extract::scroll_to_load(&client).await?;
             }
             let role_filter: Option<Vec<&str>> = filter.as_deref().map(|f| f.split(',').map(str::trim).collect());
-            let (mut text, uid_map, doc_url) = if let Some(max) = limit {
+            let (mut text, uid_map, doc_url, doc_identity) = if let Some(max) = limit {
                 let result = commands::inspect::scroll_collect(&client, verbose, uid.as_deref(), role_filter.as_deref(), max).await?;
-                (result.text, result.uid_map, result.url)
+                (result.text, result.uid_map, result.url, result.identity)
             } else {
                 let s = commands::inspect::run(&client, verbose, max_depth, uid.as_deref(), role_filter.as_deref()).await?;
-                (s.text, s.uid_map, s.url)
+                (s.text, s.uid_map, s.url, s.identity)
             };
             if urls {
                 text = commands::inspect::resolve_urls(&client, &text, &uid_map).await;
@@ -493,6 +493,9 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
                 page.uid_map = uid_map;
                 page.last_snapshot = Some(text.clone());
                 page.last_snapshot_url = Some(doc_url);
+                let (f, l) = doc_identity.map_or((None, None), |(f, l)| (Some(f), Some(l)));
+                page.last_snapshot_frame = f;
+                page.last_snapshot_loader = l;
             }
             let paged = commands::inspect::paginate(&text, offset, max_chars);
             if json_mode {
@@ -516,20 +519,29 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
             let old_text = page_state
                 .and_then(|p| p.last_snapshot.clone())
                 .ok_or("No previous snapshot. Run 'chrome-agent inspect' first.")?;
-            let old_url = page_state.and_then(|p| p.last_snapshot_url.clone());
+            let stored = page_state.and_then(|p| {
+                p.last_snapshot_frame.clone().zip(p.last_snapshot_loader.clone())
+            });
             let snapshot = commands::inspect::run(&client, false, None, None, None).await?;
-            let result =
-                commands::diff::compare(old_url.as_deref(), &old_text, &snapshot.url, &snapshot.text);
+            let identity = commands::diff::Identity::from_loader(
+                stored.as_ref().map(|(f, l)| (f.as_str(), l.as_str())),
+                snapshot.identity.as_ref().map(|(f, l)| (f.as_str(), l.as_str())),
+            );
+            let result = commands::diff::compare(identity, &old_text, &snapshot.text);
             if let Some(browser_s) = store.browsers.get_mut(&cli.browser) {
                 let page = session::ensure_page(browser_s, &cli.page, &target_id);
                 page.last_snapshot = Some(snapshot.text);
                 page.last_snapshot_url = Some(snapshot.url);
+            let (f, l) = snapshot.identity.map_or((None, None), |(f, l)| (Some(f), Some(l)));
+            page.last_snapshot_frame = f;
+            page.last_snapshot_loader = l;
                 page.uid_map = snapshot.uid_map;
             }
             if json_mode {
                 let mut obj = json!({
                     "ok": true,
                     "document_changed": result.document_changed,
+                    "identity_known": result.identity_known,
                     "added": result.added,
                     "removed": result.removed,
                     "changed": result.changed,

@@ -207,7 +207,11 @@ async fn dispatch(
             .browsers
             .get(browser_name)
             .and_then(|b| b.pages.get(page_name))
-            .and_then(|p| p.last_snapshot.clone().map(|t| (t, p.last_snapshot_url.clone())))
+            .and_then(|p| {
+                p.last_snapshot
+                    .clone()
+                    .map(|t| (t, p.last_snapshot_frame.clone().zip(p.last_snapshot_loader.clone())))
+            })
     } else {
         None
     };
@@ -273,7 +277,7 @@ async fn dispatch(
     if let Some((old_text, old_url)) = baseline {
         crate::pipe_dispatch::attach_change_report(
             client, store, browser_name, page_name, target_id, report, &old_text,
-            old_url.as_deref(), &mut value,
+            old_url, &mut value,
         )
         .await;
     }

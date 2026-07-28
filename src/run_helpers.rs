@@ -115,14 +115,18 @@ pub async fn output_action(
                 .browsers
                 .get(browser_name)
                 .and_then(|b| b.pages.get(page_name))
-                .map(|p| (p.last_snapshot.clone(), p.last_snapshot_url.clone()));
-            if let Some((Some(old_text), old_url)) = previous {
-                let cmp = commands::diff::compare(
-                    old_url.as_deref(),
-                    &old_text,
-                    &snapshot.url,
-                    &snapshot.text,
+                .map(|p| {
+                    (
+                        p.last_snapshot.clone(),
+                        p.last_snapshot_frame.clone().zip(p.last_snapshot_loader.clone()),
+                    )
+                });
+            if let Some((Some(old_text), stored)) = previous {
+                let identity = commands::diff::Identity::from_loader(
+                    stored.as_ref().map(|(f, l)| (f.as_str(), l.as_str())),
+                    snapshot.identity.as_ref().map(|(f, l)| (f.as_str(), l.as_str())),
                 );
+                let cmp = commands::diff::compare(identity, &old_text, &snapshot.text);
                 let body = if report.budget == 0 {
                     cmp.text.clone()
                 } else {
@@ -141,6 +145,7 @@ pub async fn output_action(
                     "moved": cmp.moved,
                     "anonymous": cmp.anonymous,
                     "document_changed": cmp.document_changed,
+                    "identity_known": cmp.identity_known,
                 });
                 obj["delta"] = json!(body);
                 if cmp.focus_from.is_some() || cmp.focus_to.is_some() {
@@ -162,6 +167,9 @@ pub async fn output_action(
             let page = session::ensure_page(browser_s, page_name, target_id);
             page.last_snapshot = Some(snapshot.text);
             page.last_snapshot_url = Some(snapshot.url);
+            let (f, l) = snapshot.identity.map_or((None, None), |(f, l)| (Some(f), Some(l)));
+            page.last_snapshot_frame = f;
+            page.last_snapshot_loader = l;
             page.uid_map = snapshot.uid_map;
         }
     }
@@ -211,6 +219,9 @@ pub async fn output_goto(
             obj["snapshot"] = json!(snapshot.text);
             page.last_snapshot = Some(snapshot.text);
             page.last_snapshot_url = Some(snapshot.url);
+            let (f, l) = snapshot.identity.map_or((None, None), |(f, l)| (Some(f), Some(l)));
+            page.last_snapshot_frame = f;
+            page.last_snapshot_loader = l;
             page.uid_map = snapshot.uid_map;
         }
         json_output(&obj);
@@ -225,6 +236,9 @@ pub async fn output_goto(
             println!("{}", snapshot.text);
             page.last_snapshot = Some(snapshot.text);
             page.last_snapshot_url = Some(snapshot.url);
+            let (f, l) = snapshot.identity.map_or((None, None), |(f, l)| (Some(f), Some(l)));
+            page.last_snapshot_frame = f;
+            page.last_snapshot_loader = l;
             page.uid_map = snapshot.uid_map;
         }
     }
