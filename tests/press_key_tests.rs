@@ -136,7 +136,7 @@ fn punctuation_types_instead_of_deleting() {
     );
 }
 
-/// `Input.insertText` goes to whatever holds focus. With focus on BODY it goes nowhere,
+/// ``Input.insertText` goes to whatever holds focus. With focus on BODY it goes nowhere,
 /// and the message was built from the request rather than from the page.
 #[test]
 fn typing_with_nothing_focused_is_refused() {
