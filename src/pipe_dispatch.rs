@@ -798,7 +798,7 @@ pub async fn attach_change_report(
     stored: Option<(String, String)>,
     out: &mut Value,
 ) {
-    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    crate::snapshot::settle(client, 100, 1000).await;
     let Ok(snapshot) = commands::inspect::run(client, false, None, None, None).await else {
         return;
     };

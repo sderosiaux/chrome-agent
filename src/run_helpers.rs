@@ -139,8 +139,9 @@ pub async fn output_action_with(
     let mut trailer = String::new();
 
     if report.inspect || report.changes {
-        // Give a click or a fill a moment to land before reading the page back.
-        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        // Wait for the page to stop reacting rather than for a fixed guess: a page that
+        // does nothing costs a quiet window, one that renders late is still caught.
+        crate::snapshot::settle(client, 100, 1000).await;
         let snapshot = commands::inspect::run(client, false, report.max_depth, None, None).await?;
 
         if report.changes {
