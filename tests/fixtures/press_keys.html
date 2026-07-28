@@ -1,0 +1,15 @@
+<!DOCTYPE html>
+<html>
+<head><title>Key events</title></head>
+<body>
+<!-- Records the key names the page actually receives, so a command that reports success
+     while sending nothing meaningful is visible. -->
+<input id="i">
+<div id="log"></div>
+<script>
+  document.getElementById('i').addEventListener('keydown', function (e) {
+    document.getElementById('log').textContent += '[' + e.key + ']';
+  });
+</script>
+</body>
+</html>

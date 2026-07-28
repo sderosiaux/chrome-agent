@@ -309,7 +309,38 @@ pub async fn press_key(
         "ArrowLeft" => (37, None),
         "ArrowRight" => (39, None),
         "Space" | " " => (32, Some(" ")),
-        _ => (0, None),
+        "Home" => (36, None),
+        "End" => (35, None),
+        "PageUp" => (33, None),
+        "PageDown" => (34, None),
+        "Insert" => (45, None),
+        "F1" => (112, None),
+        "F2" => (113, None),
+        "F3" => (114, None),
+        "F4" => (115, None),
+        "F5" => (116, None),
+        "F6" => (117, None),
+        "F7" => (118, None),
+        "F8" => (119, None),
+        "F9" => (120, None),
+        "F10" => (121, None),
+        "F11" => (122, None),
+        "F12" => (123, None),
+        // A single printable character types itself. Without `text` the page sees a keydown
+        // and nothing is inserted, so `press a` reported success and typed nothing.
+        _ if key.chars().count() == 1 => {
+            let ch = key.chars().next().unwrap_or(' ');
+            (u32::from(ch.to_ascii_uppercase() as u8), Some(key))
+        }
+        // Anything else would go out with virtual key code 0, which no handler reads as a
+        // key. Saying so beats reporting success for an event that means nothing.
+        other => {
+            return Err(ElementError::Action(format!(
+                "Unknown key '{other}'. Use a single character, or one of: Enter, Tab, Escape, \
+                 Backspace, Delete, Space, Home, End, PageUp, PageDown, Insert, \
+                 ArrowUp/Down/Left/Right, F1-F12."
+            )));
+        }
     };
 
     // keyDown (with virtual key code for proper event dispatch)
