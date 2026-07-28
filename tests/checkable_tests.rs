@@ -146,6 +146,12 @@ fn unchecking_a_radio_is_refused() {
     let v: Value = serde_json::from_str(&out).unwrap_or(Value::Null);
     assert_ne!(code, 0, "unchecking a radio should fail, got: {v}");
     assert_eq!(eval(b.0, "document.getElementById('radio').checked"), "true", "still checked: {v}");
+    // The refusal has to come from the guard that knows why, not from the read-back
+    // noticing afterwards that the click failed to do anything.
+    assert!(
+        v["error"].as_str().unwrap_or_default().contains("radio cannot be unchecked"),
+        "the reason must name the real constraint, not just report the click did nothing: {v}"
+    );
 }
 
 /// Native checkboxes must keep working, both directions.

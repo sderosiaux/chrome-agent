@@ -159,7 +159,36 @@ fn count_moved(old_lines: &[(&str, &str)], new_lines: &[(&str, &str)]) -> usize 
     old_order.iter().zip(&new_order).filter(|(a, b)| a != b).count()
 }
 
+/// Whether the live page is the same document the stored snapshot came from.
+///
+/// Tri-state on purpose. The URL comparison this replaces had no way to say "I don't know",
+/// so an unreadable signal took the confident branch and diffed two unrelated uid spaces.
+/// A URL is also the wrong signal twice over: it changes on a fragment jump and on
+/// `history.pushState` where the document and every uid survive, and it stays put across a
+/// reload or a form GET back to the same address where nothing survives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Identity {
+    /// Same frame, same loader: uids from the stored snapshot still refer to the same nodes.
+    Same,
+    /// The document was replaced. Every stored uid is dead.
+    Different,
+    /// We could not read it. Treated as "cannot diff", never as "same".
+    Unknown,
+}
+
+impl Identity {
+    /// Build from the stored and live `(frame_id, loader_id)` pairs.
+    pub fn from_loader(stored: Option<(&str, &str)>, live: Option<(&str, &str)>) -> Self {
+        match (stored, live) {
+            (Some(a), Some(b)) if a == b => Self::Same,
+            (Some(_), Some(_)) => Self::Different,
+            _ => Self::Unknown,
+        }
+    }
+}
+
 /// Outcome of comparing the stored snapshot against the live page.
+#[derive(Debug)]
 pub struct Comparison {
     /// Diff text, or the fresh snapshot when the document changed under us.
     pub text: String,
@@ -173,11 +202,14 @@ pub struct Comparison {
     pub focus_to: Option<String>,
     /// True when the live page is a different document from the stored snapshot.
     pub document_changed: bool,
+    /// False when we could not establish which document we are looking at.
+    pub identity_known: bool,
     /// What the agent should do next, when that isn't obvious.
     pub hint: Option<&'static str>,
 }
 
-/// Compare a stored snapshot against a fresh one, refusing to diff across documents.
+/// Compare a stored snapshot against a fresh one, refusing to diff unless we know the
+/// document is the same one.
 ///
 /// uids are Chrome `backendNodeId`s, and those counters overlap between documents. Diffing
 /// two different pages therefore pairs unrelated nodes that happen to share a uid and
@@ -185,15 +217,13 @@ pub struct Comparison {
 /// and cost more tokens than simply re-reading the destination page. So when the document
 /// changed, return the new snapshot and say so instead of pretending to diff.
 ///
-/// An empty `old_url` means the snapshot predates URL tracking; we diff as before rather
-/// than claim a change we cannot substantiate.
-pub fn compare(old_url: Option<&str>, old_text: &str, new_url: &str, new_text: &str) -> Comparison {
-    let changed_document = match old_url {
-        Some(old) if !old.is_empty() && !new_url.is_empty() => old != new_url,
-        _ => false,
-    };
-
-    if changed_document {
+pub fn compare(identity: Identity, old_text: &str, new_text: &str) -> Comparison {
+    if identity != Identity::Same {
+        let hint = if identity == Identity::Different {
+            "The page navigated, so uids from the previous snapshot no longer refer to anything. This is the new page; act on these uids."
+        } else {
+            "Could not read which document this is, so the previous snapshot cannot be compared against it. This is the page as it stands; act on these uids."
+        };
         return Comparison {
             text: new_text.to_string(),
             added: 0,
@@ -204,8 +234,9 @@ pub fn compare(old_url: Option<&str>, old_text: &str, new_url: &str, new_text: &
             anonymous: 0,
             focus_from: None,
             focus_to: None,
-            document_changed: true,
-            hint: Some("The page navigated, so uids from the previous snapshot no longer refer to anything. This is the new page; act on these uids."),
+            document_changed: identity == Identity::Different,
+            identity_known: identity != Identity::Unknown,
+            hint: Some(hint),
         };
     }
 
@@ -221,6 +252,7 @@ pub fn compare(old_url: Option<&str>, old_text: &str, new_url: &str, new_text: &
         focus_from: diff.focus_from,
         focus_to: diff.focus_to,
         document_changed: false,
+        identity_known: true,
         hint: None,
     }
 }
@@ -391,6 +423,42 @@ mod tests {
         assert_eq!(line, "~ uid=n3 button \"Save\" -> uid=n3 link \"Cancel\"");
     }
 
+    /// An identity we could not read must not be reported as "same document". uids are only
+    /// comparable within one document, so guessing wrong here fabricates a diff between two
+    /// unrelated pages — the exact failure the URL check was added to prevent.
+    #[test]
+    fn an_unreadable_identity_does_not_claim_the_document_is_the_same() {
+        let old = "uid=n1 heading \"Old\"\n";
+        let new = "uid=n1 heading \"New\"\n";
+        let c = compare(Identity::Unknown, old, new);
+        assert!(!c.identity_known, "we could not tell: {c:?}");
+        assert_eq!(c.changed, 0, "so nothing may be reported as changed: {}", c.text);
+        assert_eq!(c.text, new, "the caller gets the page instead of a guess");
+        assert!(c.hint.is_some(), "and is told why");
+    }
+
+    /// The ordinary path is unaffected.
+    #[test]
+    fn a_same_document_identity_still_diffs() {
+        let old = "uid=n1 heading \"Old\"\n";
+        let new = "uid=n1 heading \"New\"\n";
+        let c = compare(Identity::Same, old, new);
+        assert!(c.identity_known);
+        assert!(!c.document_changed);
+        assert_eq!(c.changed, 1, "{}", c.text);
+    }
+
+    /// Same URL, different document: a reload, or a form GET that lands back on itself.
+    /// The URL comparison called these "same" and diffed two unrelated uid spaces.
+    #[test]
+    fn a_reload_to_the_same_url_is_a_different_document() {
+        let old = "uid=n1 heading \"Before\"\n";
+        let new = "uid=n1 heading \"After\"\n";
+        let c = compare(Identity::Different, old, new);
+        assert!(c.document_changed);
+        assert_eq!((c.added, c.removed, c.changed), (0, 0, 0));
+    }
+
     /// When the document changed, `text` carries a whole snapshot rather than a diff.
     /// Accessibility names go in unescaped (snapshot.rs writes `name` raw), so a name
     /// containing a newline puts a line starting with "- " into that payload. Counts are
@@ -399,7 +467,7 @@ mod tests {
     fn a_changed_document_reports_no_edits_whatever_the_snapshot_contains() {
         let old = "uid=n1 heading \"Old page\"\n";
         let new = "uid=n1 heading \"Save\n- and exit\"\nuid=n2 button \"Go\"\n";
-        let c = compare(Some("https://a.example"), old, "https://b.example", new);
+        let c = compare(Identity::Different, old, new);
         assert!(c.document_changed);
         assert_eq!((c.added, c.removed, c.changed), (0, 0, 0), "no edit can be claimed across documents");
         assert_eq!(c.text, new, "the caller gets the destination page");

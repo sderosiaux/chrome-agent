@@ -86,6 +86,29 @@ impl ReportPolicy {
     }
 }
 
+/// What a fill put in, and what the page kept. Emitted on every fill so a value that was
+/// reformatted, truncated or rejected is visible rather than hidden behind "Filled".
+pub fn fill_value_report(outcome: &crate::element::FillOutcome) -> serde_json::Value {
+    let mut v = if outcome.sensitive {
+        json!({
+            "redacted": true,
+            "requested_length": outcome.requested.chars().count(),
+            "actual_length": outcome.actual.as_ref().map(|a| a.chars().count()),
+            "verbatim": outcome.verbatim(),
+        })
+    } else {
+        json!({
+            "requested": outcome.requested,
+            "actual": outcome.actual,
+            "verbatim": outcome.verbatim(),
+        })
+    };
+    if let Some(caveat) = &outcome.caveat {
+        v["caveat"] = json!(caveat);
+    }
+    v
+}
+
 /// Execute a command, report what it did to the page, and persist the new baseline.
 ///
 /// By default an action now answers "what changed", not just "what I was asked to do".
@@ -102,27 +125,54 @@ pub async fn output_action(
     report: &ActionReport,
     json_mode: bool,
 ) -> Result<(), crate::BoxError> {
+    output_action_with(client, store, browser_name, page_name, target_id, msg, report, json_mode, None).await
+}
+
+/// `output_action` plus the value a fill left behind.
+#[allow(clippy::too_many_arguments)]
+pub async fn output_action_with(
+    client: &CdpClient,
+    store: &mut SessionStore,
+    browser_name: &str,
+    page_name: &str,
+    target_id: &str,
+    msg: String,
+    report: &ActionReport,
+    json_mode: bool,
+    fill: Option<&crate::element::FillOutcome>,
+) -> Result<(), crate::BoxError> {
     let mut obj = json!({"ok": true, "message": msg});
+    if let Some(outcome) = fill {
+        obj["value"] = fill_value_report(outcome);
+    }
     let mut trailer = String::new();
 
     if report.inspect || report.changes {
-        // Give a click or a fill a moment to land before reading the page back.
-        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-        let snapshot = commands::inspect::run(client, false, report.max_depth, None, None).await?;
+        // Wait for the page to stop reacting rather than for a fixed guess: a page that
+        // does nothing costs a quiet window, one that renders late is still caught.
+        crate::snapshot::settle(client, 100, 1000).await;
+        // The baseline is always full depth. Storing a `--max-depth` view would make the
+        // next comparison read every node the limit cut off as newly added: verified, an
+        // action with `--max-depth 1` then a plain `diff` invented additions.
+        let snapshot = commands::inspect::run(client, false, None, None, None).await?;
 
         if report.changes {
             let previous = store
                 .browsers
                 .get(browser_name)
                 .and_then(|b| b.pages.get(page_name))
-                .map(|p| (p.last_snapshot.clone(), p.last_snapshot_url.clone()));
-            if let Some((Some(old_text), old_url)) = previous {
-                let cmp = commands::diff::compare(
-                    old_url.as_deref(),
-                    &old_text,
-                    &snapshot.url,
-                    &snapshot.text,
+                .map(|p| {
+                    (
+                        p.last_snapshot.clone(),
+                        p.last_snapshot_frame.clone().zip(p.last_snapshot_loader.clone()),
+                    )
+                });
+            if let Some((Some(old_text), stored)) = previous {
+                let identity = commands::diff::Identity::from_loader(
+                    stored.as_ref().map(|(f, l)| (f.as_str(), l.as_str())),
+                    snapshot.identity.as_ref().map(|(f, l)| (f.as_str(), l.as_str())),
                 );
+                let cmp = commands::diff::compare(identity, &old_text, &snapshot.text);
                 let body = if report.budget == 0 {
                     cmp.text.clone()
                 } else {
@@ -141,6 +191,7 @@ pub async fn output_action(
                     "moved": cmp.moved,
                     "anonymous": cmp.anonymous,
                     "document_changed": cmp.document_changed,
+                    "identity_known": cmp.identity_known,
                 });
                 obj["delta"] = json!(body);
                 if cmp.focus_from.is_some() || cmp.focus_to.is_some() {
@@ -154,14 +205,25 @@ pub async fn output_action(
         }
 
         if report.inspect {
-            obj["snapshot"] = json!(snapshot.text);
-            trailer.clone_from(&snapshot.text);
+            // The caller asked to see the tree at their depth; the baseline above stays
+            // full so the two never get confused.
+            let shown = if report.max_depth.is_some() {
+                commands::inspect::run(client, false, report.max_depth, None, None)
+                    .await
+                    .map_or_else(|_| snapshot.text.clone(), |s| s.text)
+            } else {
+                snapshot.text.clone()
+            };
+            obj["snapshot"] = json!(shown);
+            trailer.clone_from(&shown);
         }
 
         if let Some(browser_s) = store.browsers.get_mut(browser_name) {
             let page = session::ensure_page(browser_s, page_name, target_id);
             page.last_snapshot = Some(snapshot.text);
-            page.last_snapshot_url = Some(snapshot.url);
+            let (f, l) = snapshot.identity.map_or((None, None), |(f, l)| (Some(f), Some(l)));
+            page.last_snapshot_frame = f;
+            page.last_snapshot_loader = l;
             page.uid_map = snapshot.uid_map;
         }
     }
@@ -210,7 +272,9 @@ pub async fn output_goto(
             let snapshot = commands::inspect::run(client, false, max_depth, None, None).await?;
             obj["snapshot"] = json!(snapshot.text);
             page.last_snapshot = Some(snapshot.text);
-            page.last_snapshot_url = Some(snapshot.url);
+            let (f, l) = snapshot.identity.map_or((None, None), |(f, l)| (Some(f), Some(l)));
+            page.last_snapshot_frame = f;
+            page.last_snapshot_loader = l;
             page.uid_map = snapshot.uid_map;
         }
         json_output(&obj);
@@ -224,7 +288,9 @@ pub async fn output_goto(
             let snapshot = commands::inspect::run(client, false, max_depth, None, None).await?;
             println!("{}", snapshot.text);
             page.last_snapshot = Some(snapshot.text);
-            page.last_snapshot_url = Some(snapshot.url);
+            let (f, l) = snapshot.identity.map_or((None, None), |(f, l)| (Some(f), Some(l)));
+            page.last_snapshot_frame = f;
+            page.last_snapshot_loader = l;
             page.uid_map = snapshot.uid_map;
         }
     }

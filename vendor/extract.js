@@ -187,6 +187,31 @@ function extract(_scope, _limit) {
   candidates.sort((a, b) => b.score - a.score);
   const best = candidates[0];
 
+  // A page can hold two lists that both look like data: products and posts, results and
+  // related items. We return the higher-scoring one, and when the runner-up is close and
+  // covers different nodes, the caller has to be told — otherwise it silently receives one
+  // of two plausible answers with no way to know a choice was made.
+  function selectorFor(el) {
+    if (!el || !el.tagName) return null;
+    if (el.id) return '#' + el.id;
+    const cls = [...(el.classList || [])].filter(c => !/\d/.test(c));
+    if (cls.length) return el.tagName.toLowerCase() + '.' + cls[0];
+    return el.tagName.toLowerCase();
+  }
+
+  const bestNodes = new Set(best.elements);
+  const alternatives = [];
+  for (const c of candidates.slice(1)) {
+    if (c.score < best.score * 0.6) break;
+    const overlaps = c.elements.some(e => bestNodes.has(e));
+    if (overlaps) continue;
+    const sel = selectorFor(c.parent);
+    if (sel && !alternatives.some(a => a.selector === sel)) {
+      alternatives.push({ selector: sel, count: c.elements.length });
+    }
+    if (alternatives.length >= 3) break;
+  }
+
   // Helper: check if element or ancestor is sr-only/visually-hidden
   function isSrOnly(el) {
     const cl = el.className || '';
@@ -282,7 +307,13 @@ function extract(_scope, _limit) {
   let patternClasses = patternParts[1] || '';
   if (patternClasses.length > 40) patternClasses = patternClasses.substring(0, 40) + '...';
   const patternLabel = patternParts[0] + (patternClasses ? '.' + patternClasses : '');
-  return JSON.stringify({ items: nonEmpty, count: meaningfulElements.length, pattern: patternLabel });
+  const out = { items: nonEmpty, count: meaningfulElements.length, pattern: patternLabel };
+  if (alternatives.length) {
+    out.alternatives = alternatives;
+    out.hint = 'More than one repeating pattern on this page. Scope with --selector ' +
+      alternatives.map(a => '"' + a.selector + '"').join(' or ') + ' to pick a different one.';
+  }
+  return JSON.stringify(out);
 }
 
 if (typeof module !== 'undefined') module.exports = extract;

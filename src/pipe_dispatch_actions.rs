@@ -43,9 +43,16 @@ pub async fn dispatch_fill_and_submit(client: &CdpClient, timeout: u64, cmd: &Va
         let wait_type = if is_selector { "selector" } else { "text" };
         commands::wait::run(client, wait_type, pattern, timeout, 500).await?;
     }
-    let read_result = commands::read::run(client, false, None).await?;
+    // Best effort: Readability rejects plenty of legitimate pages, and the fill and the
+    // submit have already landed. Failing the whole command there tells an agent its
+    // mutation did not happen, and the natural response to that is to submit again.
     let message = format!("Filled {field_count} fields, submitted, waited for '{}'", wait_for.unwrap_or("none"));
-    Ok(json!({"ok": true, "message": message, "content": read_result.text_content}))
+    let mut out = json!({"ok": true, "message": message});
+    match commands::read::run(client, false, None).await {
+        Ok(read_result) => out["content"] = json!(read_result.text_content),
+        Err(e) => out["read_error"] = json!(e.to_string()),
+    }
+    Ok(out)
 }
 
 pub fn dispatch_history(cmd: &Value) -> Result<Value, crate::BoxError> {

@@ -196,7 +196,9 @@ Error:   {"ok":false, "error":"message", "hint":"what to do next"}
 Per-command shapes:
 - `goto --inspect` → `{"ok":true, "url":"...", "title":"...", "snapshot":"uid=n1..."}`
 - `inspect` → `{"ok":true, "snapshot":"uid=n1 heading..."}`
-- `click/fill/select/check` → `{"ok":true, "message":"Clicked uid=n12", "changed":{"added":1,"removed":0,"changed":0,"unchanged":42,"document_changed":false}, "delta":"+ uid=n88 heading \"Saved\""}`
+- `click/fill/select/check` → `{"ok":true, "message":"Clicked uid=n12", "changed":{"added":1,"removed":0,"changed":0,"unchanged":42,"moved":0,"anonymous":0,"document_changed":false,"identity_known":true}, "delta":"+ uid=n88 heading \"Saved\""}`
+- `fill` also returns `"value":{"requested":"...","actual":"...","verbatim":true|false}` — what you asked for and what the page kept. `verbatim:false` means a mask, a controlled component or a constraint rewrote it; read `actual` before assuming the form holds your value.
+- `focus` appears as `{"from":"n11","to":"n15"}` when focus moved. It is deliberately not counted as a content change.
 - `click/fill/select/check --inspect` → the same, plus `"snapshot"` with the whole tree
 - `click/fill/select/check --verdict off` → `{"ok":true, "message":"Clicked uid=n12"}`
 - `read` → `{"ok":true, "title":"...", "text":"article content..."}`
@@ -231,7 +233,10 @@ An inspect of a typical page is ~50-200 tokens. To stay lean:
 9. **Use --filter** to find elements fast: `inspect --filter "button,link,textbox"`.
 10. **Use --urls** on inspect to get link destinations: `inspect --filter "link" --urls`.
 11. **check/uncheck are idempotent** — "Already checked" if no change needed. Prefer over click for checkboxes.
-12. **select works by value or text** — `select --uid n5 "Option 2"` tries `option.value` first, then `option.text`.
+12. **check/uncheck refuse what they cannot check** — a text input, a custom dropdown, or unchecking a radio all return `ok:false` with the reason, instead of reporting success. They also read the state back after clicking.
+13. **fill tells you what the page kept** — check `value.verbatim`. A phone mask, a currency field or a `maxlength` will change what you wrote, and the form may reject it.
+14. **press types single characters** — `press a` inserts "a". An unknown key name is refused rather than silently doing nothing.
+15. **select works by value or text** — `select --uid n5 "Option 2"` tries `option.value` first, then `option.text`.
 13. **frame is pipe/batch-only** — `frame` scopes `eval`+`inspect` to the iframe, but the binding lives on the connection, so it only persists inside one `pipe`/`batch` process (not across separate CLI calls). After switching, `inspect` for iframe uids then act by uid; `--selector` still hits the top document. `frame main` returns.
 14. **batch for multi-step sequences** — pipe JSON array to stdin. Faster than separate CLI calls. UIDs from inspect are valid within the same batch.
 15. **close --purge** deletes browser profile (cookies, cache) when done.

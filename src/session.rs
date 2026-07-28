@@ -54,8 +54,13 @@ pub struct PageSession {
     /// Document `last_snapshot` was taken from. uids are `backendNodeId`s and those
     /// counters overlap between documents, so `diff` needs this to tell "the page
     /// changed under me" from "I am looking at a different page entirely".
+    /// `(frameId, loaderId)` of the document `last_snapshot` was taken from. The loader id
+    /// is the only signal that moves exactly when the document is replaced; a URL moves on
+    /// a fragment jump and stays put across a reload.
     #[serde(default)]
-    pub last_snapshot_url: Option<String>,
+    pub last_snapshot_frame: Option<String>,
+    #[serde(default)]
+    pub last_snapshot_loader: Option<String>,
 }
 
 /// Load the session store from disk. Returns empty store if file doesn't exist.
@@ -296,7 +301,8 @@ pub fn ensure_page<'a>(
             target_id: target_id.to_string(),
             uid_map: HashMap::new(),
             last_snapshot: None,
-            last_snapshot_url: None,
+            last_snapshot_frame: None,
+            last_snapshot_loader: None,
         })
 }
 

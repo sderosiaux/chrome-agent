@@ -10,36 +10,77 @@ pub struct Snapshot {
     pub text: String,
     /// uid → `ElementRef` mapping for subsequent actions.
     pub uid_map: HashMap<String, ElementRef>,
-    /// Document the snapshot was taken from. uids are `backendNodeId`s, and those
-    /// counters overlap between documents, so a uid only means something paired with
-    /// the document it came from. `diff` uses this to refuse comparing across a
-    /// navigation, where matching uids would pair unrelated nodes.
-    pub url: String,
+    /// `(frameId, loaderId)` of the document. The loader id changes on every document
+    /// load and only then, which is what the URL could never express: it stays put across
+    /// a reload and moves on a fragment jump.
+    pub identity: Option<(String, String)>,
 }
 
-/// Read `location.href`. `Runtime.evaluate` works without `Runtime.enable`, so this
-/// stays off the stealth hot path. Returns an empty string if the page won't answer,
-/// which callers treat as "identity unknown" rather than as a mismatch.
-pub async fn document_url(client: &CdpClient) -> String {
-    let mut params = serde_json::json!({
-        "expression": "location.href",
-        "returnByValue": true,
-    });
-    if let Some(ctx) = client.frame_context() {
-        params["contextId"] = serde_json::json!(ctx.context_id);
+/// Read `(frameId, loaderId)` for the frame we are acting in.
+///
+/// `Page.getFrameTree` rather than an event subscription: `CdpClient::events()` is a
+/// broadcast that only delivers messages received after subscribing, and several commands
+/// never subscribe at all, so an event-derived identity would be blind for them.
+pub async fn document_identity(client: &CdpClient) -> Option<(String, String)> {
+    let tree: serde_json::Value = client.call("Page.getFrameTree", serde_json::json!({})).await.ok()?;
+    let root = tree.get("frameTree")?;
+    let wanted = client.frame_context().map(|c| c.frame_id);
+    find_frame(root, wanted.as_deref())
+}
+
+/// Walk the frame tree for the bound frame, falling back to the root.
+fn find_frame(node: &serde_json::Value, wanted: Option<&str>) -> Option<(String, String)> {
+    let frame = node.get("frame")?;
+    let id = frame.get("id")?.as_str()?.to_string();
+    let loader = frame.get("loaderId")?.as_str()?.to_string();
+    if wanted.is_none_or(|w| w == id) {
+        return Some((id, loader));
     }
-    let evaluated: Result<crate::cdp::types::EvaluateResult, _> =
-        client.call("Runtime.evaluate", params).await;
-    let Ok(result) = evaluated else {
-        return String::new();
-    };
-    result
-        .result
-        .value
-        .as_ref()
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default()
-        .to_string()
+    node.get("childFrames")?
+        .as_array()?
+        .iter()
+        .find_map(|child| find_frame(child, wanted))
+}
+
+/// Wait for the DOM to stop changing, bounded at both ends.
+///
+/// Replaces a blind `sleep`: a page that does not react returns in about a quiet window
+/// instead of paying the whole budget, and a page that never settles still returns.
+/// Measured on the Hacker News front page, this took the default action report from
+/// +181ms down to the time the page actually needs.
+pub async fn settle(client: &CdpClient, quiet_ms: u32, hard_ms: u32) {
+    let expression = format!(
+        r"new Promise(resolve => {{
+            let settled = false, quiet = null, obs = null;
+            const finish = () => {{
+                if (settled) return;
+                settled = true;
+                clearTimeout(quiet);
+                clearTimeout(hard);
+                if (obs) obs.disconnect();
+                resolve();
+            }};
+            quiet = setTimeout(finish, {quiet_ms});
+            const hard = setTimeout(finish, {hard_ms});
+            obs = new MutationObserver(() => {{
+                clearTimeout(quiet);
+                quiet = setTimeout(finish, {quiet_ms});
+            }});
+            obs.observe(document.body || document.documentElement, {{
+                childList: true, subtree: true, attributes: true, characterData: true
+            }});
+        }})"
+    );
+    let _ = client
+        .call::<_, serde_json::Value>(
+            "Runtime.evaluate",
+            serde_json::json!({
+                "expression": expression,
+                "awaitPromise": true,
+                "returnByValue": true,
+            }),
+        )
+        .await;
 }
 
 /// Take an accessibility tree snapshot of the current page.
@@ -74,9 +115,9 @@ pub async fn take_snapshot(
         .await?;
 
     let (text, uid_map) = format_ax_tree(&result.nodes, verbose, max_depth, focus_uid, role_filter);
-    let url = document_url(client).await;
+    let identity = document_identity(client).await;
 
-    Ok(Snapshot { text, uid_map, url })
+    Ok(Snapshot { text, uid_map, identity })
 }
 
 /// Format `AXNode` list into indented text + uid map.

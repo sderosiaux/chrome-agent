@@ -7,6 +7,12 @@
 use serde_json::json;
 
 use crate::cdp::client::CdpClient;
+
+/// Thrown JS arrives as "Error: message\n    at <anonymous>:3:19". The stack is noise in a
+/// field an agent reads to decide what to do next.
+fn first_line(text: &str) -> String {
+    text.lines().next().unwrap_or(text).trim_start_matches("Error: ").to_string()
+}
 use crate::element::{dblclick_at_coords, wait_for_stabilization, ElementError};
 
 /// Single-click an element matched by a CSS selector via `Runtime.evaluate`.
@@ -103,12 +109,22 @@ pub async fn dblclick_selector(client: &CdpClient, selector: &str) -> Result<(),
     Ok(())
 }
 
-/// Fill an element matched by a CSS selector via `Runtime.evaluate`.
-pub async fn fill_selector(client: &CdpClient, selector: &str, value: &str) -> Result<(), ElementError> {
+/// Fill an element matched by a CSS selector, and report what the page holds afterwards.
+///
+/// Probe, write and read-back happen in one evaluation so all three bind the same node: a
+/// re-render between separate `querySelector` calls would otherwise let them act on
+/// different elements while reporting one result.
+pub async fn fill_selector(
+    client: &CdpClient,
+    selector: &str,
+    value: &str,
+) -> Result<crate::element::FillOutcome, ElementError> {
     let js = format!(
         r"(() => {{
             const el = document.querySelector({sel});
             if (!el) throw new Error('No element matches selector: ' + {sel});
+            if (el.matches(':disabled')) throw new Error('Element is disabled and cannot be filled: ' + {sel});
+            if (el.readOnly) throw new Error('Element is readonly and cannot be filled: ' + {sel});
             el.focus();
             const proto = el instanceof HTMLTextAreaElement
                 ? window.HTMLTextAreaElement.prototype
@@ -121,6 +137,12 @@ pub async fn fill_selector(client: &CdpClient, selector: &str, value: &str) -> R
             }}
             el.dispatchEvent(new Event('input', {{bubbles: true}}));
             el.dispatchEvent(new Event('change', {{bubbles: true}}));
+            return {{
+                value: el.value === undefined ? null : String(el.value),
+                maxLength: typeof el.maxLength === 'number' ? el.maxLength : null,
+                sensitive: el.type === 'password' ||
+                    /password|cc-number|cc-csc|one-time-code/i.test(el.autocomplete || '')
+            }};
         }})()",
         sel = serde_json::to_string(selector).unwrap_or_default(),
         val = serde_json::to_string(value).unwrap_or_default()
@@ -138,11 +160,17 @@ pub async fn fill_selector(client: &CdpClient, selector: &str, value: &str) -> R
             .and_then(|d| d.as_str())
             .or_else(|| exception.get("text").and_then(|t| t.as_str()))
             .unwrap_or("unknown error");
-        return Err(ElementError::Action(text.to_string()));
+        return Err(ElementError::Action(first_line(text)));
     }
 
+    let payload = result.get("result").and_then(|r| r.get("value")).cloned().unwrap_or_default();
+    let actual = payload.get("value").and_then(serde_json::Value::as_str).map(str::to_string);
+    let max_length = payload.get("maxLength").and_then(serde_json::Value::as_i64);
+    let sensitive = payload.get("sensitive").and_then(serde_json::Value::as_bool).unwrap_or(false);
     wait_for_stabilization(nav_events).await;
-    Ok(())
+    Ok(crate::element::FillOutcome::new(value, actual)
+        .with_max_length(max_length)
+        .secret(sensitive))
 }
 
 /// Focus an element matched by a CSS selector via `Runtime.evaluate`.
