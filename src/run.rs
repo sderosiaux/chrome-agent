@@ -476,12 +476,12 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
                 commands::extract::scroll_to_load(&client).await?;
             }
             let role_filter: Option<Vec<&str>> = filter.as_deref().map(|f| f.split(',').map(str::trim).collect());
-            let (mut text, uid_map, doc_url, doc_identity) = if let Some(max) = limit {
+            let (mut text, uid_map, doc_identity) = if let Some(max) = limit {
                 let result = commands::inspect::scroll_collect(&client, verbose, uid.as_deref(), role_filter.as_deref(), max).await?;
-                (result.text, result.uid_map, result.url, result.identity)
+                (result.text, result.uid_map, result.identity)
             } else {
                 let s = commands::inspect::run(&client, verbose, max_depth, uid.as_deref(), role_filter.as_deref()).await?;
-                (s.text, s.uid_map, s.url, s.identity)
+                (s.text, s.uid_map, s.identity)
             };
             if urls {
                 text = commands::inspect::resolve_urls(&client, &text, &uid_map).await;
@@ -492,7 +492,6 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
                 let page = session::ensure_page(browser_s, &cli.page, &target_id);
                 page.uid_map = uid_map;
                 page.last_snapshot = Some(text.clone());
-                page.last_snapshot_url = Some(doc_url);
                 let (f, l) = doc_identity.map_or((None, None), |(f, l)| (Some(f), Some(l)));
                 page.last_snapshot_frame = f;
                 page.last_snapshot_loader = l;
@@ -531,7 +530,6 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
             if let Some(browser_s) = store.browsers.get_mut(&cli.browser) {
                 let page = session::ensure_page(browser_s, &cli.page, &target_id);
                 page.last_snapshot = Some(snapshot.text);
-                page.last_snapshot_url = Some(snapshot.url);
             let (f, l) = snapshot.identity.map_or((None, None), |(f, l)| (Some(f), Some(l)));
             page.last_snapshot_frame = f;
             page.last_snapshot_loader = l;

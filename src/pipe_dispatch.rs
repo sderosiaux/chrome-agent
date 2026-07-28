@@ -148,12 +148,12 @@ pub async fn dispatch_inspect(
     if scroll {
         commands::extract::scroll_to_load(client).await?;
     }
-    let (mut text, uid_map, doc_url, doc_identity) = if let Some(max) = limit {
+    let (mut text, uid_map, doc_identity) = if let Some(max) = limit {
         let result = commands::inspect::scroll_collect(client, verbose, uid, role_filter.as_deref(), max).await?;
-        (result.text, result.uid_map, result.url, result.identity)
+        (result.text, result.uid_map, result.identity)
     } else {
         let s = commands::inspect::run(client, verbose, max_depth, uid, role_filter.as_deref()).await?;
-        (s.text, s.uid_map, s.url, s.identity)
+        (s.text, s.uid_map, s.identity)
     };
     if urls {
         text = commands::inspect::resolve_urls(client, &text, &uid_map).await;
@@ -165,7 +165,6 @@ pub async fn dispatch_inspect(
         let page = session::ensure_page(browser_s, page_name, target_id);
         page.uid_map = uid_map;
         page.last_snapshot = Some(text.clone());
-        page.last_snapshot_url = Some(doc_url);
         let (f, l) = doc_identity.map_or((None, None), |(f, l)| (Some(f), Some(l)));
         page.last_snapshot_frame = f;
         page.last_snapshot_loader = l;
@@ -210,7 +209,6 @@ pub async fn dispatch_diff(
         let page = session::ensure_page(browser_s, page_name, target_id);
         page.uid_map = snapshot.uid_map;
         page.last_snapshot = Some(snapshot.text);
-        page.last_snapshot_url = Some(snapshot.url);
             let (f, l) = snapshot.identity.map_or((None, None), |(f, l)| (Some(f), Some(l)));
             page.last_snapshot_frame = f;
             page.last_snapshot_loader = l;
@@ -535,7 +533,6 @@ pub async fn attach_snapshot(
         let page = session::ensure_page(browser_s, page_name, target_id);
         page.uid_map = snapshot.uid_map;
         page.last_snapshot = Some(snapshot.text.clone());
-        page.last_snapshot_url = Some(snapshot.url.clone());
         let (f, l) = snapshot.identity.clone().map_or((None, None), |(f, l)| (Some(f), Some(l)));
         page.last_snapshot_frame = f;
         page.last_snapshot_loader = l;
@@ -843,7 +840,6 @@ pub async fn attach_change_report(
         let page = session::ensure_page(browser_s, page_name, target_id);
         page.uid_map = snapshot.uid_map;
         page.last_snapshot = Some(snapshot.text);
-        page.last_snapshot_url = Some(snapshot.url);
             let (f, l) = snapshot.identity.map_or((None, None), |(f, l)| (Some(f), Some(l)));
             page.last_snapshot_frame = f;
             page.last_snapshot_loader = l;

@@ -209,7 +209,6 @@ pub async fn output_action_with(
         if let Some(browser_s) = store.browsers.get_mut(browser_name) {
             let page = session::ensure_page(browser_s, page_name, target_id);
             page.last_snapshot = Some(snapshot.text);
-            page.last_snapshot_url = Some(snapshot.url);
             let (f, l) = snapshot.identity.map_or((None, None), |(f, l)| (Some(f), Some(l)));
             page.last_snapshot_frame = f;
             page.last_snapshot_loader = l;
@@ -261,7 +260,6 @@ pub async fn output_goto(
             let snapshot = commands::inspect::run(client, false, max_depth, None, None).await?;
             obj["snapshot"] = json!(snapshot.text);
             page.last_snapshot = Some(snapshot.text);
-            page.last_snapshot_url = Some(snapshot.url);
             let (f, l) = snapshot.identity.map_or((None, None), |(f, l)| (Some(f), Some(l)));
             page.last_snapshot_frame = f;
             page.last_snapshot_loader = l;
@@ -278,7 +276,6 @@ pub async fn output_goto(
             let snapshot = commands::inspect::run(client, false, max_depth, None, None).await?;
             println!("{}", snapshot.text);
             page.last_snapshot = Some(snapshot.text);
-            page.last_snapshot_url = Some(snapshot.url);
             let (f, l) = snapshot.identity.map_or((None, None), |(f, l)| (Some(f), Some(l)));
             page.last_snapshot_frame = f;
             page.last_snapshot_loader = l;
