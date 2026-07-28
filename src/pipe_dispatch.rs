@@ -109,9 +109,9 @@ pub async fn dispatch_fill(
     let inspect = cmd.get("inspect").and_then(Value::as_bool).unwrap_or(false);
     let max_depth = cmd_max_depth(cmd).or(global_max_depth);
 
-    let msg = if let Some(sel) = cmd.get("selector").and_then(Value::as_str) {
-        crate::element::fill_selector(client, sel, value).await?;
-        format!("Filled selector '{sel}'")
+    let (msg, outcome) = if let Some(sel) = cmd.get("selector").and_then(Value::as_str) {
+        let outcome = crate::element::fill_selector(client, sel, value).await?;
+        (format!("Filled selector '{sel}'"), outcome)
     } else if let Some(uid) = cmd.get("uid").and_then(Value::as_str) {
         let uid_map = get_uid_map(store, browser_name, page_name);
         commands::fill::run(client, &uid_map, uid, value).await?
@@ -120,6 +120,7 @@ pub async fn dispatch_fill(
     };
 
     let mut obj = json!({"ok": true, "message": msg});
+    obj["value"] = crate::run_helpers::fill_value_report(&outcome);
     if inspect {
         let snapshot = attach_snapshot(client, store, browser_name, page_name, target_id, max_depth).await?;
         obj["snapshot"] = json!(snapshot);

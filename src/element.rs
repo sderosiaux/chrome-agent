@@ -169,13 +169,55 @@ async fn js_click(client: &CdpClient, object_id: &str) -> Result<(), ElementErro
     Ok(())
 }
 
+/// What the page holds after a fill, next to what was asked for.
+///
+/// A write is a request. Masks reformat, `maxlength` truncates, controlled components
+/// rewrite, and number inputs discard what they cannot parse. Reporting only "filled"
+/// hides all four, and reporting failure would be wrong for all four too — the value did
+/// land, just not verbatim.
+pub struct FillOutcome {
+    pub requested: String,
+    pub actual: Option<String>,
+    /// Set when the value that landed could not have been typed by a person: `maxlength`
+    /// constrains the editing pipeline, not the value setter, so a programmatic fill walks
+    /// straight past it and the form will reject the field on submit.
+    pub caveat: Option<String>,
+}
+
+impl FillOutcome {
+    pub fn new(requested: &str, actual: Option<String>) -> Self {
+        Self { requested: requested.to_string(), actual, caveat: None }
+    }
+
+    /// Attach the over-the-cap caveat when a `maxlength` was bypassed.
+    pub fn with_max_length(mut self, max_length: Option<i64>) -> Self {
+        if let (Some(max), Some(actual)) = (max_length, self.actual.as_deref())
+            && let Ok(cap) = usize::try_from(max)
+            && actual.chars().count() > cap
+        {
+            {
+                self.caveat = Some(format!(
+                    "exceeds maxlength={max}; a person typing could not have produced this, \
+                     and the form is likely to reject it"
+                ));
+            }
+        }
+        self
+    }
+
+    /// True when the page holds exactly what was asked for.
+    pub fn verbatim(&self) -> bool {
+        self.actual.as_deref() == Some(self.requested.as_str())
+    }
+}
+
 /// Fill an element (input/textarea) by uid.
 pub async fn fill(
     client: &CdpClient,
     uid_map: &HashMap<String, ElementRef>,
     uid: &str,
     value: &str,
-) -> Result<(), ElementError> {
+) -> Result<FillOutcome, ElementError> {
     let resolved = resolve_uid(client, uid_map, uid).await?;
 
     // Focus, clear, set value, dispatch events.
@@ -183,6 +225,8 @@ pub async fn fill(
     // synthetic onChange fires (React wraps the descriptor; direct assignment is
     // intercepted by React but the setter via Object.getOwnPropertyDescriptor is not).
     let js = r"function(v) {
+            if (this.matches(':disabled')) throw new Error('Element is disabled and cannot be filled');
+            if (this.readOnly) throw new Error('Element is readonly and cannot be filled');
             this.focus();
             var proto = this instanceof HTMLTextAreaElement
                 ? window.HTMLTextAreaElement.prototype
@@ -195,6 +239,10 @@ pub async fn fill(
             }
             this.dispatchEvent(new Event('input', {bubbles: true}));
             this.dispatchEvent(new Event('change', {bubbles: true}));
+            return {
+                value: this.value === undefined ? null : String(this.value),
+                maxLength: typeof this.maxLength === 'number' ? this.maxLength : null
+            };
         }".to_string();
 
     let nav_events = client.events();
@@ -213,17 +261,20 @@ pub async fn fill(
 
     // Check for exception
     if let Some(exception) = result.get("exceptionDetails") {
-        return Err(ElementError::Action(format!(
-            "fill threw: {}",
-            exception
-                .get("text")
-                .and_then(|t| t.as_str())
-                .unwrap_or("unknown error")
-        )));
+        let text = exception
+            .get("exception")
+            .and_then(|ex| ex.get("description"))
+            .and_then(|d| d.as_str())
+            .or_else(|| exception.get("text").and_then(|t| t.as_str()))
+            .unwrap_or("unknown error");
+        return Err(ElementError::Action(text.to_string()));
     }
 
+    let payload = result.get("result").and_then(|r| r.get("value")).cloned().unwrap_or_default();
+    let actual = payload.get("value").and_then(serde_json::Value::as_str).map(str::to_string);
+    let max_length = payload.get("maxLength").and_then(serde_json::Value::as_i64);
     wait_for_stabilization(nav_events).await;
-    Ok(())
+    Ok(FillOutcome::new(value, actual).with_max_length(max_length))
 }
 
 /// Type text character by character using Input.insertText.

@@ -8,9 +8,9 @@ pub async fn run(
     uid_map: &HashMap<String, ElementRef>,
     uid: &str,
     value: &str,
-) -> Result<String, crate::BoxError> {
-    crate::element::fill(client, uid_map, uid, value).await?;
-    Ok(format!("Filled uid={uid} with {}", value.len()))
+) -> Result<(String, crate::element::FillOutcome), crate::BoxError> {
+    let outcome = crate::element::fill(client, uid_map, uid, value).await?;
+    Ok((format!("Filled uid={uid} with {}", value.len()), outcome))
 }
 
 pub async fn run_form(

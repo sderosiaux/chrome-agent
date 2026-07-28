@@ -86,6 +86,20 @@ impl ReportPolicy {
     }
 }
 
+/// What a fill put in, and what the page kept. Emitted on every fill so a value that was
+/// reformatted, truncated or rejected is visible rather than hidden behind "Filled".
+pub fn fill_value_report(outcome: &crate::element::FillOutcome) -> serde_json::Value {
+    let mut v = json!({
+        "requested": outcome.requested,
+        "actual": outcome.actual,
+        "verbatim": outcome.verbatim(),
+    });
+    if let Some(caveat) = &outcome.caveat {
+        v["caveat"] = json!(caveat);
+    }
+    v
+}
+
 /// Execute a command, report what it did to the page, and persist the new baseline.
 ///
 /// By default an action now answers "what changed", not just "what I was asked to do".
@@ -102,7 +116,26 @@ pub async fn output_action(
     report: &ActionReport,
     json_mode: bool,
 ) -> Result<(), crate::BoxError> {
+    output_action_with(client, store, browser_name, page_name, target_id, msg, report, json_mode, None).await
+}
+
+/// `output_action` plus the value a fill left behind.
+#[allow(clippy::too_many_arguments)]
+pub async fn output_action_with(
+    client: &CdpClient,
+    store: &mut SessionStore,
+    browser_name: &str,
+    page_name: &str,
+    target_id: &str,
+    msg: String,
+    report: &ActionReport,
+    json_mode: bool,
+    fill: Option<&crate::element::FillOutcome>,
+) -> Result<(), crate::BoxError> {
     let mut obj = json!({"ok": true, "message": msg});
+    if let Some(outcome) = fill {
+        obj["value"] = fill_value_report(outcome);
+    }
     let mut trailer = String::new();
 
     if report.inspect || report.changes {

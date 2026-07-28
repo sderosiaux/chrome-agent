@@ -4,7 +4,7 @@ use crate::BoxError;
 use crate::browser::{self, BrowserOptions};
 use crate::cdp::client::CdpClient;
 use crate::cli::{Cli, Command, DaemonAction};
-use crate::run_helpers::{ReportPolicy, cmd_close, cmd_status, cmd_stop, connect_page, get_uid_map, json_output, kill_pid, output_action, output_goto, resolve_page_target};
+use crate::run_helpers::{ReportPolicy, cmd_close, cmd_status, cmd_stop, connect_page, get_uid_map, json_output, kill_pid, output_action, output_action_with, output_goto, resolve_page_target};
 use crate::{commands, pipe, session};
 
 pub async fn run(cli: Cli) -> Result<(), BoxError> {
@@ -244,16 +244,16 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
                 return Err("Only one of --uid or --selector can be provided.".into());
             }
 
-            let msg = if let Some(ref sel) = selector {
-                crate::element::fill_selector(&client, sel, &value).await?;
-                format!("Filled selector '{sel}'")
+            let (msg, outcome) = if let Some(ref sel) = selector {
+                let outcome = crate::element::fill_selector(&client, sel, &value).await?;
+                (format!("Filled selector '{sel}'"), outcome)
             } else {
                 let uid = uid.as_ref().unwrap();
                 let uid_map = get_uid_map(&store, &cli.browser, &cli.page);
                 commands::fill::run(&client, &uid_map, uid, &value).await?
             };
 
-            output_action(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, &policy.for_action(inspect, depth), json_mode).await?;
+            output_action_with(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, &policy.for_action(inspect, depth), json_mode, Some(&outcome)).await?;
         }
 
         Command::FillForm { pairs, inspect, max_depth } => {
