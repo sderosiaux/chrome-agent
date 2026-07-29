@@ -650,6 +650,17 @@ pub async fn cmd_stop(json_mode: bool) -> Result<(), crate::BoxError> {
     } // #[cfg(unix)]
 }
 
+/// The pid this invocation may kill on interrupt: its own browser's, and no other.
+///
+/// The Ctrl+C handler used to walk every entry in `sessions.json` — a file shared by
+/// every agent on the machine — so interrupting one agent killed the Chrome of every
+/// other agent running under a different `--browser` name, which is exactly the
+/// isolation the flag exists to provide.
+#[must_use]
+pub fn interrupt_kill_target(store: &SessionStore, browser_name: &str) -> Option<u32> {
+    store.browsers.get(browser_name).and_then(|b| b.pid)
+}
+
 /// Whether `comm` (the executable per `ps -o comm=`) is a browser this tool could have
 /// launched. The kill below is gated on it — see `kill_pid`.
 ///
@@ -765,6 +776,21 @@ mod tests {
         let _ = child.kill();
         let _ = child.wait();
         assert!(survived, "kill_pid killed an unrelated process holding a reused pid");
+    }
+
+    #[test]
+    fn an_interrupt_only_targets_this_invocation_s_browser() {
+        let mut store = SessionStore::default();
+        session::ensure_browser(&mut store, "agent-1", "ws://a", Some(111), true, None);
+        session::ensure_browser(&mut store, "agent-2", "ws://b", Some(222), true, None);
+
+        assert_eq!(interrupt_kill_target(&store, "agent-1"), Some(111));
+        assert_eq!(
+            interrupt_kill_target(&store, "agent-2"),
+            Some(222),
+            "a sibling agent's browser is never this invocation's to kill"
+        );
+        assert_eq!(interrupt_kill_target(&store, "never-launched"), None);
     }
 
     #[test]

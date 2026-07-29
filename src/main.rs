@@ -33,29 +33,24 @@ use crate::run_helpers::error_hint;
 
 #[tokio::main]
 async fn main() {
-    // Install signal handler so managed Chrome is cleaned up on Ctrl+C
-    tokio::spawn(async {
+    let cli = Cli::parse();
+    let json_mode = cli.json;
+
+    // Clean up this invocation's managed Chrome on Ctrl+C — and only this one. The
+    // handler used to walk every entry in the shared sessions.json and kill each pid
+    // raw, so interrupting one agent killed every other agent's browser mid-task and
+    // bypassed the PID-reuse guard every other kill path goes through. Installed after
+    // parsing because it needs to know which browser is ours.
+    let interrupted_browser = cli.browser.clone();
+    tokio::spawn(async move {
         if matches!(tokio::signal::ctrl_c().await, Ok(())) {
-            if let Ok(store) = session::load_session() {
-                for browser in store.browsers.values() {
-                    if let Some(pid) = browser.pid {
-                        #[cfg(unix)]
-                        {
-                            let _ = std::process::Command::new("kill")
-                                .arg(pid.to_string())
-                                .stdout(std::process::Stdio::null())
-                                .stderr(std::process::Stdio::null())
-                                .status();
-                        }
-                    }
+            if let Ok(store) = session::load_session()
+                && let Some(pid) = run_helpers::interrupt_kill_target(&store, &interrupted_browser) {
+                    run_helpers::kill_pid(pid);
                 }
-            }
             std::process::exit(130);
         }
     });
-
-    let cli = Cli::parse();
-    let json_mode = cli.json;
 
     if let Err(e) = run::run(cli).await {
         let msg = e.to_string();

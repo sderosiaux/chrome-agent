@@ -127,7 +127,7 @@ LLM USAGE GUIDE:
     chrome-agent download https://site/report.pdf     # fetch in-page, keeps cookies/auth; rejects over 64 MiB by default
     chrome-agent download https://site/f.csv --out ./data.csv   # choose the destination path
     chrome-agent download https://site/data.zip --max-bytes 10485760   # set a smaller byte limit
-    chrome-agent pdf --out page.pdf                    # print current page to PDF (Page.printToPDF)
+    chrome-agent pdf --filename page.pdf                    # print current page to PDF (Page.printToPDF)
     chrome-agent pdf --landscape --background          # orientation + background graphics
     chrome-agent screenshot                            # full page, PNG
     chrome-agent screenshot --format jpeg --quality 60 --max-width 1024  # smaller file (fewer tokens if re-read)
@@ -160,7 +160,7 @@ LLM USAGE GUIDE:
     chrome-agent history [--filter "pattern"]          # browsing history
     chrome-agent status                                # session info
     chrome-agent screenshot [--filename name]          # screenshot to file
-    chrome-agent pdf [--out name] [--landscape]        # current page to PDF
+    chrome-agent pdf [--filename name] [--landscape]        # current page to PDF
     chrome-agent download <url> [--out path] [--max-bytes N]   # auth-preserving; default max 64 MiB
 
   Cleanup:
