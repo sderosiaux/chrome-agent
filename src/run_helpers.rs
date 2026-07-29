@@ -653,14 +653,19 @@ pub async fn cmd_stop(json_mode: bool) -> Result<(), crate::BoxError> {
 /// Whether this command can own the browser named by `--browser`, and may therefore
 /// take it down when interrupted.
 ///
-/// `--browser` is a global flag, so `daemon start` carries it too — defaulted to
-/// `"default"`, the documented name most single-agent users get. The daemon owns no
-/// browser (it serves whoever connects), so acting on that leftover name meant Ctrl+C
-/// on the daemon killed an unrelated agent's Chrome: the same cross-agent damage,
-/// narrowed to one unlucky collision.
+/// `--browser` is a global flag, so every invocation carries a name — defaulted to
+/// `"default"`, the one most single-agent users get — including the commands that never
+/// open a browser at all. `run::run` returns before the connection block for each of
+/// these; arming the handler for them meant Ctrl+C during a read-only `status` killed
+/// whichever agent happened to hold that name. `close` is excluded for the opposite
+/// reason: it kills its own pid deliberately, and does not need a second, racier path.
 #[must_use]
 pub const fn interrupt_owns_browser(command: &crate::cli::Command) -> bool {
-    !matches!(command, crate::cli::Command::Daemon { .. })
+    use crate::cli::Command as C;
+    !matches!(
+        command,
+        C::Daemon { .. } | C::Status | C::Stop | C::Close { .. } | C::History { .. }
+    )
 }
 
 /// The pid this invocation may kill on interrupt: its own browser's, and no other.
@@ -792,13 +797,26 @@ mod tests {
     }
 
     #[test]
-    fn the_daemon_owns_no_browser_to_interrupt() {
-        // `--browser` is global, so `daemon start` carries the default name and would
-        // otherwise kill whichever agent happens to be using it.
-        assert!(!interrupt_owns_browser(&crate::cli::Command::Daemon {
-            action: crate::cli::DaemonAction::Start
-        }));
-        assert!(interrupt_owns_browser(&crate::cli::Command::Tabs));
+    fn a_command_that_never_opens_a_browser_has_none_to_interrupt() {
+        // `--browser` is global, so these carry the default name and would otherwise
+        // kill whichever agent happens to be using it — while never having touched it.
+        // Each of these returns from `run::run` before the connection block.
+        use crate::cli::Command as C;
+        for command in [
+            C::Daemon { action: crate::cli::DaemonAction::Start },
+            C::Status,
+            C::Stop,
+            C::Close { purge: false },
+            C::History { filter: None, limit: 20 },
+        ] {
+            assert!(
+                !interrupt_owns_browser(&command),
+                "this command never opens a browser, so it has none to kill"
+            );
+        }
+        // Anything that does connect keeps the cleanup.
+        assert!(interrupt_owns_browser(&C::Tabs));
+        assert!(interrupt_owns_browser(&C::Pipe));
     }
 
     #[test]
