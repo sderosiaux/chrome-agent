@@ -148,17 +148,17 @@ pub async fn dispatch_select(
     let value = cmd.get("value").and_then(Value::as_str).ok_or("select: missing \"value\"")?;
     let inspect = cmd.get("inspect").and_then(Value::as_bool).unwrap_or(false);
     let max_depth = cmd_max_depth(cmd).or(global_max_depth);
-    let msg = if let Some(sel) = cmd.get("selector").and_then(Value::as_str) {
-        let text = crate::element::select_option_selector(client, sel, value).await?;
-        format!("Selected \"{text}\" on selector '{sel}'")
+    let (msg, outcome) = if let Some(sel) = cmd.get("selector").and_then(Value::as_str) {
+        let outcome = crate::element::select_option_selector(client, sel, value).await?;
+        (format!("Selected \"{}\" on selector '{sel}'", outcome.text), outcome)
     } else if let Some(uid) = cmd.get("uid").and_then(Value::as_str) {
         let uid_map = get_uid_map(store, browser_name, page_name);
-        let text = crate::element::select_option(client, &uid_map, uid, value).await?;
-        format!("Selected \"{text}\" on uid={uid}")
+        let outcome = crate::element::select_option(client, &uid_map, uid, value).await?;
+        (format!("Selected \"{}\" on uid={uid}", outcome.text), outcome)
     } else {
         return Err("select: provide \"uid\" or \"selector\"".into());
     };
-    let mut obj = json!({"ok": true, "message": msg});
+    let mut obj = json!({"ok": true, "message": msg, "observed_after_ms": outcome.observed_after_ms});
     if inspect {
         let snapshot = attach_snapshot(client, store, browser_name, page_name, target_id, max_depth).await?;
         obj["snapshot"] = json!(snapshot);

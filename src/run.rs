@@ -428,16 +428,18 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
             }
 
             let target = crate::run_helpers::target_details(&client, selector.as_deref(), uid.as_deref()).await;
-            let msg = if let Some(ref sel) = selector {
-                let text = crate::element::select_option_selector(&client, sel, &value).await?;
-                format!("Selected \"{text}\" on selector '{sel}'")
+            let (msg, outcome) = if let Some(ref sel) = selector {
+                let outcome = crate::element::select_option_selector(&client, sel, &value).await?;
+                (format!("Selected \"{}\" on selector '{sel}'", outcome.text), outcome)
             } else {
                 let uid = uid.as_ref().unwrap();
                 let uid_map = get_uid_map(&store, &cli.browser, &cli.page);
-                commands::select::run(&client, &uid_map, uid, &value).await?
+                let outcome = commands::select::run(&client, &uid_map, uid, &value).await?;
+                (format!("Selected \"{}\" on uid={uid}", outcome.text), outcome)
             };
+            let details = Some(json!({"observed_after_ms": outcome.observed_after_ms}));
 
-            output_action_with(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, &policy.for_action(inspect, depth), json_mode, target).await?;
+            output_action_with(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, &policy.for_action(inspect, depth), json_mode, crate::run_helpers::merge_details(target, details)).await?;
         }
 
         Command::Check { uid, selector, inspect, max_depth } => {

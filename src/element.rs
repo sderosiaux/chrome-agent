@@ -583,7 +583,7 @@ pub use crate::element_selector::{
 // Split out for the 1000-line file cap; callers keep using `element::*`.
 pub use crate::element_controls::{
     drag, select_option, select_option_selector, set_checked, set_checked_selector, CheckOutcome,
-    set_file_input, set_file_input_selector,
+    SelectOutcome, set_file_input, set_file_input_selector,
 };
 
 // ---------------------------------------------------------------------------

@@ -13,39 +13,87 @@ use std::time::Duration;
 
 use super::element::{check_js_exception, click, resolve_uid, wait_for_stabilization, ElementError};
 
+/// What a select did, and when it looked.
+///
+/// The read-back happens through the same observation window as fill and check
+/// (`READ_BACK_MS`): a controlled component that snaps the selection back on a microtask
+/// or `setTimeout(0)` is caught; a validator firing later is not, which is why the window
+/// is reported rather than persistence asserted.
+pub struct SelectOutcome {
+    /// Text of the option the page still held when we looked.
+    pub text: String,
+    pub observed_after_ms: u64,
+}
+
+/// Shared body: set the selection, dispatch `change`, then read it back after the
+/// window — all bound to the same `el`, so a document change between round trips
+/// cannot swap the node under us.
+const SELECT_APPLY: &str = r"function (el, target, windowMs) {
+    if (el.tagName !== 'SELECT') throw new Error('Element is not a <select>');
+    const opts = Array.from(el.options);
+    let idx = opts.findIndex(o => o.value === target);
+    if (idx === -1) idx = opts.findIndex(o => o.text.trim() === target);
+    if (idx === -1) throw new Error('No option matching: ' + target);
+    el.selectedIndex = idx;
+    el.dispatchEvent(new Event('change', {bubbles: true}));
+    return new Promise(resolve => setTimeout(() => {
+        const now = el.selectedIndex;
+        resolve({
+            requested: opts[idx].text,
+            kept: now === idx,
+            actual: (now >= 0 && el.options[now]) ? el.options[now].text : null,
+        });
+    }, windowMs));
+}";
+
+/// Turn the read-back into the outcome, refusing when the page took the selection away.
+///
+/// Same policy as check: reporting "Selected" for a select the page has already snapped
+/// back is the one answer an agent cannot recover from — it submits the form believing a
+/// different option is chosen than what the page holds.
+fn select_outcome(result: &serde_json::Value) -> Result<SelectOutcome, ElementError> {
+    check_js_exception(result)?;
+    let value = result.get("result").and_then(|r| r.get("value"));
+    let kept = value.and_then(|v| v.get("kept")).and_then(serde_json::Value::as_bool).unwrap_or(false);
+    let requested = value.and_then(|v| v.get("requested")).and_then(serde_json::Value::as_str).unwrap_or("");
+    if !kept {
+        let actual = value
+            .and_then(|v| v.get("actual"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("nothing");
+        return Err(ElementError::Action(format!(
+            "The page reverted the selection to \"{actual}\" within {}ms; \"{requested}\" did not stick.",
+            crate::element::READ_BACK_MS
+        )));
+    }
+    Ok(SelectOutcome {
+        text: requested.to_string(),
+        observed_after_ms: crate::element::READ_BACK_MS,
+    })
+}
+
 pub async fn select_option(
     client: &CdpClient,
     uid_map: &HashMap<String, ElementRef>,
     uid: &str,
     value: &str,
-) -> Result<String, ElementError> {
+) -> Result<SelectOutcome, ElementError> {
     let resolved = resolve_uid(client, uid_map, uid).await?;
-    let js = r"function(target) {
-        if (this.tagName !== 'SELECT') throw new Error('Element is not a <select>');
-        const opts = Array.from(this.options);
-        let idx = opts.findIndex(o => o.value === target);
-        if (idx === -1) idx = opts.findIndex(o => o.text.trim() === target);
-        if (idx === -1) throw new Error('No option matching: ' + target);
-        this.selectedIndex = idx;
-        this.dispatchEvent(new Event('change', {bubbles: true}));
-        return opts[idx].text;
-    }";
+    let js = format!(
+        "function(target, windowMs) {{ return ({SELECT_APPLY})(this, target, windowMs); }}"
+    );
     let result: serde_json::Value = client
         .call("Runtime.callFunctionOn", json!({
             "objectId": resolved.object_id,
             "functionDeclaration": js,
-            "arguments": [{"value": value}],
+            "arguments": [{"value": value}, {"value": crate::element::READ_BACK_MS}],
             "returnByValue": true,
+            "awaitPromise": true,
         }))
         .await
         .map_err(|e| ElementError::Action(format!("select_option failed: {e}")))?;
 
-    check_js_exception(&result)?;
-    let text = result.get("result")
-        .and_then(|r| r.get("value"))
-        .and_then(|v| v.as_str())
-        .unwrap_or(value);
-    Ok(text.to_string())
+    select_outcome(&result)
 }
 
 /// Select a dropdown option by CSS selector.
@@ -53,34 +101,26 @@ pub async fn select_option_selector(
     client: &CdpClient,
     selector: &str,
     value: &str,
-) -> Result<String, ElementError> {
+) -> Result<SelectOutcome, ElementError> {
     let sel_json = serde_json::to_string(selector).unwrap_or_default();
     let val_json = serde_json::to_string(value).unwrap_or_default();
     let js = format!(
         r"(() => {{
             const el = document.querySelector({sel_json});
             if (!el) throw new Error('No element matches selector: ' + {sel_json});
-            if (el.tagName !== 'SELECT') throw new Error('Element is not a <select>');
-            const opts = Array.from(el.options);
-            let idx = opts.findIndex(o => o.value === {val_json});
-            if (idx === -1) idx = opts.findIndex(o => o.text.trim() === {val_json});
-            if (idx === -1) throw new Error('No option matching: ' + {val_json});
-            el.selectedIndex = idx;
-            el.dispatchEvent(new Event('change', {{bubbles: true}}));
-            return opts[idx].text;
-        }})()"
+            return ({SELECT_APPLY})(el, {val_json}, {window});
+        }})()",
+        window = crate::element::READ_BACK_MS
     );
     let result: serde_json::Value = client
-        .call("Runtime.evaluate", json!({"expression": js, "returnByValue": true}))
+        .call(
+            "Runtime.evaluate",
+            json!({"expression": js, "returnByValue": true, "awaitPromise": true}),
+        )
         .await
         .map_err(|e| ElementError::Action(format!("select_option_selector failed: {e}")))?;
 
-    check_js_exception(&result)?;
-    let text = result.get("result")
-        .and_then(|r| r.get("value"))
-        .and_then(|v| v.as_str())
-        .unwrap_or(value);
-    Ok(text.to_string())
+    select_outcome(&result)
 }
 
 // ---------------------------------------------------------------------------

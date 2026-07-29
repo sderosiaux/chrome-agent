@@ -1,0 +1,26 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Controlled select</title>
+</head>
+<body>
+  <!-- A framework-controlled select: the change handler rejects the new value and
+       snaps the selection back on the task queue, after the setter has returned. -->
+  <select id="controlled">
+    <option value="a" selected>Alpha</option>
+    <option value="b">Beta</option>
+  </select>
+  <!-- An ordinary select that keeps whatever is set. -->
+  <select id="plain">
+    <option value="a" selected>Alpha</option>
+    <option value="b">Beta</option>
+  </select>
+  <script>
+    const controlled = document.getElementById('controlled');
+    controlled.addEventListener('change', () => {
+      setTimeout(() => { controlled.selectedIndex = 0; }, 0);
+    });
+  </script>
+</body>
+</html>
