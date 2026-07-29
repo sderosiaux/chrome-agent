@@ -239,7 +239,11 @@ fn apply_role_filter(output: String, role_filter: Option<&[&str]>, max_depth: Op
         let mut v = vec![(*r).to_string()];
         match r.to_lowercase().as_str() {
             "textbox" => { v.push("searchbox".into()); v.push("combobox".into()); }
-            "input" => { v.push("textbox".into()); v.push("searchbox".into()); v.push("combobox".into()); }
+            "input" => {
+                for r in ["textbox", "searchbox", "combobox", "checkbox", "radio", "slider", "spinbutton", "switch"] {
+                    v.push(r.into());
+                }
+            }
             "button" => { v.push("menuitem".into()); }
             _ => {}
         }
@@ -559,6 +563,28 @@ mod tests {
         assert!(text.contains("uid=n10 heading \"Welcome\" level=1"));
         assert!(uid_map.contains_key("n10"));
         assert_eq!(uid_map["n10"].backend_node_id(), Some(10));
+    }
+
+    #[test]
+    fn input_alias_covers_all_input_roles() {
+        // CLAUDE.md contract: "input→all input roles". A checkbox/radio/slider
+        // silently dropped by --filter input looks like the page has no such
+        // control at all.
+        let output = "uid=n1 textbox \"Name\"\n\
+                      uid=n2 checkbox \"Agree\"\n\
+                      uid=n3 radio \"Choice A\"\n\
+                      uid=n4 slider \"Volume\"\n\
+                      uid=n5 spinbutton \"Qty\"\n\
+                      uid=n6 switch \"Dark mode\"\n\
+                      uid=n7 searchbox \"Search\"\n\
+                      uid=n8 combobox \"Country\"\n\
+                      uid=n9 button \"Go\"\n"
+            .to_string();
+        let filtered = apply_role_filter(output, Some(&["input"]), None);
+        for role in ["textbox", "checkbox", "radio", "slider", "spinbutton", "switch", "searchbox", "combobox"] {
+            assert!(filtered.contains(role), "input alias should keep role {role}, got:\n{filtered}");
+        }
+        assert!(!filtered.contains("uid=n9"), "input alias must not keep non-input roles, got:\n{filtered}");
     }
 
     #[test]
