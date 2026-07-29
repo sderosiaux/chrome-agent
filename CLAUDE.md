@@ -63,6 +63,7 @@ cargo clippy -- -D warnings  # zero warnings enforced in CI
 - **Stable UIDs** — `n{backendNodeId}` instead of sequential `e1, e2`. Survive between inspects on same page. Change after SPA navigation (re-inspect needed).
 - **3 targeting modes** — uid (from inspect), CSS selector (`--selector`), coordinates (`--xy`)
 - **JS click fallback** — when a11y reports "disabled" but DOM isn't, click falls back to `.click()`
+- **`click --selector` is the same verb as `click <uid>`** — both resolve the element's viewport centre and dispatch native CDP mouse events (`element_selector::click_selector`, mirroring `dblclick_selector`). It used to call `el.click()`, which fires the handler whatever is stacked above the node: a click on a button under a modal scrim reported success with the same shape as a click a user could have made, and nothing in the response distinguished the two spellings. Consequence, deliberate: a covered element now hands the click to whatever covers it — `--selector` on a button behind a cookie banner clicks the banner, which is what a pointer does. The JS `click()` survives only as the zero-size fallback, where there is no point to aim at.
 - **ElementRef abstraction** — session stores `{"type":"backendNode","id":N}`, ready for BiDi
 - **Noise filtering** — StaticText/InlineTextBox stripped (66% token reduction), `--filter` by role with aliases (textbox→searchbox+combobox, input→all input roles, button→menuitem)
 - **`--json` mode** — errors exit 1 with `{"ok":false}` on stdout. Agents parse stdout for the error, exit code signals failure.
