@@ -95,3 +95,41 @@ fn appending_to_an_existing_recording_keeps_it_private() {
 
     assert_eq!(mode, 0o600, "an already-open recording is narrowed too, got {mode:o}");
 }
+
+/// An unwritable recording path must not read as a recorded session.
+///
+/// `start_recording` and `log_entry` both return Result, and the pipe loop discarded
+/// both with `let _ =`. The response for the command was `ok:true` and stdout was
+/// indistinguishable from a session that was actually being written — so an agent
+/// finishes a long run, goes to `replay` it, and finds nothing there.
+#[test]
+fn an_unwritable_record_path_is_reported_not_swallowed() {
+    if !common::browser_ready() {
+        return;
+    }
+    let bad = std::env::temp_dir()
+        .join(format!("chrome-agent-no-such-dir-{}", std::process::id()))
+        .join("session.jsonl");
+    let url = common::fixture_url("verdict_states.html");
+    let script = format!(
+        "{}\n",
+        serde_json::json!({"cmd": "goto", "url": url, "_record": bad.to_string_lossy()})
+    );
+    let mut child = Command::new(binary())
+        .args(["--browser", "record-unwritable", "pipe"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn pipe");
+    child.stdin.as_mut().unwrap().write_all(script.as_bytes()).unwrap();
+    drop(child.stdin.take());
+    let output = child.wait_with_output().expect("pipe output");
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let _ = run_cli(&["--browser", "record-unwritable", "close", "--purge"]);
+
+    assert!(
+        stdout.contains("recording"),
+        "the response must say the recording could not be written: {stdout}"
+    );
+}

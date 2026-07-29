@@ -90,21 +90,29 @@ pub async fn run_pipe(cli: &Cli) -> Result<(), crate::BoxError> {
             Err(e) => { emit(&json!({"ok": false, "error": format!("Invalid JSON: {e}")})); continue; }
         };
 
+        // A recording that never opened used to be silent: the response was ok:true and
+        // stdout was indistinguishable from a session being written, so the agent finds
+        // out at `replay` time that there is nothing to replay.
         let record_path = cmd.get("_record").and_then(Value::as_str).map(String::from);
-        if let Some(ref path) = record_path {
-            let _ = commands::record::start_recording(path);
-        }
+        if let Some(ref path) = record_path
+            && let Err(e) = commands::record::start_recording(path) {
+                emit(&json!({"ok": false, "error": format!("{e}"), "hint": "Check the --record path's directory exists and is writable."}));
+                continue;
+            }
 
-        let response = dispatch(
+        let mut response = dispatch(
             &client, &browser_client, &mut store,
             &cli.browser, &cli.page, &target_id, cli.timeout, cli.max_depth,
             crate::run_helpers::ReportPolicy { changes: cli.verdict == "auto", budget: cli.budget },
             &cmd,
         ).await;
 
-        if let Some(ref path) = record_path {
-            let _ = commands::record::log_entry(path, &cmd, &response);
-        }
+        if let Some(ref path) = record_path
+            && let Err(e) = commands::record::log_entry(path, &cmd, &response) {
+                // The command itself ran; only the record of it was lost. Say so on the
+                // response rather than failing an action that already happened.
+                response["recording_error"] = json!(format!("{e}"));
+            }
 
         emit(&response);
     }
