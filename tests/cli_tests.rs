@@ -1,5 +1,7 @@
 use std::process::Command;
 
+mod common;
+
 /// Get the path to the built binary.
 fn binary() -> String {
     let mut path = std::env::current_exe()
@@ -157,33 +159,9 @@ impl Drop for TestBrowser {
     }
 }
 
-fn chrome_available() -> bool {
-    // Check if any Chrome-like binary exists
-    let candidates = if cfg!(target_os = "macos") {
-        vec!["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"]
-    } else {
-        vec!["google-chrome", "chromium"]
-    };
-
-    for candidate in candidates {
-        if std::path::Path::new(candidate).exists() {
-            return true;
-        }
-        if Command::new("which")
-            .arg(candidate)
-            .output()
-            .is_ok_and(|o| o.status.success())
-        {
-            return true;
-        }
-    }
-    false
-}
-
 #[test]
 fn headed_goto_and_eval() {
-    if !chrome_available() {
-        eprintln!("SKIP: Chrome not found");
+    if !common::browser_ready() {
         return;
     }
 
@@ -225,8 +203,7 @@ fn headed_goto_and_eval() {
 
 #[test]
 fn dblclick_selector_fires_real_double_click() {
-    if !chrome_available() {
-        eprintln!("SKIP: Chrome not found");
+    if !common::browser_ready() {
         return;
     }
 
@@ -245,7 +222,7 @@ fn dblclick_selector_fires_real_double_click() {
     let (_, stderr, code) = run_cli(&["--browser", b.name(), "goto", &url]);
     if code != 0 {
         let _ = std::fs::remove_file(&path);
-        eprintln!("SKIP: goto fixture failed: {stderr}");
+        common::unavailable(&format!("goto dblclick fixture failed: {stderr}"));
         return;
     }
 
@@ -265,8 +242,7 @@ fn dblclick_selector_fires_real_double_click() {
 
 #[test]
 fn headed_inspect_returns_uids() {
-    if !chrome_available() {
-        eprintln!("SKIP: Chrome not found");
+    if !common::browser_ready() {
         return;
     }
 
@@ -275,7 +251,7 @@ fn headed_inspect_returns_uids() {
     let (_, _, code) = run_cli(&["--browser", b.name(), "goto", "https://example.com"]);
 
     if code != 0 {
-        eprintln!("SKIP: goto failed");
+        common::unavailable("goto https://example.com failed");
         return;
     }
 
@@ -288,8 +264,7 @@ fn headed_inspect_returns_uids() {
 
 #[test]
 fn headed_screenshot_returns_path() {
-    if !chrome_available() {
-        eprintln!("SKIP: Chrome not found");
+    if !common::browser_ready() {
         return;
     }
 
@@ -298,7 +273,7 @@ fn headed_screenshot_returns_path() {
     let (_, _, code) = run_cli(&["--browser", b.name(), "goto", "https://example.com"]);
 
     if code != 0 {
-        eprintln!("SKIP: goto failed");
+        common::unavailable("goto https://example.com failed");
         return;
     }
 
@@ -319,8 +294,7 @@ fn headed_screenshot_returns_path() {
 
 #[test]
 fn headed_tabs_lists_pages() {
-    if !chrome_available() {
-        eprintln!("SKIP: Chrome not found");
+    if !common::browser_ready() {
         return;
     }
 
@@ -329,7 +303,7 @@ fn headed_tabs_lists_pages() {
     let (_, _, code) = run_cli(&["--browser", b.name(), "goto", "https://example.com"]);
 
     if code != 0 {
-        eprintln!("SKIP: goto failed");
+        common::unavailable("goto https://example.com failed");
         return;
     }
 

@@ -1,11 +1,13 @@
 use std::io::{Read as _, Write as _};
 use std::net::{SocketAddr, TcpListener};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime};
+
+mod common;
 
 fn binary() -> PathBuf {
     let mut path = std::env::current_exe()
@@ -17,16 +19,6 @@ fn binary() -> PathBuf {
         .to_path_buf();
     path.push("chrome-agent");
     path
-}
-
-fn chrome_available() -> bool {
-    ["google-chrome", "chromium"].iter().any(|candidate| {
-        Path::new(candidate).exists()
-            || Command::new("which")
-                .arg(candidate)
-                .output()
-                .is_ok_and(|output| output.status.success())
-    })
 }
 
 fn run(browser: &str, args: &[&str]) -> Output {
@@ -135,8 +127,7 @@ fn unique_temp_dir() -> PathBuf {
 
 #[test]
 fn download_rejects_declared_and_streamed_overflow_without_writing_a_file() {
-    if !chrome_available() {
-        eprintln!("SKIP: Chrome not found");
+    if !common::browser_ready() {
         return;
     }
 

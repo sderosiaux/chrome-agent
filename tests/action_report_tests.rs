@@ -1,19 +1,13 @@
-use std::path::PathBuf;
 use std::process::Command;
 
 use serde_json::Value;
+
+mod common;
 
 fn binary() -> String {
     let mut path = std::env::current_exe().unwrap().parent().unwrap().parent().unwrap().to_path_buf();
     path.push("chrome-agent");
     path.to_string_lossy().into_owned()
-}
-
-fn fixture_url(name: &str) -> String {
-    let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    path.push("tests/fixtures");
-    path.push(name);
-    format!("file://{}", path.display())
 }
 
 fn run_cli(args: &[&str]) -> (String, i32) {
@@ -22,23 +16,6 @@ fn run_cli(args: &[&str]) -> (String, i32) {
         String::from_utf8_lossy(&output.stdout).to_string(),
         output.status.code().unwrap_or(-1),
     )
-}
-
-fn chrome_available() -> bool {
-    let candidates = if cfg!(target_os = "macos") {
-        vec!["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"]
-    } else {
-        vec!["google-chrome", "chromium"]
-    };
-    for candidate in candidates {
-        if std::path::Path::new(candidate).exists() {
-            return true;
-        }
-        if Command::new("which").arg(candidate).output().is_ok_and(|o| o.status.success()) {
-            return true;
-        }
-    }
-    false
 }
 
 struct TestBrowser(&'static str);
@@ -58,15 +35,13 @@ impl Drop for TestBrowser {
 
 /// Arrange a page with a button that mutates the DOM, and a baseline snapshot.
 fn setup(browser: &str) -> bool {
-    if !chrome_available() {
-        eprintln!("SKIP: Chrome not found");
+    if !common::browser_ready() {
         return false;
     }
-    let url = fixture_url("extract_cards.html");
+    let url = common::fixture_url("extract_cards.html");
     let (_, code) = run_cli(&["--browser", browser, "goto", &url]);
     if code != 0 {
-        eprintln!("SKIP: goto failed");
-        return false;
+        return common::unavailable("goto extract_cards.html failed");
     }
     let script = "document.body.insertAdjacentHTML('afterbegin', \
                   '<button id=go onclick=\"document.body.insertAdjacentHTML(\\'beforeend\\', \
@@ -121,11 +96,10 @@ fn verdict_off_reports_only_the_action() {
 /// about what an action returns is the kind of thing an agent discovers the hard way.
 #[test]
 fn pipe_reports_changes_like_the_cli() {
-    if !chrome_available() {
-        eprintln!("SKIP: Chrome not found");
+    if !common::browser_ready() {
         return;
     }
-    let url = fixture_url("extract_cards.html");
+    let url = common::fixture_url("extract_cards.html");
     let setup = "document.body.insertAdjacentHTML('afterbegin','<button id=go>Go</button>');\
                  document.getElementById('go').onclick=function(){\
                  document.body.insertAdjacentHTML('beforeend','<h4>added by the click</h4>')};1";
@@ -213,11 +187,10 @@ fn the_change_report_respects_the_budget() {
 /// existing parity tests ran an explicit `inspect` first, which is why it shipped.
 #[test]
 fn a_pipe_session_bootstraps_its_own_baseline() {
-    if !chrome_available() {
-        eprintln!("SKIP: Chrome not found");
+    if !common::browser_ready() {
         return;
     }
-    let url = fixture_url("extract_cards.html");
+    let url = common::fixture_url("extract_cards.html");
     let add = "document.body.insertAdjacentHTML('beforeend','<h4>added</h4>');1";
     // No `inspect` anywhere: the session has to acquire a baseline on its own.
     let script = format!(
@@ -232,7 +205,7 @@ fn a_pipe_session_bootstraps_its_own_baseline() {
     // The action after the first one must report, because the first stored a baseline.
     let script = format!(
         "{}\n{}\n{}\n",
-        serde_json::json!({"cmd": "goto", "url": fixture_url("press_keys.html")}),
+        serde_json::json!({"cmd": "goto", "url": common::fixture_url("press_keys.html")}),
         serde_json::json!({"cmd": "eval", "expression": "document.getElementById('i').focus();1"}),
         serde_json::json!({"cmd": "press", "key": "a"}),
     );

@@ -1,5 +1,6 @@
-use std::path::PathBuf;
 use std::process::Command;
+
+mod common;
 
 fn binary() -> String {
     let mut path = std::env::current_exe()
@@ -13,13 +14,6 @@ fn binary() -> String {
     path.to_string_lossy().into_owned()
 }
 
-fn fixture_url(name: &str) -> String {
-    let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    path.push("tests/fixtures");
-    path.push(name);
-    format!("file://{}", path.display())
-}
-
 fn run_cli(args: &[&str]) -> (String, String, i32) {
     let output = Command::new(binary())
         .args(args)
@@ -31,33 +25,11 @@ fn run_cli(args: &[&str]) -> (String, String, i32) {
     (stdout, stderr, code)
 }
 
-fn chrome_available() -> bool {
-    let candidates = if cfg!(target_os = "macos") {
-        vec!["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"]
-    } else {
-        vec!["google-chrome", "chromium"]
-    };
-    for candidate in candidates {
-        if std::path::Path::new(candidate).exists() {
-            return true;
-        }
-        if Command::new("which")
-            .arg(candidate)
-            .output()
-            .is_ok_and(|o| o.status.success())
-        {
-            return true;
-        }
-    }
-    false
-}
-
 fn goto_fixture(browser: &str, fixture: &str) -> bool {
-    let url = fixture_url(fixture);
+    let url = common::fixture_url(fixture);
     let (_, stderr, code) = run_cli(&["--browser", browser, "goto", &url]);
     if code != 0 {
-        eprintln!("SKIP: goto failed for {fixture}: {stderr}");
-        return false;
+        return common::unavailable(&format!("goto {fixture} failed: {stderr}"));
     }
     true
 }
@@ -120,7 +92,9 @@ impl Drop for TestBrowser {
 
 #[test]
 fn extract_table_finds_product_rows() {
-    if !chrome_available() { eprintln!("SKIP: Chrome not found"); return; }
+    if !common::browser_ready() {
+        return;
+    }
     let b = TestBrowser::new("ext-table");
     if !goto_fixture(b.name(), "extract_table.html") { return; }
 
@@ -145,7 +119,9 @@ fn extract_table_finds_product_rows() {
 
 #[test]
 fn extract_cards_finds_articles() {
-    if !chrome_available() { eprintln!("SKIP: Chrome not found"); return; }
+    if !common::browser_ready() {
+        return;
+    }
     let b = TestBrowser::new("ext-cards");
     if !goto_fixture(b.name(), "extract_cards.html") { return; }
 
@@ -175,7 +151,9 @@ fn extract_cards_finds_articles() {
 
 #[test]
 fn extract_hn_like_finds_stories_not_vote_links() {
-    if !chrome_available() { eprintln!("SKIP: Chrome not found"); return; }
+    if !common::browser_ready() {
+        return;
+    }
     let b = TestBrowser::new("ext-hn");
     if !goto_fixture(b.name(), "extract_hn_like.html") { return; }
 
@@ -202,7 +180,9 @@ fn extract_hn_like_finds_stories_not_vote_links() {
 
 #[test]
 fn extract_ecommerce_finds_products_not_nav() {
-    if !chrome_available() { eprintln!("SKIP: Chrome not found"); return; }
+    if !common::browser_ready() {
+        return;
+    }
     let b = TestBrowser::new("ext-ecom");
     if !goto_fixture(b.name(), "extract_ecommerce.html") { return; }
 
@@ -229,7 +209,9 @@ fn extract_ecommerce_finds_products_not_nav() {
 
 #[test]
 fn extract_list_finds_search_results() {
-    if !chrome_available() { eprintln!("SKIP: Chrome not found"); return; }
+    if !common::browser_ready() {
+        return;
+    }
     let b = TestBrowser::new("ext-list");
     if !goto_fixture(b.name(), "extract_list.html") { return; }
 
@@ -256,7 +238,9 @@ fn extract_list_finds_search_results() {
 
 #[test]
 fn extract_nested_nav_prefers_content_over_navigation() {
-    if !chrome_available() { eprintln!("SKIP: Chrome not found"); return; }
+    if !common::browser_ready() {
+        return;
+    }
     let b = TestBrowser::new("ext-nav");
     if !goto_fixture(b.name(), "extract_nested_nav.html") { return; }
 
@@ -279,7 +263,9 @@ fn extract_nested_nav_prefers_content_over_navigation() {
 
 #[test]
 fn extract_no_pattern_returns_error() {
-    if !chrome_available() { eprintln!("SKIP: Chrome not found"); return; }
+    if !common::browser_ready() {
+        return;
+    }
     let b = TestBrowser::new("ext-nopattern");
     if !goto_fixture(b.name(), "extract_no_pattern.html") { return; }
 
@@ -301,7 +287,9 @@ fn extract_no_pattern_returns_error() {
 
 #[test]
 fn extract_mixed_finds_activity_feed() {
-    if !chrome_available() { eprintln!("SKIP: Chrome not found"); return; }
+    if !common::browser_ready() {
+        return;
+    }
     let b = TestBrowser::new("ext-mixed");
     if !goto_fixture(b.name(), "extract_mixed.html") { return; }
 
@@ -320,7 +308,9 @@ fn extract_mixed_finds_activity_feed() {
 
 #[test]
 fn extract_with_selector_scopes_correctly() {
-    if !chrome_available() { eprintln!("SKIP: Chrome not found"); return; }
+    if !common::browser_ready() {
+        return;
+    }
     let b = TestBrowser::new("ext-selector");
     if !goto_fixture(b.name(), "extract_ecommerce.html") { return; }
 
@@ -336,7 +326,9 @@ fn extract_with_selector_scopes_correctly() {
 
 #[test]
 fn extract_limit_caps_results() {
-    if !chrome_available() { eprintln!("SKIP: Chrome not found"); return; }
+    if !common::browser_ready() {
+        return;
+    }
     let b = TestBrowser::new("ext-limit");
     if !goto_fixture(b.name(), "extract_list.html") { return; }
 
@@ -355,7 +347,9 @@ fn extract_limit_caps_results() {
 
 #[test]
 fn extract_link_heavy_nav_prefers_content() {
-    if !chrome_available() { eprintln!("SKIP: Chrome not found"); return; }
+    if !common::browser_ready() {
+        return;
+    }
     let b = TestBrowser::new("ext-linknav");
     if !goto_fixture(b.name(), "extract_link_heavy_nav.html") { return; }
 
@@ -379,7 +373,9 @@ fn extract_link_heavy_nav_prefers_content() {
 
 #[test]
 fn extract_faq_items() {
-    if !chrome_available() { eprintln!("SKIP: Chrome not found"); return; }
+    if !common::browser_ready() {
+        return;
+    }
     let b = TestBrowser::new("ext-faq");
     if !goto_fixture(b.name(), "extract_definition_list.html") { return; }
 
@@ -401,7 +397,9 @@ fn extract_faq_items() {
 
 #[test]
 fn extract_semantic_classes_boost() {
-    if !chrome_available() { eprintln!("SKIP: Chrome not found"); return; }
+    if !common::browser_ready() {
+        return;
+    }
     let b = TestBrowser::new("ext-semclass");
     if !goto_fixture(b.name(), "extract_semantic_classes.html") { return; }
 
@@ -426,7 +424,9 @@ fn extract_semantic_classes_boost() {
 
 #[test]
 fn extract_ads_interleaved_finds_articles() {
-    if !chrome_available() { eprintln!("SKIP: Chrome not found"); return; }
+    if !common::browser_ready() {
+        return;
+    }
     let b = TestBrowser::new("ext-ads");
     if !goto_fixture(b.name(), "extract_ads_interleaved.html") { return; }
 
@@ -456,7 +456,9 @@ fn extract_ads_interleaved_finds_articles() {
 
 #[test]
 fn extract_flat_table_rows() {
-    if !chrome_available() { eprintln!("SKIP: Chrome not found"); return; }
+    if !common::browser_ready() {
+        return;
+    }
     let b = TestBrowser::new("ext-ftable");
     if !goto_fixture(b.name(), "extract_flat_table.html") { return; }
 

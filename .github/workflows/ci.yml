@@ -13,7 +13,20 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.95.0
       - run: cargo check
       - run: cargo clippy -- -D warnings
+      # The browser tests skip themselves when Chrome is missing, and a skip is a pass.
+      # Assert Chrome exists here so that a runner image that drops it fails the build
+      # instead of silently turning ~57 of 68 tests into no-ops.
+      - name: Require a real browser for the test run
+        run: |
+          if ! command -v google-chrome >/dev/null && ! command -v chromium >/dev/null; then
+            echo "::error::No Chrome on this runner. The browser tests would skip themselves and report green."
+            exit 1
+          fi
+          google-chrome --version || chromium --version
       - run: cargo test -- --test-threads=1
+        env:
+          # Turns every "SKIP: …" into a failure. See tests/common/mod.rs.
+          CHROME_AGENT_REQUIRE_CHROME: 1
       # Linux release binaries are fully static musl builds (issue #3). That only works
       # while the dependency graph stays pure Rust — a C-linking crate (TLS/crypto backend)
       # would reintroduce a glibc dependency. Fail fast if one sneaks back in.

@@ -4,6 +4,8 @@ use std::process::Command;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+mod common;
+
 fn binary() -> String {
     let mut path = std::env::current_exe()
         .unwrap()
@@ -14,16 +16,6 @@ fn binary() -> String {
         .to_path_buf();
     path.push("chrome-agent");
     path.to_string_lossy().into_owned()
-}
-
-fn chrome_available() -> bool {
-    ["google-chrome", "chromium"].iter().any(|candidate| {
-        std::path::Path::new(candidate).exists()
-            || Command::new("which")
-                .arg(candidate)
-                .output()
-                .is_ok_and(|output| output.status.success())
-    })
 }
 
 struct BrowserGuard(&'static str);
@@ -38,8 +30,7 @@ impl Drop for BrowserGuard {
 
 #[test]
 fn managed_browser_routes_navigation_through_proxy() {
-    if !chrome_available() {
-        eprintln!("SKIP: Chrome not found");
+    if !common::browser_ready() {
         return;
     }
 
