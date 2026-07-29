@@ -43,8 +43,12 @@ jobs:
       # not cargo test, not CI. tests/js_suite_tests.rs runs it now, but only if jsdom is
       # installed; without this step it would skip, and under CHROME_AGENT_REQUIRE_CHROME
       # that skip is fatal. Installing it here is what makes the extraction engine gated.
+      # `npm ci`, with no `|| npm install` fallback: the fallback would regenerate the
+      # lockfile on the fly and let a drifted package.json pass green, which is the
+      # failure this whole pass keeps closing elsewhere. A lockfile that no longer
+      # satisfies package.json is a commit somebody forgot to make, not a hiccup.
       - name: Install the extraction suite's dependencies
-        run: npm ci --prefix tests/js || npm install --prefix tests/js
+        run: npm ci --prefix tests/js
       - run: cargo test -- --test-threads=1
         env:
           # Turns every "SKIP: …" into a failure. See tests/common/mod.rs.

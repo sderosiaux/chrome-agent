@@ -176,3 +176,48 @@ fn a_uid_targeted_action_reports_the_uid_it_was_given() {
     let v = act(b.name(), &["click", &uid]);
     assert_eq!(v["uid"].as_str().unwrap_or_default(), uid, "{v}");
 }
+
+/// Every targeted command, not just the ones that happened to get wired.
+///
+/// `dblclick`, `select` and `upload` attached the resolved uid on the CLI path and not
+/// in pipe/batch — the mode CLAUDE.md's own guarantee matters most in, since that is
+/// where an agent correlates a change report with the node it aimed at.
+#[test]
+fn pipe_names_the_node_for_every_targeted_command() {
+    if !common::browser_ready() {
+        return;
+    }
+    let url = common::fixture_url("select_controlled_revert.html");
+    let script = format!(
+        "{}\n{}\n{}\n",
+        serde_json::json!({"cmd": "goto", "url": url}),
+        serde_json::json!({"cmd": "select", "selector": "#plain", "value": "b"}),
+        serde_json::json!({"cmd": "dblclick", "selector": "#plain"}),
+    );
+    let mut child = Command::new(binary())
+        .args(["--browser", "selector-uid-pipe-all", "pipe"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn pipe");
+    child.stdin.as_mut().unwrap().write_all(script.as_bytes()).unwrap();
+    drop(child.stdin.take());
+    let out = child.wait_with_output().expect("pipe output");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let responses: Vec<Value> = stdout
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).expect("JSON"))
+        .collect();
+    let _ = run_cli(&["--browser", "selector-uid-pipe-all", "close", "--purge"]);
+
+    assert_eq!(responses.len(), 3, "expected one response per command: {stdout}");
+    for (name, response) in [("select", &responses[1]), ("dblclick", &responses[2])] {
+        assert_eq!(response["ok"], true, "{name} should succeed: {response}");
+        assert!(
+            response["uid"].as_str().is_some_and(|u| u.starts_with('n')),
+            "pipe {name} must name the resolved node: {response}"
+        );
+    }
+}

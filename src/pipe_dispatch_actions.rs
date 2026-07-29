@@ -8,7 +8,7 @@ use crate::cdp::client::CdpClient;
 use crate::commands;
 use crate::session::{self, SessionStore};
 
-use crate::pipe_dispatch::{attach_snapshot, cmd_max_depth, get_uid_map, parse_xy};
+use crate::pipe_dispatch::{attach_snapshot, cmd_max_depth, get_uid_map, merge_into, parse_xy};
 
 // ---------------------------------------------------------------------------
 // Composite dispatchers
@@ -120,6 +120,14 @@ pub async fn dispatch_dblclick(
     // Hoist the `?` out of the `else if let` so the non-Send ControlFlow residual
     // isn't held across the awaits below (keeps the future Send).
     let xy = parse_xy(cmd)?;
+    // Resolved before the action, like every other targeted command: afterwards the
+    // element may be detached and the answer would describe a different page.
+    let target = crate::run_helpers::target_details(
+        client,
+        cmd.get("selector").and_then(Value::as_str),
+        cmd.get("uid").and_then(Value::as_str),
+    )
+    .await;
     let msg = if let Some(sel) = cmd.get("selector").and_then(Value::as_str) {
         crate::element::dblclick_selector(client, sel).await?;
         format!("Double-clicked selector '{sel}'")
@@ -134,6 +142,7 @@ pub async fn dispatch_dblclick(
         return Err("dblclick: provide \"uid\", \"selector\", or \"xy\"".into());
     };
     let mut obj = json!({"ok": true, "message": msg});
+    merge_into(&mut obj, target.as_ref());
     if inspect {
         let snapshot = attach_snapshot(client, store, browser_name, page_name, target_id, max_depth).await?;
         obj["snapshot"] = json!(snapshot);
@@ -148,6 +157,12 @@ pub async fn dispatch_select(
     let value = cmd.get("value").and_then(Value::as_str).ok_or("select: missing \"value\"")?;
     let inspect = cmd.get("inspect").and_then(Value::as_bool).unwrap_or(false);
     let max_depth = cmd_max_depth(cmd).or(global_max_depth);
+    let target = crate::run_helpers::target_details(
+        client,
+        cmd.get("selector").and_then(Value::as_str),
+        cmd.get("uid").and_then(Value::as_str),
+    )
+    .await;
     let (msg, outcome) = if let Some(sel) = cmd.get("selector").and_then(Value::as_str) {
         let outcome = crate::element::select_option_selector(client, sel, value).await?;
         (format!("Selected \"{}\" on selector '{sel}'", outcome.text), outcome)
@@ -159,6 +174,7 @@ pub async fn dispatch_select(
         return Err("select: provide \"uid\" or \"selector\"".into());
     };
     let mut obj = json!({"ok": true, "message": msg, "observed_after_ms": outcome.observed_after_ms});
+    merge_into(&mut obj, target.as_ref());
     if inspect {
         let snapshot = attach_snapshot(client, store, browser_name, page_name, target_id, max_depth).await?;
         obj["snapshot"] = json!(snapshot);
@@ -202,6 +218,12 @@ pub async fn dispatch_upload(
     let files: Vec<String> = cmd.get("files").and_then(Value::as_array)
         .ok_or("upload: missing \"files\" array")?
         .iter().filter_map(|v| v.as_str().map(String::from)).collect();
+    let target = crate::run_helpers::target_details(
+        client,
+        cmd.get("selector").and_then(Value::as_str),
+        cmd.get("uid").and_then(Value::as_str),
+    )
+    .await;
     let msg = if let Some(uid) = cmd.get("uid").and_then(Value::as_str) {
         let uid_map = get_uid_map(store, browser_name, page_name);
         crate::element::set_file_input(client, &uid_map, uid, &files).await?;
@@ -212,7 +234,9 @@ pub async fn dispatch_upload(
     } else {
         return Err("upload: provide \"uid\" or \"selector\"".into());
     };
-    Ok(json!({"ok": true, "message": msg}))
+    let mut obj = json!({"ok": true, "message": msg});
+    merge_into(&mut obj, target.as_ref());
+    Ok(obj)
 }
 
 pub async fn dispatch_drag(

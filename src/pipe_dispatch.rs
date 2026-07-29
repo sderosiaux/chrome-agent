@@ -692,7 +692,7 @@ pub async fn dispatch_batch(
 }
 
 /// Copy an optional field set into a response object.
-fn merge_into(obj: &mut Value, details: Option<&Value>) {
+pub fn merge_into(obj: &mut Value, details: Option<&Value>) {
     if let (Some(target), Some(fields)) = (obj.as_object_mut(), details.and_then(Value::as_object)) {
         for (key, value) in fields {
             target.insert(key.clone(), value.clone());
