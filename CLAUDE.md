@@ -1,4 +1,4 @@
-# chrome-agent v0.10.0
+# chrome-agent v0.11.0
 
 Single Rust binary for browser automation via CDP. Built for AI agents.
 ~11.5K lines Rust, zero runtime dependencies, 3 MB binary.
