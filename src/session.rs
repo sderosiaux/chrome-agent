@@ -158,8 +158,11 @@ fn save_to(path: &Path, store: &mut SessionStore) -> Result<(), SessionError> {
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600));
     }
-    std::fs::rename(&tmp_path, path)
-        .map_err(|e| SessionError(format!("Failed to rename session file: {e}")))?;
+    std::fs::rename(&tmp_path, path).map_err(|e| {
+        // The temp name is per-PID, so nothing else will ever reclaim it.
+        let _ = std::fs::remove_file(&tmp_path);
+        SessionError(format!("Failed to rename session file: {e}"))
+    })?;
 
     // Our view is now the baseline for subsequent saves in this process.
     store.loaded_names = store.browsers.keys().cloned().collect();
@@ -390,6 +393,31 @@ mod tests {
             snapshot,
             Some("uid=n1 RootWebArea"),
             "agent-a's snapshot was clobbered by an agent that only read it"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_failed_rename_does_not_leak_the_temp_file() {
+        let dir = std::env::temp_dir().join(format!("chrome-agent-session-tmpleak-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // Make the destination an existing non-empty directory: fs::write to the
+        // sibling temp path succeeds, fs::rename(file, dir) then fails.
+        let path = dir.join("sessions.json");
+        std::fs::create_dir_all(path.join("occupied")).unwrap();
+
+        let mut store = SessionStore::default();
+        ensure_browser(&mut store, "leaky", "ws://x", None, true, None);
+        let result = save_to(&path, &mut store);
+        assert!(result.is_err(), "rename onto a directory should fail the save");
+
+        let tmp_path = path.with_extension(format!("json.tmp.{}", std::process::id()));
+        assert!(
+            !tmp_path.exists(),
+            "failed save left {} behind",
+            tmp_path.display()
         );
 
         let _ = std::fs::remove_dir_all(&dir);
