@@ -197,10 +197,19 @@ Per-command shapes:
 - `goto --inspect` → `{"ok":true, "url":"...", "title":"...", "snapshot":"uid=n1..."}`
 - `inspect` → `{"ok":true, "snapshot":"uid=n1 heading..."}`
 - `click/fill/select/check` → `{"ok":true, "message":"Clicked uid=n12", "changed":{"added":1,"removed":0,"changed":0,"unchanged":42,"moved":0,"anonymous":0,"document_changed":false,"identity_known":true}, "delta":"+ uid=n88 heading \"Saved\""}`
-- `fill` also returns `"value":{"requested":"...","actual":"...","verbatim":true|false}` — what you asked for and what the page kept. `verbatim:false` means a mask, a controlled component or a constraint rewrote it; read `actual` before assuming the form holds your value.
+- `fill` also returns `"value":{"requested":"...","actual":"...","verbatim":true|false,"observed_after_ms":60}` — what you asked for and what the page kept, and when that was read. `verbatim:false` means a mask, a controlled component or a constraint rewrote it; read `actual` before assuming the form holds your value. `observed_after_ms` is the whole claim: the value was that 60ms after the write. A validator that clears the field at 400ms is outside any fixed window — if persistence matters, read it again.
+- `fill-form` and `fill_and_submit` return `"values":[{"uid"|"selector":"...","value":{...}}]` — one entry per field, same shape and same redaction as a single fill. On `fill_and_submit` it is the only place the per-field outcome appears: the change report runs after the submit.
+- `check`/`uncheck` return `"observed_after_ms"` too, absent when the element already held the state (nothing was dispatched, so there was nothing to observe).
 - `focus` appears as `{"from":"n11","to":"n15"}` when focus moved. It is deliberately not counted as a content change.
+- every targeted action returns `"uid"` — the node it actually resolved, even when you aimed with `--selector`. Cross-check it against the uids in `delta` to confirm the change you are reading is the element you meant.
 - `click/fill/select/check --inspect` → the same, plus `"snapshot"` with the whole tree
-- `click/fill/select/check --verdict off` → `{"ok":true, "message":"Clicked uid=n12"}`
+- `click/fill/select/check --verdict off` → `{"ok":true, "message":"Clicked uid=n12", "verdict":"not_checked", "verdict_reason":"reporting_disabled"}`
+- every mutating command also carries `verdict` + `verdict_reason`, so silence is never ambiguous:
+  - `changed` (`tree_delta`, `nodes_moved`, `focus_only`) — the page moved; `delta` says how
+  - `navigated` (`document_replaced`) — new document, every stored uid is dead, re-inspect
+  - `unchanged` (`identical_tree`) — nothing in the tree changed while the tool watched. This is NOT "the action did nothing": the same result appears when a click is swallowed by an overlay, when the effect is a canvas repaint or a style change the tree cannot see, and when the handler runs after the window closed. Do not retry on this alone — check with `inspect` or `eval` first
+  - `unknown` (`no_baseline`, `read_failed`, `identity_unreadable`) — nothing could be compared; `verdict_hint` says how to find out
+  - `not_checked` (`reporting_disabled`) — you passed `--verdict off`
 - `read` → `{"ok":true, "title":"...", "text":"article content..."}`
 - `text` → `{"ok":true, "text":"visible text..."}`
 - `eval` → `{"ok":true, "result": <any JSON value>}`

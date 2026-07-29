@@ -11,6 +11,11 @@ use super::transport::{self, CdpSender, CdpTransportError};
 use super::types::{CdpEvent, CdpMessage, CdpRequest, CdpResponse};
 
 type PendingMap = Arc<Mutex<HashMap<u64, oneshot::Sender<CdpResponse>>>>;
+
+/// Deadline applied to a CDP response when the caller sets none. Matches the CLI's
+/// `--timeout` default, which is the number a caller reaches for when asked how long they
+/// are willing to wait.
+const DEFAULT_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const DIALOG_REQUEST_ID_START: u64 = 1_000_000_000;
 const DIALOG_REQUEST_ID_MAX: u64 = i32::MAX as u64;
 
@@ -43,6 +48,14 @@ pub struct CdpClient {
     /// `eval`/`inspect` (which take `&self`) can read it without threading
     /// state through every call site.
     frame_ctx: std::sync::Mutex<Option<FrameContext>>,
+    /// How long to wait for a response before giving up on it.
+    ///
+    /// Every `call` used to await its response channel with no deadline. Chrome answers
+    /// promptly, but an evaluation sent with `awaitPromise` only answers when the page's
+    /// promise settles — and a promise that never settles left the command hanging with no
+    /// error, no output and no recovery, in pipe mode for the rest of the session. Nothing
+    /// was broken enough to notice: the socket stayed open and the dispatcher kept running.
+    call_timeout: std::sync::Mutex<std::time::Duration>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -81,6 +94,7 @@ impl CdpClient {
             events_tx,
             _dispatcher: dispatcher,
             frame_ctx: std::sync::Mutex::new(None),
+            call_timeout: std::sync::Mutex::new(DEFAULT_CALL_TIMEOUT),
         })
     }
 
@@ -132,7 +146,21 @@ impl CdpClient {
             return Err(e.into());
         }
 
-        let response = rx.await.map_err(|_| CdpClientError::DispatcherGone)?;
+        let deadline = self.call_timeout();
+        let response = match tokio::time::timeout(deadline, rx).await {
+            Ok(received) => received.map_err(|_| CdpClientError::DispatcherGone)?,
+            Err(_) => {
+                // Drop the slot: leaving it behind leaks one entry per timed-out call, and
+                // a late answer would then be delivered to a receiver nobody awaits.
+                self.pending.lock().await.remove(&id);
+                return Err(CdpClientError::Timeout(format!(
+                    "{method} did not answer within {}s. An in-page promise that never \
+                     settles (awaitPromise) is the usual cause; raise --timeout if the page \
+                     is merely slow.",
+                    deadline.as_secs()
+                )));
+            }
+        };
 
         if let Some(error) = response.error {
             return Err(CdpClientError::Protocol {
@@ -153,6 +181,19 @@ impl CdpClient {
     ) -> Result<(), CdpClientError> {
         let _: Value = self.call(method, params).await?;
         Ok(())
+    }
+
+    /// How long a call waits for its response.
+    #[must_use]
+    pub fn call_timeout(&self) -> std::time::Duration {
+        self.call_timeout.lock().map_or(DEFAULT_CALL_TIMEOUT, |d| *d)
+    }
+
+    /// Set the deadline for every subsequent call, from the caller's `--timeout`.
+    pub fn set_call_timeout(&self, timeout: std::time::Duration) {
+        if let Ok(mut slot) = self.call_timeout.lock() {
+            *slot = timeout;
+        }
     }
 
     /// Subscribe to CDP events. Returns a broadcast receiver.

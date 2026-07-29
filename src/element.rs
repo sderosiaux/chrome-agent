@@ -187,11 +187,20 @@ pub struct FillOutcome {
     /// constrains the editing pipeline, not the value setter, so a programmatic fill walks
     /// straight past it and the form will reject the field on submit.
     pub caveat: Option<String>,
+    /// How long after the write the value was read. "The field holds X" is only ever true
+    /// as of a moment, and this is the moment.
+    pub observed_after_ms: u64,
 }
 
 impl FillOutcome {
     pub fn new(requested: &str, actual: Option<String>) -> Self {
-        Self { requested: requested.to_string(), actual, caveat: None, sensitive: false }
+        Self {
+            requested: requested.to_string(),
+            actual,
+            caveat: None,
+            sensitive: false,
+            observed_after_ms: READ_BACK_MS,
+        }
     }
 
     /// Mark the outcome as holding a secret.
@@ -222,6 +231,21 @@ impl FillOutcome {
     }
 }
 
+/// How long a read-back waits before looking at what the page kept.
+///
+/// The three read-back paths used to disagree: `fill` read synchronously (0ms), so a value
+/// reverted one microtask later was reported as kept — verbatim:true on a field the page
+/// had already emptied. `check --selector` waited 60ms, `check <uid>` waited for however
+/// long a CDP round trip happened to take.
+///
+/// 60ms catches a revert on the microtask queue, in a `setTimeout(0)`, or in an animation
+/// frame — the shapes a controlled component uses. It does NOT catch a validator that
+/// fires at 400ms (`tests/fixtures/form_value_late_revert.html`), and no fixed window
+/// could: a page may revert at any time. That is why every read-back reports
+/// `observed_after_ms` alongside the value rather than asserting persistence. Raising it
+/// would buy a few more shapes at the cost of that much latency on every fill and check.
+pub const READ_BACK_MS: u64 = 60;
+
 /// Fill an element (input/textarea) by uid.
 pub async fn fill(
     client: &CdpClient,
@@ -250,13 +274,20 @@ pub async fn fill(
             }
             this.dispatchEvent(new Event('input', {bubbles: true}));
             this.dispatchEvent(new Event('change', {bubbles: true}));
-            return {
-                value: this.value === undefined ? null : String(this.value),
-                maxLength: typeof this.maxLength === 'number' ? this.maxLength : null,
-                sensitive: this.type === 'password' ||
-                    /password|cc-number|cc-csc|one-time-code/i.test(this.autocomplete || '')
-            };
-        }".to_string();
+            var el = this;
+            // Read after the window, not on the next line: a controlled component that
+            // reverts in a promise callback has not run yet when the write returns.
+            return new Promise(function (resolve) {
+                setTimeout(function () {
+                    resolve({
+                        value: el.value === undefined ? null : String(el.value),
+                        maxLength: typeof el.maxLength === 'number' ? el.maxLength : null,
+                        sensitive: el.type === 'password' ||
+                            /password|cc-number|cc-csc|one-time-code/i.test(el.autocomplete || '')
+                    });
+                }, WINDOW_MS);
+            });
+        }".replace("WINDOW_MS", &READ_BACK_MS.to_string());
 
     let nav_events = client.events();
     let result: serde_json::Value = client
@@ -267,6 +298,7 @@ pub async fn fill(
                 "functionDeclaration": js,
                 "arguments": [{"value": value}],
                 "returnByValue": true,
+                "awaitPromise": true,
             }),
         )
         .await
@@ -545,10 +577,12 @@ pub async fn click_at_coords(
 // Selector-based actions (click/dblclick/fill/focus) live in `element_selector`
 // to keep this file under the 1000-line module cap; re-exported here so callers
 // keep using `crate::element::*`.
-pub use crate::element_selector::{click_selector, dblclick_selector, fill_selector, focus_selector};
+pub use crate::element_selector::{
+    click_selector, dblclick_selector, fill_selector, focus_selector, selector_uid,
+};
 // Split out for the 1000-line file cap; callers keep using `element::*`.
 pub use crate::element_controls::{
-    drag, select_option, select_option_selector, set_checked, set_checked_selector,
+    drag, select_option, select_option_selector, set_checked, set_checked_selector, CheckOutcome,
     set_file_input, set_file_input_selector,
 };
 

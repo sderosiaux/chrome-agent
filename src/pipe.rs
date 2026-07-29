@@ -61,6 +61,9 @@ pub async fn run_pipe(cli: &Cli) -> Result<(), crate::BoxError> {
 
     let page_ws = browser::get_page_ws_url(http_endpoint, &target_id).await?;
     let client = CdpClient::connect(&page_ws).await?;
+    // The caller's own answer to "how long am I willing to wait" also bounds every CDP
+    // response, so a page promise that never settles fails instead of hanging forever.
+    client.set_call_timeout(std::time::Duration::from_secs(cli.timeout));
     client.enable("Page").await?;
 
     // Console interceptor (stealth-safe)
@@ -152,6 +155,9 @@ pub async fn run_replay(
 
     let page_ws = browser::get_page_ws_url(http_endpoint, &target_id).await?;
     let client = CdpClient::connect(&page_ws).await?;
+    // The caller's own answer to "how long am I willing to wait" also bounds every CDP
+    // response, so a page promise that never settles fails instead of hanging forever.
+    client.set_call_timeout(std::time::Duration::from_secs(cli.timeout));
     client.enable("Page").await?;
     commands::console::inject(&client).await;
     if cli.stealth { crate::setup::apply_stealth(&client).await; }
@@ -275,6 +281,14 @@ async fn dispatch(
         }
     }
     };
+    // `--verdict off` is a decision, not an observation. Saying so costs two fields and no
+    // page read, and it is the difference between "I did not look" and "nothing moved".
+    if !report.changes && crate::pipe_dispatch::mutates_page(cmd_name) {
+        crate::run_helpers::attach_verdict(
+            &mut value,
+            crate::verdict::classify(crate::verdict::Observation::ReportingDisabled),
+        );
+    }
     if let Some((old_text, old_url)) = baseline {
         crate::pipe_dispatch::attach_change_report(
             client, store, browser_name, page_name, target_id, report, old_text.as_deref(),

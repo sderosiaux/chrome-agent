@@ -1,17 +1,11 @@
-use std::path::PathBuf;
 use std::process::Command;
+
+mod common;
 
 fn binary() -> String {
     let mut path = std::env::current_exe().unwrap().parent().unwrap().parent().unwrap().to_path_buf();
     path.push("chrome-agent");
     path.to_string_lossy().into_owned()
-}
-
-fn fixture_url(name: &str) -> String {
-    let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    path.push("tests/fixtures");
-    path.push(name);
-    format!("file://{}", path.display())
 }
 
 fn run_cli(args: &[&str]) -> (String, String, i32) {
@@ -21,23 +15,6 @@ fn run_cli(args: &[&str]) -> (String, String, i32) {
         String::from_utf8_lossy(&output.stderr).to_string(),
         output.status.code().unwrap_or(-1),
     )
-}
-
-fn chrome_available() -> bool {
-    let candidates = if cfg!(target_os = "macos") {
-        vec!["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"]
-    } else {
-        vec!["google-chrome", "chromium"]
-    };
-    for candidate in candidates {
-        if std::path::Path::new(candidate).exists() {
-            return true;
-        }
-        if Command::new("which").arg(candidate).output().is_ok_and(|o| o.status.success()) {
-            return true;
-        }
-    }
-    false
 }
 
 struct TestBrowser(&'static str);
@@ -56,11 +33,10 @@ impl Drop for TestBrowser {
 }
 
 fn goto(browser: &str, fixture: &str) -> bool {
-    let url = fixture_url(fixture);
+    let url = common::fixture_url(fixture);
     let (_, stderr, code) = run_cli(&["--browser", browser, "goto", &url]);
     if code != 0 {
-        eprintln!("SKIP: goto failed for {fixture}: {stderr}");
-        return false;
+        return common::unavailable(&format!("goto {fixture} failed: {stderr}"));
     }
     true
 }
@@ -79,8 +55,7 @@ fn diff_json(browser: &str) -> Option<serde_json::Value> {
 
 #[test]
 fn diff_reports_document_change_instead_of_pairing_unrelated_uids() {
-    if !chrome_available() {
-        eprintln!("SKIP: Chrome not found");
+    if !common::browser_ready() {
         return;
     }
     let b = TestBrowser::new("diff-nav");
@@ -104,8 +79,7 @@ fn diff_reports_document_change_instead_of_pairing_unrelated_uids() {
 
 #[test]
 fn diff_on_the_same_document_still_reports_changes() {
-    if !chrome_available() {
-        eprintln!("SKIP: Chrome not found");
+    if !common::browser_ready() {
         return;
     }
     let b = TestBrowser::new("diff-same");

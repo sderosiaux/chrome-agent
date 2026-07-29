@@ -10,6 +10,8 @@ use std::process::{Command, Stdio};
 
 use serde_json::Value;
 
+mod common;
+
 /// Path to the built binary (sibling of the test binary).
 fn binary() -> String {
     let mut path = std::env::current_exe()
@@ -23,35 +25,7 @@ fn binary() -> String {
     path.to_string_lossy().into_owned()
 }
 
-fn chrome_available() -> bool {
-    let candidates = if cfg!(target_os = "macos") {
-        vec!["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"]
-    } else {
-        vec!["google-chrome", "chromium"]
-    };
-    for candidate in candidates {
-        if std::path::Path::new(candidate).exists() {
-            return true;
-        }
-        if Command::new("which")
-            .arg(candidate)
-            .output()
-            .is_ok_and(|o| o.status.success())
-        {
-            return true;
-        }
-    }
-    false
-}
-
 /// `file://` URL for a fixture in `tests/fixtures/`.
-fn fixture_url(name: &str) -> String {
-    let mut path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    path.push("tests/fixtures");
-    path.push(name);
-    format!("file://{}", path.to_string_lossy())
-}
-
 /// Run `chrome-agent pipe` feeding the given JSON command lines on stdin,
 /// return one parsed `Value` per output line (in order).
 fn run_pipe(browser: &str, commands: &[Value]) -> Vec<Value> {
@@ -101,8 +75,7 @@ impl Drop for BrowserGuard<'_> {
 
 #[test]
 fn frame_switch_scopes_eval_location_to_iframe() {
-    if !chrome_available() {
-        eprintln!("SKIP: Chrome not found");
+    if !common::browser_ready() {
         return;
     }
     let browser = "test-frame-eval-loc";
@@ -110,7 +83,7 @@ fn frame_switch_scopes_eval_location_to_iframe() {
     let responses = run_pipe(
         browser,
         &[
-            serde_json::json!({"cmd": "goto", "url": fixture_url("frame_parent.html")}),
+            serde_json::json!({"cmd": "goto", "url": common::fixture_url("frame_parent.html")}),
             serde_json::json!({"cmd": "frame", "target": "iframe"}),
             serde_json::json!({"cmd": "eval", "expression": "location.href"}),
         ],
@@ -133,8 +106,7 @@ fn frame_switch_scopes_eval_location_to_iframe() {
 
 #[test]
 fn frame_switch_scopes_eval_dom_to_iframe() {
-    if !chrome_available() {
-        eprintln!("SKIP: Chrome not found");
+    if !common::browser_ready() {
         return;
     }
     let browser = "test-frame-eval-dom";
@@ -142,7 +114,7 @@ fn frame_switch_scopes_eval_dom_to_iframe() {
     let responses = run_pipe(
         browser,
         &[
-            serde_json::json!({"cmd": "goto", "url": fixture_url("frame_parent.html")}),
+            serde_json::json!({"cmd": "goto", "url": common::fixture_url("frame_parent.html")}),
             serde_json::json!({"cmd": "frame", "target": "iframe"}),
             serde_json::json!({"cmd": "eval", "expression": "document.querySelector('#child-marker').textContent"}),
         ],
@@ -160,8 +132,7 @@ fn frame_switch_scopes_eval_dom_to_iframe() {
 
 #[test]
 fn frame_switch_scopes_inspect_to_iframe() {
-    if !chrome_available() {
-        eprintln!("SKIP: Chrome not found");
+    if !common::browser_ready() {
         return;
     }
     let browser = "test-frame-inspect";
@@ -169,7 +140,7 @@ fn frame_switch_scopes_inspect_to_iframe() {
     let responses = run_pipe(
         browser,
         &[
-            serde_json::json!({"cmd": "goto", "url": fixture_url("frame_parent.html")}),
+            serde_json::json!({"cmd": "goto", "url": common::fixture_url("frame_parent.html")}),
             serde_json::json!({"cmd": "frame", "target": "iframe"}),
             serde_json::json!({"cmd": "inspect"}),
         ],
@@ -194,8 +165,7 @@ fn frame_switch_scopes_inspect_to_iframe() {
 
 #[test]
 fn frame_main_switches_back_to_top_document() {
-    if !chrome_available() {
-        eprintln!("SKIP: Chrome not found");
+    if !common::browser_ready() {
         return;
     }
     let browser = "test-frame-main-back";
@@ -203,7 +173,7 @@ fn frame_main_switches_back_to_top_document() {
     let responses = run_pipe(
         browser,
         &[
-            serde_json::json!({"cmd": "goto", "url": fixture_url("frame_parent.html")}),
+            serde_json::json!({"cmd": "goto", "url": common::fixture_url("frame_parent.html")}),
             serde_json::json!({"cmd": "frame", "target": "iframe"}),
             serde_json::json!({"cmd": "frame", "target": "main"}),
             serde_json::json!({"cmd": "eval", "expression": "location.href"}),
@@ -225,8 +195,7 @@ fn frame_main_switches_back_to_top_document() {
 
 #[test]
 fn navigation_resets_frame_binding() {
-    if !chrome_available() {
-        eprintln!("SKIP: Chrome not found");
+    if !common::browser_ready() {
         return;
     }
     let browser = "test-frame-nav-reset";
@@ -234,9 +203,9 @@ fn navigation_resets_frame_binding() {
     let responses = run_pipe(
         browser,
         &[
-            serde_json::json!({"cmd": "goto", "url": fixture_url("frame_parent.html")}),
+            serde_json::json!({"cmd": "goto", "url": common::fixture_url("frame_parent.html")}),
             serde_json::json!({"cmd": "frame", "target": "iframe"}),
-            serde_json::json!({"cmd": "goto", "url": fixture_url("frame_child.html")}),
+            serde_json::json!({"cmd": "goto", "url": common::fixture_url("frame_child.html")}),
             serde_json::json!({"cmd": "eval", "expression": "location.href"}),
         ],
     );
@@ -264,8 +233,7 @@ fn navigation_resets_frame_binding() {
 
 #[test]
 fn frame_on_non_iframe_element_errors() {
-    if !chrome_available() {
-        eprintln!("SKIP: Chrome not found");
+    if !common::browser_ready() {
         return;
     }
     let browser = "test-frame-non-iframe";
@@ -273,7 +241,7 @@ fn frame_on_non_iframe_element_errors() {
     let responses = run_pipe(
         browser,
         &[
-            serde_json::json!({"cmd": "goto", "url": fixture_url("frame_parent.html")}),
+            serde_json::json!({"cmd": "goto", "url": common::fixture_url("frame_parent.html")}),
             serde_json::json!({"cmd": "frame", "target": "h1"}),
         ],
     );
@@ -290,8 +258,7 @@ fn frame_on_non_iframe_element_errors() {
 
 #[test]
 fn frame_on_missing_selector_errors() {
-    if !chrome_available() {
-        eprintln!("SKIP: Chrome not found");
+    if !common::browser_ready() {
         return;
     }
     let browser = "test-frame-missing";
@@ -299,7 +266,7 @@ fn frame_on_missing_selector_errors() {
     let responses = run_pipe(
         browser,
         &[
-            serde_json::json!({"cmd": "goto", "url": fixture_url("frame_parent.html")}),
+            serde_json::json!({"cmd": "goto", "url": common::fixture_url("frame_parent.html")}),
             serde_json::json!({"cmd": "frame", "target": ".does-not-exist"}),
         ],
     );
@@ -316,8 +283,7 @@ fn frame_on_missing_selector_errors() {
 
 #[test]
 fn frame_missing_target_field_errors() {
-    if !chrome_available() {
-        eprintln!("SKIP: Chrome not found");
+    if !common::browser_ready() {
         return;
     }
     let browser = "test-frame-no-target";
@@ -325,7 +291,7 @@ fn frame_missing_target_field_errors() {
     let responses = run_pipe(
         browser,
         &[
-            serde_json::json!({"cmd": "goto", "url": fixture_url("frame_parent.html")}),
+            serde_json::json!({"cmd": "goto", "url": common::fixture_url("frame_parent.html")}),
             serde_json::json!({"cmd": "frame"}),
         ],
     );
@@ -343,8 +309,7 @@ fn frame_missing_target_field_errors() {
 
 #[test]
 fn without_frame_switch_eval_targets_top_document() {
-    if !chrome_available() {
-        eprintln!("SKIP: Chrome not found");
+    if !common::browser_ready() {
         return;
     }
     let browser = "test-frame-control-eval";
@@ -352,7 +317,7 @@ fn without_frame_switch_eval_targets_top_document() {
     let responses = run_pipe(
         browser,
         &[
-            serde_json::json!({"cmd": "goto", "url": fixture_url("frame_parent.html")}),
+            serde_json::json!({"cmd": "goto", "url": common::fixture_url("frame_parent.html")}),
             serde_json::json!({"cmd": "eval", "expression": "location.href"}),
         ],
     );
@@ -368,8 +333,7 @@ fn without_frame_switch_eval_targets_top_document() {
 
 #[test]
 fn without_frame_switch_inspect_shows_parent() {
-    if !chrome_available() {
-        eprintln!("SKIP: Chrome not found");
+    if !common::browser_ready() {
         return;
     }
     let browser = "test-frame-control-inspect";
@@ -377,7 +341,7 @@ fn without_frame_switch_inspect_shows_parent() {
     let responses = run_pipe(
         browser,
         &[
-            serde_json::json!({"cmd": "goto", "url": fixture_url("frame_parent.html")}),
+            serde_json::json!({"cmd": "goto", "url": common::fixture_url("frame_parent.html")}),
             serde_json::json!({"cmd": "inspect"}),
         ],
     );

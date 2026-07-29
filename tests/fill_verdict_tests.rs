@@ -1,19 +1,13 @@
-use std::path::PathBuf;
 use std::process::Command;
 
 use serde_json::Value;
+
+mod common;
 
 fn binary() -> String {
     let mut path = std::env::current_exe().unwrap().parent().unwrap().parent().unwrap().to_path_buf();
     path.push("chrome-agent");
     path.to_string_lossy().into_owned()
-}
-
-fn fixture_url(name: &str) -> String {
-    let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    path.push("tests/fixtures");
-    path.push(name);
-    format!("file://{}", path.display())
 }
 
 fn run_cli(args: &[&str]) -> (String, i32) {
@@ -22,23 +16,6 @@ fn run_cli(args: &[&str]) -> (String, i32) {
         String::from_utf8_lossy(&output.stdout).to_string(),
         output.status.code().unwrap_or(-1),
     )
-}
-
-fn chrome_available() -> bool {
-    let candidates = if cfg!(target_os = "macos") {
-        vec!["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"]
-    } else {
-        vec!["google-chrome", "chromium"]
-    };
-    for candidate in candidates {
-        if std::path::Path::new(candidate).exists() {
-            return true;
-        }
-        if Command::new("which").arg(candidate).output().is_ok_and(|o| o.status.success()) {
-            return true;
-        }
-    }
-    false
 }
 
 struct TestBrowser(&'static str);
@@ -50,13 +27,12 @@ impl Drop for TestBrowser {
 
 /// Load a fixture and fill `selector` with `value`. Returns the parsed response.
 fn fill_on(browser: &str, fixture: &str, selector: &str, value: &str) -> Option<(Value, i32)> {
-    if !chrome_available() {
-        eprintln!("SKIP: Chrome not found");
+    if !common::browser_ready() {
         return None;
     }
-    let (_, code) = run_cli(&["--browser", browser, "goto", &fixture_url(fixture)]);
+    let (_, code) = run_cli(&["--browser", browser, "goto", &common::fixture_url(fixture)]);
     if code != 0 {
-        eprintln!("SKIP: goto failed");
+        common::unavailable(&format!("goto {fixture} failed"));
         return None;
     }
     let (out, code) = run_cli(&[

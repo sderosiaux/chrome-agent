@@ -1,0 +1,21 @@
+<!doctype html>
+<html>
+<head>
+<title>Covered button</title>
+<style>
+  #target { position: absolute; top: 100px; left: 100px; width: 200px; height: 60px; }
+  /* A modal scrim, the shape every cookie banner and dialog takes. */
+  #scrim { position: absolute; top: 0; left: 0; width: 100%; height: 400px; background: rgba(0,0,0,.3); }
+</style>
+</head>
+<body>
+  <button id="target" onclick="window.receiver = 'target'">Underneath</button>
+  <div id="scrim" onclick="window.receiver = 'scrim'"></div>
+  <p id="report">nothing yet</p>
+  <script>
+    window.receiver = null;
+    // A real pointer at the button's centre lands on the scrim, which covers it.
+    // el.click() ignores that entirely: it fires on the node whatever is on top.
+  </script>
+</body>
+</html>

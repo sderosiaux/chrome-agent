@@ -32,10 +32,12 @@ pub async fn dispatch_fill_and_submit(client: &CdpClient, timeout: u64, cmd: &Va
     let submit_selector = cmd.get("submit").and_then(Value::as_str).ok_or("fill_and_submit: missing \"submit\" selector")?;
     let wait_for = cmd.get("wait_for").and_then(Value::as_str);
     let field_count = fields.len();
+    let mut outcomes = Vec::new();
     for field in fields {
         let selector = field.get("selector").and_then(Value::as_str).ok_or("fill_and_submit: each field needs \"selector\"")?;
         let value = field.get("value").and_then(Value::as_str).ok_or("fill_and_submit: each field needs \"value\"")?;
-        crate::element::fill_selector(client, selector, value).await?;
+        let outcome = crate::element::fill_selector(client, selector, value).await?;
+        outcomes.push((selector.to_string(), outcome));
     }
     crate::element::click_selector(client, submit_selector).await?;
     if let Some(pattern) = wait_for {
@@ -48,6 +50,9 @@ pub async fn dispatch_fill_and_submit(client: &CdpClient, timeout: u64, cmd: &Va
     // mutation did not happen, and the natural response to that is to submit again.
     let message = format!("Filled {field_count} fields, submitted, waited for '{}'", wait_for.unwrap_or("none"));
     let mut out = json!({"ok": true, "message": message});
+    // The only witness this command has. The change report runs after the submit, so a
+    // field the page rewrote on the way in is no longer visible anywhere by then.
+    out["values"] = crate::run_helpers::bulk_fill_report("selector", &outcomes);
     match commands::read::run(client, false, None).await {
         Ok(read_result) => out["content"] = json!(read_result.text_content),
         Err(e) => out["read_error"] = json!(e.to_string()),
@@ -71,13 +76,16 @@ pub async fn dispatch_fill_form(
     let pairs = cmd.get("pairs").and_then(Value::as_array)
         .ok_or("fill-form requires \"pairs\" array (e.g. [{\"uid\":\"n1\",\"value\":\"a\"}])")?;
     let uid_map = crate::run_helpers::get_uid_map(store, browser_name, page_name);
+    let mut outcomes = Vec::new();
     for pair in pairs {
         let uid = pair.get("uid").and_then(Value::as_str).ok_or("Each pair needs \"uid\"")?;
         let value = pair.get("value").and_then(Value::as_str).ok_or("Each pair needs \"value\"")?;
-        crate::element::fill(client, &uid_map, uid, value).await?;
+        let outcome = crate::element::fill(client, &uid_map, uid, value).await?;
+        outcomes.push((uid.to_string(), outcome));
     }
     let inspect = cmd.get("inspect").and_then(Value::as_bool).unwrap_or(false);
     let mut obj = json!({"ok": true, "message": format!("Filled {} fields", pairs.len())});
+    obj["values"] = crate::run_helpers::bulk_fill_report("uid", &outcomes);
     if inspect {
         let max_depth = cmd.get("max_depth").and_then(Value::as_u64).map(|v| v as usize).or(global_max_depth);
         let snapshot = commands::inspect::run(client, false, max_depth, None, None).await?;
@@ -162,7 +170,13 @@ pub async fn dispatch_check(
     client: &CdpClient, store: &SessionStore, browser_name: &str, page_name: &str, cmd: &Value,
 ) -> Result<Value, crate::BoxError> {
     let desired = cmd.get("desired").and_then(Value::as_bool).unwrap_or(true);
-    let msg = if let Some(sel) = cmd.get("selector").and_then(Value::as_str) {
+    let target = crate::run_helpers::target_details(
+        client,
+        cmd.get("selector").and_then(Value::as_str),
+        cmd.get("uid").and_then(Value::as_str),
+    )
+    .await;
+    let outcome = if let Some(sel) = cmd.get("selector").and_then(Value::as_str) {
         crate::element::set_checked_selector(client, sel, desired).await?
     } else if let Some(uid) = cmd.get("uid").and_then(Value::as_str) {
         let uid_map = get_uid_map(store, browser_name, page_name);
@@ -170,7 +184,16 @@ pub async fn dispatch_check(
     } else {
         return Err("check: provide \"uid\" or \"selector\"".into());
     };
-    Ok(json!({"ok": true, "message": msg}))
+    let mut obj = json!({"ok": true, "message": outcome.message});
+    if let Some(uid) = target.as_ref().and_then(|t| t.get("uid")) {
+        obj["uid"] = uid.clone();
+    }
+    // Absent when the element already held the state: nothing was dispatched, so there was
+    // no post-action moment to report.
+    if let Some(ms) = outcome.observed_after_ms {
+        obj["observed_after_ms"] = json!(ms);
+    }
+    Ok(obj)
 }
 
 pub async fn dispatch_upload(

@@ -103,10 +103,81 @@ pub fn fill_value_report(outcome: &crate::element::FillOutcome) -> serde_json::V
             "verbatim": outcome.verbatim(),
         })
     };
+    // "The field holds X" is only true as of a moment. Saying which moment is the only
+    // honest form of the claim: a page can revert at any time, and one did at 400ms.
+    v["observed_after_ms"] = json!(outcome.observed_after_ms);
     if let Some(caveat) = &outcome.caveat {
         v["caveat"] = json!(caveat);
     }
     v
+}
+
+/// The uid of the node an action is about to touch, whichever way it was named.
+///
+/// Resolved before the action runs: afterwards the element may be detached, and the answer
+/// would describe a different page. Returns the fields to merge into the response, so a
+/// caller that has none of its own can pass this straight through.
+pub async fn target_details(
+    client: &CdpClient,
+    selector: Option<&str>,
+    uid: Option<&str>,
+) -> Option<serde_json::Value> {
+    let resolved = match (selector, uid) {
+        (Some(sel), _) => crate::element::selector_uid(client, sel).await,
+        // A uid-targeted action already names its node; echoing it keeps the field's
+        // meaning the same whichever way the caller aimed.
+        (None, Some(uid)) => Some(uid.to_string()),
+        (None, None) => None,
+    };
+    resolved.map(|uid| json!({"uid": uid}))
+}
+
+/// Merge two optional field sets into one response object.
+#[must_use]
+pub fn merge_details(
+    first: Option<serde_json::Value>,
+    second: Option<serde_json::Value>,
+) -> Option<serde_json::Value> {
+    match (first, second) {
+        (Some(mut a), Some(b)) => {
+            if let (Some(target), Some(extra)) = (a.as_object_mut(), b.as_object()) {
+                for (key, value) in extra {
+                    target.insert(key.clone(), value.clone());
+                }
+            }
+            Some(a)
+        }
+        (Some(only), None) | (None, Some(only)) => Some(only),
+        (None, None) => None,
+    }
+}
+
+/// Per-field report for a bulk fill: what each target was, and what it kept.
+///
+/// `key` is "uid" or "selector" depending on how the caller named the field. Secrets go
+/// through the same redaction as a single fill — a bulk path that printed them would be a
+/// way around it.
+#[must_use]
+pub fn bulk_fill_report(
+    key: &str,
+    outcomes: &[(String, crate::element::FillOutcome)],
+) -> serde_json::Value {
+    serde_json::Value::Array(
+        outcomes
+            .iter()
+            .map(|(target, outcome)| json!({key: target, "value": fill_value_report(outcome)}))
+            .collect(),
+    )
+}
+
+/// Split a check/uncheck outcome into the message and the fields that go with it.
+///
+/// `observed_after_ms` is absent when the element already held the desired state: nothing
+/// was dispatched, so claiming an observation window afterwards would invent one.
+#[must_use]
+pub fn check_report(outcome: crate::element::CheckOutcome) -> (String, Option<serde_json::Value>) {
+    let details = outcome.observed_after_ms.map(|ms| json!({"observed_after_ms": ms}));
+    (outcome.message, details)
 }
 
 /// Execute a command, report what it did to the page, and persist the new baseline.
@@ -128,7 +199,9 @@ pub async fn output_action(
     output_action_with(client, store, browser_name, page_name, target_id, msg, report, json_mode, None).await
 }
 
-/// `output_action` plus the value a fill left behind.
+/// `output_action` plus whatever the command itself observed — the value a fill left
+/// behind, the window a check looked through. Merged at the top level of the response so
+/// the CLI and the pipe dispatchers, which build their JSON separately, agree on shape.
 #[allow(clippy::too_many_arguments)]
 pub async fn output_action_with(
     client: &CdpClient,
@@ -139,13 +212,22 @@ pub async fn output_action_with(
     msg: String,
     report: &ActionReport,
     json_mode: bool,
-    fill: Option<&crate::element::FillOutcome>,
+    details: Option<serde_json::Value>,
 ) -> Result<(), crate::BoxError> {
     let mut obj = json!({"ok": true, "message": msg});
-    if let Some(outcome) = fill {
-        obj["value"] = fill_value_report(outcome);
+    if let Some(fields) = details.as_ref().and_then(serde_json::Value::as_object) {
+        for (key, value) in fields {
+            obj[key.as_str()] = value.clone();
+        }
     }
     let mut trailer = String::new();
+    // Silence used to mean four different things here. Whatever happens below, the response
+    // carries the one that applies.
+    let mut observation = if report.changes {
+        crate::verdict::Observation::NoBaseline
+    } else {
+        crate::verdict::Observation::ReportingDisabled
+    };
 
     if report.inspect || report.changes {
         // Wait for the page to stop reacting rather than for a fixed guess: a page that
@@ -154,7 +236,22 @@ pub async fn output_action_with(
         // The baseline is always full depth. Storing a `--max-depth` view would make the
         // next comparison read every node the limit cut off as newly added: verified, an
         // action with `--max-depth 1` then a plain `diff` invented additions.
-        let snapshot = commands::inspect::run(client, false, None, None, None).await?;
+        //
+        // A read that fails is not an action that failed. This used to propagate with `?`,
+        // so a click that had already been delivered came back as `ok:false` — and the
+        // natural response to that is to click again, which is real. `pipe_dispatch` stated
+        // the opposite policy in a comment and followed it; this is the CLI adopting it.
+        let Ok(snapshot) = commands::inspect::run(client, false, None, None, None).await else {
+            let assessment = crate::verdict::classify(crate::verdict::Observation::ReadFailed);
+            attach_verdict(&mut obj, assessment);
+            if json_mode {
+                json_output(&obj);
+            } else {
+                println!("{msg}");
+                println!("verdict: {} ({})", assessment.verdict, assessment.reason);
+            }
+            return Ok(());
+        };
 
         if report.changes {
             let previous = store
@@ -194,6 +291,13 @@ pub async fn output_action_with(
                     "identity_known": cmp.identity_known,
                 });
                 obj["delta"] = json!(body);
+                observation = crate::verdict::Observation::Compared {
+                    document_changed: cmp.document_changed,
+                    identity_known: cmp.identity_known,
+                    edits: cmp.added + cmp.removed + cmp.changed,
+                    moved: cmp.moved,
+                    focus_moved: cmp.focus_from.is_some() || cmp.focus_to.is_some(),
+                };
                 if cmp.focus_from.is_some() || cmp.focus_to.is_some() {
                     obj["focus"] = json!({"from": cmp.focus_from, "to": cmp.focus_to});
                 }
@@ -228,6 +332,9 @@ pub async fn output_action_with(
         }
     }
 
+    let assessment = crate::verdict::classify(observation);
+    attach_verdict(&mut obj, assessment);
+
     if json_mode {
         json_output(&obj);
     } else {
@@ -235,8 +342,23 @@ pub async fn output_action_with(
         if !trailer.is_empty() {
             println!("{}", trailer.trim_end());
         }
+        println!("verdict: {} ({})", assessment.verdict, assessment.reason);
     }
     Ok(())
+}
+
+/// Write the verdict, its reason, and — when the verdict is an admission of ignorance —
+/// what to do about it.
+///
+/// `hint` may already hold the diff's own advice (a navigation tells the caller its uids
+/// are dead). The verdict's hint goes in its own field rather than overwriting it: two
+/// different pieces of advice, one slot, and the more specific one loses.
+pub fn attach_verdict(obj: &mut serde_json::Value, assessment: crate::verdict::Assessment) {
+    obj["verdict"] = json!(assessment.verdict.as_str());
+    obj["verdict_reason"] = json!(assessment.reason);
+    if let Some(hint) = crate::verdict::hint_for(assessment) {
+        obj["verdict_hint"] = json!(hint);
+    }
 }
 
 /// Output goto result with optional post-inspect.

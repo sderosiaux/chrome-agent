@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Multi-field form</title></head>
+<body>
+<!-- One field keeps what it is given, one rewrites it, one refuses it. A bulk fill that
+     reports only "Filled 3 fields" is right about the count and silent about the two that
+     did not hold what was asked. -->
+<h1>Checkout</h1>
+<form id="checkout" onsubmit="event.preventDefault(); document.getElementById('done').textContent = 'submitted'">
+  <label for="name">Name</label>
+  <input id="name" name="name" type="text">
+
+  <label for="phone">Phone</label>
+  <input id="phone" name="phone" type="text">
+
+  <label for="qty">Quantity</label>
+  <input id="qty" name="qty" type="number">
+
+  <button id="submit" type="submit">Place order</button>
+</form>
+<p id="done">not submitted</p>
+<script>
+  // A phone mask: reformats whatever is typed.
+  document.getElementById('phone').addEventListener('input', function (e) {
+    var d = e.target.value.replace(/\D/g, '').slice(0, 10);
+    var out = d;
+    if (d.length > 6) out = '(' + d.slice(0, 3) + ') ' + d.slice(3, 6) + '-' + d.slice(6);
+    else if (d.length > 3) out = '(' + d.slice(0, 3) + ') ' + d.slice(3);
+    else if (d.length > 0) out = '(' + d;
+    e.target.value = out;
+  });
+</script>
+</body>
+</html>

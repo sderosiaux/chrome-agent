@@ -1,19 +1,13 @@
-use std::path::PathBuf;
 use std::process::Command;
 
 use serde_json::Value;
+
+mod common;
 
 fn binary() -> String {
     let mut path = std::env::current_exe().unwrap().parent().unwrap().parent().unwrap().to_path_buf();
     path.push("chrome-agent");
     path.to_string_lossy().into_owned()
-}
-
-fn fixture_url(name: &str) -> String {
-    let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    path.push("tests/fixtures");
-    path.push(name);
-    format!("file://{}", path.display())
 }
 
 fn run_cli(args: &[&str]) -> (String, i32) {
@@ -24,23 +18,6 @@ fn run_cli(args: &[&str]) -> (String, i32) {
     )
 }
 
-fn chrome_available() -> bool {
-    let candidates = if cfg!(target_os = "macos") {
-        vec!["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"]
-    } else {
-        vec!["google-chrome", "chromium"]
-    };
-    for candidate in candidates {
-        if std::path::Path::new(candidate).exists() {
-            return true;
-        }
-        if Command::new("which").arg(candidate).output().is_ok_and(|o| o.status.success()) {
-            return true;
-        }
-    }
-    false
-}
-
 struct TestBrowser(&'static str);
 impl Drop for TestBrowser {
     fn drop(&mut self) {
@@ -49,14 +26,12 @@ impl Drop for TestBrowser {
 }
 
 fn open_and_focus(browser: &str) -> bool {
-    if !chrome_available() {
-        eprintln!("SKIP: Chrome not found");
+    if !common::browser_ready() {
         return false;
     }
-    let (_, code) = run_cli(&["--browser", browser, "goto", &fixture_url("press_keys.html")]);
+    let (_, code) = run_cli(&["--browser", browser, "goto", &common::fixture_url("press_keys.html")]);
     if code != 0 {
-        eprintln!("SKIP: goto failed");
-        return false;
+        return common::unavailable("goto press_keys.html failed");
     }
     let (_, code) = run_cli(&["--browser", browser, "eval", "document.getElementById('i').focus(); 1"]);
     code == 0
@@ -141,11 +116,10 @@ fn punctuation_types_instead_of_deleting() {
 #[test]
 fn typing_with_nothing_focused_is_refused() {
     let b = TestBrowser("type-nofocus");
-    if !chrome_available() {
-        eprintln!("SKIP: Chrome not found");
+    if !common::browser_ready() {
         return;
     }
-    let (_, code) = run_cli(&["--browser", b.0, "goto", &fixture_url("press_keys.html")]);
+    let (_, code) = run_cli(&["--browser", b.0, "goto", &common::fixture_url("press_keys.html")]);
     if code != 0 {
         return;
     }

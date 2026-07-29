@@ -1,0 +1,12 @@
+<!doctype html>
+<html>
+<head><title>Blocks the main thread</title></head>
+<body>
+<!-- The click lands, then the page pins the main thread for three seconds. CDP needs that
+     thread to answer, so the post-action read cannot complete inside a short --timeout.
+     This is what makes "the read failed" reproducible: the action succeeded, and the
+     observation of it did not. -->
+<h1>Busy page</h1>
+<button id="block" onclick="window.blocked = true; setTimeout(function () { var t = Date.now(); while (Date.now() - t < 6000) {} }, 0)">Block</button>
+</body>
+</html>

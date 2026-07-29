@@ -4,7 +4,7 @@ use crate::BoxError;
 use crate::browser::{self, BrowserOptions};
 use crate::cdp::client::CdpClient;
 use crate::cli::{Cli, Command, DaemonAction};
-use crate::run_helpers::{ReportPolicy, cmd_close, cmd_status, cmd_stop, connect_page, get_uid_map, json_output, kill_pid, output_action, output_action_with, output_goto, resolve_page_target};
+use crate::run_helpers::{ReportPolicy, check_report, cmd_close, cmd_status, cmd_stop, connect_page, get_uid_map, json_output, kill_pid, output_action, output_action_with, output_goto, resolve_page_target};
 use crate::{commands, pipe, session};
 
 pub async fn run(cli: Cli) -> Result<(), BoxError> {
@@ -186,6 +186,9 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
     let _ = session::save_session(&mut store);
 
     let client = connect_page(http_endpoint, &target_id, cli.stealth).await?;
+    // The caller's own answer to "how long am I willing to wait" also bounds every CDP
+    // response, so a page promise that never settles fails instead of hanging forever.
+    client.set_call_timeout(std::time::Duration::from_secs(cli.timeout));
     let dialog_policy = crate::setup::DialogPolicy::parse(&cli.dialog)?;
     client.spawn_dialog_handler(dialog_policy, cli.dialog_text.clone());
 
@@ -216,6 +219,7 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
                 return Err("Only one of uid, --selector, or --xy can be provided.".into());
             }
 
+            let target = crate::run_helpers::target_details(&client, selector.as_deref(), uid.as_deref()).await;
             let msg = if let Some(ref sel) = selector {
                 crate::element::click_selector(&client, sel).await?;
                 format!("Clicked selector '{sel}'")
@@ -231,7 +235,7 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
                 commands::click::run(&client, &uid_map, uid).await?
             };
 
-            output_action(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, &policy.for_action(inspect, depth), json_mode).await?;
+            output_action_with(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, &policy.for_action(inspect, depth), json_mode, target).await?;
         }
 
         Command::Fill { uid, selector, value, inspect, max_depth } => {
@@ -244,6 +248,7 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
                 return Err("Only one of --uid or --selector can be provided.".into());
             }
 
+            let target = crate::run_helpers::target_details(&client, selector.as_deref(), uid.as_deref()).await;
             let (msg, outcome) = if let Some(ref sel) = selector {
                 let outcome = crate::element::fill_selector(&client, sel, &value).await?;
                 (format!("Filled selector '{sel}'"), outcome)
@@ -253,7 +258,7 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
                 commands::fill::run(&client, &uid_map, uid, &value).await?
             };
 
-            output_action_with(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, &policy.for_action(inspect, depth), json_mode, Some(&outcome)).await?;
+            output_action_with(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, &policy.for_action(inspect, depth), json_mode, crate::run_helpers::merge_details(target, Some(json!({"value": crate::run_helpers::fill_value_report(&outcome)})))).await?;
         }
 
         Command::FillForm { pairs, inspect, max_depth } => {
@@ -267,8 +272,9 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
                 })
                 .collect();
             let parsed = parsed?;
-            let msg = commands::fill::run_form(&client, &uid_map, &parsed).await?;
-            output_action(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, &policy.for_action(inspect, depth), json_mode).await?;
+            let (msg, outcomes) = commands::fill::run_form(&client, &uid_map, &parsed).await?;
+            let details = Some(json!({"values": crate::run_helpers::bulk_fill_report("uid", &outcomes)}));
+            output_action_with(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, &policy.for_action(inspect, depth), json_mode, details).await?;
         }
 
         Command::Text { uid, selector, truncate } => {
@@ -384,6 +390,7 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
                 return Err("Only one of uid, --selector, or --xy can be provided.".into());
             }
 
+            let target = crate::run_helpers::target_details(&client, selector.as_deref(), uid.as_deref()).await;
             let msg = if let Some(ref sel) = selector {
                 crate::element::dblclick_selector(&client, sel).await?;
                 format!("Double-clicked selector '{sel}'")
@@ -399,7 +406,7 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
                 commands::dblclick::run(&client, &uid_map, uid).await?
             };
 
-            output_action(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, &policy.for_action(inspect, depth), json_mode).await?;
+            output_action_with(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, &policy.for_action(inspect, depth), json_mode, target).await?;
         }
 
         Command::Select { value, uid, selector, inspect, max_depth } => {
@@ -412,6 +419,7 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
                 return Err("Only one of --uid or --selector can be provided.".into());
             }
 
+            let target = crate::run_helpers::target_details(&client, selector.as_deref(), uid.as_deref()).await;
             let msg = if let Some(ref sel) = selector {
                 let text = crate::element::select_option_selector(&client, sel, &value).await?;
                 format!("Selected \"{text}\" on selector '{sel}'")
@@ -421,7 +429,7 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
                 commands::select::run(&client, &uid_map, uid, &value).await?
             };
 
-            output_action(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, &policy.for_action(inspect, depth), json_mode).await?;
+            output_action_with(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, &policy.for_action(inspect, depth), json_mode, target).await?;
         }
 
         Command::Check { uid, selector, inspect, max_depth } => {
@@ -429,14 +437,16 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
             if uid.is_none() && selector.is_none() {
                 return Err("Provide a uid or --selector.".into());
             }
-            let msg = if let Some(ref sel) = selector {
+            let target = crate::run_helpers::target_details(&client, selector.as_deref(), uid.as_deref()).await;
+            let outcome = if let Some(ref sel) = selector {
                 crate::element::set_checked_selector(&client, sel, true).await?
             } else {
                 let uid = uid.as_ref().unwrap();
                 let uid_map = get_uid_map(&store, &cli.browser, &cli.page);
                 commands::check::run(&client, &uid_map, uid, true).await?
             };
-            output_action(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, &policy.for_action(inspect, depth), json_mode).await?;
+            let (msg, details) = check_report(outcome);
+            output_action_with(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, &policy.for_action(inspect, depth), json_mode, crate::run_helpers::merge_details(target, details)).await?;
         }
 
         Command::Uncheck { uid, selector, inspect, max_depth } => {
@@ -444,14 +454,16 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
             if uid.is_none() && selector.is_none() {
                 return Err("Provide a uid or --selector.".into());
             }
-            let msg = if let Some(ref sel) = selector {
+            let target = crate::run_helpers::target_details(&client, selector.as_deref(), uid.as_deref()).await;
+            let outcome = if let Some(ref sel) = selector {
                 crate::element::set_checked_selector(&client, sel, false).await?
             } else {
                 let uid = uid.as_ref().unwrap();
                 let uid_map = get_uid_map(&store, &cli.browser, &cli.page);
                 commands::check::run(&client, &uid_map, uid, false).await?
             };
-            output_action(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, &policy.for_action(inspect, depth), json_mode).await?;
+            let (msg, details) = check_report(outcome);
+            output_action_with(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, &policy.for_action(inspect, depth), json_mode, crate::run_helpers::merge_details(target, details)).await?;
         }
 
         Command::Upload { files, uid, selector, inspect, max_depth } => {
@@ -459,6 +471,7 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
             if uid.is_none() && selector.is_none() {
                 return Err("Provide --uid or --selector to identify the file input.".into());
             }
+            let target = crate::run_helpers::target_details(&client, selector.as_deref(), uid.as_deref()).await;
             let msg = if let Some(ref sel) = selector {
                 crate::element::set_file_input_selector(&client, sel, &files).await?;
                 format!("Uploaded {} file(s) to selector '{sel}'", files.len())
@@ -467,7 +480,7 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
                 let uid_map = get_uid_map(&store, &cli.browser, &cli.page);
                 commands::upload::run(&client, &uid_map, uid, &files).await?
             };
-            output_action(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, &policy.for_action(inspect, depth), json_mode).await?;
+            output_action_with(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, &policy.for_action(inspect, depth), json_mode, target).await?;
         }
 
         Command::Drag { from, to, inspect, max_depth } => {
