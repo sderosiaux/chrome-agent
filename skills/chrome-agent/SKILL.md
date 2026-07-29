@@ -200,7 +200,13 @@ Per-command shapes:
 - `fill` also returns `"value":{"requested":"...","actual":"...","verbatim":true|false}` — what you asked for and what the page kept. `verbatim:false` means a mask, a controlled component or a constraint rewrote it; read `actual` before assuming the form holds your value.
 - `focus` appears as `{"from":"n11","to":"n15"}` when focus moved. It is deliberately not counted as a content change.
 - `click/fill/select/check --inspect` → the same, plus `"snapshot"` with the whole tree
-- `click/fill/select/check --verdict off` → `{"ok":true, "message":"Clicked uid=n12"}`
+- `click/fill/select/check --verdict off` → `{"ok":true, "message":"Clicked uid=n12", "verdict":"not_checked", "verdict_reason":"reporting_disabled"}`
+- every mutating command also carries `verdict` + `verdict_reason`, so silence is never ambiguous:
+  - `changed` (`tree_delta`, `nodes_moved`, `focus_only`) — the page moved; `delta` says how
+  - `navigated` (`document_replaced`) — new document, every stored uid is dead, re-inspect
+  - `no_delta` (`identical_tree`) — the tree was identical in the observation window. NOT proof the action did nothing: it may have hit an overlay, changed only a canvas or styling, or landed slower than the window
+  - `unknown` (`no_baseline`, `read_failed`, `identity_unreadable`) — nothing could be compared; `verdict_hint` says how to find out
+  - `not_checked` (`reporting_disabled`) — you passed `--verdict off`
 - `read` → `{"ok":true, "title":"...", "text":"article content..."}`
 - `text` → `{"ok":true, "text":"visible text..."}`
 - `eval` → `{"ok":true, "result": <any JSON value>}`

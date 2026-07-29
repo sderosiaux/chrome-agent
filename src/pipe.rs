@@ -275,6 +275,14 @@ async fn dispatch(
         }
     }
     };
+    // `--verdict off` is a decision, not an observation. Saying so costs two fields and no
+    // page read, and it is the difference between "I did not look" and "nothing moved".
+    if !report.changes && crate::pipe_dispatch::mutates_page(cmd_name) {
+        crate::run_helpers::attach_verdict(
+            &mut value,
+            crate::verdict::classify(crate::verdict::Observation::ReportingDisabled),
+        );
+    }
     if let Some((old_text, old_url)) = baseline {
         crate::pipe_dispatch::attach_change_report(
             client, store, browser_name, page_name, target_id, report, old_text.as_deref(),

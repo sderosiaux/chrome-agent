@@ -6,6 +6,7 @@ use crate::cdp::client::CdpClient;
 use crate::element_ref::ElementRef;
 use crate::session::{self, SessionStore};
 use crate::commands;
+pub use crate::pipe_report::{attach_change_report, mutates_page};
 
 // Split out to stay under the 1000-line file cap; callers keep using `pipe_dispatch::*`.
 pub use crate::pipe_dispatch_actions::{
@@ -761,6 +762,13 @@ pub async fn dispatch_single(
         }
     }
     };
+    // Same as pipe: switching the report off must not read like an empty page.
+    if !report.changes && mutates_page(cmd_name) {
+        crate::run_helpers::attach_verdict(
+            &mut value,
+            crate::verdict::classify(crate::verdict::Observation::ReportingDisabled),
+        );
+    }
     if let Some((old_text, old_url)) = baseline {
         attach_change_report(
             client, store, browser_name, page_name, target_id, report, old_text.as_deref(),
@@ -769,98 +777,6 @@ pub async fn dispatch_single(
         .await;
     }
     value
-}
-
-/// Commands that can move the page, and therefore owe the caller a change report.
-pub fn mutates_page(cmd: &str) -> bool {
-    matches!(
-        cmd,
-        "click" | "tap" | "dblclick" | "double_click" | "double-click"
-            | "fill" | "type" | "press" | "select" | "check" | "uncheck"
-            | "upload" | "drag" | "hover" | "scroll"
-            | "fill-form" | "fill_form" | "fillform"
-            | "fill_and_submit" | "fill-and-submit"
-    )
-}
-
-/// Re-read the page after an action and say what moved, mirroring the CLI default.
-///
-/// Failures here are swallowed on purpose: the action itself already succeeded, and losing
-/// the report is a smaller problem than turning a successful action into an error.
-pub async fn attach_change_report(
-    client: &CdpClient,
-    store: &mut SessionStore,
-    browser_name: &str,
-    page_name: &str,
-    target_id: &str,
-    report: crate::run_helpers::ReportPolicy,
-    old_text: Option<&str>,
-    stored: Option<(String, String)>,
-    out: &mut Value,
-) {
-    crate::snapshot::settle(client, 100, 1000).await;
-    let Ok(snapshot) = commands::inspect::run(client, false, None, None, None).await else {
-        return;
-    };
-    // Store the fresh snapshot whatever happens: without this the very first action of a
-    // session had no baseline, so it wrote none, so the session never acquired one and the
-    // change report stayed silently off for its whole life.
-    let Some(old_text) = old_text else {
-        if let Some(browser_s) = store.browsers.get_mut(browser_name) {
-            let page = session::ensure_page(browser_s, page_name, target_id);
-            page.uid_map = snapshot.uid_map;
-            page.last_snapshot = Some(snapshot.text);
-            let (f, l) = snapshot.identity.map_or((None, None), |(f, l)| (Some(f), Some(l)));
-            page.last_snapshot_frame = f;
-            page.last_snapshot_loader = l;
-        }
-        return;
-    };
-    let identity = commands::diff::Identity::from_loader(
-        stored.as_ref().map(|(f, l)| (f.as_str(), l.as_str())),
-        snapshot.identity.as_ref().map(|(f, l)| (f.as_str(), l.as_str())),
-    );
-    let cmp = commands::diff::compare(identity, old_text, &snapshot.text);
-    let body = if report.budget == 0 {
-        cmp.text.clone()
-    } else {
-        crate::truncate::truncate_str(
-            cmp.text.trim_end(),
-            report.budget,
-            "\n… truncated, send {\"cmd\":\"inspect\"} for the rest",
-        )
-        .into_owned()
-    };
-    if let Some(obj) = out.as_object_mut() {
-        obj.insert(
-            "changed".into(),
-            json!({
-                "added": cmp.added,
-                "removed": cmp.removed,
-                "changed": cmp.changed,
-                "unchanged": cmp.unchanged,
-                    "moved": cmp.moved,
-                    "anonymous": cmp.anonymous,
-                "document_changed": cmp.document_changed,
-                    "identity_known": cmp.identity_known,
-            }),
-        );
-        obj.insert("delta".into(), json!(body));
-        if cmp.focus_from.is_some() || cmp.focus_to.is_some() {
-            obj.insert("focus".into(), json!({"from": cmp.focus_from, "to": cmp.focus_to}));
-        }
-        if let Some(hint) = cmp.hint {
-            obj.entry("hint").or_insert_with(|| json!(hint));
-        }
-    }
-    if let Some(browser_s) = store.browsers.get_mut(browser_name) {
-        let page = session::ensure_page(browser_s, page_name, target_id);
-        page.uid_map = snapshot.uid_map;
-        page.last_snapshot = Some(snapshot.text);
-            let (f, l) = snapshot.identity.map_or((None, None), |(f, l)| (Some(f), Some(l)));
-            page.last_snapshot_frame = f;
-            page.last_snapshot_loader = l;
-    }
 }
 
 // ---------------------------------------------------------------------------

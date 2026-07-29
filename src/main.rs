@@ -13,12 +13,14 @@ mod geometry;
 mod pipe;
 mod pipe_dispatch;
 mod pipe_dispatch_actions;
+mod pipe_report;
 mod run;
 mod run_helpers;
 mod session;
 mod setup;
 mod snapshot;
 mod truncate;
+mod verdict;
 
 /// Shared error type alias used across the crate.
 pub(crate) type BoxError = Box<dyn std::error::Error>;

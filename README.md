@@ -284,8 +284,16 @@ That is the whole point: an agent loop pays for turns, not just for tokens.
 UIDs stay the same between inspects as long as the DOM node exists. After a navigation they
 are all reassigned, which is why the click above reports the page rather than a diff.
 
+Every mutating action carries a `verdict` and a `verdict_reason`, so an empty report is never
+ambiguous: `changed`, `navigated`, `no_delta` (the tree was identical in the observation
+window), `unknown` (no baseline, or the read-back failed — `verdict_hint` says what to do), and
+`not_checked` (you switched the report off). `no_delta` is deliberately not called "no effect":
+without proof the action was delivered, an unchanged tree cannot tell a quiet page from a click
+that hit an overlay.
+
 `--verdict off` restores the older behaviour: the action is reported, the page is not read
-back. Faster, quieter, and you find out what happened on your next call.
+back. Faster, quieter, and you find out what happened on your next call — the response says
+`not_checked` so you know that is what happened.
 
 ## Content extraction
 

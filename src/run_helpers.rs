@@ -146,6 +146,13 @@ pub async fn output_action_with(
         obj["value"] = fill_value_report(outcome);
     }
     let mut trailer = String::new();
+    // Silence used to mean four different things here. Whatever happens below, the response
+    // carries the one that applies.
+    let mut observation = if report.changes {
+        crate::verdict::Observation::NoBaseline
+    } else {
+        crate::verdict::Observation::ReportingDisabled
+    };
 
     if report.inspect || report.changes {
         // Wait for the page to stop reacting rather than for a fixed guess: a page that
@@ -194,6 +201,13 @@ pub async fn output_action_with(
                     "identity_known": cmp.identity_known,
                 });
                 obj["delta"] = json!(body);
+                observation = crate::verdict::Observation::Compared {
+                    document_changed: cmp.document_changed,
+                    identity_known: cmp.identity_known,
+                    edits: cmp.added + cmp.removed + cmp.changed,
+                    moved: cmp.moved,
+                    focus_moved: cmp.focus_from.is_some() || cmp.focus_to.is_some(),
+                };
                 if cmp.focus_from.is_some() || cmp.focus_to.is_some() {
                     obj["focus"] = json!({"from": cmp.focus_from, "to": cmp.focus_to});
                 }
@@ -228,6 +242,9 @@ pub async fn output_action_with(
         }
     }
 
+    let assessment = crate::verdict::classify(observation);
+    attach_verdict(&mut obj, assessment);
+
     if json_mode {
         json_output(&obj);
     } else {
@@ -235,8 +252,23 @@ pub async fn output_action_with(
         if !trailer.is_empty() {
             println!("{}", trailer.trim_end());
         }
+        println!("verdict: {} ({})", assessment.verdict, assessment.reason);
     }
     Ok(())
+}
+
+/// Write the verdict, its reason, and — when the verdict is an admission of ignorance —
+/// what to do about it.
+///
+/// `hint` may already hold the diff's own advice (a navigation tells the caller its uids
+/// are dead). The verdict's hint goes in its own field rather than overwriting it: two
+/// different pieces of advice, one slot, and the more specific one loses.
+pub fn attach_verdict(obj: &mut serde_json::Value, assessment: crate::verdict::Assessment) {
+    obj["verdict"] = json!(assessment.verdict.as_str());
+    obj["verdict_reason"] = json!(assessment.reason);
+    if let Some(hint) = crate::verdict::hint_for(assessment) {
+        obj["verdict_hint"] = json!(hint);
+    }
 }
 
 /// Output goto result with optional post-inspect.
