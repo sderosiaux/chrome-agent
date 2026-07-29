@@ -69,10 +69,22 @@ jobs:
       # The npm postinstall downloads this file over the network and chmod +x's it.
       # Without a checksum published beside it there is nothing for the installer to
       # check the bytes against — a truncated download or a re-uploaded asset installs
-      # as a trusted native binary. shasum is present on all three runner images.
+      # as a trusted native binary.
+      #
+      # Node rather than shasum/sha256sum: it is preinstalled on all three runner
+      # images, spelled identically on each (the Windows job runs under Git bash, where
+      # which of the two shell tools exists is a question nobody wants to answer during
+      # a release), and it is the same implementation the installer verifies with.
       - name: Checksum the binary
         shell: bash
-        run: shasum -a 256 "${{ matrix.artifact }}" | awk '{print $1}' > "${{ matrix.artifact }}.sha256"
+        run: |
+          node -e '
+            const fs = require("fs"), crypto = require("crypto");
+            const file = process.argv[1];
+            const hash = crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+            fs.writeFileSync(file + ".sha256", hash + "\n");
+            console.log(file + ": " + hash);
+          ' "${{ matrix.artifact }}"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
