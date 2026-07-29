@@ -128,7 +128,18 @@ fn save_to(path: &Path, store: &mut SessionStore) -> Result<(), SessionError> {
     let mut merged = load_from(path).unwrap_or_default();
     for name in &store.loaded_names {
         if !store.browsers.contains_key(name) {
-            merged.browsers.remove(name);
+            // Compare-and-delete: the drop was decided about the entry we loaded. If
+            // another writer republished this name since (e.g. relaunched the browser
+            // with a new pid while our stale-cleanup was in flight), the on-disk entry
+            // is not the one we judged dead — deleting it would orphan a live Chrome.
+            let on_disk_is_what_we_loaded = merged
+                .browsers
+                .get(name)
+                .and_then(|entry| serde_json::to_string(entry).ok())
+                .is_none_or(|json| store.loaded_entries.get(name) == Some(&json));
+            if on_disk_is_what_we_loaded {
+                merged.browsers.remove(name);
+            }
         }
     }
     for (name, entry) in &store.browsers {
@@ -393,6 +404,47 @@ mod tests {
             snapshot,
             Some("uid=n1 RootWebArea"),
             "agent-a's snapshot was clobbered by an agent that only read it"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The daemon heartbeat decides "browser 'foo' is dead, delete it" from a snapshot
+    /// read outside the lock. If another agent relaunches 'foo' (same name, new pid)
+    /// between that read and the heartbeat's save, the delete must not take the fresh
+    /// entry down with it — that would silently orphan a running Chrome seconds after
+    /// it was launched.
+    #[test]
+    fn a_stale_delete_does_not_clobber_a_concurrent_relaunch() {
+        let dir = std::env::temp_dir().join(format!("chrome-agent-session-relaunch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("sessions.json");
+
+        // The browser exists with a (now dead) pid.
+        let mut original = SessionStore::default();
+        ensure_browser(&mut original, "foo", "ws://old", Some(111), true, None);
+        save_to(&path, &mut original).unwrap();
+
+        // Heartbeat tick: loads, sees the dead pid, drops the entry in memory.
+        let mut heartbeat = load_from(&path).unwrap();
+        heartbeat.browsers.remove("foo");
+
+        // Before the heartbeat saves, another agent relaunches 'foo'.
+        let mut agent = load_from(&path).unwrap();
+        agent.browsers.remove("foo");
+        ensure_browser(&mut agent, "foo", "ws://fresh", Some(222), true, None);
+        save_to(&path, &mut agent).unwrap();
+
+        // The heartbeat's delete was decided about the old entry, not this one.
+        save_to(&path, &mut heartbeat).unwrap();
+
+        let final_state = load_from(&path).unwrap();
+        let survivor = final_state.browsers.get("foo");
+        assert_eq!(
+            survivor.and_then(|b| b.pid),
+            Some(222),
+            "the freshly relaunched browser was deleted by a stale-cleanup decision made about its predecessor"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
