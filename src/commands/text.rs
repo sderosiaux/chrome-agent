@@ -98,6 +98,11 @@ pub async fn run(
                 )
                 .await?;
 
+            // A throwing getter is an error, not an empty element — without this
+            // check the exception read as "" with ok:true, indistinguishable from
+            // a genuinely textless node.
+            crate::element::check_js_exception(&result)?;
+
             result
                 .get("result")
                 .and_then(|r| r.get("value"))
