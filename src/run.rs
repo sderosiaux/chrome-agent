@@ -376,12 +376,15 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
                     .ok_or("Could not find next history entry")?;
                 client.send("Page.navigateToHistoryEntry", json!({"entryId": next_entry_id})).await?;
                 let _ = client.wait_for_event("Page.loadEventFired", std::time::Duration::from_secs(5)).await;
-                let title: crate::cdp::types::EvaluateResult = client
-                    .call("Runtime.evaluate", json!({"expression": "document.title", "returnByValue": true}))
+                let dest: crate::cdp::types::EvaluateResult = client
+                    .call("Runtime.evaluate", json!({"expression": "({title: document.title, url: location.href})", "returnByValue": true}))
                     .await?;
-                let title_str = title.result.value.as_ref().and_then(|v| v.as_str()).unwrap_or("");
-                let msg = format!("Navigated forward — {title_str}");
-                output_action(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, &policy.for_action(inspect, depth), json_mode).await?;
+                let title_str = dest.result.value.as_ref().and_then(|v| v.get("title")).and_then(|v| v.as_str()).unwrap_or("");
+                let url_str = dest.result.value.as_ref().and_then(|v| v.get("url")).and_then(|v| v.as_str()).unwrap_or("");
+                // A navigation, so it answers like `goto`: no change report (the caller
+                // navigated on purpose, and pipe/batch never attach one), stale uids
+                // dropped, `--inspect` refills them from the destination.
+                output_goto(&client, &mut store, &cli.browser, &cli.page, &target_id, url_str, title_str, inspect, depth, json_mode).await?;
             }
         }
 
@@ -676,7 +679,12 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
 
         Command::Wait { what, pattern, timeout, idle_ms } => {
             let msg = commands::wait::run(&client, &what, &pattern, timeout, idle_ms).await?;
-            output_action(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, &policy.for_action(false, None), json_mode).await?;
+            // Not in `mutates_page`, so pipe/batch answer plainly — the CLI must too.
+            if json_mode {
+                json_output(&json!({"ok": true, "message": msg}));
+            } else {
+                println!("{msg}");
+            }
         }
 
         Command::Type { text, selector } => {
@@ -817,7 +825,12 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
 
         Command::Frame { target } => {
             let msg = commands::frame::run(&client, &target).await?;
-            output_action(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, &policy.for_action(false, None), json_mode).await?;
+            // Not in `mutates_page`, so pipe/batch answer plainly — the CLI must too.
+            if json_mode {
+                json_output(&json!({"ok": true, "message": msg}));
+            } else {
+                println!("{msg}");
+            }
         }
 
         Command::Batch => {
