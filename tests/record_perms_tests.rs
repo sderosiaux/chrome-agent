@@ -126,10 +126,34 @@ fn an_unwritable_record_path_is_reported_not_swallowed() {
     drop(child.stdin.take());
     let output = child.wait_with_output().expect("pipe output");
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+
+    // The browser stays up here on purpose: the next check reads the page it is showing.
+    let output = Command::new(binary())
+        .args(["--browser", "record-unwritable", "--json", "eval", "location.href"])
+        .output()
+        .expect("read the page location");
+    let location = String::from_utf8_lossy(&output.stdout).to_string();
     let _ = run_cli(&["--browser", "record-unwritable", "close", "--purge"]);
 
     assert!(
         stdout.contains("recording"),
         "the response must say the recording could not be written: {stdout}"
+    );
+    assert!(
+        !stdout.contains("\"ok\":true"),
+        "the refused command must not also report a successful navigation: {stdout}"
+    );
+
+    // And the navigation genuinely did not happen. This is the deliberate half of the
+    // trade: the caller asked for a recorded goto, and an unrecorded one is not that.
+    // The refusal is per command and loud, so an agent learns on its first line rather
+    // than at replay time — but a bad path stops the session's work, not just its log.
+    assert!(
+        location.contains("\"ok\":true"),
+        "the browser should still be reachable for this check: {location}"
+    );
+    assert!(
+        !location.contains("verdict_states.html"),
+        "the refused goto must not have navigated anyway: {location}"
     );
 }
