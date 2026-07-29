@@ -652,10 +652,18 @@ pub async fn cmd_stop(json_mode: bool) -> Result<(), crate::BoxError> {
 
 /// Whether `comm` (the executable per `ps -o comm=`) is a browser this tool could have
 /// launched. The kill below is gated on it — see `kill_pid`.
+///
+/// A plain substring match on "chrome" is not enough: this tool's own binary is named
+/// `chrome-agent`, and `chromedriver` exists too. Under the exact PID-reuse race the
+/// guard is for, a reused pid landing on a sibling chrome-agent process would have been
+/// classified as a browser and killed — the scenario the guard claims to prevent.
 #[cfg(any(unix, test))]
 fn is_browser_process(comm: &str) -> bool {
-    let c = comm.to_ascii_lowercase();
-    c.contains("chrome") || c.contains("chromium") || c.contains("headless_shell")
+    let base = comm.rsplit('/').next().unwrap_or(comm).to_ascii_lowercase();
+    if base.contains("chrome-agent") || base.contains("chromedriver") {
+        return false;
+    }
+    base.contains("chrome") || base.contains("chromium") || base.contains("headless_shell")
 }
 
 /// Kill a managed-browser process (best-effort, unix only). Killing the
@@ -771,7 +779,17 @@ mod tests {
         ] {
             assert!(is_browser_process(browser), "should recognise {browser}");
         }
-        for bystander in ["sleep", "postgres", "/usr/bin/python3", "node"] {
+        for bystander in [
+            "sleep",
+            "postgres",
+            "/usr/bin/python3",
+            "node",
+            // The guard's own binary contains "chrome": under the PID-reuse race it
+            // protects against, a sibling chrome-agent must not be classified as prey.
+            "chrome-agent",
+            "/tmp/chrome-agent",
+            "chromedriver",
+        ] {
             assert!(!is_browser_process(bystander), "must not kill {bystander}");
         }
     }
