@@ -61,6 +61,9 @@ pub async fn run_pipe(cli: &Cli) -> Result<(), crate::BoxError> {
 
     let page_ws = browser::get_page_ws_url(http_endpoint, &target_id).await?;
     let client = CdpClient::connect(&page_ws).await?;
+    // The caller's own answer to "how long am I willing to wait" also bounds every CDP
+    // response, so a page promise that never settles fails instead of hanging forever.
+    client.set_call_timeout(std::time::Duration::from_secs(cli.timeout));
     client.enable("Page").await?;
 
     // Console interceptor (stealth-safe)
@@ -152,6 +155,9 @@ pub async fn run_replay(
 
     let page_ws = browser::get_page_ws_url(http_endpoint, &target_id).await?;
     let client = CdpClient::connect(&page_ws).await?;
+    // The caller's own answer to "how long am I willing to wait" also bounds every CDP
+    // response, so a page promise that never settles fails instead of hanging forever.
+    client.set_call_timeout(std::time::Duration::from_secs(cli.timeout));
     client.enable("Page").await?;
     commands::console::inject(&client).await;
     if cli.stealth { crate::setup::apply_stealth(&client).await; }

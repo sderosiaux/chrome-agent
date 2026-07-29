@@ -32,8 +32,18 @@ pub async fn scroll_collect(
     let mut uid_map: HashMap<String, ElementRef> = HashMap::new();
     let max_scrolls = limit * 3;
     let mut stale_count = 0;
+    // `limit * 3` bounds the iterations, not the time: each one costs a settle window, so a
+    // page that keeps producing items turns `--limit 500` into 1500 rounds of up to two
+    // seconds. The caller's `--timeout` is the answer to "how long am I willing to wait",
+    // so it bounds the whole collection too.
+    let deadline = std::time::Instant::now() + client.call_timeout();
+    let mut ran_out_of_time = false;
 
     for _ in 0..max_scrolls {
+        if std::time::Instant::now() >= deadline {
+            ran_out_of_time = true;
+            break;
+        }
         let snapshot = crate::snapshot::take_snapshot(client, verbose, None, focus_uid, role_filter).await?;
         let prev_len = collected.len();
         for line in snapshot.text.lines() {
@@ -54,29 +64,38 @@ pub async fn scroll_collect(
             stale_count = 0;
         }
 
-        // Scroll down one viewport, then wait for DOM mutations to settle
-        let _ = client.call::<_, serde_json::Value>(
-            "Runtime.evaluate",
-            json!({
-                "expression": r"(async () => {
-                    window.scrollBy(0, window.innerHeight);
-                    await new Promise(resolve => {
-                        let timer = setTimeout(resolve, 2000);
-                        const obs = new MutationObserver(() => {
-                            clearTimeout(timer);
-                            timer = setTimeout(() => { obs.disconnect(); resolve(); }, 400);
-                        });
-                        obs.observe(document.body || document.documentElement, { childList: true, subtree: true });
-                    });
-                })()",
-                "awaitPromise": true,
-                "returnByValue": true,
-            }),
-        ).await;
+        // Scroll down one viewport, then wait for DOM mutations to settle.
+        //
+        // The wait used to be an inline promise whose 400ms debounce re-armed on every
+        // mutation with no ceiling: on a page that mutates forever — a ticker, a live feed,
+        // a rotating ad slot — it never resolved, and `awaitPromise` then held the whole
+        // command open. `snapshot::settle` is the same debounce with a hard timer that
+        // nothing clears, so a live page costs the ceiling instead of the session.
+        let _ = client
+            .call::<_, serde_json::Value>(
+                "Runtime.evaluate",
+                json!({
+                    "expression": "window.scrollBy(0, window.innerHeight)",
+                    "returnByValue": true,
+                }),
+            )
+            .await;
+        crate::snapshot::settle(client, 400, 2000).await;
     }
 
     collected.truncate(limit);
-    let text = format!("{}\n({} items collected)", collected.join("\n"), collected.len());
+    // Say when the list is short because time ran out rather than because the page ended:
+    // the two look identical in the output otherwise.
+    let note = if ran_out_of_time {
+        format!(
+            "\n({} items collected; stopped at the {}s --timeout while the page was still producing items)",
+            collected.len(),
+            client.call_timeout().as_secs()
+        )
+    } else {
+        format!("\n({} items collected)", collected.len())
+    };
+    let text = format!("{}{note}", collected.join("\n"));
     let identity = crate::snapshot::document_identity(client).await;
     Ok(Snapshot { text, uid_map, identity })
 }
