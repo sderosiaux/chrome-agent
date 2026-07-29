@@ -607,16 +607,46 @@ fn copy_chrome_cookies(profile_dir: &Path) -> Result<(), BrowserError> {
         }
     }
 
-    // Copy Local State (contains the encryption key for cookies on macOS/Windows)
+    // Copy Local State (holds the encrypted cookie key on Windows/Linux; macOS keeps it
+    // in the Keychain instead, which is why a failure here is a warning, not an error).
     let local_state_src = chrome_default.parent().map(|p| p.join("Local State"));
-    if let Some(src) = local_state_src
-        && src.exists() {
-            let dst = profile_dir.join("Local State");
-            let _ = std::fs::copy(&src, dst);
-        }
+    let local_state = match local_state_src {
+        Some(src) if src.exists() => match std::fs::copy(&src, profile_dir.join("Local State")) {
+            Ok(_) => LocalState::Copied,
+            Err(e) => LocalState::Failed(e.to_string()),
+        },
+        _ => LocalState::Absent,
+    };
 
-    eprintln!("Copied cookies from Chrome profile");
+    eprintln!("{}", cookie_copy_message(&local_state));
     Ok(())
+}
+
+/// What happened to the `Local State` file, which carries the cookie decryption key.
+#[derive(Debug)]
+enum LocalState {
+    Copied,
+    /// Not present in the source profile — nothing to copy, nothing to warn about.
+    Absent,
+    Failed(String),
+}
+
+/// What `--copy-cookies` may claim about itself.
+///
+/// It used to print "Copied cookies from Chrome profile" whatever happened to `Local
+/// State`, so a run whose decryption key never arrived reported the same success as one
+/// where everything landed. On Windows and Linux those cookies are undecryptable, and the
+/// symptom is a logged-out session with no clue why.
+fn cookie_copy_message(local_state: &LocalState) -> String {
+    match local_state {
+        LocalState::Copied => "Copied cookies and decryption key from Chrome profile".into(),
+        LocalState::Absent => "Copied cookies from Chrome profile (no Local State to copy)".into(),
+        LocalState::Failed(e) => format!(
+            "warning: copied cookies but NOT the decryption key (Local State: {e}). \
+             On Windows and Linux the cookies will not decrypt — the session will look logged out. \
+             Use --connect to a real Chrome instead."
+        ),
+    }
 }
 
 /// Locate the user's default Chrome profile directory.
@@ -811,5 +841,25 @@ mod tests {
         assert!(result.is_none(), "unreachable port must not reconnect");
         assert!(!path.exists(), "stale port file should be removed");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_missing_decryption_key_is_not_reported_as_a_clean_copy() {
+        // The failure mode this guards: cookies land, Local State does not, and the
+        // caller is told "Copied cookies from Chrome profile" — then sits in front of a
+        // logged-out session on Windows/Linux with nothing pointing at the cause.
+        let failed = cookie_copy_message(&LocalState::Failed("Permission denied".into()));
+        assert!(failed.contains("NOT the decryption key"), "{failed}");
+        assert!(failed.contains("Permission denied"), "the OS error must survive: {failed}");
+        assert!(failed.starts_with("warning:"), "a partial copy is not a success line: {failed}");
+
+        let copied = cookie_copy_message(&LocalState::Copied);
+        assert!(copied.contains("decryption key"), "{copied}");
+        assert!(!copied.contains("warning"), "{copied}");
+
+        // Nothing to copy is not a failure: say so rather than implying a key arrived.
+        let absent = cookie_copy_message(&LocalState::Absent);
+        assert!(!absent.contains("warning"), "{absent}");
+        assert!(absent.contains("no Local State"), "{absent}");
     }
 }
