@@ -15,6 +15,32 @@ fn first_line(text: &str) -> String {
 }
 use crate::element::{click_at_coords, dblclick_at_coords, wait_for_stabilization, ElementError};
 
+/// The uid a snapshot would give the element a selector resolves to, or `None` when it
+/// matches nothing (or the node has no backend id).
+///
+/// A selector-targeted action used to report only the selector it was handed, while the
+/// change report named uids: nothing tied the two together, so an agent could not check
+/// that the node the delta describes is the node it aimed at, and a selector matching
+/// several elements gave no clue which one was used. Resolved BEFORE the action — after it,
+/// the element may be gone, and the answer would describe a different page.
+pub async fn selector_uid(client: &CdpClient, selector: &str) -> Option<String> {
+    let expression = format!(
+        "document.querySelector({})",
+        serde_json::to_string(selector).unwrap_or_default()
+    );
+    let handle: serde_json::Value = client
+        .call("Runtime.evaluate", json!({ "expression": expression }))
+        .await
+        .ok()?;
+    let object_id = handle.get("result")?.get("objectId")?.as_str()?.to_string();
+    let described: serde_json::Value = client
+        .call("DOM.describeNode", json!({ "objectId": object_id }))
+        .await
+        .ok()?;
+    let backend_id = described.get("node")?.get("backendNodeId")?.as_i64()?;
+    Some(format!("n{backend_id}"))
+}
+
 /// Single-click an element matched by a CSS selector.
 ///
 /// Resolves the element's viewport-center coordinates, then dispatches native CDP mouse

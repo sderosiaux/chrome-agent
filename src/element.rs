@@ -577,7 +577,9 @@ pub async fn click_at_coords(
 // Selector-based actions (click/dblclick/fill/focus) live in `element_selector`
 // to keep this file under the 1000-line module cap; re-exported here so callers
 // keep using `crate::element::*`.
-pub use crate::element_selector::{click_selector, dblclick_selector, fill_selector, focus_selector};
+pub use crate::element_selector::{
+    click_selector, dblclick_selector, fill_selector, focus_selector, selector_uid,
+};
 // Split out for the 1000-line file cap; callers keep using `element::*`.
 pub use crate::element_controls::{
     drag, select_option, select_option_selector, set_checked, set_checked_selector, CheckOutcome,

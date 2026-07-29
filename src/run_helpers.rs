@@ -112,6 +112,46 @@ pub fn fill_value_report(outcome: &crate::element::FillOutcome) -> serde_json::V
     v
 }
 
+/// The uid of the node an action is about to touch, whichever way it was named.
+///
+/// Resolved before the action runs: afterwards the element may be detached, and the answer
+/// would describe a different page. Returns the fields to merge into the response, so a
+/// caller that has none of its own can pass this straight through.
+pub async fn target_details(
+    client: &CdpClient,
+    selector: Option<&str>,
+    uid: Option<&str>,
+) -> Option<serde_json::Value> {
+    let resolved = match (selector, uid) {
+        (Some(sel), _) => crate::element::selector_uid(client, sel).await,
+        // A uid-targeted action already names its node; echoing it keeps the field's
+        // meaning the same whichever way the caller aimed.
+        (None, Some(uid)) => Some(uid.to_string()),
+        (None, None) => None,
+    };
+    resolved.map(|uid| json!({"uid": uid}))
+}
+
+/// Merge two optional field sets into one response object.
+#[must_use]
+pub fn merge_details(
+    first: Option<serde_json::Value>,
+    second: Option<serde_json::Value>,
+) -> Option<serde_json::Value> {
+    match (first, second) {
+        (Some(mut a), Some(b)) => {
+            if let (Some(target), Some(extra)) = (a.as_object_mut(), b.as_object()) {
+                for (key, value) in extra {
+                    target.insert(key.clone(), value.clone());
+                }
+            }
+            Some(a)
+        }
+        (Some(only), None) | (None, Some(only)) => Some(only),
+        (None, None) => None,
+    }
+}
+
 /// Split a check/uncheck outcome into the message and the fields that go with it.
 ///
 /// `observed_after_ms` is absent when the element already held the desired state: nothing

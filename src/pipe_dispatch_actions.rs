@@ -162,6 +162,12 @@ pub async fn dispatch_check(
     client: &CdpClient, store: &SessionStore, browser_name: &str, page_name: &str, cmd: &Value,
 ) -> Result<Value, crate::BoxError> {
     let desired = cmd.get("desired").and_then(Value::as_bool).unwrap_or(true);
+    let target = crate::run_helpers::target_details(
+        client,
+        cmd.get("selector").and_then(Value::as_str),
+        cmd.get("uid").and_then(Value::as_str),
+    )
+    .await;
     let outcome = if let Some(sel) = cmd.get("selector").and_then(Value::as_str) {
         crate::element::set_checked_selector(client, sel, desired).await?
     } else if let Some(uid) = cmd.get("uid").and_then(Value::as_str) {
@@ -171,6 +177,9 @@ pub async fn dispatch_check(
         return Err("check: provide \"uid\" or \"selector\"".into());
     };
     let mut obj = json!({"ok": true, "message": outcome.message});
+    if let Some(uid) = target.as_ref().and_then(|t| t.get("uid")) {
+        obj["uid"] = uid.clone();
+    }
     // Absent when the element already held the state: nothing was dispatched, so there was
     // no post-action moment to report.
     if let Some(ms) = outcome.observed_after_ms {

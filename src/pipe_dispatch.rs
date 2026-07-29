@@ -76,6 +76,12 @@ pub async fn dispatch_click(
     // isn't held across the awaits below (keeps the future Send).
     let xy = parse_xy(cmd)?;
 
+    let target = crate::run_helpers::target_details(
+        client,
+        cmd.get("selector").and_then(Value::as_str),
+        cmd.get("uid").and_then(Value::as_str),
+    )
+    .await;
     let msg = if let Some(sel) = cmd.get("selector").and_then(Value::as_str) {
         crate::element::click_selector(client, sel).await?;
         format!("Clicked selector '{sel}'")
@@ -90,6 +96,7 @@ pub async fn dispatch_click(
     };
 
     let mut obj = json!({"ok": true, "message": msg});
+    merge_into(&mut obj, target.as_ref());
     if inspect {
         let snapshot = attach_snapshot(client, store, browser_name, page_name, target_id, max_depth).await?;
         obj["snapshot"] = json!(snapshot);
@@ -110,6 +117,12 @@ pub async fn dispatch_fill(
     let inspect = cmd.get("inspect").and_then(Value::as_bool).unwrap_or(false);
     let max_depth = cmd_max_depth(cmd).or(global_max_depth);
 
+    let target = crate::run_helpers::target_details(
+        client,
+        cmd.get("selector").and_then(Value::as_str),
+        cmd.get("uid").and_then(Value::as_str),
+    )
+    .await;
     let (msg, outcome) = if let Some(sel) = cmd.get("selector").and_then(Value::as_str) {
         let outcome = crate::element::fill_selector(client, sel, value).await?;
         (format!("Filled selector '{sel}'"), outcome)
@@ -121,6 +134,7 @@ pub async fn dispatch_fill(
     };
 
     let mut obj = json!({"ok": true, "message": msg});
+    merge_into(&mut obj, target.as_ref());
     obj["value"] = crate::run_helpers::fill_value_report(&outcome);
     if inspect {
         let snapshot = attach_snapshot(client, store, browser_name, page_name, target_id, max_depth).await?;
@@ -675,6 +689,15 @@ pub async fn dispatch_batch(
     }
     let all_ok = results.iter().all(|r| r.get("ok").and_then(Value::as_bool).unwrap_or(false));
     Ok(json!({"ok": all_ok, "results": results}))
+}
+
+/// Copy an optional field set into a response object.
+fn merge_into(obj: &mut Value, details: Option<&Value>) {
+    if let (Some(target), Some(fields)) = (obj.as_object_mut(), details.and_then(Value::as_object)) {
+        for (key, value) in fields {
+            target.insert(key.clone(), value.clone());
+        }
+    }
 }
 
 /// Public entry point for dispatching a single pipe command.
