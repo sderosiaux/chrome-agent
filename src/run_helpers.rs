@@ -218,7 +218,22 @@ pub async fn output_action_with(
         // The baseline is always full depth. Storing a `--max-depth` view would make the
         // next comparison read every node the limit cut off as newly added: verified, an
         // action with `--max-depth 1` then a plain `diff` invented additions.
-        let snapshot = commands::inspect::run(client, false, None, None, None).await?;
+        //
+        // A read that fails is not an action that failed. This used to propagate with `?`,
+        // so a click that had already been delivered came back as `ok:false` — and the
+        // natural response to that is to click again, which is real. `pipe_dispatch` stated
+        // the opposite policy in a comment and followed it; this is the CLI adopting it.
+        let Ok(snapshot) = commands::inspect::run(client, false, None, None, None).await else {
+            let assessment = crate::verdict::classify(crate::verdict::Observation::ReadFailed);
+            attach_verdict(&mut obj, assessment);
+            if json_mode {
+                json_output(&obj);
+            } else {
+                println!("{msg}");
+                println!("verdict: {} ({})", assessment.verdict, assessment.reason);
+            }
+            return Ok(());
+        };
 
         if report.changes {
             let previous = store
