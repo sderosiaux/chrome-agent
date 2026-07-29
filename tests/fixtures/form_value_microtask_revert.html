@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>form-values: revert on the microtask queue</title></head>
+<body>
+<!-- The gap between a synchronous read-back and a real one.
+     form_value_controlled_revert.html reverts inside the dispatched 'input' event, so a
+     read on the next line sees it. This one reverts in a promise callback: the write has
+     already returned when the revert runs. A read-back taken in the same evaluation
+     therefore reports the requested value, verbatim:true — a confidently wrong answer,
+     and the exact shape the fill report exists to prevent.
+     Deliberately faster than the observation window, unlike form_value_late_revert.html
+     (400ms), which stays outside it and must be reported as time-scoped, not as truth. -->
+<h1>Microtask revert</h1>
+<label for="micro">Coupon</label>
+<input id="micro" name="coupon" type="text" value="">
+<p id="marker">reverted on the microtask queue after each input</p>
+<script>
+  document.getElementById('micro').addEventListener('input', function (e) {
+    Promise.resolve().then(function () { e.target.value = ''; });
+  });
+</script>
+</body>
+</html>

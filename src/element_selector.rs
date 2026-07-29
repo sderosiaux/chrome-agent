@@ -178,19 +178,25 @@ pub async fn fill_selector(
             }}
             el.dispatchEvent(new Event('input', {{bubbles: true}}));
             el.dispatchEvent(new Event('change', {{bubbles: true}}));
-            return {{
+            // Read after the window rather than on the next line: a controlled component
+            // that reverts in a promise callback has not run yet when the write returns.
+            return new Promise(resolve => setTimeout(() => resolve({{
                 value: el.value === undefined ? null : String(el.value),
                 maxLength: typeof el.maxLength === 'number' ? el.maxLength : null,
                 sensitive: el.type === 'password' ||
                     /password|cc-number|cc-csc|one-time-code/i.test(el.autocomplete || '')
-            }};
+            }}), {window}));
         }})()",
         sel = serde_json::to_string(selector).unwrap_or_default(),
-        val = serde_json::to_string(value).unwrap_or_default()
+        val = serde_json::to_string(value).unwrap_or_default(),
+        window = crate::element::READ_BACK_MS
     );
     let nav_events = client.events();
     let result: serde_json::Value = client
-        .call("Runtime.evaluate", json!({ "expression": js, "returnByValue": true }))
+        .call(
+            "Runtime.evaluate",
+            json!({ "expression": js, "returnByValue": true, "awaitPromise": true }),
+        )
         .await
         .map_err(|e| ElementError::Action(format!("fill_selector failed: {e}")))?;
 

@@ -197,7 +197,8 @@ Per-command shapes:
 - `goto --inspect` → `{"ok":true, "url":"...", "title":"...", "snapshot":"uid=n1..."}`
 - `inspect` → `{"ok":true, "snapshot":"uid=n1 heading..."}`
 - `click/fill/select/check` → `{"ok":true, "message":"Clicked uid=n12", "changed":{"added":1,"removed":0,"changed":0,"unchanged":42,"moved":0,"anonymous":0,"document_changed":false,"identity_known":true}, "delta":"+ uid=n88 heading \"Saved\""}`
-- `fill` also returns `"value":{"requested":"...","actual":"...","verbatim":true|false}` — what you asked for and what the page kept. `verbatim:false` means a mask, a controlled component or a constraint rewrote it; read `actual` before assuming the form holds your value.
+- `fill` also returns `"value":{"requested":"...","actual":"...","verbatim":true|false,"observed_after_ms":60}` — what you asked for and what the page kept, and when that was read. `verbatim:false` means a mask, a controlled component or a constraint rewrote it; read `actual` before assuming the form holds your value. `observed_after_ms` is the whole claim: the value was that 60ms after the write. A validator that clears the field at 400ms is outside any fixed window — if persistence matters, read it again.
+- `check`/`uncheck` return `"observed_after_ms"` too, absent when the element already held the state (nothing was dispatched, so there was nothing to observe).
 - `focus` appears as `{"from":"n11","to":"n15"}` when focus moved. It is deliberately not counted as a content change.
 - `click/fill/select/check --inspect` → the same, plus `"snapshot"` with the whole tree
 - `click/fill/select/check --verdict off` → `{"ok":true, "message":"Clicked uid=n12", "verdict":"not_checked", "verdict_reason":"reporting_disabled"}`

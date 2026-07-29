@@ -4,7 +4,7 @@ use crate::BoxError;
 use crate::browser::{self, BrowserOptions};
 use crate::cdp::client::CdpClient;
 use crate::cli::{Cli, Command, DaemonAction};
-use crate::run_helpers::{ReportPolicy, cmd_close, cmd_status, cmd_stop, connect_page, get_uid_map, json_output, kill_pid, output_action, output_action_with, output_goto, resolve_page_target};
+use crate::run_helpers::{ReportPolicy, check_report, cmd_close, cmd_status, cmd_stop, connect_page, get_uid_map, json_output, kill_pid, output_action, output_action_with, output_goto, resolve_page_target};
 use crate::{commands, pipe, session};
 
 pub async fn run(cli: Cli) -> Result<(), BoxError> {
@@ -253,7 +253,7 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
                 commands::fill::run(&client, &uid_map, uid, &value).await?
             };
 
-            output_action_with(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, &policy.for_action(inspect, depth), json_mode, Some(&outcome)).await?;
+            output_action_with(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, &policy.for_action(inspect, depth), json_mode, Some(json!({"value": crate::run_helpers::fill_value_report(&outcome)}))).await?;
         }
 
         Command::FillForm { pairs, inspect, max_depth } => {
@@ -429,14 +429,15 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
             if uid.is_none() && selector.is_none() {
                 return Err("Provide a uid or --selector.".into());
             }
-            let msg = if let Some(ref sel) = selector {
+            let outcome = if let Some(ref sel) = selector {
                 crate::element::set_checked_selector(&client, sel, true).await?
             } else {
                 let uid = uid.as_ref().unwrap();
                 let uid_map = get_uid_map(&store, &cli.browser, &cli.page);
                 commands::check::run(&client, &uid_map, uid, true).await?
             };
-            output_action(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, &policy.for_action(inspect, depth), json_mode).await?;
+            let (msg, details) = check_report(outcome);
+            output_action_with(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, &policy.for_action(inspect, depth), json_mode, details).await?;
         }
 
         Command::Uncheck { uid, selector, inspect, max_depth } => {
@@ -444,14 +445,15 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
             if uid.is_none() && selector.is_none() {
                 return Err("Provide a uid or --selector.".into());
             }
-            let msg = if let Some(ref sel) = selector {
+            let outcome = if let Some(ref sel) = selector {
                 crate::element::set_checked_selector(&client, sel, false).await?
             } else {
                 let uid = uid.as_ref().unwrap();
                 let uid_map = get_uid_map(&store, &cli.browser, &cli.page);
                 commands::check::run(&client, &uid_map, uid, false).await?
             };
-            output_action(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, &policy.for_action(inspect, depth), json_mode).await?;
+            let (msg, details) = check_report(outcome);
+            output_action_with(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, &policy.for_action(inspect, depth), json_mode, details).await?;
         }
 
         Command::Upload { files, uid, selector, inspect, max_depth } => {

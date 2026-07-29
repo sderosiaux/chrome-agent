@@ -103,10 +103,23 @@ pub fn fill_value_report(outcome: &crate::element::FillOutcome) -> serde_json::V
             "verbatim": outcome.verbatim(),
         })
     };
+    // "The field holds X" is only true as of a moment. Saying which moment is the only
+    // honest form of the claim: a page can revert at any time, and one did at 400ms.
+    v["observed_after_ms"] = json!(outcome.observed_after_ms);
     if let Some(caveat) = &outcome.caveat {
         v["caveat"] = json!(caveat);
     }
     v
+}
+
+/// Split a check/uncheck outcome into the message and the fields that go with it.
+///
+/// `observed_after_ms` is absent when the element already held the desired state: nothing
+/// was dispatched, so claiming an observation window afterwards would invent one.
+#[must_use]
+pub fn check_report(outcome: crate::element::CheckOutcome) -> (String, Option<serde_json::Value>) {
+    let details = outcome.observed_after_ms.map(|ms| json!({"observed_after_ms": ms}));
+    (outcome.message, details)
 }
 
 /// Execute a command, report what it did to the page, and persist the new baseline.
@@ -128,7 +141,9 @@ pub async fn output_action(
     output_action_with(client, store, browser_name, page_name, target_id, msg, report, json_mode, None).await
 }
 
-/// `output_action` plus the value a fill left behind.
+/// `output_action` plus whatever the command itself observed — the value a fill left
+/// behind, the window a check looked through. Merged at the top level of the response so
+/// the CLI and the pipe dispatchers, which build their JSON separately, agree on shape.
 #[allow(clippy::too_many_arguments)]
 pub async fn output_action_with(
     client: &CdpClient,
@@ -139,11 +154,13 @@ pub async fn output_action_with(
     msg: String,
     report: &ActionReport,
     json_mode: bool,
-    fill: Option<&crate::element::FillOutcome>,
+    details: Option<serde_json::Value>,
 ) -> Result<(), crate::BoxError> {
     let mut obj = json!({"ok": true, "message": msg});
-    if let Some(outcome) = fill {
-        obj["value"] = fill_value_report(outcome);
+    if let Some(fields) = details.as_ref().and_then(serde_json::Value::as_object) {
+        for (key, value) in fields {
+            obj[key.as_str()] = value.clone();
+        }
     }
     let mut trailer = String::new();
     // Silence used to mean four different things here. Whatever happens below, the response

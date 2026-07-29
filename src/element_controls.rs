@@ -162,12 +162,32 @@ fn refuse_uncheckable(probe: &Checkable, desired: bool) -> Result<(), ElementErr
 }
 
 /// Idempotent check/uncheck: query current state, click only if different.
+/// What a check/uncheck did, and when it looked.
+///
+/// The message alone could not say whether a read-back had happened: "Already checked" is a
+/// pre-action observation, "Checked" is a post-action one, and only the second has a window.
+pub struct CheckOutcome {
+    pub message: String,
+    /// `None` when the element already held the desired state, so nothing was dispatched
+    /// and there was nothing to observe afterwards.
+    pub observed_after_ms: Option<u64>,
+}
+
+impl CheckOutcome {
+    const fn already(message: String) -> Self {
+        Self { message, observed_after_ms: None }
+    }
+    const fn acted(message: String) -> Self {
+        Self { message, observed_after_ms: Some(crate::element::READ_BACK_MS) }
+    }
+}
+
 pub async fn set_checked(
     client: &CdpClient,
     uid_map: &HashMap<String, ElementRef>,
     uid: &str,
     desired: bool,
-) -> Result<String, ElementError> {
+) -> Result<CheckOutcome, ElementError> {
     let resolved = resolve_uid(client, uid_map, uid).await?;
     let probe_fn = format!("function() {{ return ({CHECKABLE_PROBE})(this); }}");
 
@@ -195,14 +215,17 @@ pub async fn set_checked(
     let want = if desired { "true" } else { "false" };
     let state_word = if desired { "checked" } else { "unchecked" };
     if before.state == want {
-        return Ok(format!("Already {state_word} uid={uid}"));
+        return Ok(CheckOutcome::already(format!("Already {state_word} uid={uid}")));
     }
 
     click(client, uid_map, uid).await?;
 
     // Read it back: a click is a request, not a result. A handler can reject or revert it,
     // and reporting "Checked" for a box that is still off is the one answer an agent cannot
-    // recover from.
+    // recover from. Waited explicitly, not by accident: this path used to observe whatever
+    // a CDP round trip happened to cost, which is neither the selector path's window nor
+    // any window at all.
+    tokio::time::sleep(std::time::Duration::from_millis(crate::element::READ_BACK_MS)).await;
     let after = parse_probe(&read_state(resolved.object_id, probe_fn).await?);
     if after.state != want {
         return Err(ElementError::Action(format!(
@@ -210,7 +233,10 @@ pub async fn set_checked(
             if after.state == "mixed" { "indeterminate" } else { &after.state }
         )));
     }
-    Ok(format!("{} uid={uid}", if desired { "Checked" } else { "Unchecked" }))
+    Ok(CheckOutcome::acted(format!(
+        "{} uid={uid}",
+        if desired { "Checked" } else { "Unchecked" }
+    )))
 }
 
 /// Idempotent check/uncheck by CSS selector.
@@ -218,7 +244,7 @@ pub async fn set_checked_selector(
     client: &CdpClient,
     selector: &str,
     desired: bool,
-) -> Result<String, ElementError> {
+) -> Result<CheckOutcome, ElementError> {
     let sel_json = serde_json::to_string(selector).unwrap_or_default();
     let want = if desired { "true" } else { "false" };
     // One evaluation does probe, click and read-back, so all three bind the same node even
@@ -233,13 +259,14 @@ pub async fn set_checked_selector(
             if ('{want}' === 'false' && before.radio) return {{ kind: 'radio_locked' }};
             if (before.state === '{want}') return {{ kind: before.kind, state: 'already' }};
             el.click();
-            // Read back after the microtask queue drains: a handler that reverts the
-            // change in a promise or a timeout is invisible to a synchronous read.
+            // Read back after the window: a handler that reverts the change in a promise
+            // or a timeout is invisible to a synchronous read.
             return new Promise(resolve => setTimeout(() => {{
                 const after = probe(el);
                 resolve({{ kind: before.kind, state: after.state === '{want}' ? 'ok' : after.state }});
-            }}, 60));
-        }})()"
+            }}, {window}));
+        }})()",
+        window = crate::element::READ_BACK_MS
     );
     let result: serde_json::Value = client
         .call(
@@ -261,11 +288,13 @@ pub async fn set_checked_selector(
 
     let state_word = if desired { "checked" } else { "unchecked" };
     match probe.state.as_str() {
-        "already" => Ok(format!("Already {state_word} selector '{selector}'")),
-        "ok" => Ok(format!(
+        "already" => Ok(CheckOutcome::already(format!(
+            "Already {state_word} selector '{selector}'"
+        ))),
+        "ok" => Ok(CheckOutcome::acted(format!(
             "{} selector '{selector}'",
             if desired { "Checked" } else { "Unchecked" }
-        )),
+        ))),
         other => Err(ElementError::Action(format!(
             "selector '{selector}' is still {} after the click; the page did not accept the change.",
             if other == "mixed" { "indeterminate" } else { other }
