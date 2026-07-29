@@ -106,10 +106,30 @@ fn a_revert_past_the_window_is_still_bounded_by_a_stated_time() {
     );
 
     // And the claim is indeed only about that moment.
-    let (stdout, code) = run_cli(&["--browser", b.name(), "--json", "eval", "document.querySelector('#late').value"]);
-    assert_eq!(code, 0, "{stdout}");
-    let later: Value = serde_json::from_str(&stdout).expect("JSON eval");
-    assert_eq!(later["result"], "", "the page did revert, later: {later}");
+    //
+    // Polled rather than read once. The first version assumed the round trip out of `fill`
+    // and back into `eval` always outlasts the fixture's 400ms timer — true on a developer
+    // machine, false on a CI runner, where it failed with the value still present. The
+    // property under test is "the page reverts after the window closed", not "it has
+    // already reverted by the time the next process starts", and only the first is the
+    // tool's business.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let last;
+    loop {
+        let (stdout, code) =
+            run_cli(&["--browser", b.name(), "--json", "eval", "document.querySelector('#late').value"]);
+        assert_eq!(code, 0, "{stdout}");
+        let current: Value = serde_json::from_str(&stdout).expect("JSON eval");
+        if current["result"] == "" || std::time::Instant::now() >= deadline {
+            last = current;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    assert_eq!(
+        last["result"], "",
+        "the fixture never reverted, so it cannot demonstrate a change past the window: {last}"
+    );
 }
 
 /// The three read-back paths used to disagree about how long to wait. They no longer do.
