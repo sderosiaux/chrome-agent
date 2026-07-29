@@ -7,7 +7,14 @@ on:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    # Pinned, not `ubuntu-latest`. The suite now launches a real browser, so the image is
+    # part of the contract: `ubuntu-latest` moved from 22.04 to 24.04 under existing
+    # workflows once already, and 26.04 is in public preview. A surprise image change would
+    # arrive as a browser failure in an unrelated PR.
+    runs-on: ubuntu-24.04
+    # A wedged browser used to be able to burn the full 6h default. The CDP call deadline
+    # makes that unlikely; this makes it impossible.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@1.95.0
@@ -23,6 +30,15 @@ jobs:
             exit 1
           fi
           google-chrome --version || chromium --version
+          # Ubuntu 23.10+ blocks unprivileged user namespaces through AppArmor, which is
+          # what Chrome's sandbox uses. The google-chrome .deb ships a profile that grants
+          # it, so the system Chrome we launch is expected to work — this lifts the
+          # restriction anyway, because the alternative if it ever does bite is passing
+          # --no-sandbox, and weakening the sandbox for every user of the tool to keep CI
+          # green is the wrong trade. Failure to set it is not fatal.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          # Prove the browser actually launches before spending the suite on finding out.
+          google-chrome --headless=new --disable-gpu --dump-dom about:blank >/dev/null
       - run: cargo test -- --test-threads=1
         env:
           # Turns every "SKIP: …" into a failure. See tests/common/mod.rs.
