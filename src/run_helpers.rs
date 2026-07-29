@@ -152,6 +152,24 @@ pub fn merge_details(
     }
 }
 
+/// Per-field report for a bulk fill: what each target was, and what it kept.
+///
+/// `key` is "uid" or "selector" depending on how the caller named the field. Secrets go
+/// through the same redaction as a single fill — a bulk path that printed them would be a
+/// way around it.
+#[must_use]
+pub fn bulk_fill_report(
+    key: &str,
+    outcomes: &[(String, crate::element::FillOutcome)],
+) -> serde_json::Value {
+    serde_json::Value::Array(
+        outcomes
+            .iter()
+            .map(|(target, outcome)| json!({key: target, "value": fill_value_report(outcome)}))
+            .collect(),
+    )
+}
+
 /// Split a check/uncheck outcome into the message and the fields that go with it.
 ///
 /// `observed_after_ms` is absent when the element already held the desired state: nothing

@@ -13,15 +13,21 @@ pub async fn run(
     Ok((format!("Filled uid={uid} with {}", value.len()), outcome))
 }
 
+/// Fill several fields, keeping what each one held afterwards.
+///
+/// The outcomes used to be dropped on the floor and the answer was a count. A count is
+/// right about how many writes were attempted and silent about the mask that reformatted
+/// one of them — the very thing `fill` returns `value` to expose.
 pub async fn run_form(
     client: &CdpClient,
     uid_map: &HashMap<String, ElementRef>,
     pairs: &[(&str, &str)],
-) -> Result<String, crate::BoxError> {
-    let mut filled = Vec::new();
+) -> Result<(String, Vec<(String, crate::element::FillOutcome)>), crate::BoxError> {
+    let mut outcomes = Vec::new();
     for (uid, value) in pairs {
-        crate::element::fill(client, uid_map, uid, value).await?;
-        filled.push(format!("uid={uid}"));
+        let outcome = crate::element::fill(client, uid_map, uid, value).await?;
+        outcomes.push(((*uid).to_string(), outcome));
     }
-    Ok(format!("Filled {} fields: {}", filled.len(), filled.join(", ")))
+    let names: Vec<String> = outcomes.iter().map(|(uid, _)| format!("uid={uid}")).collect();
+    Ok((format!("Filled {} fields: {}", names.len(), names.join(", ")), outcomes))
 }

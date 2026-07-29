@@ -272,8 +272,9 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
                 })
                 .collect();
             let parsed = parsed?;
-            let msg = commands::fill::run_form(&client, &uid_map, &parsed).await?;
-            output_action(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, &policy.for_action(inspect, depth), json_mode).await?;
+            let (msg, outcomes) = commands::fill::run_form(&client, &uid_map, &parsed).await?;
+            let details = Some(json!({"values": crate::run_helpers::bulk_fill_report("uid", &outcomes)}));
+            output_action_with(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, &policy.for_action(inspect, depth), json_mode, details).await?;
         }
 
         Command::Text { uid, selector, truncate } => {
