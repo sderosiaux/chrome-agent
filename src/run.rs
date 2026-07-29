@@ -168,6 +168,11 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
         (conn, client)
     };
 
+    // The browser-level client answers Target.* calls (page resolution, tabs).
+    // It is bound by the caller's --timeout like the page client below — its
+    // error message says "raise --timeout", which must actually work.
+    browser_client.set_call_timeout(std::time::Duration::from_secs(cli.timeout));
+
     let http_endpoint = conn.http_endpoint.as_deref().ok_or(
         "No HTTP endpoint available. Cannot resolve page WebSocket URL."
     )?;

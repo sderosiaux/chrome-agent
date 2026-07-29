@@ -328,6 +328,7 @@ async fn connect_browser(
                 let conn = browser::BrowserConnection {
                     ws_endpoint: ws.clone(), http_endpoint: Some(http), pid: existing.pid,
                 };
+                client.set_call_timeout(std::time::Duration::from_secs(cli.timeout));
                 return Ok((conn, client));
             }
         } else if let Some(pid) = existing.pid {
@@ -351,5 +352,7 @@ async fn connect_browser(
     };
     let conn = browser::resolve_browser(&opts).await?;
     let client = CdpClient::connect(&conn.ws_endpoint).await?;
+    // Browser-level Target.* calls obey the caller's --timeout like page calls do.
+    client.set_call_timeout(std::time::Duration::from_secs(cli.timeout));
     Ok((conn, client))
 }
