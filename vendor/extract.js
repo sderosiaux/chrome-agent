@@ -70,6 +70,25 @@ function extract(_scope, _limit) {
     return !el.closest('[hidden],[aria-hidden="true"]');
   }
 
+  // What disqualifies a group of elements from being records, whichever pass found them:
+  // it sits in chrome rather than content, or it is a strip of short links.
+  function penalise(score, parent, rich) {
+    const parentTag = parent ? parent.tagName : '';
+    if (parentTag === 'BODY' || parentTag === 'HTML') score *= 0.5;
+    if (parentTag === 'NAV' || (parent && parent.closest('nav,header,footer'))) score *= 0.3;
+
+    // Link density flags navigation, where every link is a short label. A listing row
+    // whose headline is itself a link is legitimately link-heavy, so only penalise
+    // groups where no record carries a link with real text in it.
+    const avgLinkRatio = rich.reduce((s, e) => s + linkTextRatio(e), 0) / rich.length;
+    const avgLongestLink = rich.reduce((s, e) => s + longestLinkText(e), 0) / rich.length;
+    if (avgLongestLink < HEADLINE_LINK_CHARS) {
+      if (avgLinkRatio > 0.85) score *= 0.2;
+      else if (avgLinkRatio > 0.7) score *= 0.5;
+    }
+    return score;
+  }
+
   // Phase 1: Semantic fast-pass
   const candidates = [];
   const semanticHits = [..._scope.querySelectorAll('*')].filter(el =>
@@ -88,7 +107,13 @@ function extract(_scope, _limit) {
       const rich = els.filter(e => richness(e) >= 1);
       if (rich.length < 3) continue;
       const avgRich = rich.reduce((s, e) => s + richness(e), 0) / rich.length;
-      candidates.push({ parent: rich[0].parentElement, elements: rich, sig, score: avgRich * rich.length * 2.0 });
+      // The x2 is for "this class name says data". It is not a licence to skip the
+      // navigation rules: a <nav> whose <li>s carry class "nav-item" matches
+      // DATA_CLASS_RE, and without these penalties it outscored the real product list
+      // and suppressed it from `alternatives` too. Same penalties as phase 2, one
+      // function, so the two passes cannot drift apart again.
+      const score = penalise(avgRich * rich.length * 2.0, rich[0].parentElement, rich);
+      candidates.push({ parent: rich[0].parentElement, elements: rich, sig, score });
     }
   }
 
@@ -146,20 +171,7 @@ function extract(_scope, _limit) {
       const elTag = rich[0].tagName;
 
       const avgRich = rich.reduce((s, e) => s + richness(e), 0) / rich.length;
-      let score = avgRich * rich.length;
-
-      if (parentTag === 'BODY' || parentTag === 'HTML') score *= 0.5;
-      if (parentTag === 'NAV' || parent.closest('nav,header,footer')) score *= 0.3;
-
-      // Link density flags navigation, where every link is a short label. A listing row
-      // whose headline is itself a link is legitimately link-heavy, so only penalise
-      // groups where no record carries a link with real text in it.
-      const avgLinkRatio = rich.reduce((s, e) => s + linkTextRatio(e), 0) / rich.length;
-      const avgLongestLink = rich.reduce((s, e) => s + longestLinkText(e), 0) / rich.length;
-      if (avgLongestLink < HEADLINE_LINK_CHARS) {
-        if (avgLinkRatio > 0.85) score *= 0.2;
-        else if (avgLinkRatio > 0.7) score *= 0.5;
-      }
+      let score = penalise(avgRich * rich.length, parent, rich);
 
       const avgHetero = rich.reduce((s, e) => s + heterogeneity(e), 0) / rich.length;
       if (avgHetero >= 3) score *= 1.3;

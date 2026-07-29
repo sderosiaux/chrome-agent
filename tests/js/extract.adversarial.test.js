@@ -332,3 +332,38 @@ describe('adversarial: svg-heavy cards and forms as records', () => {
     assert.ok(r.items[0].fields.includes('user0@example.com'));
   });
 });
+
+// ---------------------------------------------------------------------------
+// The semantic fast-pass must not be a way around the anti-navigation rules
+// ---------------------------------------------------------------------------
+
+describe('adversarial: navigation wearing a data class name', () => {
+  it('does not return nav links as the record set when real content is present', () => {
+    // Bootstrap/Tailwind style: the nav items carry a class the semantic fast-pass
+    // recognises ("item"), so they entered phase 1 — which applied none of phase 2's
+    // nav, link-density or richness rules — and outscored the actual product list.
+    const nav = Array.from({ length: 8 }, (_, i) =>
+      `<li class="nav-item"><a href="/p${i}">Navigation Menu Label ${i}</a></li>`).join('');
+    const cards = Array.from({ length: 3 }, (_, i) =>
+      `<div class="feature-box"><h3>Product ${i}</h3>` +
+      `<p>A real description of product ${i} here.</p><span>$${i}9.99</span></div>`).join('');
+    const html = `<html><body><nav class="main-nav"><ul>${nav}</ul></nav><main>${cards}</main></body></html>`;
+
+    const r = extractFromHTML(html);
+    assert.ok(
+      !/nav-item/.test(r.pattern),
+      `expected the content list, got the navigation: pattern=${r.pattern}`
+    );
+    assert.equal(r.count, 3, `expected the 3 product cards, got ${r.count}`);
+    assert.ok(/Product 0/.test(JSON.stringify(r.items[0])), JSON.stringify(r.items[0]));
+  });
+
+  it('still returns a semantic list that is genuinely content', () => {
+    const items = Array.from({ length: 5 }, (_, i) =>
+      `<div class="product-item"><h3>Item ${i}</h3><p>Description number ${i} with real text.</p>` +
+      `<span class="price">$${i}.00</span></div>`).join('');
+    const html = `<html><body><main><div class="list">${items}</div></main></body></html>`;
+    const r = extractFromHTML(html);
+    assert.equal(r.count, 5, `the fast-pass must still fire on real content: ${JSON.stringify(r)}`);
+  });
+});
