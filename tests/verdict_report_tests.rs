@@ -82,7 +82,7 @@ fn an_action_that_moves_nothing_says_so_instead_of_going_quiet() {
     assert_eq!(first["verdict"], "changed", "focus moving is still the page reacting: {first}");
     assert_eq!(first["verdict_reason"], "focus_only", "{first}");
     let v = act(b.name(), &["press", "ArrowDown"]);
-    assert_eq!(v["verdict"], "no_delta", "{v}");
+    assert_eq!(v["verdict"], "unchanged", "{v}");
     assert_eq!(v["verdict_reason"], "identical_tree", "{v}");
     assert!(
         v["verdict_hint"].as_str().unwrap_or_default().contains("overlay"),
@@ -172,7 +172,7 @@ fn pipe_spells_every_verdict_the_way_the_cli_does() {
     let responses = run_pipe("verdict-pipe", &[], &script);
 
     let quiet = &responses[responses.len() - 2];
-    assert_eq!(quiet["verdict"], "no_delta", "{quiet}");
+    assert_eq!(quiet["verdict"], "unchanged", "{quiet}");
     assert_eq!(quiet["verdict_reason"], "identical_tree", "{quiet}");
 
     let click = responses.last().expect("a click response");
@@ -255,7 +255,7 @@ fn the_text_output_carries_the_verdict_too() {
     let (stdout, code) = run_cli(&["--browser", b.name(), "press", "ArrowDown"]);
     assert_eq!(code, 0, "{stdout}");
     assert!(
-        stdout.contains("verdict: no_delta (identical_tree)"),
+        stdout.contains("verdict: unchanged (identical_tree)"),
         "text mode must not be the quiet one: {stdout}"
     );
 }

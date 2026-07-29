@@ -285,11 +285,11 @@ UIDs stay the same between inspects as long as the DOM node exists. After a navi
 are all reassigned, which is why the click above reports the page rather than a diff.
 
 Every mutating action carries a `verdict` and a `verdict_reason`, so an empty report is never
-ambiguous: `changed`, `navigated`, `no_delta` (the tree was identical in the observation
+ambiguous: `changed`, `navigated`, `unchanged` (the tree was identical in the observation
 window), `unknown` (no baseline, or the read-back failed — `verdict_hint` says what to do), and
-`not_checked` (you switched the report off). `no_delta` is deliberately not called "no effect":
-without proof the action was delivered, an unchanged tree cannot tell a quiet page from a click
-that hit an overlay.
+`not_checked` (you switched the report off). `unchanged` means the page did not change while
+the tool watched — not "the action had no effect", which it cannot know: an unchanged tree is
+also what a click swallowed by an overlay looks like.
 
 `--verdict off` restores the older behaviour: the action is reported, the page is not read
 back. Faster, quieter, and you find out what happened on your next call — the response says

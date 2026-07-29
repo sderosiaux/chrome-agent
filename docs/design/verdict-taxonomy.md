@@ -3,9 +3,9 @@
 Rescued from a workflow output under `/tmp`, which a reboot clears. This is the design the
 v0.9.x work is an on-ramp to, not a description of what ships today.
 
-**What is built** (`src/verdict.rs`): five verdicts — `changed`, `navigated`, `no_delta`,
+**What is built** (`src/verdict.rs`): five verdicts — `changed`, `navigated`, `unchanged`,
 `unknown`, `not_checked` — classified from the accessibility delta and the document
-identity, which is everything currently measured. `no_delta` is the placeholder for the
+identity, which is everything currently measured. `unchanged` is the placeholder for the
 `no_effect` / `intercepted` split below: promoting it needs proof of delivery, which needs
 the hit test in slice 5.
 

@@ -207,7 +207,7 @@ Per-command shapes:
 - every mutating command also carries `verdict` + `verdict_reason`, so silence is never ambiguous:
   - `changed` (`tree_delta`, `nodes_moved`, `focus_only`) — the page moved; `delta` says how
   - `navigated` (`document_replaced`) — new document, every stored uid is dead, re-inspect
-  - `no_delta` (`identical_tree`) — the tree was identical in the observation window. NOT proof the action did nothing: it may have hit an overlay, changed only a canvas or styling, or landed slower than the window
+  - `unchanged` (`identical_tree`) — nothing in the tree changed while the tool watched. This is NOT "the action did nothing": the same result appears when a click is swallowed by an overlay, when the effect is a canvas repaint or a style change the tree cannot see, and when the handler runs after the window closed. Do not retry on this alone — check with `inspect` or `eval` first
   - `unknown` (`no_baseline`, `read_failed`, `identity_unreadable`) — nothing could be compared; `verdict_hint` says how to find out
   - `not_checked` (`reporting_disabled`) — you passed `--verdict off`
 - `read` → `{"ok":true, "title":"...", "text":"article content..."}`

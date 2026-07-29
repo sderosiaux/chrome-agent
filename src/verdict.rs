@@ -6,12 +6,28 @@
 //! and nothing in the response told them apart — so an agent could not tell a quiet page
 //! from a broken observation.
 //!
-//! This is the on-ramp to the full verdict taxonomy, not the taxonomy itself. It classifies
-//! only what we already measure: the accessibility-tree delta and the document identity.
-//! It deliberately does not emit `no_effect`, which the spec defines as requiring proof of
-//! delivery (a hit test, or a postcondition read on the acted-on handle). Until that proof
-//! exists, an empty delta is `no_delta` — a statement about the observation, not about the
-//! action.
+//! # Why `unchanged` and not "no effect"
+//!
+//! When an action produces no visible difference, there are two things one could say:
+//!
+//! - "the action had no effect" — a claim about the action
+//! - "the page did not change while I watched" — a claim about the observation
+//!
+//! Only the second is something we can know. An identical tree is also what you get when
+//! the click was swallowed by an overlay, when the effect is invisible to the accessibility
+//! tree (a canvas repaint, a CSS class), and when the handler runs after the observation
+//! window closed. In all three the action DID something, and answering "no effect" would be
+//! wrong in the way that costs the most: an agent that believes it retries, and the retry
+//! is a second real click.
+//!
+//! So the verdict is `unchanged`, and `verdict_hint` spells out those three possibilities.
+//!
+//! The full taxonomy this is an on-ramp to (`docs/design/verdict-taxonomy.md`) does define
+//! `no_effect`, but only behind proof that the action was delivered: a hit test at the
+//! dispatched coordinates, or a postcondition read on the acted-on handle. Neither is built
+//! yet. When slice 5 lands the hit test, today's `unchanged` splits into `no_effect`
+//! (delivered, nothing happened) and `intercepted` (something else received it) — which is
+//! the whole reason not to spend the stronger word now.
 
 use std::fmt;
 
@@ -41,10 +57,9 @@ pub enum Verdict {
     Changed,
     /// The document was replaced. Stored uids are dead.
     Navigated,
-    /// We looked and the tree was identical. NOT a claim that the action did nothing:
-    /// without proof of delivery we cannot distinguish "nothing happened" from "the click
-    /// hit an overlay" or "the handler runs in 600ms".
-    NoDelta,
+    /// We looked and the tree was identical. A statement about the observation, not about
+    /// the action — see the module docs for why the difference is the whole point.
+    Unchanged,
     /// The honest floor. Always paired with a reason naming what was missing.
     Unknown,
     /// We did not look.
@@ -57,7 +72,7 @@ impl Verdict {
         match self {
             Self::Changed => "changed",
             Self::Navigated => "navigated",
-            Self::NoDelta => "no_delta",
+            Self::Unchanged => "unchanged",
             Self::Unknown => "unknown",
             Self::NotChecked => "not_checked",
         }
@@ -94,11 +109,11 @@ pub const fn classify(observation: Observation) -> Assessment {
         Observation::Compared { moved, .. } if moved > 0 => (Verdict::Changed, "nodes_moved"),
         // Focus churn is subtracted from the delta on purpose (every click focuses
         // something), but it is still the page reacting to the action — the closest thing
-        // to proof of delivery available without a hit test. Reporting it as `no_delta`
+        // to proof of delivery available without a hit test. Reporting it as `unchanged`
         // would throw away the one signal that separates "the click landed on an inert
         // element" from "the click never arrived".
         Observation::Compared { focus_moved: true, .. } => (Verdict::Changed, "focus_only"),
-        Observation::Compared { .. } => (Verdict::NoDelta, "identical_tree"),
+        Observation::Compared { .. } => (Verdict::Unchanged, "identical_tree"),
     };
     Assessment { verdict, reason }
 }
@@ -114,7 +129,7 @@ pub fn hint_for(assessment: Assessment) -> Option<&'static str> {
             "The action ran, but reading the page afterwards failed, so what it did is unknown. Run `inspect` to see the current state.",
         ),
         "identical_tree" => Some(
-            "The accessibility tree is unchanged. The action may have been absorbed by an overlay, or its effect may be invisible to the tree (canvas, styling), or slower than the observation window.",
+            "Nothing in the accessibility tree changed while this was watched. That is not the same as the action having no effect: a click absorbed by an overlay, an effect the tree cannot see (canvas, styling), and a handler that runs after the window all look like this. Confirm with `inspect` or `eval` before repeating the action — a repeat is a second real action.",
         ),
         _ => None,
     }
@@ -141,7 +156,7 @@ mod tests {
             (Observation::ReportingDisabled, Verdict::NotChecked, "reporting_disabled"),
             (Observation::ReadFailed, Verdict::Unknown, "read_failed"),
             (Observation::NoBaseline, Verdict::Unknown, "no_baseline"),
-            (compared(0, 0, false), Verdict::NoDelta, "identical_tree"),
+            (compared(0, 0, false), Verdict::Unchanged, "identical_tree"),
         ];
         let mut seen = std::collections::HashSet::new();
         for (observation, verdict, reason) in cases {
@@ -186,7 +201,7 @@ mod tests {
     }
 
     /// Focus churn is kept out of the delta counts, but it is still the page reacting.
-    /// Calling that `no_delta` would discard the only evidence the action was delivered.
+    /// Calling that `unchanged` would discard the only evidence the action was delivered.
     #[test]
     fn a_focus_move_alone_is_still_something_we_saw() {
         let got = classify(compared(0, 0, true));
