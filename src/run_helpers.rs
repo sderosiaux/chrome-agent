@@ -650,6 +650,19 @@ pub async fn cmd_stop(json_mode: bool) -> Result<(), crate::BoxError> {
     } // #[cfg(unix)]
 }
 
+/// Whether this command can own the browser named by `--browser`, and may therefore
+/// take it down when interrupted.
+///
+/// `--browser` is a global flag, so `daemon start` carries it too — defaulted to
+/// `"default"`, the documented name most single-agent users get. The daemon owns no
+/// browser (it serves whoever connects), so acting on that leftover name meant Ctrl+C
+/// on the daemon killed an unrelated agent's Chrome: the same cross-agent damage,
+/// narrowed to one unlucky collision.
+#[must_use]
+pub const fn interrupt_owns_browser(command: &crate::cli::Command) -> bool {
+    !matches!(command, crate::cli::Command::Daemon { .. })
+}
+
 /// The pid this invocation may kill on interrupt: its own browser's, and no other.
 ///
 /// The Ctrl+C handler used to walk every entry in `sessions.json` — a file shared by
@@ -776,6 +789,16 @@ mod tests {
         let _ = child.kill();
         let _ = child.wait();
         assert!(survived, "kill_pid killed an unrelated process holding a reused pid");
+    }
+
+    #[test]
+    fn the_daemon_owns_no_browser_to_interrupt() {
+        // `--browser` is global, so `daemon start` carries the default name and would
+        // otherwise kill whichever agent happens to be using it.
+        assert!(!interrupt_owns_browser(&crate::cli::Command::Daemon {
+            action: crate::cli::DaemonAction::Start
+        }));
+        assert!(interrupt_owns_browser(&crate::cli::Command::Tabs));
     }
 
     #[test]

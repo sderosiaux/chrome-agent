@@ -6,8 +6,9 @@
 //! the documentation verbatim produced a clap parse error. Nothing checked the text
 //! against the parser.
 //!
-//! Parsing only — no browser is launched. `--help` is the one thing that cannot be
-//! parsed this way (clap exits), so those lines are skipped explicitly.
+//! Parsing only — no browser is launched: `CHROME_AGENT_PARSE_ONLY` makes the binary
+//! return the moment clap has spoken. Synopsis lines using `[--flag name]` notation are
+//! not invocations and are checked by the second test instead.
 
 use std::process::Command;
 
@@ -17,10 +18,26 @@ fn binary() -> String {
     path.to_string_lossy().into_owned()
 }
 
+/// Drop a trailing `# comment`, ignoring `#` inside quotes.
+fn strip_comment(line: &str) -> &str {
+    let mut quote: Option<char> = None;
+    for (i, c) in line.char_indices() {
+        match quote {
+            Some(q) if c == q => quote = None,
+            None if c == '"' || c == '\'' => quote = Some(c),
+            None if c == '#' => return line[..i].trim_end(),
+            Some(_) | None => {}
+        }
+    }
+    line.trim()
+}
+
 /// Split a documented example into argv, honouring the quotes the guide uses, and
-/// dropping the trailing `# comment`.
+/// dropping the trailing `# comment` — but only a `#` outside quotes: `--selector
+/// "#country"` is a CSS id, and cutting there turned a valid example into a truncated
+/// one the parser then rejected for the wrong reason.
 fn argv(line: &str) -> Vec<String> {
-    let line = line.split_once('#').map_or(line, |(before, _)| before).trim();
+    let line = strip_comment(line);
     let mut args = Vec::new();
     let mut current = String::new();
     let mut quote: Option<char> = None;
@@ -70,12 +87,12 @@ fn every_example_in_the_embedded_guide_parses() {
     let mut broken = Vec::new();
     for example in &examples {
         let args = argv(example);
-        // `--dry-parse` does not exist; `--help` on the subcommand makes clap validate
-        // the path and exit 0 without running anything, which is exactly the check.
-        let mut with_help = args[1..].to_vec();
-        with_help.push("--help".into());
+        // CHROME_AGENT_PARSE_ONLY returns right after Cli::parse(), so clap's full
+        // verdict is the exit code — including missing required arguments, which
+        // appending `--help` would have short-circuited past.
         let output = Command::new(binary())
-            .args(&with_help)
+            .args(&args[1..])
+            .env("CHROME_AGENT_PARSE_ONLY", "1")
             .output()
             .expect("run chrome-agent");
         if !output.status.success() {
@@ -101,7 +118,7 @@ fn every_flag_named_in_a_synopsis_exists_on_its_command() {
     let mut broken = Vec::new();
     for line in guide.lines().map(str::trim) {
         let Some(rest) = line.strip_prefix("chrome-agent ") else { continue };
-        let rest = rest.split_once('#').map_or(rest, |(before, _)| before);
+        let rest = strip_comment(rest);
         let mut words = rest.split_whitespace();
         let Some(command) = words.next() else { continue };
         if command.starts_with('-') || command.starts_with('<') || command.starts_with('[') {
