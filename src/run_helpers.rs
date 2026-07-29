@@ -650,16 +650,37 @@ pub async fn cmd_stop(json_mode: bool) -> Result<(), crate::BoxError> {
     } // #[cfg(unix)]
 }
 
-/// SIGKILL a managed-browser process (best-effort, unix only). Killing the
+/// Whether `comm` (the executable per `ps -o comm=`) is a browser this tool could have
+/// launched. The kill below is gated on it — see `kill_pid`.
+#[cfg(any(unix, test))]
+fn is_browser_process(comm: &str) -> bool {
+    let c = comm.to_ascii_lowercase();
+    c.contains("chrome") || c.contains("chromium") || c.contains("headless_shell")
+}
+
+/// Kill a managed-browser process (best-effort, unix only). Killing the
 /// main Chrome process is enough — its helper processes exit with it.
+///
+/// Guarded against PID reuse: a stored pid may have died and been reassigned by the
+/// OS to an unrelated process, and signalling whatever holds the number now is data
+/// loss, not cleanup. The executable is checked first; a pid that is gone, or that
+/// no longer names a browser, is left alone. The check-then-kill window is
+/// milliseconds — not zero, but no longer unbounded.
 pub fn kill_pid(pid: u32) {
     #[cfg(unix)]
     {
-        let _ = std::process::Command::new("kill")
-            .arg(pid.to_string())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
+        let comm = std::process::Command::new("ps")
+            .args(["-p", &pid.to_string(), "-o", "comm="])
+            .output()
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+        if comm.as_deref().is_some_and(|c| !c.is_empty() && is_browser_process(c)) {
+            let _ = std::process::Command::new("kill")
+                .arg(pid.to_string())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+        }
     }
     #[cfg(not(unix))]
     {
@@ -720,6 +741,40 @@ pub fn cmd_close(browser_name: &str, purge: bool, json_mode: bool) -> Result<(),
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn kill_pid_refuses_a_pid_that_no_longer_belongs_to_a_browser() {
+        // A stored pid can be reaped and reassigned by the OS to an unrelated
+        // process. Killing whatever holds the number now is data loss, not cleanup.
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn a stand-in for the reused pid");
+        kill_pid(child.id());
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let status = child.try_wait().expect("poll the stand-in");
+        let survived = status.is_none();
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(survived, "kill_pid killed an unrelated process holding a reused pid");
+    }
+
+    #[test]
+    fn browser_executables_are_recognised_and_bystanders_are_not() {
+        for browser in [
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            "chrome",
+            "chromium",
+            "chromium-browser",
+            "headless_shell",
+            "Google Chrome for Testing",
+        ] {
+            assert!(is_browser_process(browser), "should recognise {browser}");
+        }
+        for bystander in ["sleep", "postgres", "/usr/bin/python3", "node"] {
+            assert!(!is_browser_process(bystander), "must not kill {bystander}");
+        }
+    }
 
     #[test]
     fn bug_error_hint_covers_all_cases() {
