@@ -516,10 +516,17 @@ describe('adversarial: mixed tag types as siblings', () => {
       </div>
     </body></html>`;
     const r = extractFromHTML(html);
-    assert.ok(r.count >= 3, `Expected >=3, got ${r.count}`);
-    // All items should be of the same tag type
+    // Exactly 3: the six siblings are two record types of three, and merging them into
+    // one group of six is the defect this fixture exists for (the extractor's own
+    // comment cites HN story rows vs subtext rows). `>= 3` passed either way, so a
+    // regression in the tag-merge logic could ship with the suite green.
+    assert.equal(r.count, 3, `the two tag groups must stay apart, got ${r.count}`);
     const tag = r.pattern.split('.')[0];
     assert.ok(['DIV', 'SECTION'].includes(tag), `Expected DIV or SECTION, got: ${tag}`);
+    // And every returned record is of that one type, not a mix.
+    const titles = r.items.map(i => JSON.stringify(i)).join(' ');
+    const mixed = /Div \d/.test(titles) && /Section \d/.test(titles);
+    assert.ok(!mixed, `records of both types were merged into one list: ${titles}`);
   });
 });
 
