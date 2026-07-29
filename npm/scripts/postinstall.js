@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { createHash } from 'crypto';
 import { chmodSync, createWriteStream, existsSync, mkdirSync, readFileSync, renameSync, rmSync } from 'fs';
 import { get } from 'https';
 import { arch, platform } from 'os';
@@ -64,6 +65,60 @@ async function downloadFile(url, destination) {
   }).catch((error) => { rmSync(tempPath, { force: true }); throw error; });
 }
 
+/** Fetch a small text asset (the checksum file) into memory. */
+async function fetchText(url) {
+  return new Promise((resolve, reject) => {
+    const request = (currentUrl, redirects = 10) => {
+      get(currentUrl, {
+        headers: { Accept: 'text/plain', 'User-Agent': `chrome-agent/${version}` },
+      }, (response) => {
+        if (response.statusCode >= 300 && response.statusCode < 400 && response.headers.location) {
+          response.resume();
+          if (redirects === 0) { reject(new Error('Too many redirects')); return; }
+          request(new URL(response.headers.location, currentUrl), redirects - 1);
+          return;
+        }
+        if (response.statusCode !== 200) {
+          response.resume();
+          reject(new Error(`HTTP ${response.statusCode} from ${currentUrl}`));
+          return;
+        }
+        let body = '';
+        response.setEncoding('utf8');
+        response.on('data', (chunk) => { body += chunk; });
+        response.on('end', () => resolve(body));
+        response.on('error', reject);
+      }).on('error', reject).setTimeout(30_000, function() { this.destroy(new Error('Timeout')); });
+    };
+    request(url);
+  });
+}
+
+export function sha256File(path) {
+  return createHash('sha256').update(readFileSync(path)).digest('hex');
+}
+
+/**
+ * Compare a downloaded file against the checksum published beside it.
+ *
+ * The binary is fetched over the network and chmod +x'd; without this there was nothing
+ * anywhere in the chain saying the bytes are the ones that were built. A mismatch deletes
+ * the file rather than leaving a half-trusted binary on disk: a corrupted-but-running
+ * binary surfaces as confusing behaviour later, which is worse than a failed install.
+ */
+export function verifyChecksum(actualHex, expectedRaw, binaryName) {
+  const expected = String(expectedRaw).trim().split(/\s+/)[0].toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(expected)) {
+    throw new Error(`Malformed checksum for ${binaryName}: "${String(expectedRaw).trim().slice(0, 80)}"`);
+  }
+  if (actualHex.toLowerCase() !== expected) {
+    throw new Error(
+      `Checksum mismatch for ${binaryName}: expected ${expected}, got ${actualHex}. ` +
+      'The download was corrupted or the release asset does not match what was published.'
+    );
+  }
+}
+
 async function main() {
   const targetKey = getTargetKey();
   const binaryName = targetKey ? supportedTargets[targetKey] : null;
@@ -90,11 +145,20 @@ async function main() {
   console.log(`chrome-agent: downloading native binary for ${platform()}-${arch()}...`);
 
   await downloadFile(url, binaryPath);
+  try {
+    verifyChecksum(sha256File(binaryPath), await fetchText(`${url}.sha256`), binaryName);
+  } catch (error) {
+    rmSync(binaryPath, { force: true });
+    throw error;
+  }
   if (platform() !== 'win32') chmodSync(binaryPath, 0o755);
-  console.log(`chrome-agent: installed ${binaryName}`);
+  console.log(`chrome-agent: installed ${binaryName} (sha256 verified)`);
 }
 
-main().catch((error) => {
-  console.error(`chrome-agent postinstall failed: ${error.message}`);
-  process.exitCode = 1;
-});
+// Importable for the unit tests without running the install.
+if (process.env.CHROME_AGENT_POSTINSTALL_NOOP !== '1') {
+  main().catch((error) => {
+    console.error(`chrome-agent postinstall failed: ${error.message}`);
+    process.exitCode = 1;
+  });
+}

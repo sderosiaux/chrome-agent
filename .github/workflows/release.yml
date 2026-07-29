@@ -66,11 +66,21 @@ jobs:
         if: runner.os == 'Windows'
         run: cp target/${{ matrix.target }}/release/chrome-agent.exe ${{ matrix.artifact }}
 
+      # The npm postinstall downloads this file over the network and chmod +x's it.
+      # Without a checksum published beside it there is nothing for the installer to
+      # check the bytes against — a truncated download or a re-uploaded asset installs
+      # as a trusted native binary. shasum is present on all three runner images.
+      - name: Checksum the binary
+        shell: bash
+        run: shasum -a 256 "${{ matrix.artifact }}" | awk '{print $1}' > "${{ matrix.artifact }}.sha256"
+
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact }}
-          path: ${{ matrix.artifact }}
+          path: |
+            ${{ matrix.artifact }}
+            ${{ matrix.artifact }}.sha256
 
   release:
     needs: build
