@@ -202,10 +202,19 @@ pub async fn run(
 
 /// Format the extract result as human-readable text.
 pub fn format_text(result: &ExtractResult) -> String {
-    let mut out = format!(
-        "Found {} items (pattern: {})\n",
-        result.count, result.pattern
-    );
+    let mut out = if result.count > result.items.len() {
+        format!(
+            "Found {} items, showing {} (pattern: {}) — raise --limit for the rest\n",
+            result.count,
+            result.items.len(),
+            result.pattern
+        )
+    } else {
+        format!(
+            "Found {} items (pattern: {})\n",
+            result.count, result.pattern
+        )
+    };
     for (i, item) in result.items.iter().enumerate() {
         let mut parts: Vec<String> = Vec::new();
         if let Some(title) = item.get("title").and_then(Value::as_str) {
@@ -238,18 +247,74 @@ pub fn format_text(result: &ExtractResult) -> String {
 }
 
 /// Build the JSON output for the extract command.
+///
+/// `count` is what the page matched, `returned` is what `--limit` let through. They used
+/// to be one number: an agent reading `count` as the page's inventory while holding a
+/// tenth of it under-processed the page with nothing saying so.
 pub fn to_json(result: &ExtractResult) -> Value {
-    json!({
+    let returned = result.items.len();
+    let truncated = result.count > returned;
+    let mut out = json!({
         "ok": true,
         "items": result.items,
         "count": result.count,
+        "returned": returned,
+        "truncated": truncated,
         "pattern": result.pattern,
-    })
+    });
+    if truncated {
+        out["hint"] = json!(format!(
+            "Showing {returned} of {} matched records. Raise --limit to see more.",
+            result.count
+        ));
+    }
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `count` is the number of records the page matched, `items` is what `--limit` let
+    /// through. When they differ the response must say so: an agent reading `count` as
+    /// "this page lists 30 products" while holding 10 under-processes the page silently.
+    #[test]
+    fn a_truncated_extract_says_how_many_it_is_holding_back() {
+        let result = ExtractResult {
+            items: (0..10).map(|i| json!({"title": format!("item {i}")})).collect(),
+            count: 30,
+            pattern: "div.card".into(),
+        };
+
+        let text = format_text(&result);
+        assert!(
+            text.contains("10") && text.contains("30"),
+            "the text output must show both what was matched and what was returned: {text}"
+        );
+        assert!(
+            text.contains("--limit"),
+            "and name the flag that decides it: {text}"
+        );
+
+        let v = to_json(&result);
+        assert_eq!(v["count"], 30, "count stays the number of records on the page");
+        assert_eq!(v["returned"], 10, "returned is what the caller actually holds");
+        assert_eq!(v["truncated"], true, "and the divergence is flagged: {v}");
+        assert!(
+            v["hint"].as_str().unwrap_or_default().contains("--limit"),
+            "the hint names the flag to raise: {v}"
+        );
+
+        // An untruncated result must not sprout a warning it does not deserve.
+        let whole = ExtractResult {
+            items: vec![json!({"title": "only one"})],
+            count: 1,
+            pattern: "div.card".into(),
+        };
+        let v = to_json(&whole);
+        assert_eq!(v["truncated"], false, "{v}");
+        assert!(v["hint"].is_null(), "{v}");
+    }
 
     // --- FIX A9: --scroll must not hang on continuously-mutating pages ---
 
