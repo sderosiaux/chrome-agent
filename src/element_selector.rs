@@ -60,7 +60,7 @@ pub async fn click_selector(client: &CdpClient, selector: &str) -> Result<(), El
         r"(() => {{
             const el = document.querySelector({sel});
             if (!el) throw new Error('No element matches selector: ' + {sel});
-            el.scrollIntoView({{block: 'center', inline: 'center'}});
+            el.scrollIntoView({{block: 'center', inline: 'center', behavior: 'instant'}});
             const r = el.getBoundingClientRect();
             if (r.width === 0 && r.height === 0) return null;
             return [r.left + r.width / 2, r.top + r.height / 2];
@@ -124,7 +124,7 @@ pub async fn dblclick_selector(client: &CdpClient, selector: &str) -> Result<(),
         r"(() => {{
             const el = document.querySelector({sel});
             if (!el) throw new Error('No element matches selector: ' + {sel});
-            el.scrollIntoView({{block: 'center', inline: 'center'}});
+            el.scrollIntoView({{block: 'center', inline: 'center', behavior: 'instant'}});
             const r = el.getBoundingClientRect();
             if (r.width === 0 && r.height === 0) return null;
             return [r.left + r.width / 2, r.top + r.height / 2];

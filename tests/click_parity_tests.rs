@@ -157,3 +157,25 @@ fn a_selector_that_matches_nothing_is_an_error() {
     assert_ne!(code, 0, "a missing element is a failure: {stdout}");
     assert!(stdout.contains("No element matches selector"), "{stdout}");
 }
+
+/// Smooth scrolling must not make the click land at pre-scroll coordinates.
+///
+/// The selector path scrolls the element into view and reads its rect in the same
+/// synchronous script. Under `scroll-behavior: smooth` the scroll is an animation:
+/// the rect still reports the pre-scroll position (below the fold), and the CDP
+/// mouse event dispatched at those coordinates lands outside the viewport — on
+/// nothing — while the command reports success.
+#[test]
+fn a_smooth_scrolling_page_still_gets_its_click() {
+    let b = TestBrowser("click-parity-smooth");
+    if !open(b.name(), "smooth_scroll_click.html") {
+        return;
+    }
+    let (stdout, code) = run_cli(&["--browser", b.name(), "--json", "click", "--selector", "#target"]);
+    assert_eq!(code, 0, "{stdout}");
+    assert_eq!(
+        eval(b.name(), "document.title"),
+        Value::String("clicked".into()),
+        "the click must land on the target after the scroll settles, not at its pre-scroll coordinates"
+    );
+}
