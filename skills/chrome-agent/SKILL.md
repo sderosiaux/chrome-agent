@@ -3,7 +3,7 @@ name: chrome-agent
 description: Pull structured records out of a web page (product grids, search results, feeds, tables) with no CSS selectors and no model call spent reading HTML. Drives Chrome for everything else too: navigate, click, fill forms, screenshot, print to PDF, download files that sit behind a login, and get past bot detection. Every action says whether the page complied, who received the click, and what the field kept — so you never report a success the tool did not confirm. Runs locally as one binary, no API key, no cloud. Use when the user says scrape, extract the list of, get the data from, fill this form, log in to, click, take a screenshot, read this page, check this site, or when a site has no API.
 metadata:
   author: sderosiaux
-  version: "0.11.0"
+  version: "0.12.0"
   tags: ["browser", "automation", "scraping", "chrome", "cdp"]
 ---
 
