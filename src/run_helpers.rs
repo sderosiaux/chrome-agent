@@ -73,10 +73,15 @@ pub struct ActionReport {
 }
 
 /// Reporting policy taken from the global flags, before `cli.command` is consumed.
+///
+/// `on_intercept` rides here rather than in a parallel parameter: it is a global flag like the
+/// other two, and this struct is already threaded through the CLI, pipe and batch paths, so
+/// carrying it costs no dispatcher signature.
 #[derive(Clone, Copy)]
 pub struct ReportPolicy {
     pub changes: bool,
     pub budget: usize,
+    pub on_intercept: crate::hit_test::OnIntercept,
 }
 
 impl ReportPolicy {
@@ -86,50 +91,44 @@ impl ReportPolicy {
     }
 }
 
-/// What a fill put in, and what the page kept. Emitted on every fill so a value that was
-/// reformatted, truncated or rejected is visible rather than hidden behind "Filled".
-pub fn fill_value_report(outcome: &crate::element::FillOutcome) -> serde_json::Value {
-    let mut v = if outcome.sensitive {
-        json!({
-            "redacted": true,
-            "requested_length": outcome.requested.chars().count(),
-            "actual_length": outcome.actual.as_ref().map(|a| a.chars().count()),
-            "verbatim": outcome.verbatim(),
-        })
-    } else {
-        json!({
-            "requested": outcome.requested,
-            "actual": outcome.actual,
-            "verbatim": outcome.verbatim(),
-        })
-    };
-    // "The field holds X" is only true as of a moment. Saying which moment is the only
-    // honest form of the claim: a page can revert at any time, and one did at 400ms.
-    v["observed_after_ms"] = json!(outcome.observed_after_ms);
-    if let Some(caveat) = &outcome.caveat {
-        v["caveat"] = json!(caveat);
-    }
-    v
-}
+/// What the four read-back verbs put on their responses: moved to `read_back` for the
+/// 1000-line file cap and re-exported here, so a caller still writes
+/// `run_helpers::fill_value_report` next to the `output_action` that ships it.
+pub use crate::read_back::{bulk_fill_report, check_report, fill_value_report, select_report};
 
-/// The uid of the node an action is about to touch, whichever way it was named.
+/// The node an action is about to touch, whichever way it was named: `uid`, plus `role` and
+/// `name` when they come free.
 ///
 /// Resolved before the action runs: afterwards the element may be detached, and the answer
 /// would describe a different page. Returns the fields to merge into the response, so a
 /// caller that has none of its own can pass this straight through.
+///
+/// `role`/`name` are best effort and come out of the `DOM.describeNode` the uid already needs
+/// — the explicit ARIA role or the tag name, and an accessible-name attribute if the element
+/// carries one. Not the computed accessibility name: that would cost another read, and it is
+/// what `inspect` is for. The uid path stays a plain echo and pays no round trip at all.
 pub async fn target_details(
     client: &CdpClient,
     selector: Option<&str>,
     uid: Option<&str>,
 ) -> Option<serde_json::Value> {
-    let resolved = match (selector, uid) {
-        (Some(sel), _) => crate::element::selector_uid(client, sel).await,
+    match (selector, uid) {
+        (Some(sel), _) => {
+            let handle = crate::hit_test::resolve_selector(client, sel).await.ok()?;
+            let mut out = json!({"uid": handle.uid?});
+            if let Some(role) = handle.role {
+                out["role"] = json!(role);
+            }
+            if let Some(name) = handle.name {
+                out["name"] = json!(name);
+            }
+            Some(out)
+        }
         // A uid-targeted action already names its node; echoing it keeps the field's
         // meaning the same whichever way the caller aimed.
-        (None, Some(uid)) => Some(uid.to_string()),
+        (None, Some(uid)) => Some(json!({"uid": uid})),
         (None, None) => None,
-    };
-    resolved.map(|uid| json!({"uid": uid}))
+    }
 }
 
 /// Merge two optional field sets into one response object.
@@ -150,34 +149,6 @@ pub fn merge_details(
         (Some(only), None) | (None, Some(only)) => Some(only),
         (None, None) => None,
     }
-}
-
-/// Per-field report for a bulk fill: what each target was, and what it kept.
-///
-/// `key` is "uid" or "selector" depending on how the caller named the field. Secrets go
-/// through the same redaction as a single fill — a bulk path that printed them would be a
-/// way around it.
-#[must_use]
-pub fn bulk_fill_report(
-    key: &str,
-    outcomes: &[(String, crate::element::FillOutcome)],
-) -> serde_json::Value {
-    serde_json::Value::Array(
-        outcomes
-            .iter()
-            .map(|(target, outcome)| json!({key: target, "value": fill_value_report(outcome)}))
-            .collect(),
-    )
-}
-
-/// Split a check/uncheck outcome into the message and the fields that go with it.
-///
-/// `observed_after_ms` is absent when the element already held the desired state: nothing
-/// was dispatched, so claiming an observation window afterwards would invent one.
-#[must_use]
-pub fn check_report(outcome: crate::element::CheckOutcome) -> (String, Option<serde_json::Value>) {
-    let details = outcome.observed_after_ms.map(|ms| json!({"observed_after_ms": ms}));
-    (outcome.message, details)
 }
 
 /// Execute a command, report what it did to the page, and persist the new baseline.
@@ -242,13 +213,15 @@ pub async fn output_action_with(
         // natural response to that is to click again, which is real. `pipe_dispatch` stated
         // the opposite policy in a comment and followed it; this is the CLI adopting it.
         let Ok(snapshot) = commands::inspect::run(client, false, None, None, None).await else {
-            let assessment = crate::verdict::classify(crate::verdict::Observation::ReadFailed);
-            attach_verdict(&mut obj, assessment);
+            let assessment = crate::pipe_report::attach_verdict_for(
+                client,
+                &mut obj,
+                crate::verdict::Observation::ReadFailed,
+            );
             if json_mode {
                 json_output(&obj);
             } else {
-                println!("{msg}");
-                println!("verdict: {} ({})", assessment.verdict, assessment.reason);
+                print_action(&msg, "", &obj, assessment);
             }
             return Ok(());
         };
@@ -291,12 +264,28 @@ pub async fn output_action_with(
                     "identity_known": cmp.identity_known,
                 });
                 obj["delta"] = json!(body);
+                // Read off the fresh uid_map, which is still ours until the store takes it
+                // below. Feeds the verdict, so it has to run before it is settled.
+                //
+                // `Box::pin`: this future lives inside `output_action_with`, which the CLI's
+                // one big `match` on `Command` embeds in a single stack frame. Inlining its
+                // state machine there pushed that frame past clippy's `large_stack_frames`
+                // ceiling; boxing it keeps the frame flat for the cost of one allocation on a
+                // path that already did a full page read.
+                let values_lost = Box::pin(crate::pipe_report::attach_values_lost(
+                    client,
+                    &snapshot.uid_map,
+                    &cmp.values_lost,
+                    &mut obj,
+                ))
+                .await;
                 observation = crate::verdict::Observation::Compared {
                     document_changed: cmp.document_changed,
                     identity_known: cmp.identity_known,
                     edits: cmp.added + cmp.removed + cmp.changed,
                     moved: cmp.moved,
                     focus_moved: cmp.focus_from.is_some() || cmp.focus_to.is_some(),
+                    values_lost,
                 };
                 if cmp.focus_from.is_some() || cmp.focus_to.is_some() {
                     obj["focus"] = json!({"from": cmp.focus_from, "to": cmp.focus_to});
@@ -332,19 +321,34 @@ pub async fn output_action_with(
         }
     }
 
-    let assessment = crate::verdict::classify(observation);
-    attach_verdict(&mut obj, assessment);
+    let assessment = crate::pipe_report::attach_verdict_for(client, &mut obj, observation);
 
     if json_mode {
         json_output(&obj);
     } else {
-        println!("{msg}");
-        if !trailer.is_empty() {
-            println!("{}", trailer.trim_end());
-        }
-        println!("verdict: {} ({})", assessment.verdict, assessment.reason);
+        print_action(&msg, &trailer, &obj, assessment);
     }
     Ok(())
+}
+
+/// The text-mode report for one action: its own message, the delta, and everything the
+/// response measured that the text branch used to drop (`src/render.rs`).
+///
+/// One function for both exits — the normal one and the failed-read early return — so the two
+/// cannot drift into printing different shapes for the same response.
+fn print_action(
+    msg: &str,
+    trailer: &str,
+    obj: &serde_json::Value,
+    assessment: crate::verdict::Assessment,
+) {
+    println!("{msg}");
+    if !trailer.is_empty() {
+        println!("{}", trailer.trim_end());
+    }
+    for line in crate::render::action_lines(obj, assessment, crate::render::Paint::for_stdout()) {
+        println!("{line}");
+    }
 }
 
 /// Write the verdict, its reason, and — when the verdict is an admission of ignorance —
@@ -356,8 +360,17 @@ pub async fn output_action_with(
 pub fn attach_verdict(obj: &mut serde_json::Value, assessment: crate::verdict::Assessment) {
     obj["verdict"] = json!(assessment.verdict.as_str());
     obj["verdict_reason"] = json!(assessment.reason);
+    // One token from a closed set of six, so an agent can branch on the next step without
+    // parsing the hint prose. Written here because this is the one place all three modes
+    // settle a verdict — the same reason `verdict_reason` lives here.
+    obj["next"] = json!(crate::verdict::next_for(assessment).as_str());
     if let Some(hint) = crate::verdict::hint_for(assessment) {
-        obj["verdict_hint"] = json!(hint);
+        // An action that already wrote a hint knows more than the verdict does — an
+        // intercepted click can name the element that took it, where the generic hint can
+        // only say that one exists. Never overwrite the specific one with the generic one.
+        if let Some(map) = obj.as_object_mut() {
+            map.entry("verdict_hint").or_insert_with(|| json!(hint));
+        }
     }
 }
 
@@ -370,6 +383,7 @@ pub async fn output_goto(
     target_id: &str,
     url: &str,
     title: &str,
+    landed: Option<&crate::landing::Landing>,
     inspect: bool,
     max_depth: Option<usize>,
     json_mode: bool,
@@ -390,6 +404,9 @@ pub async fn output_goto(
     page.uid_map.clear();
     if json_mode {
         let mut obj = json!({"ok": true, "url": url, "title": title});
+        if let Some(landing) = landed {
+            landing.attach(&mut obj);
+        }
         if inspect {
             let snapshot = commands::inspect::run(client, false, max_depth, None, None).await?;
             obj["snapshot"] = json!(snapshot.text);
@@ -405,6 +422,9 @@ pub async fn output_goto(
             println!("{url}");
         } else {
             println!("{url} — {title}");
+        }
+        if let Some(line) = landed.and_then(crate::landing::Landing::text_line) {
+            println!("{line}");
         }
         if inspect {
             let snapshot = commands::inspect::run(client, false, max_depth, None, None).await?;
@@ -424,54 +444,9 @@ pub fn json_output(value: &serde_json::Value) {
     println!("{}", serde_json::to_string(value).unwrap_or_default());
 }
 
-/// Provide a contextual hint for common errors.
-pub fn error_hint(msg: &str) -> Option<&'static str> {
-    // Chrome 136+ refuses CDP on the *default* user profile. chrome-agent launches
-    // its own dedicated profile so this only bites when --connect points at a Chrome
-    // started on the normal profile. Matched before the generic "Connection refused"
-    // branch so the actionable hint wins.
-    if msg.contains("Failed to connect to page") || msg.contains("DevToolsActivePort") {
-        Some("Could not attach over CDP. Chrome 136+ disables remote debugging on the default profile: drop --connect to let chrome-agent launch its own dedicated profile, or relaunch your Chrome with a separate --user-data-dir.")
-    } else if msg.contains("Connection refused") || msg.contains("No such file") {
-        Some("Is Chrome running? Try: chrome-agent goto <url>")
-    } else if msg.contains("uid=") && msg.contains("not found") {
-        Some("Run `chrome-agent inspect` to refresh element uids")
-    } else if msg.contains("Navigation failed") {
-        Some("Check the URL is valid and the page is reachable")
-    } else if msg.contains("No snapshot") || msg.contains("No inspect") || msg.contains("uid_map is empty") {
-        Some("Run 'chrome-agent inspect' first")
-    } else if msg.contains("Timeout") || msg.contains("timeout") {
-        Some("Use --timeout N for slow pages")
-    } else if msg.contains("not interactable") || msg.contains("no visible box model") {
-        Some("Element may be hidden. Try: chrome-agent scroll <uid>")
-    } else if msg.contains("No element matches selector") {
-        Some("CSS selector didn't match. Check with: chrome-agent eval \"document.querySelector('...')\"")
-    } else if msg.contains("backendDomNodeId") || msg.contains("response parse") {
-        Some("Page structure issue. Try: chrome-agent click --selector or chrome-agent eval")
-    } else if msg.contains("may not have an article") || msg.contains("Readability") {
-        Some("Page has no article structure. Try: chrome-agent text or chrome-agent text --selector \"main\"")
-    } else if msg.contains("Provide a uid") || msg.contains("Provide --uid") {
-        Some("Specify what to target: uid (e.g. n47), --selector \"css\", or --xy x,y")
-    } else if msg.contains("Evaluation error") || msg.contains("TypeError") || msg.contains("ReferenceError") || msg.contains("SyntaxError") {
-        Some("JS error in page context. Check expression syntax. Use --selector to scope to an element.")
-    } else if msg.contains("dispatcher task exited") || msg.contains("transport closed") {
-        Some("Browser connection lost. Try running the command again.")
-    } else if msg.contains("not an <iframe>") || msg.contains("not an <IFRAME>") {
-        Some("Only <iframe> is supported. For <frame>/<frameset>, use eval to access frame content.")
-    } else if msg.contains("No child frame found") {
-        Some("Iframe not found. Check the selector matches an <iframe> element.")
-    } else if msg.contains("not a <select>") {
-        Some("Element is not a <select>. For custom dropdowns, click to open then click the option.")
-    } else if msg.contains("No option matching") {
-        Some("No dropdown option matched. Use inspect --uid to check available options, or try the visible text.")
-    } else if msg.contains("File not found") {
-        Some("Check the file path exists on disk.")
-    } else if msg.contains("expected a JSON array") {
-        Some("Batch expects a JSON array of commands on stdin: [{\"cmd\":\"inspect\"}, ...]")
-    } else {
-        None
-    }
-}
+/// The error-recovery hints, moved to `hints` for the 1000-line file cap and re-exported
+/// here so `main`, `pipe` and `pipe_dispatch` keep their existing call sites.
+pub use crate::hints::error_hint;
 
 /// Get the `uid_map` from the current session, or empty if none.
 pub fn get_uid_map(store: &SessionStore, browser_name: &str, page_name: &str) -> HashMap<String, ElementRef> {
@@ -725,6 +700,70 @@ pub fn kill_pid(pid: u32) {
     }
 }
 
+/// Remove a profile directory and confirm it stayed removed.
+///
+/// `remove_dir_all` returning `Ok` is not the same as the profile being gone. A Chrome that
+/// has been signalled but has not exited yet writes its state back on the way down, and the
+/// old loop broke on that first `Ok` and then claimed "(profile purged)" over a directory
+/// that reappeared a third of a second later. Measured on one close: 235 files before, none
+/// immediately after, 22 once the shutdown flush landed (`Local State`,
+/// `Default/Preferences`, `TransportSecurity`, three cache stubs) — and 946 of the 1204
+/// profile directories that had accumulated on a developer machine were exactly that
+/// residue. The loop now ends when the directory is absent rather than when one call
+/// succeeded, and a purge that never converges says so instead of being reported as done.
+fn purge_profile(profile_dir: &std::path::Path) -> Result<(), String> {
+    let mut last_error = None;
+    for attempt in 0..8u32 {
+        if attempt > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+        if !profile_dir.exists() {
+            return Ok(());
+        }
+        if let Err(e) = std::fs::remove_dir_all(profile_dir) {
+            last_error = Some(e.to_string());
+        }
+    }
+    Err(last_error.unwrap_or_else(|| {
+        "profile was recreated after every removal; the browser may still be shutting down"
+            .to_string()
+    }))
+}
+
+/// Sweep the profile directories the automatic prune would reach one command at a time.
+///
+/// The save-path sweep is capped at one removal per invocation so a read-only command never
+/// pays for housekeeping, which means a store that accumulated before any of this existed
+/// needs as many commands as it has orphans. This is that sweep, uncapped, on request.
+pub fn cmd_purge_orphans(json_mode: bool) -> Result<(), crate::BoxError> {
+    // Loaded, not saved: saving would run the capped sweep under the lock as well, and the
+    // grace window is what makes reading the store outside the lock safe here.
+    let store = session::load_session()?;
+    let referenced = store.browsers.keys().cloned().collect();
+    let browsers_dir = session::browsers_dir()?;
+    let grace = crate::profiles::Limits::default().grace;
+
+    let mut removed = 0usize;
+    let mut failed = Vec::new();
+    for path in crate::profiles::all_removable(&browsers_dir, &referenced, grace) {
+        match std::fs::remove_dir_all(&path) {
+            Ok(()) => removed += 1,
+            Err(e) => failed.push(format!("{}: {e}", path.display())),
+        }
+    }
+
+    let message = format!("Purged {removed} orphaned profile(s)");
+    if json_mode {
+        json_output(&json!({"ok": true, "message": message, "purged": removed, "failed": failed}));
+    } else {
+        println!("{message}");
+        for failure in &failed {
+            eprintln!("warning: {failure}");
+        }
+    }
+    Ok(())
+}
+
 pub fn cmd_close(browser_name: &str, purge: bool, json_mode: bool) -> Result<(), crate::BoxError> {
     let mut store = session::load_session()?;
 
@@ -745,24 +784,16 @@ pub fn cmd_close(browser_name: &str, purge: bool, json_mode: bool) -> Result<(),
     };
 
     // Purge browser profile if requested
-    if purge
-        && let Some(home) = dirs::home_dir() {
-            let profile_dir = home.join(".chrome-agent").join("browsers").join(browser_name);
-            if profile_dir.exists() {
-                // Wait briefly for Chrome to exit after kill, then retry purge
-                for _ in 0..5 {
-                    if std::fs::remove_dir_all(&profile_dir).is_ok() {
-                        break;
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(500));
-                }
-            }
-        }
-
-    let message = if purge {
-        format!("{message} (profile purged)")
+    let purge_outcome = if purge {
+        session::browsers_dir().ok().map(|dir| purge_profile(&dir.join(browser_name)))
     } else {
-        message
+        None
+    };
+
+    let message = match purge_outcome {
+        None => message,
+        Some(Ok(())) => format!("{message} (profile purged)"),
+        Some(Err(e)) => format!("{message} (profile NOT purged: {e})"),
     };
 
     if json_mode {
@@ -806,7 +837,7 @@ mod tests {
             C::Daemon { action: crate::cli::DaemonAction::Start },
             C::Status,
             C::Stop,
-            C::Close { purge: false },
+            C::Close { purge: false, purge_orphans: false },
             C::History { filter: None, limit: 20 },
         ] {
             assert!(
@@ -861,54 +892,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn bug_error_hint_covers_all_cases() {
-        // Verify all error patterns have hints
-        assert!(error_hint("Connection refused").is_some());
-        assert!(error_hint("uid=n5 not found").is_some());
-        assert!(error_hint("Navigation failed").is_some());
-        assert!(error_hint("No snapshot").is_some());
-        assert!(error_hint("Timeout waiting").is_some());
-        assert!(error_hint("not interactable").is_some());
-        assert!(error_hint("No element matches selector").is_some());
-        assert!(error_hint("response parse error").is_some());
-        assert!(error_hint("Readability failed").is_some());
-        assert!(error_hint("Provide a uid").is_some());
-        assert!(error_hint("Evaluation error: TypeError: foo").is_some());
-        assert!(error_hint("dispatcher task exited").is_some());
-        // v0.4.0 new command hints
-        assert!(error_hint("Element is not an <iframe>").is_some());
-        assert!(error_hint("No child frame found for selector").is_some());
-        assert!(error_hint("Element is not a <select>").is_some());
-        assert!(error_hint("No option matching: foo").is_some());
-        assert!(error_hint("File not found: /tmp/nope").is_some());
-        assert!(error_hint("batch: expected a JSON array").is_some());
-        // Unknown errors should return None
-        assert!(error_hint("something random").is_none());
-    }
 
-    #[test]
-    fn connect_failure_hints_at_chrome_136() {
-        // The page-attach failure and the missing-port marker both point the user
-        // at the Chrome 136+ default-profile restriction and the --connect workaround.
-        for msg in [
-            "Failed to connect to page after 8 attempts: Connection refused",
-            "DevToolsActivePort file doesn't exist",
-        ] {
-            let hint = error_hint(msg).expect("connect failure should have a hint");
-            assert!(hint.contains("136"), "hint should mention Chrome 136: {hint}");
-            assert!(hint.contains("--connect"), "hint should mention --connect: {hint}");
-        }
-    }
 
-    #[test]
-    fn plain_connection_refused_keeps_generic_hint() {
-        // A bare "Connection refused" (no page-attach context) must NOT be hijacked
-        // by the 136 branch — it keeps the generic "is Chrome running?" hint.
-        let hint = error_hint("Connection refused").unwrap();
-        assert!(hint.contains("Chrome running"));
-        assert!(!hint.contains("136"));
-    }
 
     #[test]
     fn stop_message_reflects_daemon_reachability() {

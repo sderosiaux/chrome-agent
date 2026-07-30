@@ -1,0 +1,30 @@
+<!doctype html>
+<html>
+<head><title>Blocks the main thread after a fill</title></head>
+<body>
+<!-- The write lands and is read back, THEN the page pins the main thread. CDP needs that thread
+     to answer, so the post-action page read cannot complete inside a short --timeout — while the
+     fill's own read-back already did.
+
+     That pair is the point: `value.verbatim` is true (measured on the field) and nothing at all
+     is known about the rest of the page. The verdict describes the first, `next` the second.
+
+     The 200ms delay is what separates the two: the fill's read-back window is
+     `element::READ_BACK_MS` (60ms) and its script returns just after, so the block starts once
+     the value is already confirmed. Blocking synchronously in the handler, or on a 0ms timer,
+     would pin the thread BEFORE the read-back and fail the fill itself. -->
+<h1>Busy page</h1>
+<label for="slow">Email</label>
+<input id="slow" type="text">
+<script>
+  document.getElementById('slow').addEventListener('input', function () {
+    if (window.armed) return;
+    window.armed = true;
+    setTimeout(function () {
+      var t = Date.now();
+      while (Date.now() - t < 6000) {}
+    }, 200);
+  });
+</script>
+</body>
+</html>

@@ -46,15 +46,22 @@ fn run_batch(browser: &str, commands_json: &str) -> Value {
     serde_json::from_slice(&output.stdout).expect("batch JSON")
 }
 
-struct TestBrowser(&'static str);
+struct TestBrowser(String);
 impl TestBrowser {
-    const fn name(&self) -> &str {
-        self.0
+    /// Unique per process. A fixed name means two concurrent runs of this suite drive the same
+    /// browser: one navigates while the other clicks a uid from its own snapshot, and both fail
+    /// with "Node with given id does not belong to the document". CLAUDE.md documents the
+    /// hazard — `--browser <unique>` per agent — and the suites have to obey it too.
+    fn new(label: &str) -> Self {
+        Self(format!("{label}-{}", std::process::id()))
+    }
+    fn name(&self) -> &str {
+        &self.0
     }
 }
 impl Drop for TestBrowser {
     fn drop(&mut self) {
-        let _ = run_cli(&["--browser", self.0, "close", "--purge"]);
+        let _ = run_cli(&["--browser", &self.0, "close", "--purge"]);
     }
 }
 
@@ -86,7 +93,7 @@ fn assert_no_observation(v: &Value, context: &str) {
 
 #[test]
 fn wait_answers_with_the_same_shape_in_cli_and_batch() {
-    let b = TestBrowser("parity-wait");
+    let b = TestBrowser::new("parity-wait");
     if !setup(b.name()) {
         return;
     }
@@ -102,7 +109,7 @@ fn wait_answers_with_the_same_shape_in_cli_and_batch() {
 
 #[test]
 fn frame_answers_with_the_same_shape_in_cli_and_batch() {
-    let b = TestBrowser("parity-frame");
+    let b = TestBrowser::new("parity-frame");
     if !setup(b.name()) {
         return;
     }
@@ -118,7 +125,7 @@ fn frame_answers_with_the_same_shape_in_cli_and_batch() {
 
 #[test]
 fn forward_answers_with_the_same_shape_in_cli_and_batch() {
-    let b = TestBrowser("parity-forward");
+    let b = TestBrowser::new("parity-forward");
     if !setup(b.name()) {
         return;
     }

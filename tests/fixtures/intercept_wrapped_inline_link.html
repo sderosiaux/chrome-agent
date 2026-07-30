@@ -1,0 +1,20 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Inline link wrapped across two lines</title>
+<style>
+  p { width: 260px; font: 16px/1.4 monospace; }
+  /* The bounding box of the link spans both lines, and its centre falls in the gap
+     between them — on the paragraph, not on the link. */
+</style>
+</head>
+<body>
+  <p>Filler text before <a href="#x" id="wrapped" onclick="document.title='link clicked'; return false;">a link long enough to wrap across two line boxes</a> and after.</p>
+  <script>
+    document.querySelector('p').addEventListener('click', (e) => {
+      if (e.target.tagName === 'P') { document.title = 'paragraph clicked'; }
+    });
+  </script>
+</body>
+</html>

@@ -8,6 +8,8 @@ use crate::cdp::types::{EvaluateResult, NavigateParams, NavigateResult};
 pub struct GotoResult {
     pub url: String,
     pub title: String,
+    /// Where the navigation ended up relative to where it was aimed.
+    pub landed: crate::landing::Landing,
 }
 
 /// Parse a `"Name: Value"` header string into its (name, value) pair.
@@ -126,11 +128,23 @@ pub async fn run(
     // Read the settled page state from the renderer. Page.navigate only echoes
     // the requested URL; after an HTTP/client-side redirect the authoritative
     // URL is location.href.
+    //
+    // The status rides on the same read. Navigation Timing is the stealth-safe path the
+    // retroactive network capture already uses: no `Network.enable`, so `--stealth` keeps
+    // its promise, and no extra round trip. `responseStatus` is missing on older Chrome and
+    // 0 on a document with no HTTP response, both of which `Landing` reports as absence.
     let eval_result: EvaluateResult = client
         .call(
             "Runtime.evaluate",
             json!({
-                "expression": "({ url: location.href, title: document.title })",
+                "expression": r"(() => {
+                    let status = null;
+                    try {
+                        const nav = performance.getEntriesByType('navigation')[0];
+                        if (nav && typeof nav.responseStatus === 'number') status = nav.responseStatus;
+                    } catch (e) {}
+                    return { url: location.href, title: document.title, status };
+                })()",
                 "returnByValue": true,
             }),
         )
@@ -151,10 +165,20 @@ pub async fn run(
         .and_then(serde_json::Value::as_str)
         .unwrap_or("")
         .to_string();
+    let status = page_state
+        .and_then(|state| state.get("status"))
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|code| u16::try_from(code).ok());
+
+    // `url`, not the caller's raw argument: the https:// prefixing above is the tool's own
+    // normalisation, and comparing against the pre-normalised form would report a redirect
+    // on every `goto example.com`.
+    let landed = crate::landing::Landing::new(url, &settled_url, status);
 
     Ok(GotoResult {
         url: settled_url,
         title,
+        landed,
     })
 }
 

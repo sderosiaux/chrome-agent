@@ -55,15 +55,22 @@ fn run_bounded(args: &[&str]) -> (String, i32, Duration) {
     }
 }
 
-struct TestBrowser(&'static str);
+struct TestBrowser(String);
 impl TestBrowser {
-    const fn name(&self) -> &str {
-        self.0
+    /// Unique per process. A fixed name means two concurrent runs of this suite drive the same
+    /// browser: one navigates while the other clicks a uid from its own snapshot, and both fail
+    /// with "Node with given id does not belong to the document". CLAUDE.md documents the
+    /// hazard — `--browser <unique>` per agent — and the suites have to obey it too.
+    fn new(label: &str) -> Self {
+        Self(format!("{label}-{}", std::process::id()))
+    }
+    fn name(&self) -> &str {
+        &self.0
     }
 }
 impl Drop for TestBrowser {
     fn drop(&mut self) {
-        let _ = run_cli(&["--browser", self.0, "close", "--purge"]);
+        let _ = run_cli(&["--browser", &self.0, "close", "--purge"]);
     }
 }
 
@@ -83,7 +90,7 @@ fn open(browser: &str, fixture: &str) -> bool {
 /// the response channel had no deadline behind it.
 #[test]
 fn a_promise_that_never_resolves_becomes_an_error_not_a_hang() {
-    let b = TestBrowser("cdp-timeout-eval");
+    let b = TestBrowser::new("cdp-timeout-eval");
     if !open(b.name(), "verdict_states.html") {
         return;
     }
@@ -104,7 +111,7 @@ fn a_promise_that_never_resolves_becomes_an_error_not_a_hang() {
 /// The caller's own `--timeout` is the deadline, so a short one fails fast.
 #[test]
 fn the_deadline_is_the_one_the_caller_asked_for() {
-    let b = TestBrowser("cdp-timeout-short");
+    let b = TestBrowser::new("cdp-timeout-short");
     if !open(b.name(), "verdict_states.html") {
         return;
     }
@@ -125,7 +132,7 @@ fn the_deadline_is_the_one_the_caller_asked_for() {
 /// every mutation with no ceiling, so a page that mutates forever never let it return.
 #[test]
 fn inspect_limit_returns_on_a_page_that_never_stops_mutating() {
-    let b = TestBrowser("cdp-timeout-ticker");
+    let b = TestBrowser::new("cdp-timeout-ticker");
     if !open(b.name(), "goto_ticker.html") {
         return;
     }
@@ -140,7 +147,7 @@ fn inspect_limit_returns_on_a_page_that_never_stops_mutating() {
 /// An ordinary command must not pay for the deadline.
 #[test]
 fn a_normal_command_is_unaffected() {
-    let b = TestBrowser("cdp-timeout-normal");
+    let b = TestBrowser::new("cdp-timeout-normal");
     if !open(b.name(), "verdict_states.html") {
         return;
     }

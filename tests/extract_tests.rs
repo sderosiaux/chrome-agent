@@ -71,20 +71,24 @@ fn cleanup(browser: &str) {
 }
 
 /// RAII guard: closes browser on drop (even on panic).
-struct TestBrowser(&'static str);
+struct TestBrowser(String);
 
 impl TestBrowser {
-    const fn new(name: &'static str) -> Self {
-        Self(name)
+    /// Unique per process. A fixed name means two concurrent runs of this suite drive the same
+    /// browser: one navigates while the other clicks a uid from its own snapshot, and both fail
+    /// with "Node with given id does not belong to the document". CLAUDE.md documents the
+    /// hazard — `--browser <unique>` per agent — and the suites have to obey it too.
+    fn new(label: &str) -> Self {
+        Self(format!("{label}-{}", std::process::id()))
     }
-    const fn name(&self) -> &str {
-        self.0
+    fn name(&self) -> &str {
+        &self.0
     }
 }
 
 impl Drop for TestBrowser {
     fn drop(&mut self) {
-        cleanup(self.0);
+        cleanup(&self.0);
     }
 }
 

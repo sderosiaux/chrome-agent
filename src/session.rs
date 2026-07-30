@@ -108,7 +108,9 @@ fn snapshot_entries(browsers: &HashMap<String, BrowserSession>) -> HashMap<Strin
 /// 2. Re-read the on-disk store (another agent may have written since we loaded).
 /// 3. Delete only the browsers this process held at load but no longer holds
 ///    (e.g. `close`), leaving entries other agents added after our load intact.
-/// 4. Upsert this process's browsers, then atomically replace the file.
+/// 4. Upsert this process's browsers.
+/// 5. Drop every entry whose browser process is provably gone (`prune_dead`).
+/// 6. Atomically replace the file.
 fn save_to(path: &Path, store: &mut SessionStore) -> Result<(), SessionError> {
     let parent = path
         .parent()
@@ -154,6 +156,17 @@ fn save_to(path: &Path, store: &mut SessionStore) -> Result<(), SessionError> {
         merged.browsers.insert(name.clone(), entry.clone());
     }
 
+    // Runs after the upsert so the test is applied to the pids actually about to be
+    // written, including this process's own. A browser that died mid-command leaves
+    // nothing worth persisting.
+    let pruned = prune_dead(&mut merged.browsers);
+    // Stop carrying the dropped entries in memory: the baseline below is taken from
+    // `store`, and an entry still present there would be re-upserted by our next save
+    // (the upsert branch treats "untouched and absent from disk" as ours to publish).
+    for name in &pruned {
+        store.browsers.remove(name);
+    }
+
     let json = serde_json::to_string_pretty(&merged)
         .map_err(|e| SessionError(format!("Failed to serialize session: {e}")))?;
 
@@ -175,11 +188,26 @@ fn save_to(path: &Path, store: &mut SessionStore) -> Result<(), SessionError> {
         SessionError(format!("Failed to rename session file: {e}"))
     })?;
 
+    // Profile directories, judged against the store we just published and still under the
+    // lock that makes that store a fixed point. After the rename, not before: a sweep is
+    // housekeeping and must not delay or endanger the write it rides on.
+    crate::profiles::sweep_orphans(
+        &parent.join("browsers"),
+        &merged.browsers.keys().cloned().collect(),
+        &crate::profiles::Limits::default(),
+    );
+
     // Our view is now the baseline for subsequent saves in this process.
     store.loaded_names = store.browsers.keys().cloned().collect();
     store.loaded_entries = snapshot_entries(&store.browsers);
 
     Ok(())
+}
+
+/// Where `browser::browser_profile_dir` puts profiles. Exposed so `close --purge-orphans`
+/// sweeps the same directory the save path does.
+pub fn browsers_dir() -> Result<PathBuf, SessionError> {
+    Ok(dev_browser_dir()?.join("browsers"))
 }
 
 /// Exclusive advisory file lock, released on drop. Best-effort no-op on
@@ -229,6 +257,84 @@ struct FileLock;
 impl FileLock {
     fn acquire(_path: &Path) -> Result<Self, SessionError> {
         Ok(Self)
+    }
+}
+
+/// Drop every entry whose browser process is provably gone, returning the names
+/// dropped. Called on the merged map inside the exclusive lock, so the pid it tests
+/// is the pid on disk at that instant.
+///
+/// Nothing ever removed an entry whose Chrome had exited — `close` removes only the
+/// browser it is given a name for — and each entry carries a `uid_map` plus a
+/// `last_snapshot` per page. Measured on a developer machine: 5,212,694 bytes, 2131
+/// entries, 2123 of them naming pids the kernel reports as gone, parsed *and*
+/// rewritten by every invocation including read-only ones. After one save: 7,827
+/// bytes, 8 entries, and `text --selector body` on a warm browser went from 0.38 s
+/// to under 0.01 s.
+fn prune_dead(browsers: &mut HashMap<String, BrowserSession>) -> Vec<String> {
+    let dead: Vec<String> = browsers
+        .iter()
+        .filter(|(_, session)| is_provably_dead(session))
+        .map(|(name, _)| name.clone())
+        .collect();
+    for name in &dead {
+        browsers.remove(name);
+    }
+    dead
+}
+
+/// Whether an entry may be dropped. Deliberately one-sided: keeping a stale entry
+/// costs bytes, deleting a live one costs the caller its browser.
+///
+/// - `pid: None` is kept unconditionally and without a probe. Both `--connect` and a
+///   managed reconnect through `DevToolsActivePort` store no pid (`browser.rs`), so
+///   "no pid" carries no information about liveness — and a probe here would put an
+///   HTTP round trip per entry on the path of every save.
+/// - A pid the OS will not classify is kept. See [`Liveness`].
+fn is_provably_dead(session: &BrowserSession) -> bool {
+    session.pid.is_some_and(|pid| liveness(pid) == Liveness::Dead)
+}
+
+/// What the OS will say about a pid. `Unknown` is not a shrug that gets rounded to
+/// `Dead`: `EPERM` means the process exists under another uid, and a recycled pid
+/// reads as `Alive` under a name that Chrome no longer holds. Both keep the entry —
+/// a stale entry is inert, and the launch path already relaunches over one.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Liveness {
+    Alive,
+    Dead,
+    Unknown,
+}
+
+pub fn liveness(pid: u32) -> Liveness {
+    #[cfg(unix)]
+    {
+        // kill() reads a non-positive pid as a process *group*, so those are not a
+        // question about one process and must not be answered as one.
+        let Ok(raw) = libc::pid_t::try_from(pid) else {
+            return Liveness::Unknown;
+        };
+        if raw <= 0 {
+            return Liveness::Unknown;
+        }
+        // SAFETY: kill(pid, 0) only checks existence and permission. No signal sent.
+        #[allow(unsafe_code)]
+        let rc = unsafe { libc::kill(raw, 0) };
+        if rc == 0 {
+            return Liveness::Alive;
+        }
+        if std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+            Liveness::Dead
+        } else {
+            Liveness::Unknown
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        // No portable probe wired here, so no entry is ever provably dead and the
+        // store is never pruned. Growth is the previous behaviour, not a regression.
+        let _ = pid;
+        Liveness::Unknown
     }
 }
 
@@ -345,19 +451,10 @@ fn dev_browser_dir() -> Result<PathBuf, SessionError> {
         .ok_or_else(|| SessionError("Could not determine home directory".into()))
 }
 
+/// Treats anything short of a definite "no such process" as alive, so `cleanup_stale`
+/// keeps whatever [`liveness`] could not classify — the same bias as [`is_provably_dead`].
 fn is_process_alive(pid: u32) -> bool {
-    #[cfg(unix)]
-    {
-        // SAFETY: kill(pid, 0) only checks if the process exists. No signal sent.
-        #[allow(unsafe_code)]
-        let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
-        result == 0
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = pid;
-        true
-    }
+    liveness(pid) != Liveness::Dead
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -414,26 +511,30 @@ mod tests {
     /// between that read and the heartbeat's save, the delete must not take the fresh
     /// entry down with it — that would silently orphan a running Chrome seconds after
     /// it was launched.
+    ///
+    /// Both pids are live: what is under test is the compare-and-delete, and a fixture
+    /// pid the OS reports as gone would be swept by `prune_dead` before reaching it.
     #[test]
     fn a_stale_delete_does_not_clobber_a_concurrent_relaunch() {
         let dir = std::env::temp_dir().join(format!("chrome-agent-session-relaunch-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("sessions.json");
+        let relaunched = LivePid::spawn();
 
-        // The browser exists with a (now dead) pid.
+        // The browser exists, and the heartbeat is about to judge it stale.
         let mut original = SessionStore::default();
-        ensure_browser(&mut original, "foo", "ws://old", Some(111), true, None);
+        ensure_browser(&mut original, "foo", "ws://old", Some(std::process::id()), true, None);
         save_to(&path, &mut original).unwrap();
 
-        // Heartbeat tick: loads, sees the dead pid, drops the entry in memory.
+        // Heartbeat tick: loads, judges the entry stale, drops it in memory.
         let mut heartbeat = load_from(&path).unwrap();
         heartbeat.browsers.remove("foo");
 
         // Before the heartbeat saves, another agent relaunches 'foo'.
         let mut agent = load_from(&path).unwrap();
         agent.browsers.remove("foo");
-        ensure_browser(&mut agent, "foo", "ws://fresh", Some(222), true, None);
+        ensure_browser(&mut agent, "foo", "ws://fresh", Some(relaunched.id()), true, None);
         save_to(&path, &mut agent).unwrap();
 
         // The heartbeat's delete was decided about the old entry, not this one.
@@ -443,11 +544,36 @@ mod tests {
         let survivor = final_state.browsers.get("foo");
         assert_eq!(
             survivor.and_then(|b| b.pid),
-            Some(222),
+            Some(relaunched.id()),
             "the freshly relaunched browser was deleted by a stale-cleanup decision made about its predecessor"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A live process standing in for a running Chrome, so a fixture entry is not swept
+    /// by the dead-pid prune. Reaped on drop.
+    struct LivePid(std::process::Child);
+
+    impl LivePid {
+        fn spawn() -> Self {
+            Self(
+                std::process::Command::new("sleep")
+                    .arg("30")
+                    .spawn()
+                    .expect("spawn a stand-in for a running browser"),
+            )
+        }
+        fn id(&self) -> u32 {
+            self.0.id()
+        }
+    }
+
+    impl Drop for LivePid {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
     }
 
     #[test]
@@ -473,6 +599,150 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A pid the OS reports as gone. Searched instead of hardcoded: any fixed number
+    /// can be in use on the machine running the test.
+    #[cfg(unix)]
+    fn a_dead_pid() -> u32 {
+        (60_000..99_990u32)
+            .find(|&pid| liveness(pid) == Liveness::Dead)
+            .expect("no unused pid in range")
+    }
+
+    /// The store grew forever: `close` removes the browser it is named, and nothing
+    /// removed an entry whose Chrome had exited. A save now drops those, and only those.
+    #[cfg(unix)]
+    #[test]
+    fn save_drops_dead_browsers_and_keeps_live_and_pidless_ones() {
+        let dir = tmp_dir("prune");
+        let path = dir.join(SESSION_FILE);
+
+        let mut seed = SessionStore::default();
+        // Alive: this very test process.
+        ensure_browser(&mut seed, "live", "ws://live", Some(std::process::id()), true, None);
+        // Dead: exited Chrome, the case that accumulated.
+        ensure_browser(&mut seed, "dead", "ws://dead", Some(a_dead_pid()), true, None);
+        ensure_browser(&mut seed, "dead-2", "ws://dead2", Some(a_dead_pid()), true, None);
+        // No pid: `--connect`, or a managed reconnect via DevToolsActivePort. Dropping
+        // this is how an agent loses the user's real Chrome.
+        ensure_browser(&mut seed, "external", "ws://127.0.0.1:9222/x", None, false, None);
+        // Give the dead entries the bulk an accumulated store carries.
+        for name in ["dead", "dead-2"] {
+            let browser = seed.browsers.get_mut(name).unwrap();
+            let page = ensure_page(browser, "default", "target-1");
+            page.last_snapshot = Some("x".repeat(4096));
+        }
+        // Written without going through `save_to`: this is the file an older binary
+        // left behind, which is the state that has to be recoverable.
+        std::fs::write(&path, serde_json::to_string_pretty(&seed).unwrap()).unwrap();
+        let size_with_dead = std::fs::metadata(&path).unwrap().len();
+
+        // Any save prunes — including one from a process that only read the file.
+        let mut reader = load_from(&path).unwrap();
+        save_to(&path, &mut reader).unwrap();
+
+        let disk = load_from(&path).unwrap();
+        let mut survivors: Vec<&str> = disk.browsers.keys().map(String::as_str).collect();
+        survivors.sort_unstable();
+        assert_eq!(
+            survivors,
+            ["external", "live"],
+            "expected only the dead entries to go"
+        );
+        let size_pruned = std::fs::metadata(&path).unwrap().len();
+        assert!(
+            size_pruned < size_with_dead,
+            "file did not shrink: {size_with_dead} -> {size_pruned}"
+        );
+
+        // The saving process must stop carrying the dropped entries, or its next save
+        // re-publishes them: the upsert branch reads "untouched and absent from disk"
+        // as an entry of ours to restore.
+        assert!(
+            !reader.browsers.contains_key("dead"),
+            "the pruned entry is still staged in memory: {:?}",
+            reader.browsers.keys()
+        );
+        save_to(&path, &mut reader).unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().len(),
+            size_pruned,
+            "a second save was not a no-op"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Pruning tests the pid found on disk under the lock, so it cannot reach another
+    /// agent's running browser: that pid answers `kill(pid, 0)`.
+    #[cfg(unix)]
+    #[test]
+    fn pruning_leaves_a_concurrent_agents_live_browser_alone() {
+        let dir = tmp_dir("prune-concurrent");
+        let path = dir.join(SESSION_FILE);
+
+        // Agent A publishes a live browser and records a snapshot on it.
+        let mut a = SessionStore::default();
+        ensure_browser(&mut a, "agent-a", "ws://a", Some(std::process::id()), true, None);
+        let browser = a.browsers.get_mut("agent-a").unwrap();
+        ensure_page(browser, "default", "target-a").last_snapshot = Some("uid=n1 RootWebArea".into());
+        save_to(&path, &mut a).unwrap();
+
+        // Agent B loads that view, adds its own browser and a dead leftover, and saves.
+        let mut b = load_from(&path).unwrap();
+        ensure_browser(&mut b, "agent-b", "ws://b", Some(std::process::id()), true, None);
+        ensure_browser(&mut b, "leftover", "ws://old", Some(a_dead_pid()), true, None);
+        save_to(&path, &mut b).unwrap();
+
+        // A saves again, holding its own stale copy of agent-b.
+        save_to(&path, &mut a).unwrap();
+
+        let disk = load_from(&path).unwrap();
+        assert!(!disk.browsers.contains_key("leftover"), "dead entry survived");
+        assert_eq!(
+            disk.browsers["agent-a"]
+                .pages
+                .get("default")
+                .and_then(|p| p.last_snapshot.as_deref()),
+            Some("uid=n1 RootWebArea"),
+            "agent-a lost its snapshot"
+        );
+        assert!(
+            disk.browsers.contains_key("agent-b"),
+            "another agent's live browser was pruned: {:?}",
+            disk.browsers.keys()
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The one-sided predicate, stated directly.
+    #[test]
+    fn only_a_pid_the_os_calls_gone_makes_an_entry_droppable() {
+        let mut external = browser("ws://127.0.0.1:9222/x");
+        external.pid = None;
+        assert!(!is_provably_dead(&external), "--connect entry must be kept");
+
+        let mut live = browser("ws://live");
+        live.pid = Some(std::process::id());
+        assert!(!is_provably_dead(&live));
+
+        // Out of pid_t range: kill() would read it as a process group, so it is not a
+        // question about one process and the entry is kept.
+        let mut absurd = browser("ws://absurd");
+        absurd.pid = Some(u32::MAX);
+        assert!(!is_provably_dead(&absurd));
+        let mut zero = browser("ws://zero");
+        zero.pid = Some(0);
+        assert!(!is_provably_dead(&zero));
+
+        #[cfg(unix)]
+        {
+            let mut dead = browser("ws://dead");
+            dead.pid = Some(a_dead_pid());
+            assert!(is_provably_dead(&dead));
+        }
     }
 
     #[test]

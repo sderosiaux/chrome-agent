@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use crate::cdp::client::{CdpClient, CdpClientError};
 use crate::cdp::types::{AXNode, GetFullAXTreeResult};
 use crate::element_ref::ElementRef;
+pub use crate::snapshot_secret::Redaction;
 
 /// Result of taking an a11y tree snapshot.
 pub struct Snapshot {
@@ -114,7 +115,11 @@ pub async fn take_snapshot(
         .call("Accessibility.getFullAXTree", params)
         .await?;
 
-    let (text, uid_map) = format_ax_tree(&result.nodes, verbose, max_depth, focus_uid, role_filter);
+    // Before a line is rendered: what the tree holds cannot say whether a field is a secret,
+    // and a value printed once is on stdout, in the transcript and in any `--record` file.
+    let redaction = crate::snapshot_secret::probe(client, &result.nodes).await;
+    let (text, uid_map) =
+        format_ax_tree(&result.nodes, verbose, max_depth, focus_uid, role_filter, &redaction);
     let identity = document_identity(client).await;
 
     Ok(Snapshot { text, uid_map, identity })
@@ -134,6 +139,7 @@ fn format_ax_tree(
     max_depth: Option<usize>,
     focus_uid: Option<&str>,
     role_filter: Option<&[&str]>,
+    redaction: &Redaction,
 ) -> (String, HashMap<String, ElementRef>) {
     // Build lookup: nodeId → AXNode
     let node_by_id: HashMap<&str, &AXNode> = nodes
@@ -168,6 +174,7 @@ fn format_ax_tree(
             &mut uid_map_full,
             &mut discard,
             &mut uid_to_node_id,
+            redaction,
         );
 
         // Find the AXNode nodeId for the focus uid
@@ -188,6 +195,7 @@ fn format_ax_tree(
                 &mut uid_map,
                 &mut output,
                 &mut tracking2,
+                redaction,
             );
             return (apply_role_filter(output, role_filter, max_depth), uid_map);
         }
@@ -215,6 +223,7 @@ fn format_ax_tree(
         &mut uid_counter,
         &mut uid_map,
         &mut output,
+        redaction,
     );
 
     // Post-filter by role if requested
@@ -284,10 +293,12 @@ fn format_node(
     uid_counter: &mut u32,
     uid_map: &mut HashMap<String, ElementRef>,
     output: &mut String,
+    redaction: &Redaction,
 ) {
     let mut discard: HashMap<String, String> = HashMap::new();
     format_node_with_tracking(
         node_id, nodes, depth, verbose, max_depth, uid_counter, uid_map, output, &mut discard,
+        redaction,
     );
 }
 
@@ -301,6 +312,7 @@ fn format_node_with_tracking(
     uid_map: &mut HashMap<String, ElementRef>,
     output: &mut String,
     uid_to_node_id: &mut HashMap<String, String>,
+    redaction: &Redaction,
 ) {
     let Some(node) = nodes.get(node_id) else {
         return;
@@ -311,7 +323,7 @@ fn format_node_with_tracking(
         // Still recurse into children — some ignored nodes have visible children
         if let Some(child_ids) = &node.child_ids {
             for child_id in child_ids {
-                format_node_with_tracking(child_id, nodes, depth, verbose, max_depth, uid_counter, uid_map, output, uid_to_node_id);
+                format_node_with_tracking(child_id, nodes, depth, verbose, max_depth, uid_counter, uid_map, output, uid_to_node_id, redaction);
             }
         }
         return;
@@ -325,7 +337,7 @@ fn format_node_with_tracking(
     if !verbose && NOISE_ROLES.contains(&role) {
         if let Some(child_ids) = &node.child_ids {
             for child_id in child_ids {
-                format_node_with_tracking(child_id, nodes, depth, verbose, max_depth, uid_counter, uid_map, output, uid_to_node_id);
+                format_node_with_tracking(child_id, nodes, depth, verbose, max_depth, uid_counter, uid_map, output, uid_to_node_id, redaction);
             }
         }
         return;
@@ -349,7 +361,7 @@ fn format_node_with_tracking(
     if !verbose && role == "generic" && name.is_empty() {
         if let Some(child_ids) = &node.child_ids {
             for child_id in child_ids {
-                format_node_with_tracking(child_id, nodes, depth, verbose, max_depth, uid_counter, uid_map, output, uid_to_node_id);
+                format_node_with_tracking(child_id, nodes, depth, verbose, max_depth, uid_counter, uid_map, output, uid_to_node_id, redaction);
             }
         }
         return;
@@ -385,16 +397,18 @@ fn format_node_with_tracking(
 
     if !name.is_empty() {
         output.push_str(" \"");
-        output.push_str(&name);
+        output.push_str(redaction.name(node.backend_dom_node_id, &name));
         output.push('"');
     }
 
-    // Value (for inputs)
+    // Value (for inputs). The marker stays inside the quotes: `diff` reads a value through the
+    // `value="` prefix, and an unquoted marker would read as a field that holds nothing —
+    // turning every secret into a `values_lost` on the next comparison.
     if let Some(value_ax) = &node.value
         && let Some(val) = value_ax.value.as_ref().and_then(|v| v.as_str())
             && !val.is_empty() {
                 output.push_str(" value=\"");
-                output.push_str(val);
+                output.push_str(redaction.value(node.backend_dom_node_id, val));
                 output.push('"');
             }
 
@@ -457,7 +471,7 @@ fn format_node_with_tracking(
                                 serde_json::Value::Number(n) => output.push_str(&n.to_string()),
                                 serde_json::Value::String(s) => {
                                     output.push('"');
-                                    output.push_str(s);
+                                    output.push_str(redaction.name(node.backend_dom_node_id, s));
                                     output.push('"');
                                 }
                                 _ => output.push_str(&val.to_string()),
@@ -489,6 +503,7 @@ fn format_node_with_tracking(
                 uid_map,
                 output,
                 uid_to_node_id,
+                redaction,
             );
         }
     }
@@ -559,7 +574,7 @@ mod tests {
             },
         ];
 
-        let (text, uid_map) = format_ax_tree(&nodes, false, None, None, None);
+        let (text, uid_map) = format_ax_tree(&nodes, false, None, None, None, &Redaction::none());
         assert!(text.contains("uid=n10 heading \"Welcome\" level=1"));
         assert!(uid_map.contains_key("n10"));
         assert_eq!(uid_map["n10"].backend_node_id(), Some(10));
@@ -618,7 +633,7 @@ mod tests {
             },
         ];
 
-        let (text, uid_map) = format_ax_tree(&nodes, false, None, None, None);
+        let (text, uid_map) = format_ax_tree(&nodes, false, None, None, None, &Redaction::none());
         assert!(!text.contains("ignored"));
         assert!(text.contains("uid=n20 button \"Click me\" focused"));
         assert_eq!(uid_map.len(), 1);
@@ -655,7 +670,7 @@ mod tests {
                 ..default_ax_node()
             },
         ];
-        let (text, _) = format_ax_tree(&nodes, false, Some(1), None, None);
+        let (text, _) = format_ax_tree(&nodes, false, Some(1), None, None, &Redaction::none());
         assert!(text.contains("Root"));
         assert!(text.contains("Child"));
         assert!(!text.contains("Grand")); // depth 2 filtered
@@ -693,7 +708,7 @@ mod tests {
             },
         ];
         // n1=WebArea, n2=heading, n3=button — focus on n3
-        let (text, _) = format_ax_tree(&nodes, false, None, Some("n3"), None);
+        let (text, _) = format_ax_tree(&nodes, false, None, Some("n3"), None, &Redaction::none());
         assert!(text.contains("Submit"));
         assert!(!text.contains("Title"));
     }
@@ -733,7 +748,7 @@ mod tests {
             },
         ];
         // Focus the form (n1) AND filter to buttons: only the Submit button remains.
-        let (text, _) = format_ax_tree(&nodes, false, None, Some("n1"), Some(&["button"]));
+        let (text, _) = format_ax_tree(&nodes, false, None, Some("n1"), Some(&["button"]), &Redaction::none());
         assert!(text.contains("uid=n3 button \"Submit\""));
         assert!(!text.contains("Please sign up")); // heading filtered out
         assert!(!text.contains("form")); // focus root also filtered (not a button)
@@ -750,14 +765,14 @@ mod tests {
             backend_dom_node_id: Some(1),
             ..default_ax_node()
         }];
-        let (text, _) = format_ax_tree(&nodes, false, None, Some("e99"), None);
+        let (text, _) = format_ax_tree(&nodes, false, None, Some("e99"), None, &Redaction::none());
         assert!(text.contains("not found"));
     }
 
     #[test]
     fn bug_empty_tree() {
         let nodes: Vec<AXNode> = vec![];
-        let (text, uid_map) = format_ax_tree(&nodes, false, None, None, None);
+        let (text, uid_map) = format_ax_tree(&nodes, false, None, None, None, &Redaction::none());
         assert!(text.is_empty());
         assert!(uid_map.is_empty());
     }
@@ -780,7 +795,7 @@ mod tests {
                 ..default_ax_node()
             },
         ];
-        let (text, uid_map) = format_ax_tree(&nodes, false, None, None, None);
+        let (text, uid_map) = format_ax_tree(&nodes, false, None, None, None, &Redaction::none());
         // All nodes ignored = empty output
         assert!(text.is_empty());
         assert!(uid_map.is_empty());
@@ -798,7 +813,7 @@ mod tests {
             ..default_ax_node()
         }];
         // Filter for "button" but only heading exists
-        let (text, _) = format_ax_tree(&nodes, false, None, None, Some(&["button"]));
+        let (text, _) = format_ax_tree(&nodes, false, None, None, Some(&["button"]), &Redaction::none());
         assert!(text.is_empty() || !text.contains("heading"));
     }
 

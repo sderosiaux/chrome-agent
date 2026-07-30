@@ -30,15 +30,22 @@ fn run_cli(args: &[&str]) -> (String, i32) {
     )
 }
 
-struct TestBrowser(&'static str);
+struct TestBrowser(String);
 impl TestBrowser {
-    const fn name(&self) -> &str {
-        self.0
+    /// Unique per process. A fixed name means two concurrent runs of this suite drive the same
+    /// browser: one navigates while the other clicks a uid from its own snapshot, and both fail
+    /// with "Node with given id does not belong to the document". CLAUDE.md documents the
+    /// hazard — `--browser <unique>` per agent — and the suites have to obey it too.
+    fn new(label: &str) -> Self {
+        Self(format!("{label}-{}", std::process::id()))
+    }
+    fn name(&self) -> &str {
+        &self.0
     }
 }
 impl Drop for TestBrowser {
     fn drop(&mut self) {
-        let _ = run_cli(&["--browser", self.0, "close", "--purge"]);
+        let _ = run_cli(&["--browser", &self.0, "close", "--purge"]);
     }
 }
 
@@ -63,7 +70,7 @@ fn fill(browser: &str, selector: &str, value: &str) -> Value {
 /// old fill reported the requested value back as though the page had kept it.
 #[test]
 fn a_value_reverted_on_the_microtask_queue_is_not_reported_as_kept() {
-    let b = TestBrowser("window-microtask");
+    let b = TestBrowser::new("window-microtask");
     if !open(b.name(), "form_value_microtask_revert.html") {
         return;
     }
@@ -80,7 +87,7 @@ fn a_value_reverted_on_the_microtask_queue_is_not_reported_as_kept() {
 /// true as of a moment.
 #[test]
 fn a_fill_reports_the_window_it_observed() {
-    let b = TestBrowser("window-fill-declared");
+    let b = TestBrowser::new("window-fill-declared");
     if !open(b.name(), "form_value_plain_input.html") {
         return;
     }
@@ -93,7 +100,7 @@ fn a_fill_reports_the_window_it_observed() {
 /// tool cannot see it — what it can do is say when it looked.
 #[test]
 fn a_revert_past_the_window_is_still_bounded_by_a_stated_time() {
-    let b = TestBrowser("window-late");
+    let b = TestBrowser::new("window-late");
     if !open(b.name(), "form_value_late_revert.html") {
         return;
     }
@@ -135,7 +142,7 @@ fn a_revert_past_the_window_is_still_bounded_by_a_stated_time() {
 /// The three read-back paths used to disagree about how long to wait. They no longer do.
 #[test]
 fn check_reports_the_same_window_as_fill() {
-    let b = TestBrowser("window-check");
+    let b = TestBrowser::new("window-check");
     if !open(b.name(), "checkable_kinds.html") {
         return;
     }
@@ -147,7 +154,7 @@ fn check_reports_the_same_window_as_fill() {
 
 #[test]
 fn check_by_uid_reports_the_window_too() {
-    let b = TestBrowser("window-check-uid");
+    let b = TestBrowser::new("window-check-uid");
     if !open(b.name(), "checkable_kinds.html") {
         return;
     }

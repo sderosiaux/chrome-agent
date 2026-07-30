@@ -1,0 +1,13 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <!-- A client-side redirect the settle probe has to outlive: the load event fires on THIS
+       document, and location.href only becomes the destination once the refresh has run. -->
+  <meta http-equiv="refresh" content="0;url=goto_redirect_target.html">
+  <title>Bouncing</title>
+</head>
+<body>
+  <p>redirecting…</p>
+</body>
+</html>

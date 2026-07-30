@@ -10,8 +10,9 @@ pub use crate::pipe_report::{attach_change_report, mutates_page};
 
 // Split out to stay under the 1000-line file cap; callers keep using `pipe_dispatch::*`.
 pub use crate::pipe_dispatch_actions::{
-    dispatch_check, dispatch_dblclick, dispatch_drag, dispatch_fill_and_submit, dispatch_fill_form,
-    dispatch_history, dispatch_hover, dispatch_navigate_and_read, dispatch_select, dispatch_upload,
+    dispatch_assert, dispatch_check, dispatch_dblclick, dispatch_drag, dispatch_fill_and_submit,
+    dispatch_fill_form, dispatch_history, dispatch_hover, dispatch_navigate_and_read,
+    dispatch_select, dispatch_upload, run_batch,
 };
 
 // ---------------------------------------------------------------------------
@@ -54,6 +55,9 @@ pub async fn dispatch_goto(
     let _ = commands::history::append(&result.url, &result.title, page_name);
 
     let mut obj = json!({"ok": true, "url": result.url, "title": result.title});
+    // `goto` stays out of `mutates_page`, so nothing else will speak for it: `landed` rides
+    // on its own response, in the one dispatcher pipe and batch share.
+    result.landed.attach(&mut obj);
     if inspect {
         let snapshot = attach_snapshot(client, store, browser_name, page_name, target_id, max_depth).await?;
         obj["snapshot"] = json!(snapshot);
@@ -68,6 +72,7 @@ pub async fn dispatch_click(
     page_name: &str,
     target_id: &str,
     global_max_depth: Option<usize>,
+    report: crate::run_helpers::ReportPolicy,
     cmd: &Value,
 ) -> Result<Value, crate::BoxError> {
     let inspect = cmd.get("inspect").and_then(Value::as_bool).unwrap_or(false);
@@ -75,28 +80,28 @@ pub async fn dispatch_click(
     // Hoist the `?` out of the `else if let` so the non-Send ControlFlow residual
     // isn't held across the awaits below (keeps the future Send).
     let xy = parse_xy(cmd)?;
+    let on_intercept = crate::hit_test::OnIntercept::from_cmd(cmd, report.on_intercept);
 
-    let target = crate::run_helpers::target_details(
-        client,
-        cmd.get("selector").and_then(Value::as_str),
-        cmd.get("uid").and_then(Value::as_str),
-    )
-    .await;
-    let msg = if let Some(sel) = cmd.get("selector").and_then(Value::as_str) {
-        crate::element::click_selector(client, sel).await?;
-        format!("Clicked selector '{sel}'")
+    let (msg, details) = if let Some(sel) = cmd.get("selector").and_then(Value::as_str) {
+        let outcome = crate::element::click_selector(client, sel, on_intercept).await?;
+        let target = format!("selector '{sel}'");
+        (
+            outcome.refusal_message("click", &target).unwrap_or_else(|| format!("Clicked {target}")),
+            Some(outcome.report()),
+        )
     } else if let Some((x, y)) = xy {
         crate::element::click_at_coords(client, x, y).await?;
-        format!("Clicked at ({x}, {y})")
+        (format!("Clicked at ({x}, {y})"), None)
     } else if let Some(uid) = cmd.get("uid").and_then(Value::as_str) {
         let uid_map = get_uid_map(store, browser_name, page_name);
-        commands::click::run(client, &uid_map, uid).await?
+        let (msg, outcome) = commands::click::run(client, &uid_map, uid, on_intercept).await?;
+        (msg, Some(outcome.report()))
     } else {
         return Err("click: provide \"uid\", \"selector\", or \"xy\"".into());
     };
 
     let mut obj = json!({"ok": true, "message": msg});
-    merge_into(&mut obj, target.as_ref());
+    merge_into(&mut obj, details.as_ref());
     if inspect {
         let snapshot = attach_snapshot(client, store, browser_name, page_name, target_id, max_depth).await?;
         obj["snapshot"] = json!(snapshot);
@@ -682,13 +687,12 @@ pub async fn dispatch_batch(
 ) -> Result<Value, crate::BoxError> {
     let cmds = cmd.get("commands").and_then(Value::as_array)
         .ok_or("batch: missing \"commands\" array")?;
-    let mut results = Vec::new();
-    for c in cmds {
-        let r = dispatch_single(client, browser_client, store, browser_name, page_name, target_id, timeout, global_max_depth, report, c).await;
-        results.push(r);
-    }
-    let all_ok = results.iter().all(|r| r.get("ok").and_then(Value::as_bool).unwrap_or(false));
-    Ok(json!({"ok": all_ok, "results": results}))
+    let stop_on_error = cmd.get("stop_on_error").and_then(Value::as_bool).unwrap_or(false);
+    Ok(run_batch(
+        client, browser_client, store, browser_name, page_name, target_id, timeout,
+        global_max_depth, report, cmds, stop_on_error,
+    )
+    .await)
 }
 
 /// Copy an optional field set into a response object.
@@ -735,7 +739,7 @@ pub async fn dispatch_single(
     let mut value = {
     let result: Result<Value, crate::BoxError> = match cmd_name {
         "goto" => dispatch_goto(client, store, browser_name, page_name, target_id, timeout, global_max_depth, cmd).await,
-        "click" => dispatch_click(client, store, browser_name, page_name, target_id, global_max_depth, cmd).await,
+        "click" => dispatch_click(client, store, browser_name, page_name, target_id, global_max_depth, report, cmd).await,
         "fill" => dispatch_fill(client, store, browser_name, page_name, target_id, global_max_depth, cmd).await,
         "inspect" => dispatch_inspect(client, store, browser_name, page_name, target_id, cmd).await,
         "eval" => dispatch_eval(client, cmd).await,
@@ -750,13 +754,13 @@ pub async fn dispatch_single(
         "scroll" => dispatch_scroll(client, store, browser_name, page_name, cmd).await,
         "type" => dispatch_type(client, cmd).await,
         "press" => dispatch_press(client, cmd).await,
-        "dblclick" => dispatch_dblclick(client, store, browser_name, page_name, target_id, global_max_depth, cmd).await,
+        "dblclick" => dispatch_dblclick(client, store, browser_name, page_name, target_id, global_max_depth, report, cmd).await,
         "select" => dispatch_select(client, store, browser_name, page_name, target_id, global_max_depth, cmd).await,
-        "check" => dispatch_check(client, store, browser_name, page_name, cmd).await,
+        "check" => dispatch_check(client, store, browser_name, page_name, report, cmd).await,
         "uncheck" => {
             let mut c = cmd.clone();
             if let Some(m) = c.as_object_mut() { m.insert("desired".into(), Value::Bool(false)); }
-            dispatch_check(client, store, browser_name, page_name, &c).await
+            dispatch_check(client, store, browser_name, page_name, report, &c).await
         }
         "upload" => dispatch_upload(client, store, browser_name, page_name, cmd).await,
         "drag" => dispatch_drag(client, store, browser_name, page_name, cmd).await,
@@ -771,6 +775,7 @@ pub async fn dispatch_single(
         "fill_and_submit" | "fill-and-submit" => dispatch_fill_and_submit(client, timeout, cmd).await,
         "history" => dispatch_history(cmd),
         "frame" => dispatch_frame(client, cmd).await,
+        "assert" => dispatch_assert(client, store, browser_name, page_name, cmd).await,
         other => Err(unknown_cmd_error(other)),
     };
     // `result` must not outlive this block: BoxError is not Send, and an await with it
@@ -780,16 +785,19 @@ pub async fn dispatch_single(
         Err(e) => {
             let msg = e.to_string();
             let mut obj = json!({"ok": false, "error": msg});
-            if let Some(h) = crate::run_helpers::error_hint(&msg) { obj["hint"] = json!(h); }
+            if let Some(h) = crate::run_helpers::error_hint(&msg, browser_name) { obj["hint"] = json!(h); }
             return obj;
         }
     }
     };
     // Same as pipe: switching the report off must not read like an empty page.
     if !report.changes && mutates_page(cmd_name) {
-        crate::run_helpers::attach_verdict(
+        // The hit test still ran: it is part of aiming the action, not part of the report.
+        // An intercepted click says so even here, where the page was never re-read.
+        crate::pipe_report::attach_verdict_for(
+            client,
             &mut value,
-            crate::verdict::classify(crate::verdict::Observation::ReportingDisabled),
+            crate::verdict::Observation::ReportingDisabled,
         );
     }
     if let Some((old_text, old_url)) = baseline {

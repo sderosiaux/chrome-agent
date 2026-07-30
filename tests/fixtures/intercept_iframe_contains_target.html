@@ -1,0 +1,20 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Target inside an iframe</title>
+<style>#shop { position: absolute; top: 90px; left: 60px; width: 300px; height: 120px; border: 4px solid #999; }</style>
+</head>
+<body>
+  <p>The button lives inside the frame, not under it.</p>
+  <iframe id="shop" srcdoc="<body style='margin:0'><button id='buy' style='margin:20px;width:120px;height:40px' onclick='this.textContent = &quot;bought&quot;'>Buy</button></body>"></iframe>
+  <script>
+    // Paired half of naming an <iframe> as a receiver: a target INSIDE a frame must not be
+    // reported as intercepted by the frame that contains it. The aim point still has to be
+    // mapped through the frame's own offset, or the click lands on the parent's padding.
+    //
+    // The effect is deliberately frame-local: a handler writing to `parent.document` would
+    // make the fixture depend on file:// origin rules rather than on the hit test.
+  </script>
+</body>
+</html>

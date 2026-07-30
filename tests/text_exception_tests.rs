@@ -25,21 +25,28 @@ fn run_cli(args: &[&str]) -> (String, i32) {
     )
 }
 
-struct TestBrowser(&'static str);
+struct TestBrowser(String);
 impl TestBrowser {
-    const fn name(&self) -> &str {
-        self.0
+    /// Unique per process. A fixed name means two concurrent runs of this suite drive the same
+    /// browser: one navigates while the other clicks a uid from its own snapshot, and both fail
+    /// with "Node with given id does not belong to the document". CLAUDE.md documents the
+    /// hazard — `--browser <unique>` per agent — and the suites have to obey it too.
+    fn new(label: &str) -> Self {
+        Self(format!("{label}-{}", std::process::id()))
+    }
+    fn name(&self) -> &str {
+        &self.0
     }
 }
 impl Drop for TestBrowser {
     fn drop(&mut self) {
-        let _ = run_cli(&["--browser", self.0, "close", "--purge"]);
+        let _ = run_cli(&["--browser", &self.0, "close", "--purge"]);
     }
 }
 
 #[test]
 fn a_throwing_text_read_is_an_error_not_an_empty_string() {
-    let b = TestBrowser("text-exception");
+    let b = TestBrowser::new("text-exception");
     if !common::browser_ready() {
         return;
     }

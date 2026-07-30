@@ -1,0 +1,19 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Modal dialog holds the top layer</title>
+<style>#behind { position: absolute; top: 200px; left: 40px; width: 180px; height: 40px; }</style>
+</head>
+<body>
+  <button id="behind" onclick="window.receiver = 'behind'">Behind the dialog</button>
+  <dialog id="terms">Terms of service</dialog>
+  <script>
+    window.receiver = null;
+    // showModal() puts the dialog in the top layer, so every pointer event outside it goes
+    // to the dialog's backdrop. NOT `blocked`: telling an agent to wait on the button
+    // teaches it to wait forever instead of closing the dialog.
+    document.getElementById('terms').showModal();
+  </script>
+</body>
+</html>

@@ -111,7 +111,20 @@ fn every_example_in_the_embedded_guide_parses() {
     );
 }
 
+/// Ask clap for a command's help text, or `None` when that path is not a command.
+fn help_for(path: &[String]) -> Option<String> {
+    let mut args: Vec<&str> = path.iter().map(String::as_str).collect();
+    args.push("--help");
+    let out = Command::new(binary()).args(&args).output().expect("run chrome-agent");
+    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).to_string())
+}
+
 /// The synopsis lines name flags too; those flag names must exist on that command.
+///
+/// The command is a *path*, not a word: `assert value --equals x` puts the flag on the leaf,
+/// and `assert --help` lists only its subcommands. A following word joins the path only when
+/// its help differs from its parent's — otherwise `goto https://example.com --help`, which
+/// clap happily answers with `goto`'s help, would read the URL as a subcommand.
 #[test]
 fn every_flag_named_in_a_synopsis_exists_on_its_command() {
     let guide = include_str!("../llm-guide.txt");
@@ -124,21 +137,32 @@ fn every_flag_named_in_a_synopsis_exists_on_its_command() {
         if command.starts_with('-') || command.starts_with('<') || command.starts_with('[') {
             continue;
         }
-        let help = Command::new(binary())
-            .args([command, "--help"])
-            .output()
-            .expect("run chrome-agent");
-        if !help.status.success() {
+        let mut path = vec![command.to_string()];
+        let Some(mut help_text) = help_for(&path) else {
             continue; // not a subcommand (e.g. a bare URL example)
+        };
+        for word in words {
+            if word.starts_with('-') || word.starts_with('<') || word.starts_with('[') {
+                break;
+            }
+            let mut candidate = path.clone();
+            candidate.push(word.to_string());
+            match help_for(&candidate) {
+                Some(deeper) if deeper != help_text => {
+                    path = candidate;
+                    help_text = deeper;
+                }
+                _ => break,
+            }
         }
-        let help_text = String::from_utf8_lossy(&help.stdout).to_string();
+        let named = path.join(" ");
         for word in rest.split(|c: char| c.is_whitespace() || c == '[' || c == ']') {
             let flag = word.trim_matches(|c| c == ',' || c == '.');
             if !flag.starts_with("--") || flag.len() < 4 {
                 continue;
             }
             if !help_text.contains(flag) {
-                broken.push(format!("`chrome-agent {command}` has no {flag} (line: {line})"));
+                broken.push(format!("`chrome-agent {named}` has no {flag} (line: {line})"));
             }
         }
     }

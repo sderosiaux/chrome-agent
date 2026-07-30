@@ -24,7 +24,11 @@ pub async fn dispatch_navigate_and_read(
     client.set_frame_context(None); // navigation invalidates any bound frame (issue #8)
     let _ = commands::history::append(&goto_result.url, &goto_result.title, page_name);
     let read_result = commands::read::run(client, false, truncate).await?;
-    Ok(json!({"ok": true, "url": goto_result.url, "title": goto_result.title, "content": read_result.text_content}))
+    let mut out = json!({"ok": true, "url": goto_result.url, "title": goto_result.title, "content": read_result.text_content});
+    // The bounce this reports matters more here than on a bare `goto`: without it the caller
+    // gets a login page's prose back as if it were the article they asked for.
+    goto_result.landed.attach(&mut out);
+    Ok(out)
 }
 
 pub async fn dispatch_fill_and_submit(client: &CdpClient, timeout: u64, cmd: &Value) -> Result<Value, crate::BoxError> {
@@ -39,7 +43,12 @@ pub async fn dispatch_fill_and_submit(client: &CdpClient, timeout: u64, cmd: &Va
         let outcome = crate::element::fill_selector(client, selector, value).await?;
         outcomes.push((selector.to_string(), outcome));
     }
-    crate::element::click_selector(client, submit_selector).await?;
+    let submitted = crate::element::click_selector(
+        client,
+        submit_selector,
+        crate::hit_test::OnIntercept::from_cmd(cmd, crate::hit_test::OnIntercept::default()),
+    )
+    .await?;
     if let Some(pattern) = wait_for {
         let is_selector = pattern.contains('.') || pattern.contains('#') || pattern.contains('[') || pattern.contains('>');
         let wait_type = if is_selector { "selector" } else { "text" };
@@ -50,6 +59,10 @@ pub async fn dispatch_fill_and_submit(client: &CdpClient, timeout: u64, cmd: &Va
     // mutation did not happen, and the natural response to that is to submit again.
     let message = format!("Filled {field_count} fields, submitted, waited for '{}'", wait_for.unwrap_or("none"));
     let mut out = json!({"ok": true, "message": message});
+    // The submit's own delivery, at the top level where the verdict wiring reads it: a submit
+    // button under a consent banner is the shape this command exists for, and it used to be
+    // reported as a successful submit.
+    merge_into(&mut out, Some(&submitted.report()));
     // The only witness this command has. The change report runs after the submit, so a
     // field the page rewrote on the way in is no longer visible anywhere by then.
     out["values"] = crate::run_helpers::bulk_fill_report("selector", &outcomes);
@@ -113,36 +126,38 @@ pub async fn dispatch_hover(
 
 pub async fn dispatch_dblclick(
     client: &CdpClient, store: &mut SessionStore, browser_name: &str, page_name: &str,
-    target_id: &str, global_max_depth: Option<usize>, cmd: &Value,
+    target_id: &str, global_max_depth: Option<usize>,
+    report: crate::run_helpers::ReportPolicy, cmd: &Value,
 ) -> Result<Value, crate::BoxError> {
     let inspect = cmd.get("inspect").and_then(Value::as_bool).unwrap_or(false);
     let max_depth = cmd_max_depth(cmd).or(global_max_depth);
     // Hoist the `?` out of the `else if let` so the non-Send ControlFlow residual
     // isn't held across the awaits below (keeps the future Send).
     let xy = parse_xy(cmd)?;
-    // Resolved before the action, like every other targeted command: afterwards the
-    // element may be detached and the answer would describe a different page.
-    let target = crate::run_helpers::target_details(
-        client,
-        cmd.get("selector").and_then(Value::as_str),
-        cmd.get("uid").and_then(Value::as_str),
-    )
-    .await;
-    let msg = if let Some(sel) = cmd.get("selector").and_then(Value::as_str) {
-        crate::element::dblclick_selector(client, sel).await?;
-        format!("Double-clicked selector '{sel}'")
+    let on_intercept = crate::hit_test::OnIntercept::from_cmd(cmd, report.on_intercept);
+    // The node is resolved before the action, from the handle the probe and the dispatch use:
+    // afterwards the element may be detached and the answer would describe a different page.
+    let (msg, details) = if let Some(sel) = cmd.get("selector").and_then(Value::as_str) {
+        let outcome = crate::element::dblclick_selector(client, sel, on_intercept).await?;
+        let target = format!("selector '{sel}'");
+        (
+            outcome
+                .refusal_message("double-click", &target)
+                .unwrap_or_else(|| format!("Double-clicked {target}")),
+            Some(outcome.report()),
+        )
     } else if let Some((x, y)) = xy {
         crate::element::dblclick_at_coords(client, x, y).await?;
-        format!("Double-clicked at ({x}, {y})")
+        (format!("Double-clicked at ({x}, {y})"), None)
     } else if let Some(uid) = cmd.get("uid").and_then(Value::as_str) {
         let uid_map = get_uid_map(store, browser_name, page_name);
-        crate::element::dblclick(client, &uid_map, uid).await?;
-        format!("Double-clicked uid={uid}")
+        let (msg, outcome) = commands::dblclick::run(client, &uid_map, uid, on_intercept).await?;
+        (msg, Some(outcome.report()))
     } else {
         return Err("dblclick: provide \"uid\", \"selector\", or \"xy\"".into());
     };
     let mut obj = json!({"ok": true, "message": msg});
-    merge_into(&mut obj, target.as_ref());
+    merge_into(&mut obj, details.as_ref());
     if inspect {
         let snapshot = attach_snapshot(client, store, browser_name, page_name, target_id, max_depth).await?;
         obj["snapshot"] = json!(snapshot);
@@ -165,15 +180,16 @@ pub async fn dispatch_select(
     .await;
     let (msg, outcome) = if let Some(sel) = cmd.get("selector").and_then(Value::as_str) {
         let outcome = crate::element::select_option_selector(client, sel, value).await?;
-        (format!("Selected \"{}\" on selector '{sel}'", outcome.text), outcome)
+        (format!("Selected \"{}\" on selector '{sel}'", outcome.label()), outcome)
     } else if let Some(uid) = cmd.get("uid").and_then(Value::as_str) {
         let uid_map = get_uid_map(store, browser_name, page_name);
         let outcome = crate::element::select_option(client, &uid_map, uid, value).await?;
-        (format!("Selected \"{}\" on uid={uid}", outcome.text), outcome)
+        (format!("Selected \"{}\" on uid={uid}", outcome.label()), outcome)
     } else {
         return Err("select: provide \"uid\" or \"selector\"".into());
     };
-    let mut obj = json!({"ok": true, "message": msg, "observed_after_ms": outcome.observed_after_ms});
+    let mut obj = json!({"ok": true, "message": msg});
+    merge_into(&mut obj, Some(&crate::run_helpers::select_report(&outcome)));
     merge_into(&mut obj, target.as_ref());
     if inspect {
         let snapshot = attach_snapshot(client, store, browser_name, page_name, target_id, max_depth).await?;
@@ -183,7 +199,8 @@ pub async fn dispatch_select(
 }
 
 pub async fn dispatch_check(
-    client: &CdpClient, store: &SessionStore, browser_name: &str, page_name: &str, cmd: &Value,
+    client: &CdpClient, store: &SessionStore, browser_name: &str, page_name: &str,
+    report: crate::run_helpers::ReportPolicy, cmd: &Value,
 ) -> Result<Value, crate::BoxError> {
     let desired = cmd.get("desired").and_then(Value::as_bool).unwrap_or(true);
     let target = crate::run_helpers::target_details(
@@ -196,19 +213,19 @@ pub async fn dispatch_check(
         crate::element::set_checked_selector(client, sel, desired).await?
     } else if let Some(uid) = cmd.get("uid").and_then(Value::as_str) {
         let uid_map = get_uid_map(store, browser_name, page_name);
-        crate::element::set_checked(client, &uid_map, uid, desired).await?
+        let on_intercept = crate::hit_test::OnIntercept::from_cmd(cmd, report.on_intercept);
+        crate::element::set_checked(client, &uid_map, uid, desired, on_intercept).await?
     } else {
         return Err("check: provide \"uid\" or \"selector\"".into());
     };
-    let mut obj = json!({"ok": true, "message": outcome.message});
+    let (message, details) = crate::run_helpers::check_report(outcome);
+    let mut obj = json!({"ok": true, "message": message});
     if let Some(uid) = target.as_ref().and_then(|t| t.get("uid")) {
         obj["uid"] = uid.clone();
     }
-    // Absent when the element already held the state: nothing was dispatched, so there was
-    // no post-action moment to report.
-    if let Some(ms) = outcome.observed_after_ms {
-        obj["observed_after_ms"] = json!(ms);
-    }
+    // `observed_after_ms` is absent when the element already held the state: nothing was
+    // dispatched, so there was no post-action moment to report.
+    merge_into(&mut obj, details.as_ref());
     Ok(obj)
 }
 
@@ -247,4 +264,78 @@ pub async fn dispatch_drag(
     let uid_map = get_uid_map(store, browser_name, page_name);
     crate::element::drag(client, &uid_map, from, to).await?;
     Ok(json!({"ok": true, "message": format!("Dragged uid={from} to uid={to}")}))
+}
+
+// ---------------------------------------------------------------------------
+// Assert
+// ---------------------------------------------------------------------------
+
+/// `assert` for pipe and batch.
+///
+/// There is no exit code here, so `held` rides on `ok`: a claim that did not hold answers
+/// `{"ok":false,"assertion":{…},"hint":…}` and one that could not be checked answers the
+/// usual `{"ok":false,"error":…}`. The two are told apart by the presence of `assertion`,
+/// and `batch`'s `all_ok` and `stop_on_error` treat both as the failures they are without
+/// needing a second convention. `assert` is not in `mutates_page`: it is a read, so no
+/// change report and no verdict ride on the response.
+pub async fn dispatch_assert(
+    client: &CdpClient, store: &SessionStore, browser_name: &str, page_name: &str, cmd: &Value,
+) -> Result<Value, crate::BoxError> {
+    let assertion = commands::assert::from_json(cmd)?;
+    let uid_map = get_uid_map(store, browser_name, page_name);
+    let outcome = commands::assert::run(client, &uid_map, &assertion).await?;
+    Ok(outcome.to_json())
+}
+
+// ---------------------------------------------------------------------------
+// Batch
+// ---------------------------------------------------------------------------
+
+/// Run a list of commands through `dispatch_single`, optionally stopping at the first
+/// failure.
+///
+/// The one loop behind both batch front ends (`chrome-agent batch` reading a JSON array from
+/// stdin, and `{"cmd":"batch","commands":[…]}` in pipe mode) — they used to keep a copy each,
+/// so `stop_on_error` would have had to be implemented, and kept in step, twice.
+///
+/// `stop_on_error` is opt-in and off by default: a batch is also used to collect independent
+/// observations, where one failure is not a reason to abandon the rest. When it is on, the
+/// response says where it stopped rather than leaving the caller to infer it from a short
+/// array.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_batch(
+    client: &CdpClient,
+    browser_client: &CdpClient,
+    store: &mut SessionStore,
+    browser_name: &str,
+    page_name: &str,
+    target_id: &str,
+    timeout: u64,
+    global_max_depth: Option<usize>,
+    report: crate::run_helpers::ReportPolicy,
+    commands_list: &[Value],
+    stop_on_error: bool,
+) -> Value {
+    let mut results = Vec::with_capacity(commands_list.len());
+    let mut stopped_at = None;
+    for (index, c) in commands_list.iter().enumerate() {
+        let r = crate::pipe_dispatch::dispatch_single(
+            client, browser_client, store, browser_name, page_name, target_id, timeout,
+            global_max_depth, report, c,
+        )
+        .await;
+        let ok = r.get("ok").and_then(Value::as_bool).unwrap_or(false);
+        results.push(r);
+        if stop_on_error && !ok {
+            stopped_at = Some(index);
+            break;
+        }
+    }
+    let all_ok = results.iter().all(|r| r.get("ok").and_then(Value::as_bool).unwrap_or(false));
+    let mut obj = json!({"ok": all_ok, "results": results});
+    if let Some(index) = stopped_at {
+        obj["stopped_at"] = json!(index);
+        obj["skipped"] = json!(commands_list.len() - index - 1);
+    }
+    obj
 }

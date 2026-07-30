@@ -4,9 +4,18 @@ use crate::BoxError;
 use crate::browser::{self, BrowserOptions};
 use crate::cdp::client::CdpClient;
 use crate::cli::{Cli, Command, DaemonAction};
-use crate::run_helpers::{ReportPolicy, check_report, cmd_close, cmd_status, cmd_stop, connect_page, get_uid_map, json_output, kill_pid, output_action, output_action_with, output_goto, resolve_page_target};
+use crate::run_helpers::{ReportPolicy, check_report, cmd_close, cmd_purge_orphans, cmd_status, cmd_stop, connect_page, get_uid_map, json_output, kill_pid, output_action, output_action_with, output_goto, resolve_page_target};
 use crate::{commands, pipe, session};
 
+/// The biggest awaited futures in this function are `Box::pin`ned before being awaited.
+///
+/// Not style: `clippy::large_stack_frames` (nursery, denied in CI) sums the sizes of every MIR
+/// local in a body, and each `.await` here contributes its callee's whole future as a separate
+/// local. One `match cli.command` with ~40 arms therefore adds up to a number no single frame
+/// ever holds — measured at 527,450 bytes against a 512,000 limit, while the real state machine
+/// for this function is 8,608 bytes (`-Zprint-type-sizes`). Boxing turns the largest of those
+/// locals into an 8-byte pointer for the cost of one allocation per process run, on paths that
+/// are about to do network I/O anyway. Un-boxing any of them re-trips the lint.
 pub async fn run(cli: Cli) -> Result<(), BoxError> {
     match cli.command {
         Command::Daemon { action } => {
@@ -34,16 +43,19 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
             return cmd_stop(cli.json).await;
         }
 
-        Command::Close { purge } => {
+        Command::Close { purge, purge_orphans } => {
+            if purge_orphans {
+                return cmd_purge_orphans(cli.json);
+            }
             return cmd_close(&cli.browser, purge, cli.json);
         }
 
         Command::Pipe => {
-            return pipe::run_pipe(&cli).await;
+            return Box::pin(pipe::run_pipe(&cli)).await;
         }
 
         Command::Replay { ref file, ref vars } => {
-            return pipe::run_replay(&cli, file, vars.as_deref()).await;
+            return Box::pin(pipe::run_replay(&cli, file, vars.as_deref())).await;
         }
 
         Command::History { ref filter, limit } => {
@@ -121,7 +133,7 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
                     proxy_server: effective_proxy.clone(),
                     copy_cookies: cli.copy_cookies,
                 };
-                let conn = browser::resolve_browser(&opts).await?;
+                let conn = Box::pin(browser::resolve_browser(&opts)).await?;
                 let client = CdpClient::connect(&conn.ws_endpoint).await?;
                 (conn, client)
             }
@@ -139,7 +151,7 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
                 proxy_server: effective_proxy.clone(),
                 copy_cookies: cli.copy_cookies,
             };
-            let conn = browser::resolve_browser(&opts).await?;
+            let conn = Box::pin(browser::resolve_browser(&opts)).await?;
             let client = CdpClient::connect(&conn.ws_endpoint).await?;
             (conn, client)
         }
@@ -163,7 +175,7 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
             proxy_server: effective_proxy.clone(),
             copy_cookies: cli.copy_cookies,
         };
-        let conn = browser::resolve_browser(&opts).await?;
+        let conn = Box::pin(browser::resolve_browser(&opts)).await?;
         let client = CdpClient::connect(&conn.ws_endpoint).await?;
         (conn, client)
     };
@@ -190,7 +202,7 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
     };
     let _ = session::save_session(&mut store);
 
-    let client = connect_page(http_endpoint, &target_id, cli.stealth).await?;
+    let client = Box::pin(connect_page(http_endpoint, &target_id, cli.stealth)).await?;
     // The caller's own answer to "how long am I willing to wait" also bounds every CDP
     // response, so a page promise that never settles fails instead of hanging forever.
     client.set_call_timeout(std::time::Duration::from_secs(cli.timeout));
@@ -198,7 +210,11 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
     client.spawn_dialog_handler(dialog_policy, cli.dialog_text.clone());
 
     let json_mode = cli.json;
-    let policy = ReportPolicy { changes: cli.verdict == "auto", budget: cli.budget };
+    let policy = ReportPolicy {
+        changes: cli.verdict == "auto",
+        budget: cli.budget,
+        on_intercept: crate::hit_test::OnIntercept::parse(&cli.on_intercept)?,
+    };
     match cli.command {
         Command::Goto { url, inspect, max_depth, wait_for, headers } => {
             let depth = max_depth.or(cli.max_depth);
@@ -211,7 +227,7 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
                 commands::wait::run(&client, "selector", selector, cli.timeout, 500).await?;
             }
             let _ = commands::history::append(&result.url, &result.title, &cli.page);
-            output_goto(&client, &mut store, &cli.browser, &cli.page, &target_id, &result.url, &result.title, inspect, depth, json_mode).await?;
+            output_goto(&client, &mut store, &cli.browser, &cli.page, &target_id, &result.url, &result.title, Some(&result.landed), inspect, depth, json_mode).await?;
         }
 
         Command::Click { uid, selector, xy, inspect, max_depth } => {
@@ -224,23 +240,29 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
                 return Err("Only one of uid, --selector, or --xy can be provided.".into());
             }
 
-            let target = crate::run_helpers::target_details(&client, selector.as_deref(), uid.as_deref()).await;
-            let msg = if let Some(ref sel) = selector {
-                crate::element::click_selector(&client, sel).await?;
-                format!("Clicked selector '{sel}'")
+            // The selector path resolves and reports its own node, from the same handle it
+            // probes and clicks; only --xy has no element to name.
+            let (msg, details) = if let Some(ref sel) = selector {
+                let outcome = crate::element::click_selector(&client, sel, policy.on_intercept).await?;
+                let target = format!("selector '{sel}'");
+                (
+                    outcome.refusal_message("click", &target).unwrap_or_else(|| format!("Clicked {target}")),
+                    Some(outcome.report()),
+                )
             } else if let Some(ref coords) = xy {
                 if coords.len() != 2 {
                     return Err("--xy requires exactly 2 values: x,y".into());
                 }
                 crate::element::click_at_coords(&client, coords[0], coords[1]).await?;
-                format!("Clicked at ({}, {})", coords[0], coords[1])
+                (format!("Clicked at ({}, {})", coords[0], coords[1]), None)
             } else {
                 let uid = uid.as_ref().unwrap();
                 let uid_map = get_uid_map(&store, &cli.browser, &cli.page);
-                commands::click::run(&client, &uid_map, uid).await?
+                let (msg, outcome) = commands::click::run(&client, &uid_map, uid, policy.on_intercept).await?;
+                (msg, Some(outcome.report()))
             };
 
-            output_action_with(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, &policy.for_action(inspect, depth), json_mode, target).await?;
+            output_action_with(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, &policy.for_action(inspect, depth), json_mode, details).await?;
         }
 
         Command::Fill { uid, selector, value, inspect, max_depth } => {
@@ -384,7 +406,10 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
                 // A navigation, so it answers like `goto`: no change report (the caller
                 // navigated on purpose, and pipe/batch never attach one), stale uids
                 // dropped, `--inspect` refills them from the destination.
-                output_goto(&client, &mut store, &cli.browser, &cli.page, &target_id, url_str, title_str, inspect, depth, json_mode).await?;
+                //
+                // No `landed`: the caller asked for the next history entry, not for a URL,
+                // so there is no requested URL to have been redirected away from.
+                output_goto(&client, &mut store, &cli.browser, &cli.page, &target_id, url_str, title_str, None, inspect, depth, json_mode).await?;
             }
         }
 
@@ -398,23 +423,29 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
                 return Err("Only one of uid, --selector, or --xy can be provided.".into());
             }
 
-            let target = crate::run_helpers::target_details(&client, selector.as_deref(), uid.as_deref()).await;
-            let msg = if let Some(ref sel) = selector {
-                crate::element::dblclick_selector(&client, sel).await?;
-                format!("Double-clicked selector '{sel}'")
+            let (msg, details) = if let Some(ref sel) = selector {
+                let outcome = crate::element::dblclick_selector(&client, sel, policy.on_intercept).await?;
+                let target = format!("selector '{sel}'");
+                (
+                    outcome
+                        .refusal_message("double-click", &target)
+                        .unwrap_or_else(|| format!("Double-clicked {target}")),
+                    Some(outcome.report()),
+                )
             } else if let Some(ref coords) = xy {
                 if coords.len() != 2 {
                     return Err("--xy requires exactly 2 values: x,y".into());
                 }
                 crate::element::dblclick_at_coords(&client, coords[0], coords[1]).await?;
-                format!("Double-clicked at ({}, {})", coords[0], coords[1])
+                (format!("Double-clicked at ({}, {})", coords[0], coords[1]), None)
             } else {
                 let uid = uid.as_ref().unwrap();
                 let uid_map = get_uid_map(&store, &cli.browser, &cli.page);
-                commands::dblclick::run(&client, &uid_map, uid).await?
+                let (msg, outcome) = commands::dblclick::run(&client, &uid_map, uid, policy.on_intercept).await?;
+                (msg, Some(outcome.report()))
             };
 
-            output_action_with(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, &policy.for_action(inspect, depth), json_mode, target).await?;
+            output_action_with(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, &policy.for_action(inspect, depth), json_mode, details).await?;
         }
 
         Command::Select { value, uid, selector, inspect, max_depth } => {
@@ -430,14 +461,14 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
             let target = crate::run_helpers::target_details(&client, selector.as_deref(), uid.as_deref()).await;
             let (msg, outcome) = if let Some(ref sel) = selector {
                 let outcome = crate::element::select_option_selector(&client, sel, &value).await?;
-                (format!("Selected \"{}\" on selector '{sel}'", outcome.text), outcome)
+                (format!("Selected \"{}\" on selector '{sel}'", outcome.label()), outcome)
             } else {
                 let uid = uid.as_ref().unwrap();
                 let uid_map = get_uid_map(&store, &cli.browser, &cli.page);
                 let outcome = commands::select::run(&client, &uid_map, uid, &value).await?;
-                (format!("Selected \"{}\" on uid={uid}", outcome.text), outcome)
+                (format!("Selected \"{}\" on uid={uid}", outcome.label()), outcome)
             };
-            let details = Some(json!({"observed_after_ms": outcome.observed_after_ms}));
+            let details = Some(crate::run_helpers::select_report(&outcome));
 
             output_action_with(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, &policy.for_action(inspect, depth), json_mode, crate::run_helpers::merge_details(target, details)).await?;
         }
@@ -453,7 +484,7 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
             } else {
                 let uid = uid.as_ref().unwrap();
                 let uid_map = get_uid_map(&store, &cli.browser, &cli.page);
-                commands::check::run(&client, &uid_map, uid, true).await?
+                commands::check::run(&client, &uid_map, uid, true, policy.on_intercept).await?
             };
             let (msg, details) = check_report(outcome);
             output_action_with(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, &policy.for_action(inspect, depth), json_mode, crate::run_helpers::merge_details(target, details)).await?;
@@ -470,7 +501,7 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
             } else {
                 let uid = uid.as_ref().unwrap();
                 let uid_map = get_uid_map(&store, &cli.browser, &cli.page);
-                commands::check::run(&client, &uid_map, uid, false).await?
+                commands::check::run(&client, &uid_map, uid, false, policy.on_intercept).await?
             };
             let (msg, details) = check_report(outcome);
             output_action_with(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, &policy.for_action(inspect, depth), json_mode, crate::run_helpers::merge_details(target, details)).await?;
@@ -689,6 +720,14 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
             }
         }
 
+        Command::Assert { ref what } => {
+            // A read, so no change report and no verdict: nothing moved. `run_cli` returns
+            // `commands::assert::NotHeld` when the claim did not hold, which `main` turns
+            // into exit 2 before its generic error path (which would say 1).
+            let uid_map = get_uid_map(&store, &cli.browser, &cli.page);
+            commands::assert::run_cli(&client, &uid_map, what, json_mode).await?;
+        }
+
         Command::Type { text, selector } => {
             if let Some(ref sel) = selector {
                 crate::element::focus_selector(&client, sel).await?;
@@ -835,7 +874,7 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
             }
         }
 
-        Command::Batch => {
+        Command::Batch { stop_on_error } => {
             let input = {
                 use std::io::Read as _;
                 let mut buf = String::new();
@@ -843,17 +882,14 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
                 buf
             };
             let cmds = commands::batch::parse_commands(&input)?;
-            let mut results = Vec::with_capacity(cmds.len());
-            for cmd in &cmds {
-                let response = crate::pipe_dispatch::dispatch_single(
-                    &client, &browser_client, &mut store,
-                    &cli.browser, &cli.page, &target_id,
-                    cli.timeout, cli.max_depth, policy, cmd,
-                ).await;
-                results.push(response);
-            }
-            let all_ok = results.iter().all(|r| r.get("ok").and_then(serde_json::Value::as_bool).unwrap_or(false));
-            json_output(&json!({"ok": all_ok, "results": results}));
+            // The same loop pipe mode's `{"cmd":"batch"}` runs, so `--stop-on-error` and
+            // `"stop_on_error"` cannot drift apart.
+            let out = crate::pipe_dispatch::run_batch(
+                &client, &browser_client, &mut store,
+                &cli.browser, &cli.page, &target_id,
+                cli.timeout, cli.max_depth, policy, &cmds, stop_on_error,
+            ).await;
+            json_output(&out);
         }
 
         // Already handled above

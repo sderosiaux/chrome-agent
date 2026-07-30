@@ -26,15 +26,22 @@ fn run_cli(args: &[&str]) -> (String, i32) {
     )
 }
 
-struct TestBrowser(&'static str);
+struct TestBrowser(String);
 impl TestBrowser {
-    const fn name(&self) -> &str {
-        self.0
+    /// Unique per process. A fixed name means two concurrent runs of this suite drive the same
+    /// browser: one navigates while the other clicks a uid from its own snapshot, and both fail
+    /// with "Node with given id does not belong to the document". CLAUDE.md documents the
+    /// hazard — `--browser <unique>` per agent — and the suites have to obey it too.
+    fn new(label: &str) -> Self {
+        Self(format!("{label}-{}", std::process::id()))
+    }
+    fn name(&self) -> &str {
+        &self.0
     }
 }
 impl Drop for TestBrowser {
     fn drop(&mut self) {
-        let _ = run_cli(&["--browser", self.0, "close", "--purge"]);
+        let _ = run_cli(&["--browser", &self.0, "close", "--purge"]);
     }
 }
 
@@ -62,7 +69,7 @@ fn eval(browser: &str, expression: &str) -> Value {
 /// a real pointer does, and what `click <uid>` already did.
 #[test]
 fn a_selector_click_lands_where_a_real_pointer_would() {
-    let b = TestBrowser("click-parity-overlay");
+    let b = TestBrowser::new("click-parity-overlay");
     if !open(b.name(), "click_overlay.html") {
         return;
     }
@@ -79,7 +86,7 @@ fn a_selector_click_lands_where_a_real_pointer_would() {
 /// The uid path is the reference behaviour. Both must agree on the same page.
 #[test]
 fn the_uid_path_and_the_selector_path_agree_on_who_receives_the_click() {
-    let b = TestBrowser("click-parity-uid");
+    let b = TestBrowser::new("click-parity-uid");
     if !open(b.name(), "click_overlay.html") {
         return;
     }
@@ -111,7 +118,7 @@ fn the_uid_path_and_the_selector_path_agree_on_who_receives_the_click() {
 /// An ordinary uncovered element must still be clicked — the point is parity, not refusal.
 #[test]
 fn an_uncovered_element_is_still_clicked_by_selector() {
-    let b = TestBrowser("click-parity-plain");
+    let b = TestBrowser::new("click-parity-plain");
     if !open(b.name(), "verdict_states.html") {
         return;
     }
@@ -127,7 +134,7 @@ fn an_uncovered_element_is_still_clicked_by_selector() {
 /// A zero-size element has no point to aim at, and must not silently do nothing.
 #[test]
 fn an_element_with_no_layout_box_still_gets_its_handler() {
-    let b = TestBrowser("click-parity-zerosize");
+    let b = TestBrowser::new("click-parity-zerosize");
     if !open(b.name(), "verdict_states.html") {
         return;
     }
@@ -149,7 +156,7 @@ fn an_element_with_no_layout_box_still_gets_its_handler() {
 /// A selector that matches nothing must still be an error, not a silent success.
 #[test]
 fn a_selector_that_matches_nothing_is_an_error() {
-    let b = TestBrowser("click-parity-missing");
+    let b = TestBrowser::new("click-parity-missing");
     if !open(b.name(), "verdict_states.html") {
         return;
     }
@@ -167,7 +174,7 @@ fn a_selector_that_matches_nothing_is_an_error() {
 /// nothing — while the command reports success.
 #[test]
 fn a_smooth_scrolling_page_still_gets_its_click() {
-    let b = TestBrowser("click-parity-smooth");
+    let b = TestBrowser::new("click-parity-smooth");
     if !open(b.name(), "smooth_scroll_click.html") {
         return;
     }

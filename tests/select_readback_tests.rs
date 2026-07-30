@@ -26,15 +26,22 @@ fn run_cli(args: &[&str]) -> (String, i32) {
     )
 }
 
-struct TestBrowser(&'static str);
+struct TestBrowser(String);
 impl TestBrowser {
-    const fn name(&self) -> &str {
-        self.0
+    /// Unique per process. A fixed name means two concurrent runs of this suite drive the same
+    /// browser: one navigates while the other clicks a uid from its own snapshot, and both fail
+    /// with "Node with given id does not belong to the document". CLAUDE.md documents the
+    /// hazard — `--browser <unique>` per agent — and the suites have to obey it too.
+    fn new(label: &str) -> Self {
+        Self(format!("{label}-{}", std::process::id()))
+    }
+    fn name(&self) -> &str {
+        &self.0
     }
 }
 impl Drop for TestBrowser {
     fn drop(&mut self) {
-        let _ = run_cli(&["--browser", self.0, "close", "--purge"]);
+        let _ = run_cli(&["--browser", &self.0, "close", "--purge"]);
     }
 }
 
@@ -54,7 +61,7 @@ fn open(browser: &str) -> bool {
 /// the wrong answer; the command must refuse, like check does when a click is rejected.
 #[test]
 fn a_reverted_selection_is_not_reported_as_selected() {
-    let b = TestBrowser("select-revert");
+    let b = TestBrowser::new("select-revert");
     if !open(b.name()) {
         return;
     }
@@ -74,7 +81,7 @@ fn a_reverted_selection_is_not_reported_as_selected() {
 /// A selection that sticks reports the window it was observed through, like fill/check.
 #[test]
 fn a_kept_selection_reports_its_observation_window() {
-    let b = TestBrowser("select-kept");
+    let b = TestBrowser::new("select-kept");
     if !open(b.name()) {
         return;
     }
@@ -96,7 +103,7 @@ fn a_kept_selection_reports_its_observation_window() {
 /// The uid path makes the same promise as the selector path.
 #[test]
 fn the_uid_path_reads_back_too() {
-    let b = TestBrowser("select-uid-revert");
+    let b = TestBrowser::new("select-uid-revert");
     if !open(b.name()) {
         return;
     }

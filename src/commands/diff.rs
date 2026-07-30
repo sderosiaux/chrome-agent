@@ -25,6 +25,29 @@ pub struct Diff {
     /// drag-and-drop reorder reads as "No changes detected": every uid and every line is
     /// still there.
     pub moved: usize,
+    /// Fields that held a value before the action and hold none after it.
+    ///
+    /// The evidence was always in the rendered text — the `value=` token simply stops
+    /// appearing after the `->`. A diff line is prose, though: an agent reading the JSON saw
+    /// `verdict:"changed"` and `ok:true` and never learnt that the field it had just filled
+    /// was empty again. `tests/fixtures/form_value_reset_on_submit.html` is the archetype: the
+    /// submit handler sets a status AND calls `form.reset()`, so both statements on the
+    /// response were true and the loss was contractually invisible.
+    pub values_lost: Vec<LostValue>,
+}
+
+/// A field that held a value before an action and holds none after it.
+///
+/// `was` is what the accessibility tree reported, which is not always what the field held: a
+/// `type=password` value arrives here already masked by Chrome. Redaction is applied by the
+/// caller, which can ask the page what kind of field it is — see `pipe_report::values_lost`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LostValue {
+    pub uid: String,
+    pub role: String,
+    /// The accessible name, when the node has one.
+    pub name: Option<String>,
+    pub was: String,
 }
 
 /// Compare two snapshot texts and produce a compact diff.
@@ -56,6 +79,7 @@ pub fn diff_snapshots(old: &str, new: &str) -> Diff {
     let mut unchanged: usize = 0;
     let mut focus_from: Option<String> = None;
     let mut focus_to: Option<String> = None;
+    let mut values_lost = Vec::new();
 
     // Removed and changed, in the order they appeared on the old page.
     for (uid, old_line) in &old_lines {
@@ -72,6 +96,9 @@ pub fn diff_snapshots(old: &str, new: &str) -> Diff {
                     }
                     unchanged += 1;
                 } else {
+                    if let Some(lost) = lost_value(uid, old_line, new_line) {
+                        values_lost.push(lost);
+                    }
                     changed.push(render_change(old_line, new_line));
                 }
             }
@@ -127,7 +154,46 @@ pub fn diff_snapshots(old: &str, new: &str) -> Diff {
         focus_to,
         anonymous,
         moved,
+        values_lost,
     }
+}
+
+/// The value a node held before the action and no longer holds, if that is what changed.
+///
+/// Only a value that went from something to nothing counts. A value that was REPLACED is not a
+/// loss — that is a mask, a normaliser or a fresh write, and the `~` line already carries both
+/// sides. A node that disappeared entirely is not one either: it is reported as `removed`,
+/// which is not silent, and the value went with a node the caller can no longer act on.
+fn lost_value(uid: &str, old_line: &str, new_line: &str) -> Option<LostValue> {
+    let old_tokens = tokenize(old_line)?;
+    let was = value_token(&old_tokens)?;
+    if was.is_empty() {
+        return None;
+    }
+    let new_tokens = tokenize(new_line)?;
+    if !value_token(&new_tokens).is_none_or(str::is_empty) {
+        return None;
+    }
+    // `uid=n11 textbox "Email" …`: role is the token after the uid, the name the quoted one
+    // after it. Both are best effort — a node with neither still reports the loss.
+    Some(LostValue {
+        uid: uid.to_string(),
+        role: old_tokens.get(1).copied().unwrap_or_default().to_string(),
+        name: old_tokens
+            .get(2)
+            .and_then(|t| t.strip_prefix('"'))
+            .and_then(|t| t.strip_suffix('"'))
+            .map(str::to_string),
+        was: was.to_string(),
+    })
+}
+
+/// The inside of a `value="…"` token, if the line has one.
+fn value_token<'a>(tokens: &[&'a str]) -> Option<&'a str> {
+    tokens
+        .iter()
+        .find_map(|t| t.strip_prefix("value=\""))
+        .and_then(|t| t.strip_suffix('"'))
 }
 
 /// `e{n}` uids come from nodes with no backendDOMNodeId and are numbered per snapshot.
@@ -206,6 +272,9 @@ pub struct Comparison {
     pub identity_known: bool,
     /// What the agent should do next, when that isn't obvious.
     pub hint: Option<&'static str>,
+    /// Fields this action emptied. Only ever populated on a real diff: across two documents
+    /// there is no "before" to have lost anything from.
+    pub values_lost: Vec<LostValue>,
 }
 
 /// Compare a stored snapshot against a fresh one, refusing to diff unless we know the
@@ -237,6 +306,7 @@ pub fn compare(identity: Identity, old_text: &str, new_text: &str) -> Comparison
             document_changed: identity == Identity::Different,
             identity_known: identity != Identity::Unknown,
             hint: Some(hint),
+            values_lost: Vec::new(),
         };
     }
 
@@ -254,6 +324,7 @@ pub fn compare(identity: Identity, old_text: &str, new_text: &str) -> Comparison
         document_changed: false,
         identity_known: true,
         hint: None,
+        values_lost: diff.values_lost,
     }
 }
 
@@ -421,6 +492,78 @@ mod tests {
         let d = diff_snapshots(old, new);
         let line = d.text.lines().next().unwrap();
         assert_eq!(line, "~ uid=n3 button \"Save\" -> uid=n3 link \"Cancel\"");
+    }
+
+    /// The S3 shape: a submit handler sets a status and calls `form.reset()`. The `~` line
+    /// carried the evidence all along — the `value=` token simply stops appearing after the
+    /// arrow — but a diff line is prose, and an agent reading JSON never saw it.
+    #[test]
+    fn a_field_this_action_emptied_is_reported_as_a_lost_value() {
+        let old = "uid=n2 textbox \"Email\" value=\"hello@example.com\" focused\nuid=n5 status \"\"\n";
+        let new = "uid=n2 textbox \"Email\" focused\nuid=n5 status \"sent\"\n";
+        let d = diff_snapshots(old, new);
+        assert_eq!(d.values_lost.len(), 1, "{}", d.text);
+        let lost = &d.values_lost[0];
+        assert_eq!(lost.uid, "n2");
+        assert_eq!(lost.role, "textbox");
+        assert_eq!(lost.name.as_deref(), Some("Email"));
+        assert_eq!(lost.was, "hello@example.com");
+    }
+
+    /// `value=""` is the same absence written differently, and every empty text input in a
+    /// snapshot has it. Treating it as a loss would fire on every form on the web.
+    #[test]
+    fn an_emptied_value_token_counts_the_same_as_a_missing_one() {
+        let old = "uid=n2 textbox \"Email\" value=\"a@b.c\"\n";
+        let new = "uid=n2 textbox \"Email\" value=\"\"\n";
+        assert_eq!(diff_snapshots(old, new).values_lost.len(), 1);
+        // And the reverse is not a loss: nothing was there to lose.
+        let d = diff_snapshots(new, old);
+        assert!(d.values_lost.is_empty(), "a field being filled is not a field being emptied");
+    }
+
+    /// A value that was REPLACED is not a value that was lost. A mask, a normaliser and a
+    /// fresh write all land here, and the `~` line already carries both sides.
+    #[test]
+    fn a_rewritten_value_is_not_a_lost_one() {
+        let old = "uid=n2 textbox \"Phone\" value=\"5551234567\"\n";
+        let new = "uid=n2 textbox \"Phone\" value=\"(555) 123-4567\"\n";
+        assert!(diff_snapshots(old, new).values_lost.is_empty());
+    }
+
+    /// A node that disappeared entirely is reported as `removed`, which is not silent, and its
+    /// value went with a node the caller can no longer act on.
+    #[test]
+    fn a_node_that_vanished_is_a_removal_not_a_lost_value() {
+        let old = "uid=n2 textbox \"Email\" value=\"a@b.c\"\n";
+        let new = "uid=n9 heading \"Thanks\"\n";
+        let d = diff_snapshots(old, new);
+        assert_eq!(d.removed, 1, "{}", d.text);
+        assert!(d.values_lost.is_empty(), "{}", d.text);
+    }
+
+    /// Across two documents there is no "before" to have lost anything from: the uids belong
+    /// to different spaces, so a pairing would be an accident.
+    #[test]
+    fn no_value_is_claimed_lost_across_a_document_change() {
+        let old = "uid=n2 textbox \"Email\" value=\"a@b.c\"\n";
+        let new = "uid=n2 heading \"Other page\"\n";
+        for identity in [Identity::Different, Identity::Unknown] {
+            assert!(compare(identity, old, new).values_lost.is_empty(), "for {identity:?}");
+        }
+    }
+
+    /// A value containing spaces survives tokenizing; a name with an unbalanced quote makes
+    /// the split ambiguous and must yield no claim rather than a mangled one.
+    #[test]
+    fn lost_values_handle_spaces_and_refuse_ambiguous_lines() {
+        let old = "uid=n2 textbox \"Address\" value=\"12 Rue de la Paix\"\n";
+        let new = "uid=n2 textbox \"Address\"\n";
+        assert_eq!(diff_snapshots(old, new).values_lost[0].was, "12 Rue de la Paix");
+
+        let old = "uid=n7 textbox \"\"odd\" value=\"x\"\n";
+        let new = "uid=n7 textbox \"\"odd\"\n";
+        assert!(diff_snapshots(old, new).values_lost.is_empty(), "no guess at token boundaries");
     }
 
     /// An identity we could not read must not be reported as "same document". uids are only

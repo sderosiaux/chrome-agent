@@ -1,0 +1,25 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Read-back kinds</title>
+</head>
+<body>
+  <!-- One page holding the three controls that read their own state back, so the verdicts
+       they report can be compared without the page being part of the difference. -->
+  <input id="text" type="text">
+
+  <select id="dropdown">
+    <option value="a" selected>Alpha</option>
+    <option value="b">Beta</option>
+  </select>
+
+  <input id="box" type="checkbox">
+  <label for="box">off to start with</label>
+
+  <!-- Already in the state `check` would ask for: nothing is dispatched, so there is no
+       read-back of our own write to report. -->
+  <input id="box_on" type="checkbox" checked>
+  <label for="box_on">on already</label>
+</body>
+</html>
