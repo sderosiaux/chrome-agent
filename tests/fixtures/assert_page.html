@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Assertable page</title></head>
+<body>
+<!-- One page holding every shape `assert` has to get right.
+
+     The disabled block is the point of the group: `el.disabled` is false for the input
+     inside a disabled <fieldset> (the ancestor is what disables it) and undefined on the
+     div, which is why the reading is `:disabled` plus `aria-disabled` and not the property.
+
+     The hidden block separates the three ways a page hides something. None of them means
+     "covered by an overlay" — that question needs a hit test, which assert does not do. -->
+<h1>Order 4815</h1>
+<p id="status">Shipped on 2026-07-29</p>
+
+<label for="state">State</label>
+<select id="state">
+  <option value="">Choose…</option>
+  <option value="CA">California</option>
+  <option value="NY">New York</option>
+</select>
+
+<label for="email">Email</label>
+<input id="email" type="email" value="ada@example.com">
+
+<label for="secret">Password</label>
+<input id="secret" type="password" value="hunter2">
+
+<button id="live">Live</button>
+<button id="dead" disabled>Dead</button>
+<fieldset disabled>
+  <input id="in_disabled_fieldset" type="text" value="x">
+</fieldset>
+<div id="aria_dead" role="button" aria-disabled="true" tabindex="0">Inert</div>
+
+<span id="shown">visible</span>
+<span id="gone" style="display:none">display none</span>
+<span id="invisible" style="visibility:hidden">visibility hidden</span>
+<span id="transparent" style="opacity:0">opacity zero</span>
+
+<ul id="rows">
+  <li class="row">a</li>
+  <li class="row">b</li>
+  <li class="row">c</li>
+</ul>
+
+<div id="editable" contenteditable="true">typed here</div>
+</body>
+</html>

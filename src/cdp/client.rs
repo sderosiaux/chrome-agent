@@ -56,6 +56,14 @@ pub struct CdpClient {
     /// error, no output and no recovery, in pipe mode for the rest of the session. Nothing
     /// was broken enough to notice: the socket stayed open and the dispatcher kept running.
     call_timeout: std::sync::Mutex<std::time::Duration>,
+    /// When the last input event went out on this connection.
+    ///
+    /// `no_effect` is only ever a claim about a window — "the page did not move for N ms
+    /// after the event" — and the two ends of that window live in different modules: the
+    /// dispatch is in `element`, the observation in the verdict wiring. Recording it here
+    /// keeps the number measured rather than assumed, without threading an `Instant` through
+    /// every dispatcher signature in all three modes.
+    last_dispatch: std::sync::Mutex<Option<std::time::Instant>>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -95,7 +103,22 @@ impl CdpClient {
             _dispatcher: dispatcher,
             frame_ctx: std::sync::Mutex::new(None),
             call_timeout: std::sync::Mutex::new(DEFAULT_CALL_TIMEOUT),
+            last_dispatch: std::sync::Mutex::new(None),
         })
+    }
+
+    /// Record that an input event has just gone out.
+    pub fn mark_dispatch(&self) {
+        if let Ok(mut slot) = self.last_dispatch.lock() {
+            *slot = Some(std::time::Instant::now());
+        }
+    }
+
+    /// How long ago the last input event went out, or `None` if none has.
+    #[must_use]
+    pub fn ms_since_dispatch(&self) -> Option<u64> {
+        let at = (*self.last_dispatch.lock().ok()?)?;
+        u64::try_from(at.elapsed().as_millis()).ok()
     }
 
     /// Return the frame context set by the `frame` command, if any.

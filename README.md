@@ -210,6 +210,34 @@ chrome-agent screenshot
 | `wait <text\|url\|selector> <pattern>` | Wait for a condition. |
 | `wait network-idle [--idle-ms N] [--timeout N]` | Wait until the network is quiet for `--idle-ms` (default 500). Beats fixed sleeps for SPA/XHR settle. |
 
+### Assertions
+
+The exit code is the answer: **0** the claim held, **2** it did not, **1** it could not be checked
+(no browser, a selector matching nothing, an unparseable regex, a CDP timeout). No other command
+returns 2, and a bad flag exits 1 — so a CI job can tell "the page is wrong" from "the tool broke".
+
+| Command | What it does |
+|---------|------------|
+| `assert value (--selector "css"\|--uid <uid>) (--equals\|--contains\|--matches) <s>` | A form control's value. Secret fields are compared but never printed. |
+| `assert text (--contains\|--matches) <s> [--selector "css"\|--uid <uid>]` | Visible text of the page, or of one element. |
+| `assert url (--equals\|--matches) <s>` | The current URL. |
+| `assert state (--selector "css"\|--uid <uid>) (--checked\|--unchecked\|--selected <opt>\|--enabled\|--disabled\|--visible)` | Checked (native or `aria-checked`), the `<select>`'s option, disabled (`:disabled` or `aria-disabled`), or rendered. |
+| `assert exists --selector "css" [--count N\|--min N]` | How many elements match. `--count 0` asserts absence. |
+
+```bash
+chrome-agent fill --selector "#coupon" "SAVE10"
+chrome-agent assert value --selector "#coupon" --equals "SAVE10"; echo $?
+# 0 if the field holds it. 2 if a mask or a controlled component rewrote it — and the
+# response then names what the page kept: {"actual":"","held":false}
+
+chrome-agent assert state --selector "#terms" --checked      # reads the same classification check/uncheck apply
+chrome-agent assert exists --selector ".result" --min 1
+```
+
+`assert` is a read: no change report, no verdict, and it never clicks. `--matches` is a Rust
+regex (`\d`/`\w`/`\s` are ASCII-only, no `\p{...}`; `(?i)` works). In `batch`/`pipe` there is no
+exit code — a failed assertion is `ok:false` with the same `assertion` object.
+
 ### Content extraction
 
 | Command | What it does |
@@ -236,6 +264,12 @@ chrome-agent screenshot
 | `pipe` | Persistent JSON stdin/stdout connection. |
 
 ## Global flags
+
+These are accepted on either side of the verb: `fill --selector "#q" x --json` works as well as
+`--json fill --selector "#q" x`. The exceptions are `--timeout` and `--max-depth`. A command that
+declares its own takes it after the verb (`wait selector ".x" --timeout 5` keeps `wait`'s 10 s
+default, not the global 30 s); everywhere else those two must come before it, and passing one
+where it is not declared is a usage error naming the invocation which works.
 
 ```
 --browser <name>         Named browser profile (default: "default")
@@ -284,12 +318,43 @@ That is the whole point: an agent loop pays for turns, not just for tokens.
 UIDs stay the same between inspects as long as the DOM node exists. After a navigation they
 are all reassigned, which is why the click above reports the page rather than a diff.
 
-Every mutating action carries a `verdict` and a `verdict_reason`, so an empty report is never
-ambiguous: `changed`, `navigated`, `unchanged` (the tree was identical in the observation
-window), `unknown` (no baseline, or the read-back failed — `verdict_hint` says what to do), and
-`not_checked` (you switched the report off). `unchanged` means the page did not change while
-the tool watched — not "the action had no effect", which it cannot know: an unchanged tree is
-also what a click swallowed by an overlay looks like.
+## What a response tells you
+
+`ok:true` means the command ran, not that the page complied. Every mutating action carries a
+`verdict`, a `verdict_reason` and a `next` — one token from a closed set of six, so an empty
+change report is never ambiguous and a caller can branch without parsing prose.
+
+| `verdict` | `verdict_reason` | `next` | What it means |
+|---|---|---|---|
+| `changed` | `tree_delta`, `nodes_moved`, `focus_only` | `proceed` | The page moved; `delta` says how. |
+| `changed` | `value_kept` | `proceed` / `inspect` | The state was confirmed by the read-back on the element itself, and the tree could not show it — a secret field renders as a fixed marker, so re-filling one leaves no delta to point at, and on a fresh session there is no tree to compare at all. `fill`, `select` and `check`/`uncheck` all reach it, through the same `value.verbatim`. The only row whose `next` is not a function of the reason alone: when the page read failed too, the verdict still stands (it is about the element) and `next` becomes `inspect` (nothing else was seen). |
+| `changed` | `values_lost` | `confirm` | It moved **and** emptied a field that held a value — `values_lost` names each one. A form that submitted and cleared itself looks identical to one that threw the input away. |
+| `navigated` | `document_replaced` | `inspect` | New document; every stored uid is dead. |
+| `intercepted` | `hit_test_receiver`, `modal_dialog` | `dismiss` | Another element occupied the point aimed at and received the event. **`intercepted_by`** names it (tag, id, class, uid, z-index, whether it is a modal). Nothing is known about the target. |
+| `not_kept` | `value_reverted`, `value_rewritten` | `stop` | The write reached the element and it does not hold it: empty on the first, rewritten by a mask or normaliser on the second. Read `value.actual`; a second fill produces the same answer. |
+| `no_effect` | `delivered_no_change` | `confirm` | Delivery **proven** by a hit test and the tree stayed still inside `observed_after_ms`. |
+| `unchanged` | `identical_tree` | `confirm` | The tree was identical while the tool watched — delivery not proven. |
+| `unknown` | `no_baseline`, `read_failed`, `identity_unreadable`, `aim_point_off_target` | `inspect` | Nothing could be compared. Never "nothing happened". |
+| `unknown` | `scroll_not_settled` | `retry` | Nothing was dispatched at all, so a repeat duplicates nothing. |
+
+Two of those rungs report that nothing was dispatched and only one asks for a retry, because what
+separates them is the shape of the miss: `scroll_not_settled` is transient (the page was still
+moving under the aim point, so the next attempt aims at a settled box and works), while
+`aim_point_off_target` is stable (the computed point does not belong to the target — a wrapped
+inline box, a clipped container, a transformed layout — so an identical retry misses identically).
+| `not_checked` | `reporting_disabled` | `proceed` | You passed `--verdict off`. |
+
+`unchanged` means the page did not change while the tool watched — not "the action had no
+effect", which it cannot know: an unchanged tree is also what a click swallowed by an overlay
+looks like. That is why mouse actions also report `delivery` (`target_hit`, `intercepted`,
+`off_target`, `not_settled`, `js`, `not_probed`) from a hit test at the coordinate about to be
+dispatched: `no_effect` is only ever emitted behind `target_hit`, and `not_settled`/`off_target`
+mean nothing was sent. `--on-intercept refuse` turns an interception into an error instead of
+sending the event anyway.
+
+Two blind spots, both stated rather than papered over: the read-back window is a fixed 60 ms
+(reported as `observed_after_ms`, so a validator firing at 400 ms is outside it — `wait` then
+`assert value`), and canvas, WebGL and CSS-only effects are invisible to the accessibility tree.
 
 `--verdict off` restores the older behaviour: the action is reported, the page is not read
 back. Faster, quieter, and you find out what happened on your next call — the response says
@@ -471,7 +536,19 @@ One JSON line per response. About 10x faster than spawning a process per command
 
 ```bash
 chrome-agent --json goto https://example.com --inspect
-# {"ok":true,"url":"...","title":"...","snapshot":"uid=n1 heading..."}
+# {"ok":true,"url":"...","title":"...","landed":{"requested":"...","final":"...","redirected":false,"http_status":200},"snapshot":"uid=n1 heading..."}
+
+# `landed` is where you aimed vs where you ended up. An expired session redirecting to a
+# login wall used to be indistinguishable from a successful load:
+chrome-agent --json goto https://app.example.com/orders
+# {"ok":true,"url":"https://app.example.com/login?next=/orders","title":"Sign in",
+#  "landed":{"requested":"https://app.example.com/orders",
+#            "final":"https://app.example.com/login?next=/orders",
+#            "redirected":true,"http_status":200},
+#  "hint":"The redirect landed on a path containing 'login', which often means the session expired. ..."}
+# A fragment-only or trailing-slash change is not a redirect. `http_status` is the final
+# hop's status (a followed 302 reports 200), read from the Navigation Timing API so
+# --stealth is untouched, and absent — never 0 — when the page reports none.
 
 chrome-agent --json eval "1+1"
 # {"ok":true,"result":2}
@@ -479,7 +556,13 @@ chrome-agent --json eval "1+1"
 # Errors exit 1 but JSON is still on stdout (parseable):
 chrome-agent --json click n99
 # {"ok":false,"error":"Element uid=n99 not found.","hint":"Run 'chrome-agent inspect'"}
+
+# An assertion that did not hold exits 2 — a page fact, not a tool failure:
+chrome-agent --json assert value --selector "#coupon" --equals "SAVE10"
+# {"ok":false,"assertion":{"kind":"value","expected":"SAVE10","actual":"","held":false},"hint":"..."}
 ```
+
+Exit codes: `0` success · `1` error (including a bad flag) · `2` an assertion did not hold · `130` Ctrl+C.
 
 ## Inspect with link URLs
 

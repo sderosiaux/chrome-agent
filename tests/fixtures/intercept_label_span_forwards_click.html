@@ -1,0 +1,21 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Label forwards a click to a hidden control</title>
+<style>
+  /* The visually-hidden checkbox pattern every design system ships. The box a person
+     sees is the SIBLING span, so elementFromPoint never returns the input. */
+  #agree { position: absolute; opacity: 0; width: 1px; height: 1px; }
+  .box { display: inline-block; width: 24px; height: 24px; border: 2px solid #333; }
+</style>
+</head>
+<body>
+  <label for="agree"><span class="box" id="painted"></span> I agree</label>
+  <input type="checkbox" id="agree" onchange="document.title = 'toggled'">
+  <script>
+    // `hit instanceof HTMLLabelElement` misses this: the hit is the SPAN.
+    // `hit.closest('label').control === target` catches it.
+  </script>
+</body>
+</html>

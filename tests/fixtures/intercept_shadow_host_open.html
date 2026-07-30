@@ -1,0 +1,24 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>Button inside an open shadow root</title></head>
+<body>
+  <my-widget></my-widget>
+  <script>
+    // Both naive escapes fail at once here: elementFromPoint on the document returns the
+    // HOST, and Node.contains does not cross the shadow boundary — so a design-system
+    // button reads as intercepted by its own host unless the descent and the containment
+    // climb are both implemented.
+    class MyWidget extends HTMLElement {
+      constructor() {
+        super();
+        const root = this.attachShadow({mode: 'open'});
+        root.innerHTML = '<button id="inner" style="width:200px;height:40px">Buy</button>';
+        root.querySelector('#inner').addEventListener('click', () => {
+          document.title = 'inner clicked';
+        });
+      }
+    }
+    customElements.define('my-widget', MyWidget);
+  </script>
+</body>
+</html>

@@ -27,15 +27,22 @@ fn run_cli(args: &[&str]) -> (String, i32) {
     )
 }
 
-struct TestBrowser(&'static str);
+struct TestBrowser(String);
 impl TestBrowser {
-    const fn name(&self) -> &str {
-        self.0
+    /// Unique per process. A fixed name means two concurrent runs of this suite drive the same
+    /// browser: one navigates while the other clicks a uid from its own snapshot, and both fail
+    /// with "Node with given id does not belong to the document". CLAUDE.md documents the
+    /// hazard — `--browser <unique>` per agent — and the suites have to obey it too.
+    fn new(label: &str) -> Self {
+        Self(format!("{label}-{}", std::process::id()))
+    }
+    fn name(&self) -> &str {
+        &self.0
     }
 }
 impl Drop for TestBrowser {
     fn drop(&mut self) {
-        let _ = run_cli(&["--browser", self.0, "close", "--purge"]);
+        let _ = run_cli(&["--browser", &self.0, "close", "--purge"]);
     }
 }
 
@@ -65,7 +72,7 @@ fn act(browser: &str, args: &[&str]) -> Value {
 /// just another unverifiable string.
 #[test]
 fn a_selector_click_names_the_node_it_resolved() {
-    let b = TestBrowser("selector-uid-click");
+    let b = TestBrowser::new("selector-uid-click");
     if !open(b.name(), "verdict_states.html") {
         return;
     }
@@ -91,7 +98,7 @@ fn a_selector_click_names_the_node_it_resolved() {
 /// The point of the field: the delta's uids and the action's target become comparable.
 #[test]
 fn the_reported_uid_can_be_matched_against_the_delta() {
-    let b = TestBrowser("selector-uid-delta");
+    let b = TestBrowser::new("selector-uid-delta");
     if !open(b.name(), "form_value_plain_input.html") {
         return;
     }
@@ -107,7 +114,7 @@ fn the_reported_uid_can_be_matched_against_the_delta() {
 
 #[test]
 fn check_by_selector_names_its_node() {
-    let b = TestBrowser("selector-uid-check");
+    let b = TestBrowser::new("selector-uid-check");
     if !open(b.name(), "checkable_kinds.html") {
         return;
     }
@@ -131,8 +138,11 @@ fn pipe_echoes_the_resolved_uid_too() {
         serde_json::json!({"cmd": "inspect"}),
         serde_json::json!({"cmd": "click", "selector": "#add"}),
     );
+    // Unique per process: a fixed name lets a second concurrent run of this suite drive the
+    // same browser and clobber this one's page.
+    let browser = format!("selector-uid-pipe-{}", std::process::id());
     let mut child = Command::new(binary())
-        .args(["--browser", "selector-uid-pipe", "pipe"])
+        .args(["--browser", &browser, "pipe"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -147,7 +157,7 @@ fn pipe_echoes_the_resolved_uid_too() {
         .rfind(|l| !l.trim().is_empty())
         .map(|l| serde_json::from_str(l).expect("JSON"))
         .expect("a click response");
-    let _ = run_cli(&["--browser", "selector-uid-pipe", "close", "--purge"]);
+    let _ = run_cli(&["--browser", &browser, "close", "--purge"]);
 
     assert!(
         last["uid"].as_str().is_some_and(|u| u.starts_with('n')),
@@ -158,7 +168,7 @@ fn pipe_echoes_the_resolved_uid_too() {
 /// Targeting by uid already names its node — the field must not contradict itself.
 #[test]
 fn a_uid_targeted_action_reports_the_uid_it_was_given() {
-    let b = TestBrowser("selector-uid-passthrough");
+    let b = TestBrowser::new("selector-uid-passthrough");
     if !open(b.name(), "verdict_states.html") {
         return;
     }
@@ -194,8 +204,11 @@ fn pipe_names_the_node_for_every_targeted_command() {
         serde_json::json!({"cmd": "select", "selector": "#plain", "value": "b"}),
         serde_json::json!({"cmd": "dblclick", "selector": "#plain"}),
     );
+    // Unique per process: a fixed name lets a second concurrent run of this suite drive the
+    // same browser and clobber this one's page.
+    let browser = format!("selector-uid-pipe-all-{}", std::process::id());
     let mut child = Command::new(binary())
-        .args(["--browser", "selector-uid-pipe-all", "pipe"])
+        .args(["--browser", &browser, "pipe"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -210,7 +223,7 @@ fn pipe_names_the_node_for_every_targeted_command() {
         .filter(|l| !l.trim().is_empty())
         .map(|l| serde_json::from_str(l).expect("JSON"))
         .collect();
-    let _ = run_cli(&["--browser", "selector-uid-pipe-all", "close", "--purge"]);
+    let _ = run_cli(&["--browser", &browser, "close", "--purge"]);
 
     assert_eq!(responses.len(), 3, "expected one response per command: {stdout}");
     for (name, response) in [("select", &responses[1]), ("dblclick", &responses[2])] {

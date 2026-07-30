@@ -1,0 +1,17 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Uncovered button with nothing wired to it</title>
+<style>#inert-btn { position: absolute; top: 60px; left: 60px; width: 200px; height: 40px; }</style>
+</head>
+<body>
+  <button id="inert-btn">Does nothing</button>
+  <p id="note">The click is delivered; the page has no reason to move.</p>
+  <script>
+    // No listener anywhere: no inline handler, no delegation, no form. The click lands, the
+    // tree stays identical, and that combination is the only thing `no_effect` may claim.
+    // Both spellings of `click` must reach the same verdict here.
+  </script>
+</body>
+</html>

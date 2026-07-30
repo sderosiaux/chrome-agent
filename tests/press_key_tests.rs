@@ -18,10 +18,22 @@ fn run_cli(args: &[&str]) -> (String, i32) {
     )
 }
 
-struct TestBrowser(&'static str);
+struct TestBrowser(String);
+impl TestBrowser {
+    /// Unique per process. A fixed name means two concurrent runs of this suite drive the same
+    /// browser: one navigates while the other clicks a uid from its own snapshot, and both fail
+    /// with "Node with given id does not belong to the document". CLAUDE.md documents the
+    /// hazard — `--browser <unique>` per agent — and the suites have to obey it too.
+    fn new(label: &str) -> Self {
+        Self(format!("{label}-{}", std::process::id()))
+    }
+    fn name(&self) -> &str {
+        &self.0
+    }
+}
 impl Drop for TestBrowser {
     fn drop(&mut self) {
-        let _ = run_cli(&["--browser", self.0, "close", "--purge"]);
+        let _ = run_cli(&["--browser", &self.0, "close", "--purge"]);
     }
 }
 
@@ -41,15 +53,15 @@ fn open_and_focus(browser: &str) -> bool {
 /// and nothing is inserted, so the command reported success and left the field empty.
 #[test]
 fn pressing_a_printable_character_types_it() {
-    let b = TestBrowser("press-char");
-    if !open_and_focus(b.0) {
+    let b = TestBrowser::new("press-char");
+    if !open_and_focus(b.name()) {
         return;
     }
     for key in ["h", "i"] {
-        let (out, code) = run_cli(&["--browser", b.0, "--verdict", "off", "--json", "press", key]);
+        let (out, code) = run_cli(&["--browser", b.name(), "--verdict", "off", "--json", "press", key]);
         assert_eq!(code, 0, "press {key} should succeed: {out}");
     }
-    let (value, _) = run_cli(&["--browser", b.0, "eval", "document.getElementById('i').value"]);
+    let (value, _) = run_cli(&["--browser", b.name(), "eval", "document.getElementById('i').value"]);
     assert_eq!(value.trim().trim_matches('"'), "hi", "the characters should have been typed");
 }
 
@@ -57,11 +69,11 @@ fn pressing_a_printable_character_types_it() {
 /// a key, and the command still reported success.
 #[test]
 fn an_unknown_key_name_is_refused_rather_than_sent_as_nothing() {
-    let b = TestBrowser("press-unknown");
-    if !open_and_focus(b.0) {
+    let b = TestBrowser::new("press-unknown");
+    if !open_and_focus(b.name()) {
         return;
     }
-    let (out, code) = run_cli(&["--browser", b.0, "--verdict", "off", "--json", "press", "Zorglub"]);
+    let (out, code) = run_cli(&["--browser", b.name(), "--verdict", "off", "--json", "press", "Zorglub"]);
     let v: Value = serde_json::from_str(&out).unwrap_or(Value::Null);
     assert_ne!(code, 0, "an unknown key should fail: {v}");
     assert!(
@@ -73,15 +85,15 @@ fn an_unknown_key_name_is_refused_rather_than_sent_as_nothing() {
 /// Navigation keys that were missing entirely used to fall into the same hole.
 #[test]
 fn navigation_keys_reach_the_page() {
-    let b = TestBrowser("press-nav");
-    if !open_and_focus(b.0) {
+    let b = TestBrowser::new("press-nav");
+    if !open_and_focus(b.name()) {
         return;
     }
     for key in ["Home", "End", "PageDown", "F5"] {
-        let (out, code) = run_cli(&["--browser", b.0, "--verdict", "off", "--json", "press", key]);
+        let (out, code) = run_cli(&["--browser", b.name(), "--verdict", "off", "--json", "press", key]);
         assert_eq!(code, 0, "press {key} should succeed: {out}");
     }
-    let (log, _) = run_cli(&["--browser", b.0, "eval", "document.getElementById('log').textContent"]);
+    let (log, _) = run_cli(&["--browser", b.name(), "eval", "document.getElementById('log').textContent"]);
     for key in ["Home", "End", "PageDown", "F5"] {
         assert!(log.contains(key), "the page should have seen {key}: {log}");
     }
@@ -92,18 +104,18 @@ fn navigation_keys_reach_the_page() {
 /// "XYZ" with the caret at 0 became "YZ", reported as success.
 #[test]
 fn punctuation_types_instead_of_deleting() {
-    let b = TestBrowser("press-punct");
-    if !open_and_focus(b.0) {
+    let b = TestBrowser::new("press-punct");
+    if !open_and_focus(b.name()) {
         return;
     }
     let (_, code) = run_cli(&[
-        "--browser", b.0, "eval",
+        "--browser", b.name(), "eval",
         "const i=document.getElementById('i'); i.value='XYZ'; i.focus(); i.setSelectionRange(0,0); 1",
     ]);
     assert_eq!(code, 0);
-    let (out, code) = run_cli(&["--browser", b.0, "--verdict", "off", "--json", "press", "."]);
+    let (out, code) = run_cli(&["--browser", b.name(), "--verdict", "off", "--json", "press", "."]);
     assert_eq!(code, 0, "{out}");
-    let (value, _) = run_cli(&["--browser", b.0, "eval", "document.getElementById('i').value"]);
+    let (value, _) = run_cli(&["--browser", b.name(), "eval", "document.getElementById('i').value"]);
     assert_eq!(
         value.trim().trim_matches('"'),
         ".XYZ",
@@ -115,15 +127,15 @@ fn punctuation_types_instead_of_deleting() {
 /// and the message was built from the request rather than from the page.
 #[test]
 fn typing_with_nothing_focused_is_refused() {
-    let b = TestBrowser("type-nofocus");
+    let b = TestBrowser::new("type-nofocus");
     if !common::browser_ready() {
         return;
     }
-    let (_, code) = run_cli(&["--browser", b.0, "goto", &common::fixture_url("press_keys.html")]);
+    let (_, code) = run_cli(&["--browser", b.name(), "goto", &common::fixture_url("press_keys.html")]);
     if code != 0 {
         return;
     }
-    let (out, code) = run_cli(&["--browser", b.0, "--verdict", "off", "--json", "type", "hello"]);
+    let (out, code) = run_cli(&["--browser", b.name(), "--verdict", "off", "--json", "type", "hello"]);
     let v: Value = serde_json::from_str(&out).unwrap_or(Value::Null);
     assert_ne!(code, 0, "typing into nothing should fail: {v}");
     assert!(

@@ -25,6 +25,21 @@ plausible detection signal reports a confident wrong answer. `form_value_phone_m
 is the sharpest: a digits-only comparison says the content was preserved, and a currency
 variant of the same mask turns `1000` into `10.00`.
 
+## `read_back_kinds.html`, `select_secret_autocomplete.html`
+
+One page holding a text input, a `<select>` and two checkboxes — the controls that read
+their own state back — so the verdicts `fill`, `select` and `check` report can be compared
+without the page being part of the difference. The already-checked box is the case that must
+NOT claim a read-back: nothing is dispatched, so there is no post-action moment.
+
+`select_secret_autocomplete.html` is deliberately contrived markup: a `<select>` declaring
+`autocomplete="new-password"` is nonsense, and it is the only way to reach
+`element::SECRET_FIELD` on a dropdown. It pins the redaction where the predicate actually
+fires, rather than leaving it to hold by luck. Its control select carries DIFFERENT option
+labels on purpose: `snapshot_secret` scrubs any node echoing a secret's value, so identical
+labels made the control come back redacted too — for a different reason, which is exactly the
+confusion a control is supposed to remove.
+
 ## `checkable_kinds.html`
 
 Native checkbox, ARIA checkbox, text input, radio. Covers the two readings of "is this

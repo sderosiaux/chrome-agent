@@ -24,15 +24,22 @@ fn run_cli(args: &[&str]) -> (String, i32) {
     )
 }
 
-struct TestBrowser(&'static str);
+struct TestBrowser(String);
 impl TestBrowser {
-    const fn name(&self) -> &str {
-        self.0
+    /// Unique per process. A fixed name means two concurrent runs of this suite drive the same
+    /// browser: one navigates while the other clicks a uid from its own snapshot, and both fail
+    /// with "Node with given id does not belong to the document". CLAUDE.md documents the
+    /// hazard — `--browser <unique>` per agent — and the suites have to obey it too.
+    fn new(label: &str) -> Self {
+        Self(format!("{label}-{}", std::process::id()))
+    }
+    fn name(&self) -> &str {
+        &self.0
     }
 }
 impl Drop for TestBrowser {
     fn drop(&mut self) {
-        let _ = run_cli(&["--browser", self.0, "close", "--purge"]);
+        let _ = run_cli(&["--browser", &self.0, "close", "--purge"]);
     }
 }
 
@@ -61,7 +68,7 @@ fn act(browser: &str, args: &[&str]) -> Value {
 
 #[test]
 fn an_action_that_moves_the_page_says_changed() {
-    let b = TestBrowser("verdict-changed");
+    let b = TestBrowser::new("verdict-changed");
     if !open_with_baseline(b.name()) {
         return;
     }
@@ -73,7 +80,7 @@ fn an_action_that_moves_the_page_says_changed() {
 /// The case the report used to answer with silence, indistinguishable from three failures.
 #[test]
 fn an_action_that_moves_nothing_says_so_instead_of_going_quiet() {
-    let b = TestBrowser("verdict-nodelta");
+    let b = TestBrowser::new("verdict-nodelta");
     if !open_with_baseline(b.name()) {
         return;
     }
@@ -94,7 +101,7 @@ fn an_action_that_moves_nothing_says_so_instead_of_going_quiet() {
 /// attribution clean). Nothing here measures that, so nothing may print it.
 #[test]
 fn an_empty_delta_never_claims_the_action_had_no_effect() {
-    let b = TestBrowser("verdict-noeffect");
+    let b = TestBrowser::new("verdict-noeffect");
     if !open_with_baseline(b.name()) {
         return;
     }
@@ -106,7 +113,7 @@ fn an_empty_delta_never_claims_the_action_had_no_effect() {
 
 #[test]
 fn an_action_that_replaces_the_document_says_navigated() {
-    let b = TestBrowser("verdict-navigated");
+    let b = TestBrowser::new("verdict-navigated");
     if !open_with_baseline(b.name()) {
         return;
     }
@@ -122,7 +129,7 @@ fn the_first_action_of_a_session_says_it_had_no_baseline() {
     if !common::browser_ready() {
         return;
     }
-    let b = TestBrowser("verdict-nobaseline");
+    let b = TestBrowser::new("verdict-nobaseline");
     let url = common::fixture_url("verdict_states.html");
     let (_, code) = run_cli(&["--browser", b.name(), "goto", &url]);
     if code != 0 {
@@ -142,7 +149,7 @@ fn the_first_action_of_a_session_says_it_had_no_baseline() {
 /// Switching the report off is a decision, not an observation, and must not look like one.
 #[test]
 fn verdict_off_says_it_did_not_look() {
-    let b = TestBrowser("verdict-off");
+    let b = TestBrowser::new("verdict-off");
     if !open_with_baseline(b.name()) {
         return;
     }
@@ -219,7 +226,7 @@ fn pipe_says_it_did_not_look_when_the_report_is_off() {
 /// Batch goes through `dispatch_single`, a third path to the same contract.
 #[test]
 fn batch_carries_the_verdict_as_well() {
-    let b = TestBrowser("verdict-batch");
+    let b = TestBrowser::new("verdict-batch");
     if !open_with_baseline(b.name()) {
         return;
     }
@@ -247,7 +254,7 @@ fn batch_carries_the_verdict_as_well() {
 /// The text mode reader is in the same position as the JSON one.
 #[test]
 fn the_text_output_carries_the_verdict_too() {
-    let b = TestBrowser("verdict-text");
+    let b = TestBrowser::new("verdict-text");
     if !open_with_baseline(b.name()) {
         return;
     }
@@ -258,6 +265,56 @@ fn the_text_output_carries_the_verdict_too() {
         stdout.contains("verdict: unchanged (identical_tree)"),
         "text mode must not be the quiet one: {stdout}"
     );
+}
+
+/// The sequence every demo and every quickstart uses, and the one where the artefact bites.
+///
+/// `goto` keeps `last_snapshot` while clearing `uid_map`, so the first action after a `goto`
+/// that followed an `inspect` compares against the PREVIOUS page and the identity rung fires.
+/// Measured before the fix: `delivery:"intercepted"` and `verdict:"navigated"` on the same
+/// response, with the interception — the only thing the caller can act on — absent from the
+/// verdict. A hit test is measured on this action's own target and does not need two trees to
+/// be comparable, so it precedes the rung that says they are not.
+#[test]
+fn an_intercepted_click_says_so_on_the_first_action_after_a_goto() {
+    if !common::browser_ready() {
+        return;
+    }
+    let b = TestBrowser::new("verdict-demo-sequence");
+    // A snapshot of a DIFFERENT page, which is what makes the identity stale below.
+    let (_, code) = run_cli(&["--browser", b.name(), "goto", &common::fixture_url("verdict_states.html")]);
+    if code != 0 {
+        common::unavailable("goto verdict_states.html failed");
+        return;
+    }
+    let (_, code) = run_cli(&["--browser", b.name(), "inspect"]);
+    assert_eq!(code, 0, "inspect should establish the baseline");
+    let (_, code) = run_cli(&["--browser", b.name(), "goto", &common::fixture_url("click_overlay.html")]);
+    assert_eq!(code, 0, "goto click_overlay.html");
+
+    let v = act(b.name(), &["click", "--selector", "#target"]);
+    assert_eq!(v["verdict"], "intercepted", "{v}");
+    assert_eq!(v["verdict_reason"], "hit_test_receiver", "{v}");
+    assert_eq!(v["intercepted_by"]["id"], "scrim", "and it names the receiver: {v}");
+    // The navigation is not hidden, it is just not the verdict: the fields stay put.
+    assert_eq!(
+        v["changed"]["document_changed"], true,
+        "the identity reading still rides on the response: {v}"
+    );
+}
+
+/// The other half of that ordering. `target_hit` is not a verdict, it is the licence for
+/// `no_effect` — a claim about a tree that stayed quiet — so on a replaced document the
+/// navigation is still the answer.
+#[test]
+fn a_click_that_navigates_still_says_navigated() {
+    let b = TestBrowser::new("verdict-nav-kept");
+    if !open_with_baseline(b.name()) {
+        return;
+    }
+    let v = act(b.name(), &["click", "--selector", "#away"]);
+    assert_eq!(v["verdict"], "navigated", "{v}");
+    assert_eq!(v["verdict_reason"], "document_replaced", "{v}");
 }
 
 /// Run a pipe script and return every JSON response.

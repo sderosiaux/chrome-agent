@@ -1,0 +1,14 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>No layout box, no hit test</title>
+</head>
+<body>
+  <button id="hidden" style="display:none" onclick="document.title = 'js clicked'">Not laid out</button>
+  <script>
+    // There is no point to aim at, so the click is synthetic. The absence of a hit test is
+    // encoded as an absence (delivery: js), never as a clean one.
+  </script>
+</body>
+</html>

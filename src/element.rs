@@ -73,49 +73,87 @@ pub struct ResolvedElement {
 
 /// Click an element by uid.
 ///
-/// Strategy: try mouse event at element center coordinates first.
-/// If no box model available (hidden, custom component, a11y reports "disabled"
-/// but DOM isn't), falls back to JS `.click()` on the element directly.
+/// The aim point comes from `hit_test::aim`, which scrolls the element into view, measures
+/// where a click on it would go, and says what sits there — one round trip, replacing the
+/// separate `scrollIntoViewIfNeeded` call and second `DOM.getBoxModel` this used to do. What
+/// the probe reports is what the response reports: a click delivered to something else is
+/// `intercepted` rather than a success indistinguishable from a real one, and an aim point
+/// still moving under a smooth scroll is refused rather than dispatched into empty space.
+///
+/// An element with no layout box still falls back to a JS `.click()`, where there is no point
+/// to aim at and no hit test to run.
 pub async fn click(
     client: &CdpClient,
     uid_map: &HashMap<String, ElementRef>,
     uid: &str,
-) -> Result<(), ElementError> {
+    on_intercept: crate::hit_test::OnIntercept,
+) -> Result<crate::hit_test::Dispatched, ElementError> {
     let resolved = resolve_uid(client, uid_map, uid).await?;
-
-    // If no box model, fallback to JS click immediately
     if resolved.center.is_none() {
-        return js_click(client, &resolved.object_id).await;
+        js_click(client, &resolved.object_id).await?;
+        return Ok(crate::hit_test::Dispatched::js().named(Some(uid.to_string()), None, None));
     }
+    let outcome = click_handle(
+        client,
+        &resolved.object_id,
+        resolved.center,
+        on_intercept,
+        &format!("uid={uid}"),
+    )
+    .await?;
+    Ok(outcome.named(Some(uid.to_string()), None, None))
+}
 
-    // Scroll element into view first
-    let _ = client
-        .call::<_, serde_json::Value>(
-            "Runtime.callFunctionOn",
-            json!({
-                "objectId": resolved.object_id,
-                "functionDeclaration": "function() { this.scrollIntoViewIfNeeded(); }",
-                "returnByValue": true,
-            }),
-        )
-        .await;
+/// Aim at a resolved handle and single-click it. Shared by the uid and the selector paths, so
+/// the two spellings of `click` cannot drift apart again.
+///
+/// `fallback_center` is the box model's centre, used only when the probe itself could not run.
+pub async fn click_handle(
+    client: &CdpClient,
+    object_id: &str,
+    fallback_center: Option<(f64, f64)>,
+    on_intercept: crate::hit_test::OnIntercept,
+    target: &str,
+) -> Result<crate::hit_test::Dispatched, ElementError> {
+    use crate::hit_test::{Aim, Dispatched};
+    use crate::verdict::Delivery;
 
-    // Re-fetch box model after scroll
-    let box_result: Result<GetBoxModelResult, _> = client
-        .call(
-            "DOM.getBoxModel",
-            json!({ "backendNodeId": resolved.backend_node_id }),
-        )
-        .await;
-
-    let Some((cx, cy)) = box_result.ok().map(|r| r.model.content_center()) else {
-        // Box model disappeared after scroll — fallback to JS click
-        return js_click(client, &resolved.object_id).await;
+    let (point, delivery, receiver) = match crate::hit_test::aim(client, object_id).await {
+        Aim::NoBox => {
+            js_click(client, object_id).await?;
+            return Ok(Dispatched::js());
+        }
+        Aim::Unprobed => {
+            let Some(center) = fallback_center else {
+                js_click(client, object_id).await?;
+                return Ok(Dispatched::js());
+            };
+            (center, Delivery::NotProbed, None)
+        }
+        Aim::At { point, delivery, receiver } => (point, delivery, receiver),
     };
 
+    if matches!(delivery, Delivery::NotSettled | Delivery::OffTarget) {
+        return Ok(Dispatched::skipped(delivery, point, None));
+    }
+    if delivery == Delivery::Intercepted && on_intercept == crate::hit_test::OnIntercept::Refuse {
+        let refused = Dispatched::skipped(delivery, point, receiver);
+        return Err(ElementError::NotInteractable(
+            refused
+                .refusal_message("click", target)
+                .unwrap_or_else(|| format!("Refused to click {target}")),
+        ));
+    }
+
+    dispatch_click_at(client, point.0, point.1).await?;
+    Ok(Dispatched::landed(delivery, point, receiver))
+}
+
+/// The two mouse events of a single click, at coordinates somebody else decided on.
+async fn dispatch_click_at(client: &CdpClient, cx: f64, cy: f64) -> Result<(), ElementError> {
     // Subscribe BEFORE dispatching so a fast navigation isn't missed.
     let nav_events = client.events();
-    // mousePressed
+    client.mark_dispatch();
     client
         .send("Input.dispatchMouseEvent", DispatchMouseEventParams {
             event_type: MouseEventType::MousePressed,
@@ -127,7 +165,6 @@ pub async fn click(
         .await
         .map_err(|e| ElementError::Action(format!("mousePressed failed: {e}")))?;
 
-    // mouseReleased
     client
         .send("Input.dispatchMouseEvent", DispatchMouseEventParams {
             event_type: MouseEventType::MouseReleased,
@@ -144,8 +181,9 @@ pub async fn click(
 }
 
 /// Fallback: click an element via JS `.click()` when mouse events can't be dispatched.
-async fn js_click(client: &CdpClient, object_id: &str) -> Result<(), ElementError> {
+pub async fn js_click(client: &CdpClient, object_id: &str) -> Result<(), ElementError> {
     let nav_events = client.events();
+    client.mark_dispatch();
     let result: serde_json::Value = client
         .call(
             "Runtime.callFunctionOn",
@@ -231,6 +269,20 @@ impl FillOutcome {
     }
 }
 
+/// Whether a field holds something that must never be printed, as a JS expression over `el`.
+///
+/// One reader, four callers: `fill` by uid and by selector, `assert value`, and the
+/// `values_lost` report. The predicate decides whether a value reaches stdout, an agent
+/// transcript and any `--record` file, so four copies of it that agree today is four chances
+/// for one of them to be widened alone — the same reason `CHECKABLE_PROBE` and `SELECT_READ`
+/// are shared between their action and their assertion.
+///
+/// `type=password` is masked by Chrome in the accessibility tree as well; the `autocomplete`
+/// half is not, so a one-time code or a card number in a `type=text` field is only redacted
+/// because this predicate names it.
+pub const SECRET_FIELD: &str =
+    r"(el.type === 'password' || /password|cc-number|cc-csc|one-time-code/i.test(el.autocomplete || ''))";
+
 /// How long a read-back waits before looking at what the page kept.
 ///
 /// The three read-back paths used to disagree: `fill` read synchronously (0ms), so a value
@@ -282,12 +334,12 @@ pub async fn fill(
                     resolve({
                         value: el.value === undefined ? null : String(el.value),
                         maxLength: typeof el.maxLength === 'number' ? el.maxLength : null,
-                        sensitive: el.type === 'password' ||
-                            /password|cc-number|cc-csc|one-time-code/i.test(el.autocomplete || '')
+                        sensitive: SECRET_EXPR
                     });
                 }, WINDOW_MS);
             });
-        }".replace("WINDOW_MS", &READ_BACK_MS.to_string());
+        }".replace("WINDOW_MS", &READ_BACK_MS.to_string())
+        .replace("SECRET_EXPR", SECRET_FIELD);
 
     let nav_events = client.events();
     let result: serde_json::Value = client
@@ -539,46 +591,22 @@ pub enum ElementError {
 }
 
 /// Click at explicit (x, y) coordinates using Input.dispatchMouseEvent.
+///
+/// No hit test: `--xy` names no element, so there is nothing for a receiver to differ from.
+/// Only "received by X" could be reported, never an interception.
 pub async fn click_at_coords(
     client: &CdpClient,
     x: f64,
     y: f64,
 ) -> Result<(), ElementError> {
-    // Subscribe BEFORE dispatching so a fast navigation isn't missed.
-    let nav_events = client.events();
-    // mousePressed
-    client
-        .send("Input.dispatchMouseEvent", DispatchMouseEventParams {
-            event_type: MouseEventType::MousePressed,
-            x, y,
-            button: Some(MouseButton::Left), buttons: Some(1), click_count: Some(1),
-            modifiers: None, timestamp: None, delta_x: None, delta_y: None,
-            pointer_type: Some("mouse".into()),
-        })
-        .await
-        .map_err(|e| ElementError::Action(format!("mousePressed failed: {e}")))?;
-
-    // mouseReleased
-    client
-        .send("Input.dispatchMouseEvent", DispatchMouseEventParams {
-            event_type: MouseEventType::MouseReleased,
-            x, y,
-            button: Some(MouseButton::Left), buttons: Some(0), click_count: Some(1),
-            modifiers: None, timestamp: None, delta_x: None, delta_y: None,
-            pointer_type: Some("mouse".into()),
-        })
-        .await
-        .map_err(|e| ElementError::Action(format!("mouseReleased failed: {e}")))?;
-
-    wait_for_stabilization(nav_events).await;
-    Ok(())
+    dispatch_click_at(client, x, y).await
 }
 
 // Selector-based actions (click/dblclick/fill/focus) live in `element_selector`
 // to keep this file under the 1000-line module cap; re-exported here so callers
 // keep using `crate::element::*`.
 pub use crate::element_selector::{
-    click_selector, dblclick_selector, fill_selector, focus_selector, selector_uid,
+    click_selector, dblclick_selector, fill_selector, focus_selector,
 };
 // Split out for the 1000-line file cap; callers keep using `element::*`.
 pub use crate::element_controls::{
@@ -590,70 +618,75 @@ pub use crate::element_controls::{
 // Double-click
 // ---------------------------------------------------------------------------
 
-/// Double-click an element by uid.
+/// Double-click an element by uid. Aimed by the same probe as `click` — a double-click that
+/// lands on a scrim is the same false success twice over.
 pub async fn dblclick(
     client: &CdpClient,
     uid_map: &HashMap<String, ElementRef>,
     uid: &str,
-) -> Result<(), ElementError> {
+    on_intercept: crate::hit_test::OnIntercept,
+) -> Result<crate::hit_test::Dispatched, ElementError> {
     let resolved = resolve_uid(client, uid_map, uid).await?;
-
     if resolved.center.is_none() {
-        return js_dblclick(client, &resolved.object_id).await;
+        js_dblclick(client, &resolved.object_id).await?;
+        return Ok(crate::hit_test::Dispatched::js().named(Some(uid.to_string()), None, None));
     }
-
-    let _ = client
-        .call::<_, serde_json::Value>(
-            "Runtime.callFunctionOn",
-            json!({
-                "objectId": resolved.object_id,
-                "functionDeclaration": "function() { this.scrollIntoViewIfNeeded(); }",
-                "returnByValue": true,
-            }),
-        )
-        .await;
-
-    let box_result: Result<GetBoxModelResult, _> = client
-        .call("DOM.getBoxModel", json!({ "backendNodeId": resolved.backend_node_id }))
-        .await;
-
-    let Some((cx, cy)) = box_result.ok().map(|r| r.model.content_center()) else {
-        return js_dblclick(client, &resolved.object_id).await;
-    };
-
-    let nav_events = client.events();
-    for click_count in [1, 2] {
-        client
-            .send("Input.dispatchMouseEvent", DispatchMouseEventParams {
-                event_type: MouseEventType::MousePressed,
-                x: cx, y: cy,
-                button: Some(MouseButton::Left), buttons: Some(1),
-                click_count: Some(click_count),
-                modifiers: None, timestamp: None, delta_x: None, delta_y: None,
-                pointer_type: Some("mouse".into()),
-            })
-            .await
-            .map_err(|e| ElementError::Action(format!("mousePressed failed: {e}")))?;
-
-        client
-            .send("Input.dispatchMouseEvent", DispatchMouseEventParams {
-                event_type: MouseEventType::MouseReleased,
-                x: cx, y: cy,
-                button: Some(MouseButton::Left), buttons: Some(0),
-                click_count: Some(click_count),
-                modifiers: None, timestamp: None, delta_x: None, delta_y: None,
-                pointer_type: Some("mouse".into()),
-            })
-            .await
-            .map_err(|e| ElementError::Action(format!("mouseReleased failed: {e}")))?;
-    }
-
-    wait_for_stabilization(nav_events).await;
-    Ok(())
+    let outcome = dblclick_handle(
+        client,
+        &resolved.object_id,
+        resolved.center,
+        on_intercept,
+        &format!("uid={uid}"),
+    )
+    .await?;
+    Ok(outcome.named(Some(uid.to_string()), None, None))
 }
 
-async fn js_dblclick(client: &CdpClient, object_id: &str) -> Result<(), ElementError> {
+/// Aim at a resolved handle and double-click it. Mirrors `click_handle`.
+pub async fn dblclick_handle(
+    client: &CdpClient,
+    object_id: &str,
+    fallback_center: Option<(f64, f64)>,
+    on_intercept: crate::hit_test::OnIntercept,
+    target: &str,
+) -> Result<crate::hit_test::Dispatched, ElementError> {
+    use crate::hit_test::{Aim, Dispatched};
+    use crate::verdict::Delivery;
+
+    let (point, delivery, receiver) = match crate::hit_test::aim(client, object_id).await {
+        Aim::NoBox => {
+            js_dblclick(client, object_id).await?;
+            return Ok(Dispatched::js());
+        }
+        Aim::Unprobed => {
+            let Some(center) = fallback_center else {
+                js_dblclick(client, object_id).await?;
+                return Ok(Dispatched::js());
+            };
+            (center, Delivery::NotProbed, None)
+        }
+        Aim::At { point, delivery, receiver } => (point, delivery, receiver),
+    };
+
+    if matches!(delivery, Delivery::NotSettled | Delivery::OffTarget) {
+        return Ok(Dispatched::skipped(delivery, point, None));
+    }
+    if delivery == Delivery::Intercepted && on_intercept == crate::hit_test::OnIntercept::Refuse {
+        let refused = Dispatched::skipped(delivery, point, receiver);
+        return Err(ElementError::NotInteractable(
+            refused
+                .refusal_message("double-click", target)
+                .unwrap_or_else(|| format!("Refused to double-click {target}")),
+        ));
+    }
+
+    dblclick_at_coords(client, point.0, point.1).await?;
+    Ok(Dispatched::landed(delivery, point, receiver))
+}
+
+pub async fn js_dblclick(client: &CdpClient, object_id: &str) -> Result<(), ElementError> {
     let nav_events = client.events();
+    client.mark_dispatch();
     client
         .call::<_, serde_json::Value>(
             "Runtime.callFunctionOn",
@@ -673,6 +706,7 @@ async fn js_dblclick(client: &CdpClient, object_id: &str) -> Result<(), ElementE
 /// Double-click at coordinates.
 pub async fn dblclick_at_coords(client: &CdpClient, x: f64, y: f64) -> Result<(), ElementError> {
     let nav_events = client.events();
+    client.mark_dispatch();
     for click_count in [1, 2] {
         client
             .send("Input.dispatchMouseEvent", DispatchMouseEventParams {

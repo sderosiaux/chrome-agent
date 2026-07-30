@@ -115,8 +115,11 @@ fn an_unwritable_record_path_is_reported_not_swallowed() {
         "{}\n",
         serde_json::json!({"cmd": "goto", "url": url, "_record": bad.to_string_lossy()})
     );
+    // Unique per process: a fixed name lets a second concurrent run of this suite drive the
+    // same browser and clobber this one's page.
+    let browser = format!("record-unwritable-{}", std::process::id());
     let mut child = Command::new(binary())
-        .args(["--browser", "record-unwritable", "pipe"])
+        .args(["--browser", &browser, "pipe"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -129,11 +132,11 @@ fn an_unwritable_record_path_is_reported_not_swallowed() {
 
     // The browser stays up here on purpose: the next check reads the page it is showing.
     let output = Command::new(binary())
-        .args(["--browser", "record-unwritable", "--json", "eval", "location.href"])
+        .args(["--browser", &browser, "--json", "eval", "location.href"])
         .output()
         .expect("read the page location");
     let location = String::from_utf8_lossy(&output.stdout).to_string();
-    let _ = run_cli(&["--browser", "record-unwritable", "close", "--purge"]);
+    let _ = run_cli(&["--browser", &browser, "close", "--purge"]);
 
     assert!(
         stdout.contains("recording"),

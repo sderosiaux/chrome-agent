@@ -5,6 +5,68 @@ LLM USAGE GUIDE:
   navigation, or when the change report says document_changed.
   Headless by default. Add --stealth for bot-protected sites. Use --json for structured output.
 
+  Reading an action's response (ok:true means the command ran, NOT that the page complied):
+    Branch on "next" — one token, closed set of six. Not on the verdict word.
+    verdict     reason                next      what to do
+    changed     tree_delta            proceed   the page moved; delta says how
+    changed     nodes_moved           proceed   same nodes, reordered
+    changed     focus_only            proceed   only focus moved: the sole sign it arrived
+    changed     value_kept            proceed   the element held it when read back; no delta could
+                                                show it (a secret renders as a marker, and a first
+                                                action has no tree to compare). fill, select and
+                                                check all reach this row, via value.verbatim.
+                                                One exception to this table's one-next-per-reason
+                                                shape: if the PAGE read failed, the same verdict
+                                                answers next=inspect — the field is confirmed, the
+                                                page around it was never seen. Branch on "next".
+    changed     values_lost           confirm   moved AND emptied a filled field; values_lost names them
+    navigated   document_replaced     inspect   new document, every stored uid is dead
+    intercepted hit_test_receiver     dismiss   intercepted_by got the event; target unknown
+    intercepted modal_dialog          dismiss   a modal owns the top layer; Escape it first
+    not_kept    value_reverted        stop      element held NOTHING; read value.actual, do not re-fill
+    not_kept    value_rewritten       stop      element holds something else (mask/normaliser)
+    no_effect   delivered_no_change   confirm   delivery PROVEN + tree still in observed_after_ms
+    unchanged   identical_tree        confirm   identical tree, delivery not proven
+    unknown     no_baseline           inspect   nothing to compare against yet
+    unknown     read_failed           inspect   the action ran, the read after it failed
+    unknown     identity_unreadable   inspect   the two trees may be different documents
+    unknown     aim_point_off_target  inspect   nothing dispatched, and the miss is STABLE
+    unknown     scroll_not_settled    retry     nothing dispatched, and the miss is TRANSIENT
+    not_checked reporting_disabled    proceed   you passed --verdict off
+    # unknown = could not compare, never "nothing happened". scroll_not_settled is the ONE
+    # unknown that licenses a repeat, and "next" is where that shows.
+    # Both dispatch nothing, so neither can double an action -- but only the transient one can
+    # succeed on a repeat: scroll_not_settled means the page was still moving, so the animation
+    # ends and the next attempt aims at a settled box. aim_point_off_target means the computed
+    # point does not belong to the target (wrapped inline box, clipped container, transformed
+    # layout), so an identical retry misses identically -- look at the page instead.
+    # verdict_reason is the machine token; verdict_hint names the next command in words.
+
+  "delivery" on a mouse action (click, dblclick, the check/uncheck click) — a hit test at the
+  coordinate about to be dispatched, and the only thing that licenses the two strong words:
+    target_hit   aimed at the target/descendant/label's control/shadow host — licenses no_effect
+    intercepted  aimed at an element outside the target's subtree -> intercepted_by names it
+    off_target   no point inside the element's own rects: NOTHING WAS DISPATCHED, but the miss
+                 is stable, so a repeat misses the same way -> inspect
+    not_settled  still moving or off-viewport: NOTHING WAS DISPATCHED and the miss is transient,
+                 so repeating is safe AND is the fix -> retry
+    js           went through a JS click()/MouseEvent: no hit test, licenses nothing
+    not_probed   no hit test, or its answer misses the document that matters (iframe target):
+                 absence of evidence, licenses NO conclusion
+    # --on-intercept refuse errors instead of dispatching; default dispatch sends it anyway
+    # (what a pointer does) and names the receiver in intercepted_by.
+    # Two blind spots no retry can fix: the read-back window is a fixed 60ms (a validator at
+    # 400ms is outside it -- use wait + assert value), and canvas/WebGL/CSS-only effects are
+    # invisible to the a11y tree (use screenshot or eval, never a second click).
+
+  Flag position: the flags on the top-level command (--json, --browser, --verdict, --budget,
+  --stealth, --on-intercept, --page, --dialog ...) are accepted on either side of the verb, so
+  `fill --selector "#q" x --json` works as well as `--json fill --selector "#q" x`. Two are the
+  exception: --timeout and --max-depth. A command that declares its own takes it after the verb
+  (`wait selector ".x" --timeout 5`, `click n1 --max-depth 2`); everywhere else those two must
+  come BEFORE it. Passing one where it is not declared is an exit-1 usage error that names the
+  invocation which works.
+
   Quick start:
     chrome-agent goto https://example.com --inspect
     chrome-agent click n12                         # reports what changed; no second call needed
@@ -69,6 +131,33 @@ LLM USAGE GUIDE:
     # Only works with <iframe>, not legacy <frame>/<frameset>.
     # Always re-inspect after switching — UIDs are scoped to the frame.
 
+  Assertions (the exit code IS the answer: 0 held, 2 did not hold, 1 could not be checked):
+    chrome-agent assert value --selector "#email" --equals "ada@example.com"
+    chrome-agent assert value --uid n20 --contains "@"
+    chrome-agent assert text --contains "Order shipped"           # whole-page text
+    chrome-agent assert text --selector "#status" --matches "Shipped on \d{4}"
+    chrome-agent assert url --matches "/orders/\d+$"
+    chrome-agent assert url --equals "https://shop.example.com/cart"
+    chrome-agent assert state --selector "#terms" --checked        # native OR aria-checked
+    chrome-agent assert state --uid n15 --selected "California"    # dropdown's current option
+    chrome-agent assert state --selector "#submit" --enabled       # or --disabled
+    chrome-agent assert state --selector ".modal" --visible        # rendered, opaque, not hidden
+    chrome-agent assert exists --selector ".result" --count 10     # exactly 10
+    chrome-agent assert exists --selector ".result" --min 1        # at least 1
+    chrome-agent assert exists --selector ".error" --count 0       # assert absence
+    # 2 means the page is not in that state. 1 means nothing was compared: no browser, a
+    # selector that matches nothing, an unparseable regex, a CDP timeout. Retry on 1;
+    # report or repair on 2. Every other command still exits 0 or 1 only.
+    # assert reads the page: no change report, no verdict, and it never clicks anything.
+    # --checked reads the same classification check/uncheck apply; --selected the same
+    # reading select uses. An assertion cannot disagree with the action.
+    # --matches is a Rust regex: \d \w \s are ASCII-only, no \p or lookaround. Use
+    # "(?i)" for case-insensitive. --contains is a plain substring, case-sensitive.
+    # Secret fields (password, cc-number, cc-csc, one-time-code) are compared but the
+    # value is never printed: the response says redacted with both lengths.
+    # In pipe/batch there is no exit code: {"cmd":"assert","what":"value","selector":"#a",
+    # "equals":"x"} answers ok:false with the same assertion object.
+
   Inspection + filtering:
     chrome-agent inspect                               # full accessibility tree
     chrome-agent inspect --max-depth 2                 # limit depth (saves tokens)
@@ -104,6 +193,9 @@ LLM USAGE GUIDE:
 
   Batch mode (execute multiple commands at once):
     echo '[{"cmd":"goto","url":"https://example.com"},{"cmd":"inspect"},{"cmd":"click","uid":"n12"}]' | chrome-agent batch
+    chrome-agent batch --stop-on-error                  # stop at the first ok:false (default: run all)
+    # With --stop-on-error the response adds stopped_at (index) and skipped (count).
+    # In pipe mode: {"cmd":"batch","stop_on_error":true,"commands":[...]}
     # Returns one JSON line per command. Faster than separate CLI calls.
     # UIDs from inspect are valid for subsequent commands in the same batch.
     # After goto in a batch, UIDs change — use the ones from the next inspect.
@@ -114,6 +206,12 @@ LLM USAGE GUIDE:
 
   Navigation:
     chrome-agent goto https://example.com              # navigate
+    # goto also returns "landed": {"requested","final","redirected","http_status"}.
+    # Check "redirected" before trusting the page — an expired session bouncing to a
+    # login wall otherwise reads as a successful load. Fragment-only and trailing-slash
+    # differences are not redirects. "http_status" is the final hop's status as the
+    # browser reports it, and is absent (never 0) when it reports none. A redirect onto /login, /signin,
+    # /auth or /sso adds a "hint": a guess from the URL, so inspect to confirm.
     chrome-agent goto https://spa.com --wait-for "main" # wait for selector after nav
     chrome-agent goto https://api.co --header "Authorization: Bearer XYZ"  # extra HTTP headers (repeatable)
     chrome-agent back                                  # history back
@@ -151,6 +249,10 @@ LLM USAGE GUIDE:
     chrome-agent --json goto https://example.com
     -> {"ok":true,"url":"...","title":"..."}
     Errors: {"ok":false,"error":"...","hint":"..."} (exit 1, JSON still on stdout)
+    Exit codes: 0 success · 1 error (also a bad flag) · 2 an assertion did not hold · 130 Ctrl+C
+    A failed assertion: {"ok":false,"assertion":{"kind":"value","expected":"x","actual":"",
+    "held":false},"hint":"..."} on stdout with exit 2. Without --json the line goes to
+    stderr and stdout stays empty, so a shell pipeline reads the exit code alone.
 
   More commands:
     chrome-agent hover n30                             # hover over element
@@ -178,15 +280,30 @@ LLM USAGE GUIDE:
       full inspect and ~8,730 for the raw HTML.
     - Prefer inspect over screenshot: a screenshot gives you no uids to act on, so you end up
       paying for the image and then inspecting anyway.
-    - Actions report changes by default. `changed.document_changed: true` means the page
-      navigated and every previous uid is dead -- inspect before acting again. `added`/
-      `removed`/`changed` of 0 means the action had no visible effect on the page.
+    - Actions report changes by default, and `verdict`/`next` interpret those counts for you --
+      see the response table at the top of this guide. `added`/`removed`/`changed` of 0 does
+      NOT mean the action had no effect: an overlay that swallowed the click, an effect the
+      a11y tree cannot see, and a handler that ran after the window all look exactly like it.
+      Never retry on `unchanged` or `unknown` without checking first: the action may have
+      landed and a repeat is a second real action.
+    - Read `value.verbatim` after every fill, select and check before you report it worked --
+      all three read the element back and report it in that same field -- and read `uid`
+      on every targeted action -- it names the node actually resolved, even when you aimed
+      with --selector, so you can check the delta describes the element you meant.
     - --budget N caps that change report (default 1200 chars); --verdict off turns it off
       entirely and restores the older, faster, quieter behaviour.
     - A full inspect is not cheap on a real page (~5,650 tokens on the HN front page). Narrow
       it with --filter or --max-depth when you only need the interactive elements
       (--filter button,link on that same page is ~1,735).
     - Use --urls on inspect to get link destinations before deciding which to click.
+    - A submit that reports `values_lost` cleared a field you had filled. That is what a form
+      does after a successful send AND what a form does when it throws the input away -- the
+      tool cannot tell those apart. Confirm with `assert text --contains` on the page's own
+      confirmation, or `network`, before re-filling: a re-submit may send the work twice.
+    - After a fill/select/check whose report looks wrong, `assert` is the cheap confirmation:
+      it re-reads one thing instead of the whole tree, and exit 2 names what the page holds.
+      A page that reverts a value later than the 60ms read-back window (a validator at 400ms)
+      is caught by `wait` + `assert value`, which no single action can do.
     - check/uncheck are idempotent — prefer over click for checkboxes.
     - select matches by option value first, then by visible text.
     - After `frame <selector>`, re-inspect to get iframe UIDs. `frame main` to return.

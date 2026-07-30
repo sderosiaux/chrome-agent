@@ -56,7 +56,7 @@ fn run_pipe(browser: &str, commands: &[Value]) -> Vec<Value> {
 /// Close the browser session (best-effort cleanup).
 fn close(browser: &str) {
     let _ = Command::new(binary())
-        .args(["--browser", browser, "close"])
+        .args(["--browser", browser, "close", "--purge"])
         .output();
 }
 

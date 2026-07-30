@@ -24,6 +24,11 @@ libc = "0.2"
 # Dropping the default rustls feature removes ring/rustls (C-ish deps) → pure-Rust
 # graph → fully static musl builds with zero glibc dependency. See release.yml.
 ureq = { version = "3", default-features = false }
+# `assert --matches` needs a regex engine. regex-lite over regex: zero transitive
+# dependencies (the musl graph stays pure Rust, see release.yml) and none of the ~1 MB of
+# Unicode tables, for a comparator that runs once per assertion. The cost is documented in
+# llm-guide.txt: \d \w \s are ASCII-only and there is no \p{…}.
+regex-lite = "0.1.9"
 
 [lints.rust]
 unsafe_code = "deny"

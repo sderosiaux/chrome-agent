@@ -1,2 +1,14 @@
 target/
 node_modules/
+
+# bench working files: inputs to a replay and un-archived outputs, not evidence.
+# Archived runs live under bench/results/<date>/ and are committed.
+bench/stagehand/act-cache/
+bench/stagehand/control-cache/
+bench/stagehand/raw-*.json
+bench/stagehand/stagehand-results.json
+bench/stagehand/package-lock.json
+bench/stagehand/pnpm-lock.yaml
+
+# Bench runs are reproducible, not archived
+bench/results/

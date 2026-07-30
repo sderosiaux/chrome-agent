@@ -7,7 +7,7 @@ use crate::browser::{self, BrowserOptions};
 use crate::cdp::client::CdpClient;
 use crate::commands;
 use crate::pipe_dispatch::{
-    dispatch_back, dispatch_batch, dispatch_check, dispatch_click,
+    dispatch_assert, dispatch_back, dispatch_batch, dispatch_check, dispatch_click,
     dispatch_console, dispatch_dblclick, dispatch_diff, dispatch_download, dispatch_drag,
     dispatch_eval, dispatch_extract, dispatch_fill, dispatch_fill_and_submit,
     dispatch_fill_form, dispatch_forward, dispatch_frame, dispatch_goto,
@@ -76,6 +76,7 @@ pub async fn run_pipe(cli: &Cli) -> Result<(), crate::BoxError> {
     }
     let dialog_policy = crate::setup::DialogPolicy::parse(&cli.dialog)?;
     client.spawn_dialog_handler(dialog_policy, cli.dialog_text.clone());
+    let policy = report_policy(cli)?;
 
     // Main loop: read JSON commands from stdin
     let stdin = BufReader::new(tokio::io::stdin());
@@ -103,7 +104,7 @@ pub async fn run_pipe(cli: &Cli) -> Result<(), crate::BoxError> {
         let mut response = dispatch(
             &client, &browser_client, &mut store,
             &cli.browser, &cli.page, &target_id, cli.timeout, cli.max_depth,
-            crate::run_helpers::ReportPolicy { changes: cli.verdict == "auto", budget: cli.budget },
+            policy,
             &cmd,
         ).await;
 
@@ -172,6 +173,7 @@ pub async fn run_replay(
     else { client.enable("Runtime").await?; }
     let dialog_policy = crate::setup::DialogPolicy::parse(&cli.dialog)?;
     client.spawn_dialog_handler(dialog_policy, cli.dialog_text.clone());
+    let policy = report_policy(cli)?;
 
     for line in content.lines() {
         let line = line.trim();
@@ -191,7 +193,7 @@ pub async fn run_replay(
         let response = dispatch(
             &client, &browser_client, &mut store,
             &cli.browser, &cli.page, &target_id, cli.timeout, cli.max_depth,
-            crate::run_helpers::ReportPolicy { changes: cli.verdict == "auto", budget: cli.budget },
+            policy,
             &cmd,
         ).await;
 
@@ -234,7 +236,7 @@ async fn dispatch(
     let mut value = {
     let result: Result<Value, crate::BoxError> = match cmd_name {
         "goto" => dispatch_goto(client, store, browser_name, page_name, target_id, timeout, global_max_depth, cmd).await,
-        "click" => dispatch_click(client, store, browser_name, page_name, target_id, global_max_depth, cmd).await,
+        "click" => dispatch_click(client, store, browser_name, page_name, target_id, global_max_depth, report, cmd).await,
         "fill" => dispatch_fill(client, store, browser_name, page_name, target_id, global_max_depth, cmd).await,
         "inspect" => dispatch_inspect(client, store, browser_name, page_name, target_id, cmd).await,
         "eval" => dispatch_eval(client, cmd).await,
@@ -250,15 +252,15 @@ async fn dispatch(
         "type" => dispatch_type(client, cmd).await,
         "press" => dispatch_press(client, cmd).await,
         "fill-form" | "fill_form" | "fillform" => dispatch_fill_form(client, store, browser_name, page_name, target_id, global_max_depth, cmd).await,
-        "dblclick" => dispatch_dblclick(client, store, browser_name, page_name, target_id, global_max_depth, cmd).await,
+        "dblclick" => dispatch_dblclick(client, store, browser_name, page_name, target_id, global_max_depth, report, cmd).await,
         "select" => dispatch_select(client, store, browser_name, page_name, target_id, global_max_depth, cmd).await,
-        "check" => dispatch_check(client, store, browser_name, page_name, cmd).await,
+        "check" => dispatch_check(client, store, browser_name, page_name, report, cmd).await,
         "uncheck" => {
             let mut cmd_with_desired = cmd.clone();
             if let Some(m) = cmd_with_desired.as_object_mut() {
                 m.insert("desired".into(), Value::Bool(false));
             }
-            dispatch_check(client, store, browser_name, page_name, &cmd_with_desired).await
+            dispatch_check(client, store, browser_name, page_name, report, &cmd_with_desired).await
         }
         "upload" => dispatch_upload(client, store, browser_name, page_name, cmd).await,
         "drag" => dispatch_drag(client, store, browser_name, page_name, cmd).await,
@@ -272,6 +274,7 @@ async fn dispatch(
         "fill_and_submit" | "fill-and-submit" => dispatch_fill_and_submit(client, timeout, cmd).await,
         "history" => dispatch_history(cmd),
         "frame" => dispatch_frame(client, cmd).await,
+        "assert" => dispatch_assert(client, store, browser_name, page_name, cmd).await,
         "batch" => dispatch_batch(client, browser_client, store, browser_name, page_name, target_id, timeout, global_max_depth, report, cmd).await,
         "" => Err("Missing \"cmd\" field".into()),
         other => Err(format!("Unknown command: {other}").into()),
@@ -284,7 +287,7 @@ async fn dispatch(
         Err(e) => {
             let msg = e.to_string();
             let mut obj = json!({"ok": false, "error": msg});
-            if let Some(h) = error_hint(&msg) { obj["hint"] = json!(h); }
+            if let Some(h) = error_hint(&msg, browser_name) { obj["hint"] = json!(h); }
             return obj;
         }
     }
@@ -292,9 +295,12 @@ async fn dispatch(
     // `--verdict off` is a decision, not an observation. Saying so costs two fields and no
     // page read, and it is the difference between "I did not look" and "nothing moved".
     if !report.changes && crate::pipe_dispatch::mutates_page(cmd_name) {
-        crate::run_helpers::attach_verdict(
+        // The hit test still ran: it is part of aiming the action, not part of the report.
+        // An intercepted click says so even here, where the page was never re-read.
+        crate::pipe_report::attach_verdict_for(
+            client,
             &mut value,
-            crate::verdict::classify(crate::verdict::Observation::ReportingDisabled),
+            crate::verdict::Observation::ReportingDisabled,
         );
     }
     if let Some((old_text, old_url)) = baseline {
@@ -310,6 +316,15 @@ async fn dispatch(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// The global reporting flags, parsed once for the session rather than per command.
+fn report_policy(cli: &Cli) -> Result<crate::run_helpers::ReportPolicy, crate::BoxError> {
+    Ok(crate::run_helpers::ReportPolicy {
+        changes: cli.verdict == "auto",
+        budget: cli.budget,
+        on_intercept: crate::hit_test::OnIntercept::parse(&cli.on_intercept)?,
+    })
+}
 
 fn emit(value: &Value) {
     let line = serde_json::to_string(value).unwrap_or_default();

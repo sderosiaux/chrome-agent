@@ -14,14 +14,54 @@ fn parse_positive_usize(value: &str) -> Result<usize, String> {
 const CLI_LONG_ABOUT: &str = "\
 chrome-agent — browser automation for AI agents. Controls Chrome via CDP.\n\
 Single binary, zero runtime dependencies. Named pages persist between invocations.\n\
+\n\
+Reading a response: ok:true means the command ran, not that the page complied.\n\
+Read `verdict` (and `value.verbatim` after a fill) before reporting success; branch on\n\
+`next` — never repeat an action on `unknown`, because the first one may have landed.\n\
+\n\
 Use --stealth to bypass bot detection (Cloudflare, Turnstile).\n\
 Use --copy-cookies to access sites where you're already logged in (X.com, Gmail).\n\
 \n\
-Workflow: inspect → read uids → act (click/fill) → inspect again.\n\
+Workflow: inspect → read uids → act (click/fill) → assert.\n\
 Use --inspect on action commands to combine action + observation in one call.";
 
 const CLI_AFTER_LONG_HELP: &str = include_str!("../llm-guide.txt");
 
+/// The flags that must still precede the verb, and why each one could not be `global = true`.
+///
+/// Every other flag on `Cli` is global, so it parses on either side of the subcommand. These two
+/// are redeclared by some commands with their own meaning and their own defaults — `--timeout` by
+/// `wait` (10 s) and `download` (30 s), `--max-depth` by the twelve action commands that take
+/// `--inspect`. A global arg propagates into EVERY subcommand, so sharing an id with one of them
+/// is a duplicate-argument panic at startup, not a parse error. Unifying them would mean giving
+/// `wait` the global 30 s default, which is a real regression: every `wait` that gives up after
+/// 10 s today would hang three times longer. A correct default is worth more than a parsing
+/// convenience.
+///
+/// So the position rule stays, and `hints::flag_position_hint` makes the failure teach it. The
+/// second element is the clause that explains this flag specifically; the harm was never the
+/// rule, it was clap's `tip: to pass '--timeout' as a value, use '-- --timeout'` — advice for a
+/// different problem entirely, on the caller's first attempt.
+pub const BEFORE_VERB_ONLY: &[(&str, &str)] = &[
+    (
+        "--timeout",
+        "`wait` and `download` declare their own --timeout with different defaults, so this one \
+         is not global",
+    ),
+    (
+        "--max-depth",
+        "the action commands declare their own --max-depth for `--inspect`, so this one is not \
+         global",
+    ),
+];
+
+/// Every flag on this struct except the two in [`BEFORE_VERB_ONLY`] is `global = true`, so it
+/// parses on either side of the subcommand.
+///
+/// `chrome-agent fill --selector "#micro" "x" --json` used to fail with a raw clap error and the
+/// tip "to pass '--json' as a value, use '-- --json'" — advice for a different problem, on the
+/// most natural way to reach for the flag. Requiring a global flag to precede the verb is the
+/// opposite of the reflex a shell teaches, and the failure lands on the caller's FIRST attempt.
 #[derive(Parser)]
 #[command(
     name = "chrome-agent",
@@ -33,19 +73,19 @@ const CLI_AFTER_LONG_HELP: &str = include_str!("../llm-guide.txt");
 #[allow(clippy::struct_excessive_bools)]
 pub struct Cli {
     /// Named browser profile (default: "default")
-    #[arg(long, default_value = "default")]
+    #[arg(long, default_value = "default", global = true)]
     pub browser: String,
 
     /// Connect to existing browser: ws:// URL, http:// URL, or "auto"
-    #[arg(long)]
+    #[arg(long, global = true)]
     pub connect: Option<String>,
 
     /// Proxy server for a managed browser: http(s)://host:port or socks4/5://host:port
-    #[arg(long)]
+    #[arg(long, global = true)]
     pub proxy_server: Option<String>,
 
     /// Launch browser with a visible window (default is headless)
-    #[arg(long)]
+    #[arg(long, global = true)]
     pub headed: bool,
 
     /// Global timeout in seconds for page loads
@@ -53,15 +93,15 @@ pub struct Cli {
     pub timeout: u64,
 
     /// Ignore HTTPS certificate errors
-    #[arg(long)]
+    #[arg(long, global = true)]
     pub ignore_https_errors: bool,
 
     /// Output structured JSON instead of text
-    #[arg(long)]
+    #[arg(long, global = true)]
     pub json: bool,
 
     /// Stealth mode: 7 anti-detection patches (webdriver, UA, WebGL, input leak, Runtime.enable skipped)
-    #[arg(long)]
+    #[arg(long, global = true)]
     pub stealth: bool,
 
     /// Max depth for --inspect output (used by goto, click, fill, etc.)
@@ -71,27 +111,34 @@ pub struct Cli {
     /// What an action command reports after it runs.
     /// `auto` (default) appends what changed on the page. `off` restores the older,
     /// faster behaviour: the action is reported, the page is not re-read.
-    #[arg(long, default_value = "auto", value_parser = ["auto", "off"])]
+    #[arg(long, default_value = "auto", value_parser = ["auto", "off"], global = true)]
     pub verdict: String,
 
     /// Character budget for the change report on an action. 0 removes the cap.
-    #[arg(long, default_value = "1200")]
+    #[arg(long, default_value = "1200", global = true)]
     pub budget: usize,
 
+    /// What a click/double-click does when the hit test says another element occupies the
+    /// point it was aimed at. `dispatch` (default) sends it anyway — what a pointer does —
+    /// and names the receiver in `intercepted_by`. `refuse` returns an error and dispatches
+    /// nothing.
+    #[arg(long, default_value = "dispatch", value_parser = ["dispatch", "refuse"], global = true)]
+    pub on_intercept: String,
+
     /// Copy cookies from your real Chrome profile (uses your logged-in sessions)
-    #[arg(long)]
+    #[arg(long, global = true)]
     pub copy_cookies: bool,
 
     /// Named page/tab within the browser (default: "default")
-    #[arg(long, default_value = "default")]
+    #[arg(long, default_value = "default", global = true)]
     pub page: String,
 
     /// How to answer JS dialogs (alert/confirm/prompt/beforeunload): accept, dismiss, or manual
-    #[arg(long, default_value = "accept")]
+    #[arg(long, default_value = "accept", global = true)]
     pub dialog: String,
 
     /// Text to submit for `prompt()` dialogs when --dialog accept (default: empty)
-    #[arg(long)]
+    #[arg(long, global = true)]
     pub dialog_text: Option<String>,
 
     #[command(subcommand)]
@@ -100,7 +147,7 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Command {
-    /// Navigate to a URL
+    /// Navigate to a URL — reports `landed` (where you aimed vs where you ended up, and any redirect)
     #[command(alias = "navigate", alias = "open", alias = "go")]
     Goto {
         /// Target URL
@@ -119,7 +166,7 @@ pub enum Command {
         headers: Vec<String>,
     },
 
-    /// Click an element by uid, CSS selector, or coordinates
+    /// Click an element (uid, CSS, or x,y) — the response says whether it landed and who received the event
     #[command(alias = "tap")]
     Click {
         /// Element uid (e.g. "n47") — omit if using --selector or --xy
@@ -138,7 +185,7 @@ pub enum Command {
         max_depth: Option<usize>,
     },
 
-    /// Fill an input element by uid or CSS selector
+    /// Fill an input (uid or CSS) — the response reports what the page actually kept, in `value`
     Fill {
         /// Value to fill
         value: String,
@@ -156,7 +203,7 @@ pub enum Command {
         max_depth: Option<usize>,
     },
 
-    /// Fill multiple form fields at once
+    /// Fill multiple form fields at once — one kept-value report per field, not just a count
     #[command(name = "fill-form")]
     FillForm {
         /// uid=value pairs (e.g. "e5=hello" "e7=world")
@@ -204,7 +251,7 @@ pub enum Command {
         max_depth: Option<usize>,
     },
 
-    /// Double-click an element by uid, CSS selector, or coordinates
+    /// Double-click an element (uid, CSS, or x,y) — hit-tested, so an interception is named, not silent
     Dblclick {
         /// Element uid
         uid: Option<String>,
@@ -222,7 +269,7 @@ pub enum Command {
         max_depth: Option<usize>,
     },
 
-    /// Select a dropdown option by value or visible text
+    /// Select a dropdown option by value or visible text — refuses if the page reverts the selection
     Select {
         /// Value or visible text to select
         value: String,
@@ -240,7 +287,7 @@ pub enum Command {
         max_depth: Option<usize>,
     },
 
-    /// Ensure a checkbox/radio is checked (idempotent)
+    /// Ensure a checkbox/radio is checked — idempotent, state read back, refuses what it cannot classify
     Check {
         /// Element uid
         uid: Option<String>,
@@ -255,7 +302,7 @@ pub enum Command {
         max_depth: Option<usize>,
     },
 
-    /// Ensure a checkbox/radio is unchecked (idempotent)
+    /// Ensure a checkbox/radio is unchecked — idempotent, state read back, unchecking a radio is refused
     Uncheck {
         /// Element uid
         uid: Option<String>,
@@ -270,7 +317,7 @@ pub enum Command {
         max_depth: Option<usize>,
     },
 
-    /// Upload file(s) to a file input element
+    /// Upload file(s) to a file input — paths are validated before the page is touched
     Upload {
         /// File path(s) to upload
         files: Vec<String>,
@@ -436,6 +483,18 @@ pub enum Command {
         idle_ms: u64,
     },
 
+    /// Prove a claim about the page — exit 0 held (the only quotable evidence), 2 did not hold, 1 not checked
+    ///
+    /// The exit code is the answer, and it distinguishes three outcomes the rest of this
+    /// binary collapses into two: 0 the claim held when we looked, 2 it did not (the page
+    /// is not in the asserted state), 1 it could not be checked at all — no browser, a
+    /// selector that matches nothing, an invalid regex, a CDP timeout. A CI job or a recipe
+    /// runner needs 2 and 1 apart: the first is a fact to report, the second a retry.
+    Assert {
+        #[command(subcommand)]
+        what: AssertWhat,
+    },
+
     /// Type text into the focused element (or focus a selector first)
     Type {
         /// Text to type
@@ -528,7 +587,11 @@ pub enum Command {
     },
 
     /// Execute multiple commands from a JSON array on stdin
-    Batch,
+    Batch {
+        /// Stop at the first command that fails (default: run every command)
+        #[arg(long)]
+        stop_on_error: bool,
+    },
 
     /// Persistent connection mode — read JSON commands from stdin (one per line)
     Pipe,
@@ -541,6 +604,10 @@ pub enum Command {
         /// Also delete the browser profile (cookies, cache, data)
         #[arg(long)]
         purge: bool,
+        /// Delete every profile no session references, no browser holds, and nothing has
+        /// touched for a day. The save path removes one per command; this sweeps the backlog.
+        #[arg(long)]
+        purge_orphans: bool,
     },
 
     /// Show session status
@@ -560,6 +627,109 @@ pub enum Command {
 pub enum DaemonAction {
     /// Start the daemon (foreground, used internally)
     Start,
+}
+
+/// What `assert` can be asked about the page.
+///
+/// One subcommand per kind of claim rather than a pile of flags on `assert`: the comparators
+/// that make sense differ per kind (a URL is equal or matches a pattern; a page's text is
+/// contained or matches), and clap's arg groups can then enforce "exactly one comparator"
+/// and "exactly one state" instead of the dispatcher discovering it at run time.
+#[derive(Subcommand)]
+pub enum AssertWhat {
+    /// A form control's value (input, textarea, select)
+    #[command(group = clap::ArgGroup::new("value_cmp").required(true).args(["equals", "contains", "matches"]))]
+    #[command(group = clap::ArgGroup::new("value_target").required(true).args(["selector", "uid"]))]
+    Value {
+        /// CSS selector of the control
+        #[arg(long)]
+        selector: Option<String>,
+        /// Element uid of the control (e.g. "n47")
+        #[arg(long)]
+        uid: Option<String>,
+        /// The value the control must hold, exactly
+        #[arg(long)]
+        equals: Option<String>,
+        /// A substring the value must contain
+        #[arg(long)]
+        contains: Option<String>,
+        /// A regular expression the value must match (Rust regex; \d \w \s are ASCII-only)
+        #[arg(long)]
+        matches: Option<String>,
+    },
+
+    /// Visible text — of the whole page, or of one element with --selector/--uid
+    #[command(group = clap::ArgGroup::new("text_cmp").required(true).args(["contains", "matches"]))]
+    #[command(group = clap::ArgGroup::new("text_target").args(["selector", "uid"]))]
+    Text {
+        /// CSS selector to scope the text to (default: the whole page)
+        #[arg(long)]
+        selector: Option<String>,
+        /// Element uid to scope the text to
+        #[arg(long)]
+        uid: Option<String>,
+        /// A substring the text must contain
+        #[arg(long)]
+        contains: Option<String>,
+        /// A regular expression the text must match
+        #[arg(long)]
+        matches: Option<String>,
+    },
+
+    /// The current URL
+    #[command(group = clap::ArgGroup::new("url_cmp").required(true).args(["equals", "matches"]))]
+    Url {
+        /// The URL the page must be on, exactly
+        #[arg(long)]
+        equals: Option<String>,
+        /// A regular expression the URL must match
+        #[arg(long)]
+        matches: Option<String>,
+    },
+
+    /// An element's state: checked, selected, enabled or rendered
+    #[command(group = clap::ArgGroup::new("state_want").required(true).args(["checked", "unchecked", "selected", "enabled", "disabled", "visible"]))]
+    #[command(group = clap::ArgGroup::new("state_target").required(true).args(["selector", "uid"]))]
+    State {
+        /// CSS selector of the element
+        #[arg(long)]
+        selector: Option<String>,
+        /// Element uid of the element
+        #[arg(long)]
+        uid: Option<String>,
+        /// The checkbox/radio (native or ARIA) must be checked
+        #[arg(long)]
+        checked: bool,
+        /// The checkbox/radio must be unchecked (indeterminate satisfies neither)
+        #[arg(long)]
+        unchecked: bool,
+        /// The <select> must hold this option (by value or visible text)
+        #[arg(long)]
+        selected: Option<String>,
+        /// The control must not be disabled (neither :disabled nor aria-disabled)
+        #[arg(long)]
+        enabled: bool,
+        /// The control must be disabled (:disabled or aria-disabled)
+        #[arg(long)]
+        disabled: bool,
+        /// The element must be rendered, opaque and not visibility:hidden
+        #[arg(long)]
+        visible: bool,
+    },
+
+    /// How many elements a CSS selector matches
+    #[command(group = clap::ArgGroup::new("exists_count").args(["count", "min"]))]
+    Exists {
+        /// CSS selector to count
+        #[arg(long)]
+        selector: String,
+        /// Exactly this many matches (0 asserts absence)
+        #[arg(long)]
+        count: Option<usize>,
+        /// At least this many matches
+        #[arg(long)]
+        min: Option<usize>,
+    },
 }
 
 #[cfg(test)]
@@ -601,6 +771,49 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    /// The arg groups are the validation: a claim with two comparators, or none, is not a
+    /// claim, and clap must refuse it before a browser is opened.
+    #[test]
+    fn assert_requires_exactly_one_comparator_and_one_target() {
+        let ok = |args: &[&str]| {
+            Cli::try_parse_from(std::iter::once("chrome-agent").chain(args.iter().copied()))
+        };
+        assert!(ok(&["assert", "value", "--selector", "#a", "--equals", "x"]).is_ok());
+        assert!(ok(&["assert", "value", "--uid", "n1", "--contains", "x"]).is_ok());
+        // Two comparators, or none.
+        assert!(ok(&["assert", "value", "--selector", "#a", "--equals", "x", "--contains", "y"]).is_err());
+        assert!(ok(&["assert", "value", "--selector", "#a"]).is_err());
+        // Two targets, or none.
+        assert!(ok(&["assert", "value", "--selector", "#a", "--uid", "n1", "--equals", "x"]).is_err());
+        assert!(ok(&["assert", "value", "--equals", "x"]).is_err());
+        // `text` needs no target (the whole page) but still needs a comparator, and
+        // `--equals` is not one of its options at all.
+        assert!(ok(&["assert", "text", "--contains", "x"]).is_ok());
+        assert!(ok(&["assert", "text"]).is_err());
+        assert!(ok(&["assert", "text", "--equals", "x"]).is_err());
+        // Exactly one state, and a target for it.
+        assert!(ok(&["assert", "state", "--selector", "#a", "--checked"]).is_ok());
+        assert!(ok(&["assert", "state", "--selector", "#a", "--checked", "--unchecked"]).is_err());
+        assert!(ok(&["assert", "state", "--selector", "#a"]).is_err());
+        assert!(ok(&["assert", "state", "--checked"]).is_err());
+        // exists: selector required, count and min mutually exclusive but both optional.
+        assert!(ok(&["assert", "exists", "--selector", ".row"]).is_ok());
+        assert!(ok(&["assert", "exists", "--selector", ".row", "--count", "3"]).is_ok());
+        assert!(ok(&["assert", "exists", "--selector", ".row", "--count", "3", "--min", "1"]).is_err());
+        assert!(ok(&["assert", "exists", "--count", "3"]).is_err());
+        // url takes no target at all.
+        assert!(ok(&["assert", "url", "--equals", "https://a/"]).is_ok());
+        assert!(ok(&["assert", "url", "--selector", "#a", "--equals", "x"]).is_err());
+    }
+
+    #[test]
+    fn batch_stop_on_error_is_off_by_default() {
+        let default = Cli::try_parse_from(["chrome-agent", "batch"]).unwrap();
+        let explicit = Cli::try_parse_from(["chrome-agent", "batch", "--stop-on-error"]).unwrap();
+        assert!(matches!(default.command, Command::Batch { stop_on_error: false }));
+        assert!(matches!(explicit.command, Command::Batch { stop_on_error: true }));
     }
 
     #[test]

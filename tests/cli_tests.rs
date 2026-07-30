@@ -50,6 +50,7 @@ fn help_shows_all_subcommands() {
     assert!(stdout.contains("status"));
     assert!(stdout.contains("stop"));
     assert!(stdout.contains("daemon"));
+    assert!(stdout.contains("assert"));
 }
 
 #[test]
@@ -72,6 +73,125 @@ fn help_shows_global_flags() {
     assert!(stdout.contains("--timeout"));
     assert!(stdout.contains("--ignore-https-errors"));
     assert!(stdout.contains("--page"));
+}
+
+/// A global flag parses on either side of the subcommand.
+///
+/// `chrome-agent fill --selector "#micro" "x" --json` used to fail with a raw clap error and the
+/// tip "to pass '--json' as a value, use '-- --json'" — advice for a different problem, on the
+/// most natural way to reach for the flag, and on the caller's first attempt. `CHROME_AGENT_PARSE_ONLY`
+/// returns the moment clap has spoken, so this is clap's verdict and no browser is launched.
+#[test]
+fn a_global_flag_is_accepted_on_either_side_of_the_verb() {
+    let parses = |args: &[&str]| {
+        let output = Command::new(binary())
+            .args(args)
+            .env("CHROME_AGENT_PARSE_ONLY", "1")
+            .output()
+            .expect("run chrome-agent");
+        (
+            output.status.success(),
+            String::from_utf8_lossy(&output.stderr).lines().next().unwrap_or("").to_string(),
+        )
+    };
+    let cases: &[(&[&str], &[&str])] = &[
+        (&["--json", "fill", "--selector", "#micro", "x"], &["fill", "--selector", "#micro", "x", "--json"]),
+        (&["--json", "click", "n1"], &["click", "n1", "--json"]),
+        (&["--json", "inspect"], &["inspect", "--json"]),
+        (&["--verdict", "off", "click", "n1"], &["click", "n1", "--verdict", "off"]),
+        (&["--browser", "a7", "eval", "1"], &["eval", "1", "--browser", "a7"]),
+    ];
+    for (before, after) in cases {
+        let (ok, err) = parses(before);
+        assert!(ok, "the documented order stopped working: {before:?} -> {err}");
+        let (ok, err) = parses(after);
+        assert!(ok, "a global flag after the verb must parse: {after:?} -> {err}");
+    }
+}
+
+/// The two flags that cannot be global, and why: `wait`/`download` declare their own
+/// `--timeout`, and the twelve action commands their own `--max-depth`. A global arg propagates
+/// into every subcommand, so sharing an id with one is a duplicate-argument panic at startup.
+/// Both positions still parse, each meaning its own thing, and `run.rs` resolves them with
+/// `local.or(global)`.
+#[test]
+fn the_two_locally_redeclared_flags_still_work_in_both_positions() {
+    for args in [
+        vec!["wait", "selector", ".x", "--timeout", "5"],
+        vec!["--timeout", "5", "click", "n1"],
+        vec!["click", "n1", "--max-depth", "2"],
+        vec!["--max-depth", "2", "click", "n1"],
+    ] {
+        let output = Command::new(binary())
+            .args(&args)
+            .env("CHROME_AGENT_PARSE_ONLY", "1")
+            .output()
+            .expect("run chrome-agent");
+        assert!(
+            output.status.success(),
+            "{args:?} -> {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+/// The two flags that must precede the verb now say so, in the caller's own words.
+///
+/// `chrome-agent click n1 --timeout 5` is rejected on purpose — `wait` and `download` declare
+/// their own `--timeout` with their own defaults, so the global one cannot propagate into every
+/// subcommand. The harm was never the rule; it was clap's answer to it, `tip: to pass
+/// '--timeout' as a value, use '-- --timeout'`, which is advice for escaping a literal string
+/// nobody meant to pass.
+#[test]
+fn a_flag_that_must_precede_the_verb_says_so_instead_of_offering_to_escape_it() {
+    for (args, flag, moved) in [
+        (vec!["click", "n1", "--timeout", "5"], "--timeout", "chrome-agent --timeout 5 click n1"),
+        (vec!["text", "--max-depth", "2"], "--max-depth", "chrome-agent --max-depth 2 text"),
+    ] {
+        let (_, stderr, code) = run_cli(&args);
+        assert_eq!(code, 1, "{args:?} should still be a usage error: {stderr}");
+        assert!(
+            stderr.contains(&format!("hint: {flag} is read before the verb")),
+            "{args:?} did not state the rule: {stderr}"
+        );
+        assert!(
+            stderr.contains(&format!("`{moved}`")),
+            "{args:?} did not name the working invocation: {stderr}"
+        );
+        assert!(
+            !stderr.contains(&format!("-- {flag}")),
+            "clap's escape-it tip is back for {args:?}: {stderr}"
+        );
+        assert!(
+            !stderr.contains("as a value"),
+            "clap's escape-it tip is back for {args:?}: {stderr}"
+        );
+
+        // The strongest form of the hint contract: the command it hands back has to run. A hint
+        // that names an invocation the parser also rejects is worse than no hint.
+        let suggested: Vec<&str> = moved.split_whitespace().skip(1).collect();
+        let output = Command::new(binary())
+            .args(&suggested)
+            .env("CHROME_AGENT_PARSE_ONLY", "1")
+            .output()
+            .expect("run chrome-agent");
+        assert!(
+            output.status.success(),
+            "the hint for {args:?} names an invocation that does not parse: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+/// And an unrelated usage error keeps clap's own wording, tip included: this rewrite covers the
+/// one error clap gets wrong, not its output in general.
+#[test]
+fn an_unrelated_usage_error_is_left_to_clap() {
+    let (_, stderr, code) = run_cli(&["click", "n1", "--nonsense"]);
+    assert_eq!(code, 1);
+    assert!(stderr.contains("unexpected argument '--nonsense'"), "{stderr}");
+    assert!(stderr.contains("-- --nonsense"), "clap's tip should survive here: {stderr}");
+    assert!(!stderr.contains("read before the verb"), "{stderr}");
 }
 
 #[test]
@@ -111,7 +231,11 @@ fn goto_subcommand_help() {
 fn click_subcommand_help() {
     let (stdout, _, code) = run_cli(&["click", "--help"]);
     assert_eq!(code, 0);
-    assert!(stdout.contains("Click an element by uid"));
+    assert!(stdout.contains("Click an element"));
+    // The one-liner is what a token-conscious agent reads instead of the 26 KB `--help`, so it
+    // has to carry the guarantee: a click that reports success may still have been taken by
+    // something stacked above the target, and the response is where that shows.
+    assert!(stdout.contains("who received the event"), "{stdout}");
     assert!(stdout.contains("--inspect"));
 }
 
@@ -142,20 +266,24 @@ fn eval_subcommand_help() {
 // These are guarded by a check for Chrome availability.
 
 /// RAII guard: closes browser on drop (even on panic).
-struct TestBrowser(&'static str);
+struct TestBrowser(String);
 
 impl TestBrowser {
-    const fn new(name: &'static str) -> Self {
-        Self(name)
+    /// Unique per process. A fixed name means two concurrent runs of this suite drive the same
+    /// browser: one navigates while the other clicks a uid from its own snapshot, and both fail
+    /// with "Node with given id does not belong to the document". CLAUDE.md documents the
+    /// hazard — `--browser <unique>` per agent — and the suites have to obey it too.
+    fn new(label: &str) -> Self {
+        Self(format!("{label}-{}", std::process::id()))
     }
-    const fn name(&self) -> &str {
-        self.0
+    fn name(&self) -> &str {
+        &self.0
     }
 }
 
 impl Drop for TestBrowser {
     fn drop(&mut self) {
-        let _ = run_cli(&["--browser", self.0, "close"]);
+        let _ = run_cli(&["--browser", &self.0, "close", "--purge"]);
     }
 }
 
