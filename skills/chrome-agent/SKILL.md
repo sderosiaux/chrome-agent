@@ -213,6 +213,7 @@ chrome-agent download <url> [--out path] [--max-bytes N]        # in-page fetch,
 
 chrome-agent tabs
 chrome-agent close [--purge]
+chrome-agent close --orphans                                     # close browsers no session claims
 ```
 
 ## Global flags

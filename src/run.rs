@@ -43,9 +43,18 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
             return cmd_stop(cli.json).await;
         }
 
-        Command::Close { purge, purge_orphans } => {
+        Command::Close { purge, purge_orphans, orphans } => {
+            // Processes before profiles: a profile whose browser is still running is not
+            // removable, so sweeping the disk first would skip exactly the directories
+            // this pair is meant to reclaim.
+            if orphans {
+                crate::orphans::cmd_close_orphans(cli.json)?;
+            }
             if purge_orphans {
                 return cmd_purge_orphans(cli.json);
+            }
+            if orphans {
+                return Ok(());
             }
             return cmd_close(&cli.browser, purge, cli.json);
         }

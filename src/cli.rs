@@ -608,6 +608,10 @@ pub enum Command {
         /// touched for a day. The save path removes one per command; this sweeps the backlog.
         #[arg(long)]
         purge_orphans: bool,
+        /// Close every running browser no session entry claims. Processes only — the
+        /// profiles they leave behind are what --purge-orphans sweeps.
+        #[arg(long)]
+        orphans: bool,
     },
 
     /// Show session status

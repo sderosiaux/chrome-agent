@@ -174,6 +174,7 @@ chrome-agent screenshot
 | `back` | History back. |
 | `forward` | History forward. |
 | `close [--purge]` | Stop browser. `--purge` deletes cookies/profile. |
+| `close --orphans` | Close every running browser no session entry claims. `status` lists them; the profiles they leave are what `--purge-orphans` sweeps. |
 
 ### Inspection
 

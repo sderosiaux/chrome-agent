@@ -7,6 +7,11 @@ use crate::commands;
 use crate::element_ref::ElementRef;
 use crate::session::{self, BrowserSession, SessionStore};
 
+// Split for the 1000-line cap. Re-exported so `kill_pid` keeps one import path across
+// `run.rs`, `main.rs` and `orphans.rs` — three call sites that must not drift onto two
+// different kill paths, which is how the pid-reuse guard came to be bypassed once already.
+pub use crate::kill::{KillOutcome, close_message, kill_pid};
+
 /// Connect to a page-level CDP endpoint with retry. Sets up Page domain,
 /// console interceptor, and optionally Runtime domain + stealth patches.
 pub async fn connect_page(
@@ -512,6 +517,10 @@ pub async fn resolve_page_target(
 pub fn cmd_status(json_mode: bool) -> Result<(), crate::BoxError> {
     let store = session::load_session()?;
     let daemon_alive = session::daemon_socket_exists();
+    // Reported next to the sessions rather than in a command of its own: a browser the
+    // registry lost is invisible exactly where a user goes to look for one, and the two
+    // 19-day-old Chromes that motivated this were found with `ps`, not with this tool.
+    let orphans = crate::orphans::scan(&store);
 
     if json_mode {
         let browsers: Vec<serde_json::Value> = store
@@ -527,9 +536,18 @@ pub fn cmd_status(json_mode: bool) -> Result<(), crate::BoxError> {
                 })
             })
             .collect();
+        // `null` where the process table could not be read, which is not the same claim
+        // as an empty list and would be a false all-clear if flattened into one.
+        let orphan_json = orphans.as_ref().map(|found| {
+            found
+                .iter()
+                .map(|o| json!({"name": o.name, "pid": o.pid}))
+                .collect::<Vec<_>>()
+        });
         json_output(&json!({
             "ok": true,
             "browsers": browsers,
+            "orphans": orphan_json,
             "daemon": if daemon_alive { "running" } else { "stopped" },
         }));
     } else {
@@ -551,6 +569,13 @@ pub fn cmd_status(json_mode: bool) -> Result<(), crate::BoxError> {
             }
         }
 
+        for orphan in orphans.iter().flatten() {
+            println!(
+                "orphan={}  pid={}  no session entry — close with `chrome-agent close --orphans`",
+                orphan.name, orphan.pid
+            );
+        }
+
         println!(
             "daemon: {}",
             if daemon_alive { "running" } else { "stopped" }
@@ -559,6 +584,7 @@ pub fn cmd_status(json_mode: bool) -> Result<(), crate::BoxError> {
 
     Ok(())
 }
+
 
 /// Message for `cmd_stop`, given whether we actually reached a live daemon.
 /// Pure so the stop decision can be unit-tested without a socket.
@@ -654,52 +680,6 @@ pub fn interrupt_kill_target(store: &SessionStore, browser_name: &str) -> Option
     store.browsers.get(browser_name).and_then(|b| b.pid)
 }
 
-/// Whether `comm` (the executable per `ps -o comm=`) is a browser this tool could have
-/// launched. The kill below is gated on it — see `kill_pid`.
-///
-/// A plain substring match on "chrome" is not enough: this tool's own binary is named
-/// `chrome-agent`, and `chromedriver` exists too. Under the exact PID-reuse race the
-/// guard is for, a reused pid landing on a sibling chrome-agent process would have been
-/// classified as a browser and killed — the scenario the guard claims to prevent.
-#[cfg(any(unix, test))]
-fn is_browser_process(comm: &str) -> bool {
-    let base = comm.rsplit('/').next().unwrap_or(comm).to_ascii_lowercase();
-    if base.contains("chrome-agent") || base.contains("chromedriver") {
-        return false;
-    }
-    base.contains("chrome") || base.contains("chromium") || base.contains("headless_shell")
-}
-
-/// Kill a managed-browser process (best-effort, unix only). Killing the
-/// main Chrome process is enough — its helper processes exit with it.
-///
-/// Guarded against PID reuse: a stored pid may have died and been reassigned by the
-/// OS to an unrelated process, and signalling whatever holds the number now is data
-/// loss, not cleanup. The executable is checked first; a pid that is gone, or that
-/// no longer names a browser, is left alone. The check-then-kill window is
-/// milliseconds — not zero, but no longer unbounded.
-pub fn kill_pid(pid: u32) {
-    #[cfg(unix)]
-    {
-        let comm = std::process::Command::new("ps")
-            .args(["-p", &pid.to_string(), "-o", "comm="])
-            .output()
-            .ok()
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
-        if comm.as_deref().is_some_and(|c| !c.is_empty() && is_browser_process(c)) {
-            let _ = std::process::Command::new("kill")
-                .arg(pid.to_string())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status();
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = pid;
-    }
-}
-
 /// Remove a profile directory and confirm it stayed removed.
 ///
 /// `remove_dir_all` returning `Ok` is not the same as the profile being gone. A Chrome that
@@ -769,18 +749,12 @@ pub fn cmd_close(browser_name: &str, purge: bool, json_mode: bool) -> Result<(),
 
     let browser = store.browsers.remove(browser_name);
 
-    let message = match browser {
-        Some(b) => {
-            if let Some(pid) = b.pid {
-                kill_pid(pid);
-                format!("Closed browser={browser_name} (pid={pid})")
-            } else {
-                format!("Removed external browser session: {browser_name}")
-            }
-        }
-        None => {
-            format!("No browser session named '{browser_name}'.")
-        }
+    let outcome = browser.as_ref().and_then(|b| b.pid).map(|pid| (pid, kill_pid(pid)));
+
+    let message = match (&browser, outcome) {
+        (Some(_), Some((pid, outcome))) => close_message(browser_name, pid, outcome),
+        (Some(_), None) => format!("Removed external browser session: {browser_name}"),
+        (None, _) => format!("No browser session named '{browser_name}'."),
     };
 
     // Purge browser profile if requested
@@ -797,7 +771,14 @@ pub fn cmd_close(browser_name: &str, purge: bool, json_mode: bool) -> Result<(),
     };
 
     if json_mode {
-        json_output(&json!({"ok": true, "message": message}));
+        // `ok` has always meant "the command ran", so a caller cannot read a kill out of
+        // it. `signalled` is the act itself: false where the pid was gone or reused, and
+        // the only field that separates a browser this closed from one it merely forgot.
+        json_output(&json!({
+            "ok": true,
+            "message": message,
+            "signalled": outcome.is_some_and(|(_, o)| o == KillOutcome::Signalled),
+        }));
     } else {
         println!("{message}");
     }
@@ -811,23 +792,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn kill_pid_refuses_a_pid_that_no_longer_belongs_to_a_browser() {
-        // A stored pid can be reaped and reassigned by the OS to an unrelated
-        // process. Killing whatever holds the number now is data loss, not cleanup.
-        let mut child = std::process::Command::new("sleep")
-            .arg("30")
-            .spawn()
-            .expect("spawn a stand-in for the reused pid");
-        kill_pid(child.id());
-        std::thread::sleep(std::time::Duration::from_millis(300));
-        let status = child.try_wait().expect("poll the stand-in");
-        let survived = status.is_none();
-        let _ = child.kill();
-        let _ = child.wait();
-        assert!(survived, "kill_pid killed an unrelated process holding a reused pid");
-    }
-
-    #[test]
     fn a_command_that_never_opens_a_browser_has_none_to_interrupt() {
         // `--browser` is global, so these carry the default name and would otherwise
         // kill whichever agent happens to be using it — while never having touched it.
@@ -837,7 +801,7 @@ mod tests {
             C::Daemon { action: crate::cli::DaemonAction::Start },
             C::Status,
             C::Stop,
-            C::Close { purge: false, purge_orphans: false },
+            C::Close { purge: false, purge_orphans: false, orphans: false },
             C::History { filter: None, limit: 20 },
         ] {
             assert!(
@@ -864,36 +828,6 @@ mod tests {
         );
         assert_eq!(interrupt_kill_target(&store, "never-launched"), None);
     }
-
-    #[test]
-    fn browser_executables_are_recognised_and_bystanders_are_not() {
-        for browser in [
-            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-            "chrome",
-            "chromium",
-            "chromium-browser",
-            "headless_shell",
-            "Google Chrome for Testing",
-        ] {
-            assert!(is_browser_process(browser), "should recognise {browser}");
-        }
-        for bystander in [
-            "sleep",
-            "postgres",
-            "/usr/bin/python3",
-            "node",
-            // The guard's own binary contains "chrome": under the PID-reuse race it
-            // protects against, a sibling chrome-agent must not be classified as prey.
-            "chrome-agent",
-            "/tmp/chrome-agent",
-            "chromedriver",
-        ] {
-            assert!(!is_browser_process(bystander), "must not kill {bystander}");
-        }
-    }
-
-
-
 
     #[test]
     fn stop_message_reflects_daemon_reachability() {
