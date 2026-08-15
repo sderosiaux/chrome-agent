@@ -12,7 +12,9 @@ mod element_controls;
 mod geometry;
 mod hit_test;
 mod hints;
+mod kill;
 mod landing;
+mod orphans;
 mod pipe;
 mod pipe_dispatch;
 mod pipe_dispatch_actions;
@@ -98,11 +100,21 @@ async fn main() {
                 && let Some(pid) = run_helpers::interrupt_kill_target(&store, &name) {
                     run_helpers::kill_pid(pid);
                 }
+            // The store answers only for browsers that reached it. Interrupting a cold
+            // start before its first save — reproducible inside ~0.3 s — left a Chrome
+            // running that no later command could name, which is how a headless browser
+            // survives for 19 days. This reaps that one, and is a no-op once saved.
+            kill::reap_unpersisted();
             std::process::exit(130);
         }
     });
 
     if let Err(e) = run::run(cli).await {
+        // Same window, reached by returning rather than by signal: the launch succeeds and
+        // then `CdpClient::connect` or `resolve_page_target` fails, so the browser is up and
+        // the store never learned its pid. A browser that DID reach the store is left alone
+        // — a failed command leaving a usable browser behind is the existing contract.
+        kill::reap_unpersisted();
         // An assertion that did not hold is not a broken tool: it gets its own exit code so
         // a caller can tell "the page is not in that state" (2) from "the browser never
         // started" (1). Checked before the generic handler below, which would print it as a

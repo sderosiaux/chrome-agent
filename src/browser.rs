@@ -220,6 +220,11 @@ async fn launch_browser(opts: &BrowserOptions) -> Result<BrowserConnection, Brow
     })?;
 
     let pid = child.id();
+    // From here until `save_session` writes it, this pid lives only in this process's
+    // memory. Arming it makes the interrupt and error paths able to reap it; the port
+    // timeout below was the one case that had its own handling, and every other way out
+    // of this window leaked. See `kill::UNPERSISTED`.
+    crate::kill::arm(pid);
 
     // Wait for DevToolsActivePort to appear. If it never shows (e.g. slow start
     // under load), the spawned Chrome would otherwise be orphaned — `Child`'s
@@ -231,6 +236,7 @@ async fn launch_browser(opts: &BrowserOptions) -> Result<BrowserConnection, Brow
         Err(e) => {
             let _ = child.kill();
             let _ = child.wait();
+            crate::kill::disarm(pid);
             return Err(e);
         }
     };

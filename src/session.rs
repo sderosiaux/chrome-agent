@@ -71,7 +71,18 @@ pub fn load_session() -> Result<SessionStore, SessionError> {
 /// Save the session store to disk, merging with the current on-disk state so
 /// parallel agents don't clobber each other's entries.
 pub fn save_session(store: &mut SessionStore) -> Result<(), SessionError> {
-    save_to(&session_path()?, store)
+    let result = save_to(&session_path()?, store);
+    if result.is_ok() {
+        // A pid that is now on disk is reachable by `close`, `status` and the interrupt
+        // handler, so it is no longer this invocation's to reap. Disarming here rather
+        // than at each call site is the point: the write that makes a browser reachable
+        // is the same event that ends the window, and a save path added later inherits
+        // it instead of having to remember. See `kill::UNPERSISTED`.
+        for pid in store.browsers.values().filter_map(|b| b.pid) {
+            crate::kill::disarm(pid);
+        }
+    }
+    result
 }
 
 /// Read a session store from an explicit path (empty store if the file is
