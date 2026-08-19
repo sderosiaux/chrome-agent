@@ -10,9 +10,9 @@
 
 use std::fmt;
 
-/// What the hit test said about a mouse action's delivery, before it was dispatched.
+/// What the hit test said about a pointer-targeted action's delivery before dispatch.
 ///
-/// `NotProbed` is the floor and the default: every command that dispatches no mouse event —
+/// `NotProbed` is the floor and the default: every command that dispatches no pointer event —
 /// and every mouse path where the probe could not answer, or answered about a document we
 /// cannot hit-test (a target inside an iframe) — reports it. It is an absence of evidence
 /// and never licenses a claim.
@@ -117,7 +117,7 @@ pub struct Delivered {
 }
 
 impl Delivered {
-    /// The floor: no mouse event, or no answer from the hit test.
+    /// The floor: no pointer event, or no answer from the hit test.
     pub const NOT_PROBED: Self =
         Self { how: Delivery::NotProbed, modal_receiver: false, observed_after_ms: None };
 }

@@ -51,6 +51,7 @@ fn help_shows_all_subcommands() {
     assert!(stdout.contains("stop"));
     assert!(stdout.contains("daemon"));
     assert!(stdout.contains("assert"));
+    assert!(stdout.contains("emulate"));
 }
 
 #[test]
