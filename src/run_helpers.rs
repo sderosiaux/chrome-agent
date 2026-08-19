@@ -744,8 +744,58 @@ pub fn cmd_purge_orphans(json_mode: bool) -> Result<(), crate::BoxError> {
     Ok(())
 }
 
-pub fn cmd_close(browser_name: &str, purge: bool, json_mode: bool) -> Result<(), crate::BoxError> {
+pub async fn cmd_close(
+    browser_name: &str,
+    purge: bool,
+    json_mode: bool,
+    timeout_seconds: u64,
+) -> Result<(), crate::BoxError> {
     let mut store = session::load_session()?;
+
+    // `--connect` sessions have no owned process to terminate. First publish a close marker so a
+    // long-lived pipe can clear overrides through the same CDP session that applied them. A fresh
+    // connection cannot supersede another session's Emulation domain state.
+    let needs_external_cleanup = store
+        .browsers
+        .get(browser_name)
+        .is_some_and(|browser| browser.pid.is_none());
+    if needs_external_cleanup {
+        let browser = store.browsers.get_mut(browser_name).unwrap();
+        browser
+            .client_pids
+            .retain(|pid| session::is_client_process(*pid));
+        let wait_for_clients = !browser.client_pids.is_empty();
+        browser.closing = true;
+        session::save_session(&mut store)?;
+
+        if wait_for_clients {
+            let deadline = std::time::Instant::now()
+                + std::time::Duration::from_secs(timeout_seconds.max(1));
+            loop {
+                store = session::load_session()?;
+                let live_clients = store.browsers.get(browser_name).map_or(0, |browser| {
+                    browser
+                        .client_pids
+                        .iter()
+                        .filter(|pid| session::is_client_process(**pid))
+                        .count()
+                });
+                if live_clients == 0 {
+                    break;
+                }
+                if std::time::Instant::now() >= deadline {
+                    return Err(format!(
+                        "Timed out waiting for {live_clients} active client session(s) to release external browser {browser_name:?}"
+                    )
+                    .into());
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        }
+        if let Some(browser) = store.browsers.get(browser_name) {
+            crate::emulation::clear_browser_overrides(browser).await?;
+        }
+    }
 
     let browser = store.browsers.remove(browser_name);
 

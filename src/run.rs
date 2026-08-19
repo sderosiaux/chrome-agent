@@ -3,7 +3,7 @@ use serde_json::json;
 use crate::BoxError;
 use crate::browser::{self, BrowserOptions};
 use crate::cdp::client::CdpClient;
-use crate::cli::{Cli, Command, DaemonAction};
+use crate::cli::{Cli, Command, DaemonAction, EmulateAction};
 use crate::run_helpers::{ReportPolicy, check_report, cmd_close, cmd_purge_orphans, cmd_status, cmd_stop, connect_page, get_uid_map, json_output, kill_pid, output_action, output_action_with, output_goto, resolve_page_target};
 use crate::{commands, pipe, session};
 
@@ -56,7 +56,7 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
             if orphans {
                 return Ok(());
             }
-            return cmd_close(&cli.browser, purge, cli.json);
+            return cmd_close(&cli.browser, purge, cli.json, cli.timeout).await;
         }
 
         Command::Pipe => {
@@ -91,6 +91,13 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
 
     // All other commands need a browser connection + CDP client
     let mut store = session::load_session()?;
+    if store
+        .browsers
+        .get(&cli.browser)
+        .is_some_and(|browser| browser.closing)
+    {
+        return Err(format!("Browser {:?} is closing", cli.browser).into());
+    }
     let requested_proxy = browser::normalized_proxy_option(
         cli.connect.as_deref(),
         cli.proxy_server.as_deref(),
@@ -217,6 +224,23 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
     client.set_call_timeout(std::time::Duration::from_secs(cli.timeout));
     let dialog_policy = crate::setup::DialogPolicy::parse(&cli.dialog)?;
     client.spawn_dialog_handler(dialog_policy, cli.dialog_text.clone());
+    let _client_registration = session::register_client(&mut store, &cli.browser)?;
+    if session::browser_is_closing(&cli.browser)? {
+        return Err(format!("Browser {:?} is closing", cli.browser).into());
+    }
+
+    // Reapplying before `device` or `reset` would let an invalid stored configuration prevent the
+    // command that repairs it. Batch defers the same decision to `run_batch`, where command order
+    // determines which entries remain blocked and when recovery takes effect.
+    let defers_emulation_reapply = matches!(
+        &cli.command,
+        Command::Emulate {
+            action: EmulateAction::Device { .. } | EmulateAction::Reset,
+        } | Command::Batch { .. }
+    );
+    if !defers_emulation_reapply {
+        crate::emulation::reapply(&client, &store, &cli.browser, &cli.page).await?;
+    }
 
     let json_mode = cli.json;
     let policy = ReportPolicy {
@@ -883,6 +907,59 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
             }
         }
 
+        Command::Emulate { action } => {
+            match action {
+                EmulateAction::Device { label, width, height, dpr, mobile, touch, orientation } => {
+                    session::ensure_exclusive_client(&cli.browser)?;
+                    let config = crate::emulation::DeviceEmulation::new(
+                        label, width, height, dpr, mobile, touch, orientation,
+                    )?;
+                    let response = crate::emulation::apply_and_store(
+                        &client, &mut store, &cli.browser, &cli.page, config.clone(),
+                    ).await?;
+                    session::save_session(&mut store)?;
+                    if json_mode {
+                        json_output(&response);
+                    } else {
+                        println!("{}", config.text_line());
+                        println!(
+                            "{}",
+                            crate::emulation::format_effective_metrics(&response["effective"])
+                        );
+                    }
+                }
+                EmulateAction::Status => {
+                    let requested_line = store.browsers.get(&cli.browser)
+                        .and_then(|browser| browser.pages.get(&cli.page))
+                        .and_then(|page| page.device_emulation.as_ref())
+                        .map(crate::emulation::DeviceEmulation::text_line);
+                    let response = crate::emulation::status(
+                        &client, &store, &cli.browser, &cli.page,
+                    ).await?;
+                    if json_mode {
+                        json_output(&response);
+                    } else if let Some(requested_line) = requested_line {
+                        println!("{requested_line}");
+                        println!("{}", crate::emulation::format_effective_metrics(&response["effective"]));
+                    } else {
+                        println!("No device emulation on page={:?}.", cli.page);
+                    }
+                }
+                EmulateAction::Reset => {
+                    session::ensure_exclusive_client(&cli.browser)?;
+                    let response = crate::emulation::clear(
+                        &client, &mut store, &cli.browser, &cli.page,
+                    ).await?;
+                    session::save_session(&mut store)?;
+                    if json_mode {
+                        json_output(&response);
+                    } else {
+                        println!("Cleared device emulation from page={:?}.", cli.page);
+                    }
+                }
+            }
+        }
+
         Command::Batch { stop_on_error } => {
             let input = {
                 use std::io::Read as _;
@@ -892,11 +969,16 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
             };
             let cmds = commands::batch::parse_commands(&input)?;
             // The same loop pipe mode's `{"cmd":"batch"}` runs, so `--stop-on-error` and
-            // `"stop_on_error"` cannot drift apart.
+            // `"stop_on_error"` cannot drift apart. One recovery state is shared by every entry;
+            // a reset can repair later commands without reapplying before each one.
+            let mut emulation_recovery = crate::pipe_dispatch::EmulationRecovery::new(
+                &client, &store, &cli.browser, &cli.page,
+            ).await;
             let out = crate::pipe_dispatch::run_batch(
                 &client, &browser_client, &mut store,
                 &cli.browser, &cli.page, &target_id,
                 cli.timeout, cli.max_depth, policy, &cmds, stop_on_error,
+                &mut emulation_recovery,
             ).await;
             json_output(&out);
         }

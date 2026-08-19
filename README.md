@@ -261,6 +261,8 @@ exit code — a failed assertion is `ok:false` with the same `assertion` object.
 | Command | What it does |
 |---------|------------|
 | `frame <selector\|main>` | Switch `eval`/`inspect` into an iframe (or back to main). Persists only within a `pipe`/`batch` process. |
+| `emulate device --width W --height H [--dpr N] [--mobile] [--touch] [--orientation portrait\|landscape] [--label name]` | Apply explicit device metrics to the current named page. |
+| `emulate status\|reset` | Report requested and page-observed metrics, or clear that page's overrides. |
 | `batch` | Execute multiple commands from a JSON array on stdin. |
 | `pipe` | Persistent JSON stdin/stdout connection. |
 
@@ -347,7 +349,7 @@ inline box, a clipped container, a transformed layout — so an identical retry 
 
 `unchanged` means the page did not change while the tool watched — not "the action had no
 effect", which it cannot know: an unchanged tree is also what a click swallowed by an overlay
-looks like. That is why mouse actions also report `delivery` (`target_hit`, `intercepted`,
+looks like. That is why pointer-targeted actions also report `delivery` (`target_hit`, `intercepted`,
 `off_target`, `not_settled`, `js`, `not_probed`) from a hit test at the coordinate about to be
 dispatched: `no_effect` is only ever emitted behind `target_hit`, and `not_settled`/`off_target`
 mean nothing was sent. `--on-intercept refuse` turns an interception into an error instead of
@@ -399,6 +401,25 @@ chrome-agent upload --uid n30 /path/to/document.pdf
 # Double-click (text selection, special controls)
 chrome-agent dblclick n42
 ```
+
+## Device emulation
+
+```bash
+chrome-agent --page mobile emulate device --label "checkout phone" \
+  --width 412 --height 915 --dpr 2.625 --mobile --touch
+chrome-agent --page mobile emulate status
+chrome-agent --page mobile emulate reset
+```
+
+Metrics are attached to one named page and reapplied on later CLI connections. Sibling and newly
+created pages stay unchanged. Closing or restarting Chrome discards the configuration. Values are
+explicit because device preset catalogs belong to the DevTools frontend, not CDP; the binary does
+not ship a copy that can drift from Chromium. Screen/orientation reporting and touch-event
+synthesis require experimental CDP fields. If Chromium rejects one, the command attempts every
+cleanup call and does not persist the incomplete configuration. Because CDP emulation state belongs
+to a connection, `device` and `reset` refuse to race another live client process; send the mutation
+through the active pipe or close that client first. Chromium exposes an orientation override only
+for its active target, so commands that reapply or inspect emulation activate that named tab first.
 
 ## Iframes
 

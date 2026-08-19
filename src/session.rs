@@ -38,8 +38,19 @@ pub struct BrowserSession {
     pub proxy_server: Option<String>,
     #[serde(default)]
     pub daemon_pid: Option<u32>,
+    /// Transient close marker used to let long-lived pipe clients release target-scoped state.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub closing: bool,
+    /// Command processes with a live target CDP session in this browser.
+    #[serde(default, alias = "pipePids", skip_serializing_if = "Vec::is_empty")]
+    pub client_pids: Vec<u32>,
     #[serde(default)]
     pub pages: HashMap<String, PageSession>,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 /// Per-page session state.
@@ -61,6 +72,11 @@ pub struct PageSession {
     pub last_snapshot_frame: Option<String>,
     #[serde(default)]
     pub last_snapshot_loader: Option<String>,
+    /// Requested device metrics for this named page. They are reapplied to its current target on
+    /// each connection. A Chrome relaunch replaces the surrounding browser entry, so the metrics
+    /// expire with the browser process rather than leaking into a new one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_emulation: Option<crate::emulation::DeviceEmulation>,
 }
 
 /// Load the session store from disk. Returns empty store if file doesn't exist.
@@ -83,6 +99,81 @@ pub fn save_session(store: &mut SessionStore) -> Result<(), SessionError> {
         }
     }
     result
+}
+
+/// Register this command's live target connection until its process scope ends.
+pub fn register_client(
+    store: &mut SessionStore,
+    browser_name: &str,
+) -> Result<ClientRegistration, SessionError> {
+    let pid = std::process::id();
+    if let Some(browser) = store.browsers.get_mut(browser_name)
+        && !browser.client_pids.contains(&pid)
+    {
+        browser.client_pids.push(pid);
+        save_session(store)?;
+    }
+    Ok(ClientRegistration {
+        browser_name: browser_name.to_string(),
+        pid,
+    })
+}
+
+pub fn unregister_client(store: &mut SessionStore, browser_name: &str, pid: u32) {
+    if let Some(browser) = store.browsers.get_mut(browser_name) {
+        browser.client_pids.retain(|candidate| *candidate != pid);
+    }
+}
+
+/// Refuse an emulation mutation while another process owns a CDP session on this browser.
+pub fn browser_is_closing(browser_name: &str) -> Result<bool, SessionError> {
+    Ok(load_session()?
+        .browsers
+        .get(browser_name)
+        .is_none_or(|browser| browser.closing))
+}
+
+pub fn ensure_exclusive_client(browser_name: &str) -> Result<(), SessionError> {
+    let current_pid = std::process::id();
+    let store = load_session()?;
+    let browser = store.browsers.get(browser_name);
+    if browser.is_none_or(|browser| browser.closing) {
+        return Err(SessionError(format!(
+            "Cannot change device emulation while browser {browser_name:?} is closing"
+        )));
+    }
+    let endpoint = browser.map(|browser| browser.ws_endpoint.as_str());
+    let others = endpoint.map_or(0, |endpoint| {
+        store
+            .browsers
+            .values()
+            .filter(|browser| browser.ws_endpoint == endpoint)
+            .flat_map(|browser| &browser.client_pids)
+            .filter(|pid| **pid != current_pid && is_client_process(**pid))
+            .count()
+    });
+    if others == 0 {
+        Ok(())
+    } else {
+        Err(SessionError(format!(
+            "Cannot change device emulation while {others} other client session(s) are active on browser {browser_name:?}; send the command through the active pipe or close it first"
+        )))
+    }
+}
+
+/// Removes a client registration on every return path, including command errors.
+pub struct ClientRegistration {
+    browser_name: String,
+    pid: u32,
+}
+
+impl Drop for ClientRegistration {
+    fn drop(&mut self) {
+        if let Ok(mut store) = load_session() {
+            unregister_client(&mut store, &self.browser_name, self.pid);
+            let _ = save_session(&mut store);
+        }
+    }
 }
 
 /// Read a session store from an explicit path (empty store if the file is
@@ -155,6 +246,7 @@ fn save_to(path: &Path, store: &mut SessionStore) -> Result<(), SessionError> {
             }
         }
     }
+    let mut concurrently_deleted = Vec::new();
     for (name, entry) in &store.browsers {
         // Untouched since load: another agent may have advanced it while we were
         // working, so keep the on-disk value rather than republishing our stale copy.
@@ -164,7 +256,32 @@ fn save_to(path: &Path, store: &mut SessionStore) -> Result<(), SessionError> {
         if untouched && merged.browsers.contains_key(name) {
             continue;
         }
-        merged.browsers.insert(name.clone(), entry.clone());
+        // A pipe can hold this browser entry while short CLI processes update sibling pages or
+        // replace a target. Merge against the value originally loaded so this save publishes only
+        // this process's changes instead of writing its stale browser snapshot over newer state.
+        let loaded = store
+            .loaded_entries
+            .get(name)
+            .and_then(|json| serde_json::from_str::<BrowserSession>(json).ok());
+        let entry = match (loaded, merged.browsers.get(name)) {
+            (Some(loaded), Some(on_disk)) => {
+                crate::session_merge::merge_browser_entry(&loaded, entry, on_disk)
+            }
+            (Some(loaded), None)
+                if crate::session_merge::same_browser_lifetime(&loaded, entry) =>
+            {
+                // Another process closed this browser after we loaded it. An open pipe may still
+                // hold and mutate its stale in-memory entry, but it must not republish a lifetime
+                // that was deliberately removed from the shared store.
+                concurrently_deleted.push(name.clone());
+                continue;
+            }
+            _ => entry.clone(),
+        };
+        merged.browsers.insert(name.clone(), entry);
+    }
+    for name in concurrently_deleted {
+        store.browsers.remove(&name);
     }
 
     // Runs after the upsert so the test is applied to the pids actually about to be
@@ -392,6 +509,8 @@ pub fn ensure_browser<'a>(
             headless,
             proxy_server,
             daemon_pid: None,
+            closing: false,
+            client_pids: Vec::new(),
             pages: HashMap::new(),
         })
 }
@@ -434,6 +553,7 @@ pub fn ensure_page<'a>(
             last_snapshot: None,
             last_snapshot_frame: None,
             last_snapshot_loader: None,
+            device_emulation: None,
         })
 }
 
@@ -466,6 +586,62 @@ fn dev_browser_dir() -> Result<PathBuf, SessionError> {
 /// keeps whatever [`liveness`] could not classify — the same bias as [`is_provably_dead`].
 fn is_process_alive(pid: u32) -> bool {
     liveness(pid) != Liveness::Dead
+}
+
+/// Return whether a registered client pid still belongs to this executable.
+pub fn is_client_process(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        let expected = std::env::current_exe()
+            .ok()
+            .and_then(|path| path.file_name().map(std::ffi::OsStr::to_os_string));
+        let actual = std::process::Command::new("ps")
+            .args(["-p", &pid.to_string(), "-o", "comm="])
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .and_then(|output| {
+                let command = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                (!command.is_empty()).then(|| {
+                    std::path::Path::new(&command)
+                        .file_name()
+                        .map(std::ffi::OsStr::to_os_string)
+                })
+            })
+            .flatten();
+        expected.is_some() && expected == actual
+    }
+    #[cfg(windows)]
+    {
+        let expected = std::env::current_exe()
+            .ok()
+            .and_then(|path| {
+                path.file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+            })
+            .map(|name| name.to_ascii_lowercase());
+        let output = std::process::Command::new("tasklist")
+            .args([
+                "/FI",
+                &format!("PID eq {pid}"),
+                "/FO",
+                "CSV",
+                "/NH",
+            ])
+            .output()
+            .ok()
+            .filter(|output| output.status.success());
+        match (expected, output) {
+            (Some(expected), Some(output)) => String::from_utf8_lossy(&output.stdout)
+                .to_ascii_lowercase()
+                .starts_with(&format!("\"{expected}\"")),
+            _ => false,
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        is_process_alive(pid)
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -558,6 +734,50 @@ mod tests {
             Some(relaunched.id()),
             "the freshly relaunched browser was deleted by a stale-cleanup decision made about its predecessor"
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An external browser has no pid to prune. If `close` removes its entry while an open pipe
+    /// still holds a changed copy, the pipe's later save must honor the deletion rather than
+    /// resurrecting the detached session and its emulation configuration.
+    #[test]
+    fn a_stale_writer_does_not_resurrect_a_concurrently_closed_external_browser() {
+        let dir = tmp_dir("external-close");
+        let path = dir.join(SESSION_FILE);
+
+        let mut original = SessionStore::default();
+        let browser = ensure_browser(&mut original, "external", "ws://shared", None, true, None);
+        let page = ensure_page(browser, "mobile", "target-1");
+        page.device_emulation = Some(
+            crate::emulation::DeviceEmulation::new(None, 390, 844, 3.0, true, true, None)
+                .unwrap(),
+        );
+        save_to(&path, &mut original).unwrap();
+
+        let mut stale_pipe = load_from(&path).unwrap();
+        stale_pipe
+            .browsers
+            .get_mut("external")
+            .unwrap()
+            .pages
+            .get_mut("mobile")
+            .unwrap()
+            .last_snapshot = Some("updated after load".into());
+
+        let mut closer = load_from(&path).unwrap();
+        closer.browsers.remove("external");
+        save_to(&path, &mut closer).unwrap();
+
+        save_to(&path, &mut stale_pipe).unwrap();
+        assert!(!load_from(&path).unwrap().browsers.contains_key("external"));
+        assert!(
+            !stale_pipe.browsers.contains_key("external"),
+            "the stale entry should also be dropped from the writer's in-memory baseline"
+        );
+
+        save_to(&path, &mut stale_pipe).unwrap();
+        assert!(!load_from(&path).unwrap().browsers.contains_key("external"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -865,6 +1085,8 @@ mod tests {
             headless: true,
             proxy_server: None,
             daemon_pid: None,
+            closing: false,
+            client_pids: Vec::new(),
             pages: HashMap::new(),
         }
     }
