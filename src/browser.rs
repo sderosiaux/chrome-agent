@@ -539,6 +539,15 @@ fn find_chromium() -> Result<PathBuf, BrowserError> {
             if cft.exists() {
                 return Ok(cft);
             }
+        } else if cfg!(target_os = "windows") {
+            let cft64 = managed.join("chrome-win64/chrome.exe");
+            if cft64.exists() {
+                return Ok(cft64);
+            }
+            let cft32 = managed.join("chrome-win32/chrome.exe");
+            if cft32.exists() {
+                return Ok(cft32);
+            }
         }
     }
 
@@ -578,6 +587,28 @@ fn find_chromium() -> Result<PathBuf, BrowserError> {
                         return Ok(PathBuf::from(found));
                     }
                 }
+        // For Windows: check if it's on PATH
+        if cfg!(target_os = "windows")
+            && let Ok(output) = Command::new("where").arg(candidate).output()
+                && output.status.success() {
+                    let found = String::from_utf8_lossy(&output.stdout)
+                        .lines().next().unwrap_or("").trim().to_string();
+                    if !found.is_empty() {
+                        return Ok(PathBuf::from(found));
+                    }
+                }
+    }
+
+    // Windows: standard install locations (not necessarily on PATH)
+    if cfg!(target_os = "windows") {
+        for var in ["ProgramFiles", "LOCALAPPDATA"] {
+            if let Some(dir) = std::env::var_os(var) {
+                let candidate = PathBuf::from(dir).join("Google/Chrome/Application/chrome.exe");
+                if candidate.exists() {
+                    return Ok(candidate);
+                }
+            }
+        }
     }
 
     Err(BrowserError::NotFound(
