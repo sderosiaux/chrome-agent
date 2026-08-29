@@ -2,7 +2,7 @@ use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::cdp::client::{CdpClient, CdpClientError, CdpCommandHandle};
+use crate::cdp::client::{CdpClient, CdpClientError};
 use crate::cdp::types::EvaluateResult;
 use crate::session::{PageSession, SessionStore};
 
@@ -219,27 +219,6 @@ pub async fn clear_overrides(client: &CdpClient) -> Result<(), CdpClientError> {
     emit.and(touch).and(metrics)
 }
 
-/// Clear overrides through a cloneable command view of the same CDP session.
-pub async fn clear_overrides_handle(client: &CdpCommandHandle) -> Result<(), CdpClientError> {
-    let emit = client
-        .send(
-            "Emulation.setEmitTouchEventsForMouse",
-            json!({"enabled": false, "configuration": "desktop"}),
-        )
-        .await;
-    let touch = client
-        .send(
-            "Emulation.setTouchEmulationEnabled",
-            json!({"enabled": false}),
-        )
-        .await;
-    let metrics = client
-        .send("Emulation.clearDeviceMetricsOverride", json!({}))
-        .await;
-
-    emit.and(touch).and(metrics)
-}
-
 async fn activate_target(client: &CdpClient, target_id: &str) -> Result<(), CdpClientError> {
     client
         .send("Target.activateTarget", json!({"targetId": target_id}))
@@ -317,50 +296,6 @@ pub async fn clear(
     clear_overrides(client).await?;
     page_session_mut(store, browser_name, page_name)?.device_emulation = None;
     Ok(json!({"ok": true, "emulation": null}))
-}
-
-/// Clear persisted page overrides before detaching from an externally owned browser.
-///
-/// Every configured page is attempted even if an earlier target cannot be reached. Managed
-/// browsers do not need this path because `close` terminates their Chrome process and targets.
-pub async fn clear_browser_overrides(
-    browser: &crate::session::BrowserSession,
-) -> Result<(), crate::BoxError> {
-    let http_endpoint = crate::browser::extract_http_from_ws(&browser.ws_endpoint);
-    let mut first_error = None;
-    for (page_name, page) in browser
-        .pages
-        .iter()
-        .filter(|(_, page)| page.device_emulation.is_some())
-    {
-        let result = async {
-            let Ok(page_ws) =
-                crate::browser::get_page_ws_url(&http_endpoint, &page.target_id).await
-            else {
-                // A missing target or browser cannot retain a target-scoped override.
-                return Ok::<(), crate::BoxError>(());
-            };
-            let Ok(client) = CdpClient::connect(&page_ws).await else {
-                // The target disappeared between discovery and connection.
-                return Ok(());
-            };
-            activate_target(&client, &page.target_id).await?;
-            clear_overrides(&client).await?;
-            Ok(())
-        }
-        .await;
-        if let Err(error) = result
-            && first_error.is_none()
-        {
-            first_error = Some(format!(
-                "Could not clear device emulation from page {page_name:?}: {error}"
-            ));
-        }
-    }
-    match first_error {
-        Some(error) => Err(error.into()),
-        None => Ok(()),
-    }
 }
 
 /// Reapply the configuration attached to this exact browser and named-page pair.

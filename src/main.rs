@@ -27,7 +27,6 @@ mod render;
 mod run;
 mod run_helpers;
 mod session;
-mod session_merge;
 mod setup;
 mod snapshot;
 mod snapshot_secret;

@@ -40,7 +40,7 @@ pub struct FrameContext {
 /// pending request futures or broadcast event subscribers.
 pub struct CdpClient {
     sender: CdpSender,
-    next_id: Arc<AtomicU64>,
+    next_id: AtomicU64,
     pending: PendingMap,
     events_tx: broadcast::Sender<CdpEvent>,
     _dispatcher: tokio::task::JoinHandle<()>,
@@ -55,7 +55,7 @@ pub struct CdpClient {
     /// promise settles — and a promise that never settles left the command hanging with no
     /// error, no output and no recovery, in pipe mode for the rest of the session. Nothing
     /// was broken enough to notice: the socket stayed open and the dispatcher kept running.
-    call_timeout: Arc<std::sync::Mutex<std::time::Duration>>,
+    call_timeout: std::sync::Mutex<std::time::Duration>,
     /// When the last input event went out on this connection.
     ///
     /// `no_effect` is only ever a claim about a window — "the page did not move for N ms
@@ -87,59 +87,6 @@ pub enum CdpClientError {
     DispatcherGone,
 }
 
-/// Cloneable command-only view of a CDP connection for independent background control tasks.
-#[derive(Clone)]
-pub struct CdpCommandHandle {
-    sender: CdpSender,
-    next_id: Arc<AtomicU64>,
-    pending: PendingMap,
-    call_timeout: Arc<std::sync::Mutex<std::time::Duration>>,
-}
-
-impl CdpCommandHandle {
-    pub async fn send<P: Serialize>(
-        &self,
-        method: &'static str,
-        params: P,
-    ) -> Result<(), CdpClientError> {
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let request = CdpRequest {
-            id,
-            method,
-            params: serde_json::to_value(params).map_err(CdpClientError::Serialization)?,
-            session_id: None,
-        };
-        let (tx, rx) = oneshot::channel();
-        self.pending.lock().await.insert(id, tx);
-        let json = serde_json::to_string(&request).map_err(CdpClientError::Serialization)?;
-        if let Err(error) = self.sender.send(json).await {
-            self.pending.lock().await.remove(&id);
-            return Err(error.into());
-        }
-        let deadline = self
-            .call_timeout
-            .lock()
-            .map_or(DEFAULT_CALL_TIMEOUT, |value| *value);
-        let response = match tokio::time::timeout(deadline, rx).await {
-            Ok(received) => received.map_err(|_| CdpClientError::DispatcherGone)?,
-            Err(_) => {
-                self.pending.lock().await.remove(&id);
-                return Err(CdpClientError::Timeout(format!(
-                    "{method} did not answer within {}s",
-                    deadline.as_secs()
-                )));
-            }
-        };
-        if let Some(error) = response.error {
-            return Err(CdpClientError::Protocol {
-                code: error.code,
-                message: error.message,
-            });
-        }
-        Ok(())
-    }
-}
-
 impl CdpClient {
     /// Connect to a Chrome `DevTools` Protocol endpoint.
     pub async fn connect(url: &str) -> Result<Self, CdpClientError> {
@@ -155,26 +102,15 @@ impl CdpClient {
 
         Ok(Self {
             sender,
-            next_id: Arc::new(AtomicU64::new(1)),
+            next_id: AtomicU64::new(1),
             pending,
             events_tx,
             _dispatcher: dispatcher,
             frame_ctx: std::sync::Mutex::new(None),
-            call_timeout: Arc::new(std::sync::Mutex::new(DEFAULT_CALL_TIMEOUT)),
+            call_timeout: std::sync::Mutex::new(DEFAULT_CALL_TIMEOUT),
             last_dispatch: std::sync::Mutex::new(None),
             touch_emulation: AtomicBool::new(false),
         })
-    }
-
-    /// Return a cloneable command sender backed by this connection and dispatcher.
-    #[must_use]
-    pub fn command_handle(&self) -> CdpCommandHandle {
-        CdpCommandHandle {
-            sender: self.sender.clone(),
-            next_id: Arc::clone(&self.next_id),
-            pending: Arc::clone(&self.pending),
-            call_timeout: Arc::clone(&self.call_timeout),
-        }
     }
 
     /// Record that an input event has just gone out.

@@ -56,7 +56,7 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
             if orphans {
                 return Ok(());
             }
-            return cmd_close(&cli.browser, purge, cli.json, cli.timeout).await;
+            return cmd_close(&cli.browser, purge, cli.json);
         }
 
         Command::Pipe => {
@@ -91,13 +91,6 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
 
     // All other commands need a browser connection + CDP client
     let mut store = session::load_session()?;
-    if store
-        .browsers
-        .get(&cli.browser)
-        .is_some_and(|browser| browser.closing)
-    {
-        return Err(format!("Browser {:?} is closing", cli.browser).into());
-    }
     let requested_proxy = browser::normalized_proxy_option(
         cli.connect.as_deref(),
         cli.proxy_server.as_deref(),
@@ -224,11 +217,6 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
     client.set_call_timeout(std::time::Duration::from_secs(cli.timeout));
     let dialog_policy = crate::setup::DialogPolicy::parse(&cli.dialog)?;
     client.spawn_dialog_handler(dialog_policy, cli.dialog_text.clone());
-    let _client_registration = session::register_client(&mut store, &cli.browser)?;
-    if session::browser_is_closing(&cli.browser)? {
-        return Err(format!("Browser {:?} is closing", cli.browser).into());
-    }
-
     // Reapplying before `device` or `reset` would let an invalid stored configuration prevent the
     // command that repairs it. Batch defers the same decision to `run_batch`, where command order
     // determines which entries remain blocked and when recovery takes effect.
@@ -910,7 +898,6 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
         Command::Emulate { action } => {
             match action {
                 EmulateAction::Device { label, width, height, dpr, mobile, touch, orientation } => {
-                    session::ensure_exclusive_client(&cli.browser)?;
                     let config = crate::emulation::DeviceEmulation::new(
                         label, width, height, dpr, mobile, touch, orientation,
                     )?;
@@ -946,7 +933,6 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
                     }
                 }
                 EmulateAction::Reset => {
-                    session::ensure_exclusive_client(&cli.browser)?;
                     let response = crate::emulation::clear(
                         &client, &mut store, &cli.browser, &cli.page,
                     ).await?;

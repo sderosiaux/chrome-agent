@@ -104,10 +104,6 @@ pub async fn dispatch_emulate(
         .and_then(Value::as_str)
         .ok_or("emulate: missing \"action\" (device, status, or reset)")?;
 
-    if matches!(action, "device" | "reset") {
-        crate::session::ensure_exclusive_client(browser_name)?;
-    }
-
     let response = match action {
         "device" => {
             let config = parse_device_config(cmd)?;
