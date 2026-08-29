@@ -44,8 +44,8 @@ which chrome-agent || npm install -g chrome-agent   # or: cargo install chrome-a
 | `unknown` | `no_baseline` | inspect | First action of the session on this page; nothing to compare against. |
 | `unknown` | `read_failed` | inspect | The action ran; reading the page afterwards failed. |
 | `unknown` | `identity_unreadable` | inspect | The two trees may not belong to the same document. |
-| `unknown` | `aim_point_off_target` | inspect | No point inside the element's own boxes could be aimed at — **nothing was dispatched**, but the miss is **stable** (a wrapped inline box, a clipped container, a transformed layout), so an identical retry misses identically. Look, then aim at a child that has a box of its own. |
-| `unknown` | `scroll_not_settled` | **retry** | The aim point was still moving or off-viewport — **nothing was dispatched**, and the miss is **transient**, so the retry is the fix: the animation ends and the next attempt aims at a settled box. `wait`, then repeat. |
+| `unknown` | `aim_point_off_target` | inspect | Two readings of the aim point **agreed** and it still could not be aimed at — **nothing was dispatched**, and the miss is **stable**, so an identical retry misses identically. Two shapes, told apart by `aim`: a point on screen outside the element's own boxes (a wrapped inline box, a clipped container) → aim at a child that has a box of its own; a point **outside the viewport** (a `position: fixed` wall, a locked document scroll) → no scroll will move it, change the page's state first. |
+| `unknown` | `scroll_not_settled` | **retry** | Two readings of the aim point **disagreed**: it was still moving — **nothing was dispatched**, and the miss is **transient**, so the retry is the fix: the movement ends and the next attempt aims at a settled box. `wait`, then repeat. |
 | `not_checked` | `reporting_disabled` | proceed | You passed `--verdict off`. The silence is yours, not the page's. |
 
 `delivery` rides on pointer-targeted actions (`click`, `dblclick`, and the `check`/`uncheck` click) and is what licenses the two strong words:
@@ -54,13 +54,19 @@ which chrome-agent || npm install -g chrome-agent   # or: cargo install chrome-a
 |---|---|---|
 | `target_hit` | The aim point resolved to the target, a descendant, its label's control, or its shadow host. | The only value that permits `no_effect`. |
 | `intercepted` | The aim point belongs to an element outside the target's flat subtree. | → `verdict: intercepted`, `intercepted_by` names the receiver. |
-| `off_target` | No point inside the target's own client rects could be aimed at. | **Nothing was dispatched**, so repeating cannot double an action — but the miss is **stable**, so it cannot succeed either. Hence `inspect`. |
-| `not_settled` | Still moving, or outside the viewport, after the settle loop. | **Nothing was dispatched**, and the miss is **transient**, so repeating is both safe and the fix. Hence `retry`. |
+| `off_target` | No point on the target could be aimed at, and two consecutive probes agreed: outside its own client rects, or outside the viewport and pinned there. | **Nothing was dispatched**, so repeating cannot double an action — but the miss is **stable**, so it cannot succeed either. Hence `inspect`. |
+| `not_settled` | Two consecutive probes disagreed: the aim point was still moving when the settle budget ran out. | **Nothing was dispatched**, and the miss is **transient**, so repeating is both safe and the fix. Hence `retry`. |
 | `js` | Went through a JS `click()`/`MouseEvent`, which performs no hit test. | Interception is inapplicable, not undetected. Licenses nothing. |
 | `not_probed` | No hit test ran, or its answer does not cover the document that matters (a target inside an iframe). | Absence of evidence. Licenses **no** conclusion. |
 
 `--on-intercept refuse` turns an interception into an error that dispatches nothing, instead of
-the default `dispatch` (send it anyway — what a pointer does — and name the receiver).
+the default `dispatch` (send it anyway — what a pointer does — and name the receiver). The
+refusal is `ok:false` (CLI exit 1) and carries **the same fields as the dispatch** —
+`delivery`, `intercepted_by`, `uid`, `aim`, `verdict`, `verdict_reason`, `next`, `verdict_hint`
+and `hint` — plus `dispatched:false`. Branch on `next` there as everywhere else: it says
+`dismiss`, and since nothing reached the page, dealing with the receiver and aiming again
+duplicates nothing. `dispatched:false` appears on **every** response that aimed and sent
+nothing, refusal or not.
 
 ## The rule: never report a success the tool did not confirm
 
@@ -74,10 +80,13 @@ once and continue from what you see; do not re-send the action. The one exceptio
 why you branch on `next` and not on the word `unknown`.
 
 Two `unknown` rungs report that nothing was dispatched, and only one licenses a repeat. The
-difference is the shape of the miss, not the dispatch: `scroll_not_settled` is **transient** (the
-page was still moving under the aim point, so the retry aims at a settled box and succeeds),
-`aim_point_off_target` is **stable** (the computed point does not belong to the target at all, so
-an identical retry is an infinite loop dressed as a recovery — look at the page instead).
+difference is whether the readings agreed, not whether an event was sent: `scroll_not_settled` is
+**transient** (two probes 30 ms apart disagreed, so the retry aims at a settled box and succeeds),
+`aim_point_off_target` is **stable** (the probes agreed and the point still could not be aimed at,
+so an identical retry is an infinite loop dressed as a recovery — look at the page instead). A
+consent wall in `position: fixed` whose control sits above the viewport, on a document whose
+scroll is locked, is the second: `scroll` answers "Scrolled into view" and moves nothing, and the
+aim point comes back identical to the pixel every time.
 
 When `verdict` is `intercepted`, the element named in `intercepted_by` received your event and
 nothing at all is known about the target — dismiss that element first, then repeat; when it is

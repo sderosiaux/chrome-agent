@@ -14,6 +14,7 @@ mod element_controls;
 mod emulation;
 mod geometry;
 mod hit_test;
+mod hit_test_report;
 mod hints;
 mod kill;
 mod landing;
@@ -126,6 +127,21 @@ async fn main() {
         // failure and exit 1 — the very conflation the code exists to remove.
         if let Some(not_held) = e.downcast_ref::<commands::assert::NotHeld>() {
             std::process::exit(not_held.report());
+        }
+        // A refusal is not a bare sentence: `--on-intercept refuse` measured who was in the
+        // way before deciding not to act, and the mode that refuses is the one whose caller has
+        // the most re-planning to do. Same `ok:false` and same exit 1 — nothing was dispatched,
+        // so the command did not do what it was asked.
+        if let Some(refused) = hit_test::refusal_in(&e) {
+            if json_mode {
+                println!("{}", refused.to_json(&browser));
+            } else {
+                eprintln!("error: {refused}");
+                for line in refused.text_lines(&browser) {
+                    eprintln!("{line}");
+                }
+            }
+            std::process::exit(1);
         }
         let msg = e.to_string();
         if json_mode {

@@ -329,6 +329,12 @@ async fn dispatch(
     match result {
         Ok(v) => v,
         Err(e) => {
+            // A refusal carries what it measured — the receiver, the aim point, the branch —
+            // and flattening it to its Display would drop all of it on the one path where
+            // nothing was dispatched and the caller has to re-plan.
+            if let Some(refused) = crate::hit_test::refusal_in(&e) {
+                return refused.to_json(browser_name);
+            }
             let msg = e.to_string();
             let mut obj = json!({"ok": false, "error": msg});
             if let Some(h) = error_hint(&msg, browser_name) { obj["hint"] = json!(h); }

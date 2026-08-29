@@ -100,7 +100,8 @@ pub async fn click(
         on_intercept,
         &format!("uid={uid}"),
     )
-    .await?;
+    .await
+    .map_err(|e| e.naming(Some(uid.to_string()), None, None))?;
     Ok(outcome.named(Some(uid.to_string()), None, None))
 }
 
@@ -118,7 +119,7 @@ pub async fn click_handle(
     use crate::hit_test::{Aim, Dispatched};
     use crate::verdict::Delivery;
 
-    let (point, delivery, receiver) = match crate::hit_test::aim(client, object_id).await {
+    let (point, delivery, receiver, unaimable) = match crate::hit_test::aim(client, object_id).await {
         Aim::NoBox => {
             js_click(client, object_id).await?;
             return Ok(Dispatched::js());
@@ -128,25 +129,37 @@ pub async fn click_handle(
                 js_click(client, object_id).await?;
                 return Ok(Dispatched::js());
             };
-            (center, Delivery::NotProbed, None)
+            (center, Delivery::NotProbed, None, None)
         }
-        Aim::At { point, delivery, receiver } => (point, delivery, receiver),
+        Aim::At { point, delivery, receiver, unaimable } => (point, delivery, receiver, unaimable),
     };
 
     if matches!(delivery, Delivery::NotSettled | Delivery::OffTarget) {
-        return Ok(Dispatched::skipped(delivery, point, None));
+        // `unaimable` is what separates a box a pointer cannot reach from a box the page is
+        // holding off screen. Same verdict, same absence of a dispatch, different recovery.
+        return Ok(Dispatched::skipped(delivery, point, None).unaimed(unaimable));
     }
     if delivery == Delivery::Intercepted && on_intercept == crate::hit_test::OnIntercept::Refuse {
-        let refused = Dispatched::skipped(delivery, point, receiver);
-        return Err(ElementError::NotInteractable(
-            refused
-                .refusal_message("click", target)
-                .unwrap_or_else(|| format!("Refused to click {target}")),
-        ));
+        return Err(refusal(Dispatched::skipped(delivery, point, receiver), "click", target));
     }
 
     dispatch_click_at(client, point.0, point.1).await?;
     Ok(Dispatched::landed(delivery, point, receiver))
+}
+
+/// The error a refused pointer action returns, carrying what the probe measured.
+///
+/// One place for both verbs: a refusal that names the receiver on `click` and not on
+/// `dblclick` is the same class of asymmetry the verdict module exists to remove.
+fn refusal(
+    dispatched: crate::hit_test::Dispatched,
+    verb: &str,
+    target: &str,
+) -> ElementError {
+    let message = dispatched
+        .refusal_message(verb, target)
+        .unwrap_or_else(|| format!("Refused to {verb} {target}"));
+    ElementError::Refused(Box::new(crate::hit_test::Refused::new(message, dispatched)))
 }
 
 /// A click at coordinates somebody else decided on: mouse normally, touch under emulation.
@@ -600,6 +613,15 @@ pub async fn wait_for_stabilization(mut nav_events: broadcast::Receiver<CdpEvent
 
 #[derive(Debug, thiserror::Error)]
 pub enum ElementError {
+    /// `--on-intercept refuse` stopped a pointer action before it dispatched.
+    ///
+    /// A variant of its own, and not a `NotInteractable(String)`, because everything the
+    /// caller needs to act — the receiver, its uid, the aim point, the branch — had been
+    /// measured and was being thrown away at the point where the message was formatted. It
+    /// rides through the error channel the way `commands::assert::NotHeld` carries exit 2, and
+    /// the three error boundaries unpack it with `hit_test::refusal_in`.
+    #[error("{0}")]
+    Refused(Box<crate::hit_test::Refused>),
     #[error("{0}")]
     NotFound(String),
     #[error("{0}")]
@@ -608,6 +630,24 @@ pub enum ElementError {
     NotInteractable(String),
     #[error("{0}")]
     Action(String),
+}
+
+impl ElementError {
+    /// Carry the identity of the node an action resolved onto the refusal it produced.
+    ///
+    /// A no-op for every other variant: only a refusal has a structured response to put it on.
+    #[must_use]
+    pub fn naming(
+        self,
+        uid: Option<String>,
+        role: Option<String>,
+        name: Option<String>,
+    ) -> Self {
+        match self {
+            Self::Refused(refused) => Self::Refused(Box::new(refused.naming(uid, role, name))),
+            other => other,
+        }
+    }
 }
 
 /// Click at explicit (x, y) coordinates using Input.dispatchMouseEvent.
@@ -658,7 +698,8 @@ pub async fn dblclick(
         on_intercept,
         &format!("uid={uid}"),
     )
-    .await?;
+    .await
+    .map_err(|e| e.naming(Some(uid.to_string()), None, None))?;
     Ok(outcome.named(Some(uid.to_string()), None, None))
 }
 
@@ -673,7 +714,7 @@ pub async fn dblclick_handle(
     use crate::hit_test::{Aim, Dispatched};
     use crate::verdict::Delivery;
 
-    let (point, delivery, receiver) = match crate::hit_test::aim(client, object_id).await {
+    let (point, delivery, receiver, unaimable) = match crate::hit_test::aim(client, object_id).await {
         Aim::NoBox => {
             js_dblclick(client, object_id).await?;
             return Ok(Dispatched::js());
@@ -683,21 +724,18 @@ pub async fn dblclick_handle(
                 js_dblclick(client, object_id).await?;
                 return Ok(Dispatched::js());
             };
-            (center, Delivery::NotProbed, None)
+            (center, Delivery::NotProbed, None, None)
         }
-        Aim::At { point, delivery, receiver } => (point, delivery, receiver),
+        Aim::At { point, delivery, receiver, unaimable } => (point, delivery, receiver, unaimable),
     };
 
     if matches!(delivery, Delivery::NotSettled | Delivery::OffTarget) {
-        return Ok(Dispatched::skipped(delivery, point, None));
+        // `unaimable` is what separates a box a pointer cannot reach from a box the page is
+        // holding off screen. Same verdict, same absence of a dispatch, different recovery.
+        return Ok(Dispatched::skipped(delivery, point, None).unaimed(unaimable));
     }
     if delivery == Delivery::Intercepted && on_intercept == crate::hit_test::OnIntercept::Refuse {
-        let refused = Dispatched::skipped(delivery, point, receiver);
-        return Err(ElementError::NotInteractable(
-            refused
-                .refusal_message("double-click", target)
-                .unwrap_or_else(|| format!("Refused to double-click {target}")),
-        ));
+        return Err(refusal(Dispatched::skipped(delivery, point, receiver), "double-click", target));
     }
 
     dblclick_at_coords(client, point.0, point.1).await?;

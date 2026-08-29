@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Consent wall pinned above the viewport</title>
+<style>
+  /* The document cannot scroll. This is what a consent wall does to the page behind it, and
+     it is the half a plain "off screen" fixture misses: `scroll` answers "Scrolled into view"
+     and moves nothing, so every retry re-measures the same coordinate. */
+  html, body { height: 100%; overflow: hidden; margin: 0; }
+  /* Content that WOULD scroll if the lock were not there. */
+  #article { height: 3000px; padding: 16px; }
+  /* Pinned, and pinned past the top edge — the shape measured on a real consent wall, where
+     the reject control sat fourteen pixels above the viewport on seven attempts running. */
+  #wall {
+    position: fixed; left: 0; right: 0; top: -80px; height: 260px;
+    background: #f4f4f4; border-bottom: 1px solid #ccc;
+  }
+  #reject { position: absolute; top: 8px; left: 40px; }
+  #accept { position: absolute; top: 140px; left: 40px; }
+  /* The same failure in the other axis. Measured on a second site: the aim point came back at
+     x = -263.7 with y inside the viewport, where the first had y = -14 — so the classification
+     may not be reading one edge. */
+  #drawer { position: fixed; top: 200px; left: -300px; width: 260px; height: 120px;
+            background: #eee; border: 1px solid #ccc; }
+  #drawer-reject { position: absolute; top: 20px; left: 20px; }
+</style>
+</head>
+<body>
+  <div id="article">
+    <h1>An article behind a wall</h1>
+    <p>The document is 3000px tall and cannot be scrolled while the wall is up.</p>
+  </div>
+  <div id="wall">
+    <button id="reject">Reject all cookies</button>
+    <button id="accept">Accept all cookies</button>
+  </div>
+  <div id="drawer">
+    <button id="drawer-reject">Reject from the drawer</button>
+  </div>
+  <script>
+    window.receiver = null;
+    for (const id of ['reject', 'accept', 'drawer-reject']) {
+      document.getElementById(id).addEventListener('click', () => { window.receiver = id; });
+    }
+  </script>
+</body>
+</html>

@@ -55,7 +55,8 @@ pub fn gloss(assessment: Assessment) -> &'static str {
         }
         "scroll_not_settled" => "nothing was dispatched: the aim point was still moving",
         "aim_point_off_target" => {
-            "nothing was dispatched: no point inside the element could be aimed at"
+            "nothing was dispatched: no point on the element could be aimed at, and the \
+             reading did not change while it was watched"
         }
         "reporting_disabled" => "not checked — the page was never re-read (--verdict off)",
         _ => match assessment.verdict {
@@ -586,10 +587,10 @@ pub fn hint_for(assessment: Assessment) -> Option<&'static str> {
             "A modal dialog holds the top layer, so it receives every pointer event outside itself. Close it (press Escape, or click its own dismiss control) before acting on anything behind it.",
         ),
         "scroll_not_settled" => Some(
-            "The aim point was still moving, or still outside the viewport, when the scroll was measured — so nothing was dispatched rather than dispatched at a coordinate that had already moved. Run `wait` (or `scroll` the target into view) and repeat the action.",
+            "Two readings of the aim point disagreed, so it was still moving when it was measured — nothing was dispatched, rather than dispatched at a coordinate the target had already left. This is the one rung where the repeat is the fix and is safe, because the page saw no event: run `wait` for the movement to end, then run the action again. A point that had STOPPED moving and was still unaimable reports `aim_point_off_target` instead, and that one does not improve on a repeat.",
         ),
         "aim_point_off_target" => Some(
-            "No point inside the element's own boxes could be aimed at, so nothing was dispatched. This is what an element clipped to nothing, or laid out across a gap, looks like. Try `--selector` on a child that has a box of its own.",
+            "No point on the element could be aimed at and the reading was stable — two probes 30ms apart agreed — so nothing was dispatched and a repeat measures the same coordinate. Two shapes reach here, and `aim` tells them apart: a coordinate on screen means the element has no box a pointer can reach (an inline link laid out across a gap, a container clipped to nothing), and a coordinate outside the viewport means the page is holding it there, which the probe's own scroll already failed to change. Run `inspect` to see where the element sits: for the first, aim at a child that has a box of its own; for the second, change the page's state — dismiss the layer pinning it — because no scroll will move it.",
         ),
         // `changed` alone would read as plain success, and this is the shape where that costs
         // most: a form that "submits" and quietly discards what was typed into it.
@@ -659,7 +660,7 @@ pub fn short_hint(assessment: Assessment) -> Option<&'static str> {
             "Nothing was dispatched, so a repeat is safe: `wait` for the page to settle, then run this action again.",
         ),
         "aim_point_off_target" => Some(
-            "Nothing was dispatched: the element has no aimable box. Try `--selector` on a child that has one.",
+            "Nothing was dispatched, and a repeat measures the same point. Run `inspect`: aim at a child with a box of its own, or clear whatever pins the element off screen.",
         ),
         "no_baseline" => Some(
             "Run `inspect` to establish a baseline; the next action on this page will report what changed.",

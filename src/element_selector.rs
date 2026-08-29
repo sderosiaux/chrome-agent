@@ -41,7 +41,10 @@ pub async fn click_selector(
         on_intercept,
         &format!("selector '{selector}'"),
     )
-    .await?;
+    .await
+    // The refusal is where the caller most needs to know which node was aimed at, and it was
+    // the one path that lost it: `named` below only ever ran on the way out through `Ok`.
+    .map_err(|e| e.naming(handle.uid.clone(), handle.role.clone(), handle.name.clone()))?;
     Ok(outcome.named(handle.uid, handle.role, handle.name))
 }
 
@@ -61,7 +64,10 @@ pub async fn dblclick_selector(
         on_intercept,
         &format!("selector '{selector}'"),
     )
-    .await?;
+    .await
+    // The refusal is where the caller most needs to know which node was aimed at, and it was
+    // the one path that lost it: `named` below only ever ran on the way out through `Ok`.
+    .map_err(|e| e.naming(handle.uid.clone(), handle.role.clone(), handle.name.clone()))?;
     Ok(outcome.named(handle.uid, handle.role, handle.name))
 }
 

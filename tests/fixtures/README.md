@@ -79,6 +79,21 @@ The link exists for `--urls` alone and is what makes that path fail in the OTHER
 `url="…"` is appended to the line, the next read renders it bare, and the link comes back as
 `changed` rather than `added`. Without a link on the page the whole class would have looked
 like one bug instead of two.
+## `fixed_wall_above_viewport.html`
+
+A consent wall in `position: fixed` whose controls sit past an edge of the viewport, on a
+document whose own scroll is locked (`html,body{overflow:hidden}` over 3000px of content). It
+reproduces the cause and not just the symptom: an element merely below the fold is scrolled into
+view by the probe, while this one cannot be — `scroll` answers "Scrolled into view" and moves
+nothing, and every reading of the aim point comes back identical to the pixel. That is the shape
+the settle loop used to report as `not_settled` (transient, `next: retry`), which is an
+instruction to loop forever.
+
+Two controls, two geometries, because the first fix could have been reading one edge: `#reject`
+sits ABOVE the top edge (negative y, the shape measured on a consent wall at `(378, -14)`) and
+`#drawer-reject` sits PAST the left edge (negative x with y inside the viewport, the shape
+measured on a second site at `(-263.7, 107.5)`). Both must report `off_target` →
+`aim_point_off_target` → `inspect`.
 
 ## Everything else
 

@@ -355,15 +355,20 @@ change report is never ambiguous and a caller can branch without parsing prose.
 | `not_kept` | `value_reverted`, `value_rewritten` | `stop` | The write reached the element and it does not hold it: empty on the first, rewritten by a mask or normaliser on the second. Read `value.actual`; a second fill produces the same answer. |
 | `no_effect` | `delivered_no_change` | `confirm` | Delivery **proven** by a hit test and the tree stayed still inside `observed_after_ms`. |
 | `unchanged` | `identical_tree` | `confirm` | The tree was identical while the tool watched — delivery not proven. |
-| `unknown` | `no_baseline`, `read_failed`, `identity_unreadable`, `aim_point_off_target` | `inspect` | Nothing could be compared. Never "nothing happened". |
-| `unknown` | `scroll_not_settled` | `retry` | Nothing was dispatched at all, so a repeat duplicates nothing. |
+| `unknown` | `no_baseline`, `read_failed`, `identity_unreadable` | `inspect` | Nothing could be compared. Never "nothing happened". |
+| `unknown` | `aim_point_off_target` | `inspect` | Nothing was dispatched, and the readings agreed — so a repeat aims at the same point and refuses again. |
+| `unknown` | `scroll_not_settled` | `retry` | Nothing was dispatched at all and the readings disagreed, so a repeat duplicates nothing and can succeed. |
+| `not_checked` | `reporting_disabled` | `proceed` | You passed `--verdict off`. |
 
 Two of those rungs report that nothing was dispatched and only one asks for a retry, because what
-separates them is the shape of the miss: `scroll_not_settled` is transient (the page was still
-moving under the aim point, so the next attempt aims at a settled box and works), while
-`aim_point_off_target` is stable (the computed point does not belong to the target — a wrapped
-inline box, a clipped container, a transformed layout — so an identical retry misses identically).
-| `not_checked` | `reporting_disabled` | `proceed` | You passed `--verdict off`. |
+separates them is whether two readings of the aim point agreed: `scroll_not_settled` is transient
+(they disagreed — the point was still moving, so the next attempt aims at a settled box and
+works), while `aim_point_off_target` is stable (they agreed and the point still could not be aimed
+at, so an identical retry misses identically). The stable rung covers two shapes, and `aim` tells
+them apart: a coordinate on screen means the element has no box a pointer can reach (a wrapped
+inline box, a clipped container), and a coordinate outside the viewport means the page is holding
+it there — a consent wall in `position: fixed` over a document whose scroll is locked, where
+`scroll` reports success and moves nothing.
 
 `unchanged` means the page did not change while the tool watched — not "the action had no
 effect", which it cannot know: an unchanged tree is also what a click swallowed by an overlay
@@ -371,7 +376,10 @@ looks like. That is why pointer-targeted actions also report `delivery` (`target
 `off_target`, `not_settled`, `js`, `not_probed`) from a hit test at the coordinate about to be
 dispatched: `no_effect` is only ever emitted behind `target_hit`, and `not_settled`/`off_target`
 mean nothing was sent. `--on-intercept refuse` turns an interception into an error instead of
-sending the event anyway.
+sending the event anyway — `ok:false`, exit 1, and the same fields the dispatch would have
+carried (`delivery`, `intercepted_by`, `verdict`, `next`, `verdict_hint`, `hint`) plus
+`dispatched:false`, because the mode that refuses to act is the one whose caller has the most
+re-planning to do.
 
 Two blind spots, both stated rather than papered over: the read-back window is a fixed 60 ms
 (reported as `observed_after_ms`, so a validator firing at 400 ms is outside it — `wait` then
