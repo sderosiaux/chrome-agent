@@ -73,7 +73,7 @@ chrome-agent screenshot
 ## How It Works
 
 ```
-chrome-agent v0.12.0 (Rust, ~11.5K lines, 3 MB binary)
+chrome-agent v0.13.0 (Rust, ~11.5K lines, 3 MB binary)
     │
     │ WebSocket (Chrome DevTools Protocol)
     ▼
