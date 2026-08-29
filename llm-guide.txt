@@ -196,6 +196,9 @@ LLM USAGE GUIDE:
     chrome-agent network                               # resources already loaded (stealth-safe)
     chrome-agent network --filter "graphql" --body     # filter + response bodies
     chrome-agent network --live 5 --body               # capture live traffic for 5 seconds
+    # --body without --filter fetches textual types only (json/text/js/xml); WITH --filter
+    # every match is fetched — the filter is the selection (application/yaml included).
+    # Binary bodies are never printed: body_omitted names the size and the download command.
     chrome-agent network --abort "*tracking*" --live 30 # block requests matching pattern
 
   Console capture (stealth-safe):

@@ -1,0 +1,14 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Network body probe</title></head>
+<body>
+<p>Fetches config.yaml and blob.bin from the server named in location.hash.</p>
+<script>
+  const base = location.hash.slice(1);
+  setInterval(() => {
+    fetch(base + "/config.yaml").catch(() => {});
+    fetch(base + "/blob.bin").catch(() => {});
+  }, 400);
+</script>
+</body>
+</html>
