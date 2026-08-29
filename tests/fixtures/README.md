@@ -45,6 +45,26 @@ confusion a control is supposed to remove.
 Native checkbox, ARIA checkbox, text input, radio. Covers the two readings of "is this
 checked" that `!!el.checked` gets wrong in opposite directions.
 
+## `snapshot_filter_baseline.html`
+
+Thirteen accessibility nodes and an empty `#slot` to inject into, chosen so that every
+narrowing flag on `inspect` hides a DIFFERENT part of the tree: a heading and a footer
+outside `main` (which `--uid <main>` drops), a combobox with two options nested two levels
+deep (which `--max-depth 1` drops), one link (which `--urls` annotates and nothing else
+does), and exactly one button (so `--filter button` keeps one line out of thirteen).
+
+The count is the point. Injecting one button into `#slot` makes the honest answer to the
+next `diff` exactly `added=1, removed=0, changed=0`, so a baseline that was stored narrowed
+does not merely look different — it reports a number, and the number names how much of the
+page the flag had hidden. Measured before the fix: `--filter` 13, `--max-depth 1` 10,
+`--uid <main>` 5, `--urls` 1 but `changed=1`. A fixture with a round tree would have let
+several of those collapse onto the same wrong answer.
+
+The link exists for `--urls` alone and is what makes that path fail in the OTHER direction:
+`url="…"` is appended to the line, the next read renders it bare, and the link comes back as
+`changed` rather than `added`. Without a link on the page the whole class would have looked
+like one bug instead of two.
+
 ## Everything else
 
 `frame_*` for iframe binding, `dialog_click.html` for the JS dialog handler,

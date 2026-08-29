@@ -180,8 +180,8 @@ chrome-agent screenshot
 
 | Command | What it does |
 |---------|------------|
-| `inspect [--verbose] [--max-depth N] [--uid nN] [--filter "role,role"] [--scroll] [--limit N] [--urls] [--max-chars N] [--offset K]` | a11y tree with UIDs. `--scroll --limit` for infinite scroll. `--urls` resolves href on links. `--max-chars`/`--offset` cap and page the output. |
-| `diff` | What changed since last inspect. |
+| `inspect [--verbose] [--max-depth N] [--uid nN] [--filter "role,role"] [--scroll] [--limit N] [--urls] [--max-chars N] [--offset K]` | a11y tree with UIDs. `--scroll --limit` for infinite scroll. `--urls` resolves href on links. `--max-chars`/`--offset` cap and page the output. Every one of these narrows what is PRINTED only: the snapshot stored for `diff` is the full tree, and every uid on the page stays actionable. |
+| `diff` | What changed since last inspect. Compared against the FULL tree, whatever narrowing flags the inspect printed with — a `--filter`ed view is not a baseline, and using one reports every node the filter hid as an addition. |
 | `screenshot [--filename name] [--format jpeg\|png] [--quality N] [--max-width N] [--uid nN\|--selector "css"]` | Screenshot to file. JPEG/quality/max-width shrink it; `--uid`/`--selector` clip to one element. |
 | `pdf [--filename name] [--landscape] [--background]` | Print the current page to a PDF file. |
 | `tabs` | List open tabs. |

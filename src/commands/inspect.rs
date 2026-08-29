@@ -4,7 +4,7 @@ use serde_json::json;
 
 use crate::cdp::client::CdpClient;
 use crate::element_ref::ElementRef;
-use crate::snapshot::Snapshot;
+use crate::snapshot::{Snapshot, Views};
 
 pub async fn run(
     client: &CdpClient,
@@ -17,16 +17,38 @@ pub async fn run(
     Ok(snapshot)
 }
 
+/// One reading of the page, rendered twice: the full baseline to persist and the reduced
+/// view the caller asked for.
+///
+/// Every caller that both *shows* a tree and *stores* one goes through here, so the rule
+/// that a display flag never reaches the baseline is stated once — see `snapshot::Views`.
+pub async fn views(
+    client: &CdpClient,
+    verbose: bool,
+    max_depth: Option<usize>,
+    focus_uid: Option<&str>,
+    role_filter: Option<&[&str]>,
+) -> Result<Views, crate::BoxError> {
+    Ok(crate::snapshot::take_views(client, verbose, max_depth, focus_uid, role_filter).await?)
+}
+
 /// Scroll and collect unique filtered items from virtualized lists (X.com, etc.).
 /// Takes repeated snapshots while scrolling, deduplicates by text content,
 /// stops when `limit` unique items are collected or no new items appear.
+///
+/// The collected text is a UNION over scroll positions: it never described the page at any
+/// one moment, so it cannot be a diff baseline. `Views::full` is therefore a fresh, full
+/// reading taken once the scrolling has stopped — the page as it now stands — while the
+/// union stays what the caller is shown. Its `uid_map` keeps the union too: an item that
+/// scrolled out of a virtualized list is gone from the final tree, and dropping its uid
+/// would take away the only handle the caller was given for it.
 pub async fn scroll_collect(
     client: &CdpClient,
     verbose: bool,
     focus_uid: Option<&str>,
     role_filter: Option<&[&str]>,
     limit: usize,
-) -> Result<Snapshot, crate::BoxError> {
+) -> Result<Views, crate::BoxError> {
     let mut collected: Vec<String> = Vec::new();
     let mut seen = HashSet::new();
     let mut uid_map: HashMap<String, ElementRef> = HashMap::new();
@@ -96,8 +118,17 @@ pub async fn scroll_collect(
         format!("\n({} items collected)", collected.len())
     };
     let text = format!("{}{note}", collected.join("\n"));
-    let identity = crate::snapshot::document_identity(client).await;
-    Ok(Snapshot { text, uid_map, identity })
+
+    // One more full reading, after the scrolling: the baseline has to be a page state, and
+    // the union above is not one. Costs a single `getFullAXTree` on a path that already
+    // spent up to `limit * 3` of them.
+    let mut full = crate::snapshot::take_snapshot(client, verbose, None, None, None).await?;
+    // The final tree wins on any uid it also holds; the union keeps the ones it alone saw.
+    for (uid, element) in full.uid_map {
+        uid_map.insert(uid, element);
+    }
+    full.uid_map = uid_map;
+    Ok(Views::from_parts(full, Some(text)))
 }
 
 /// Post-process snapshot text to resolve and append href URLs on link nodes.

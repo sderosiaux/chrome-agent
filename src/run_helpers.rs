@@ -213,11 +213,18 @@ pub async fn output_action_with(
         // next comparison read every node the limit cut off as newly added: verified, an
         // action with `--max-depth 1` then a plain `diff` invented additions.
         //
+        // One reading, two renderings (`snapshot::Views`): the baseline and, when the caller
+        // asked for `--inspect --max-depth`, the shallower text printed for them. It used to
+        // be two `getFullAXTree` calls, so a page that moved between them printed a tree that
+        // was not the baseline stored beside it.
+        //
         // A read that fails is not an action that failed. This used to propagate with `?`,
         // so a click that had already been delivered came back as `ok:false` — and the
         // natural response to that is to click again, which is real. `pipe_dispatch` stated
         // the opposite policy in a comment and followed it; this is the CLI adopting it.
-        let Ok(snapshot) = commands::inspect::run(client, false, None, None, None).await else {
+        let display_depth = if report.inspect { report.max_depth } else { None };
+        let Ok(views) = commands::inspect::views(client, false, display_depth, None, None).await
+        else {
             let assessment = crate::pipe_report::attach_verdict_for(
                 client,
                 &mut obj,
@@ -230,6 +237,8 @@ pub async fn output_action_with(
             }
             return Ok(());
         };
+        let shown = report.inspect.then(|| views.shown().to_string());
+        let snapshot = views.full;
 
         if report.changes {
             let previous = store
@@ -302,18 +311,11 @@ pub async fn output_action_with(
             }
         }
 
-        if report.inspect {
+        if let Some(shown) = shown {
             // The caller asked to see the tree at their depth; the baseline above stays
             // full so the two never get confused.
-            let shown = if report.max_depth.is_some() {
-                commands::inspect::run(client, false, report.max_depth, None, None)
-                    .await
-                    .map_or_else(|_| snapshot.text.clone(), |s| s.text)
-            } else {
-                snapshot.text.clone()
-            };
-            obj["snapshot"] = json!(shown);
-            trailer.clone_from(&shown);
+            obj["snapshot"] = json!(&shown);
+            trailer = shown;
         }
 
         if let Some(browser_s) = store.browsers.get_mut(browser_name) {
@@ -413,13 +415,16 @@ pub async fn output_goto(
             landing.attach(&mut obj);
         }
         if inspect {
-            let snapshot = commands::inspect::run(client, false, max_depth, None, None).await?;
-            obj["snapshot"] = json!(snapshot.text);
-            page.last_snapshot = Some(snapshot.text);
-            let (f, l) = snapshot.identity.map_or((None, None), |(f, l)| (Some(f), Some(l)));
+            // `--max-depth` decides what is printed, never what is stored: a truncated
+            // baseline makes the next `diff` report every node past the limit as an addition.
+            let views = commands::inspect::views(client, false, max_depth, None, None).await?;
+            obj["snapshot"] = json!(views.shown());
+            let full = views.full;
+            page.last_snapshot = Some(full.text);
+            let (f, l) = full.identity.map_or((None, None), |(f, l)| (Some(f), Some(l)));
             page.last_snapshot_frame = f;
             page.last_snapshot_loader = l;
-            page.uid_map = snapshot.uid_map;
+            page.uid_map = full.uid_map;
         }
         json_output(&obj);
     } else {
@@ -432,13 +437,15 @@ pub async fn output_goto(
             println!("{line}");
         }
         if inspect {
-            let snapshot = commands::inspect::run(client, false, max_depth, None, None).await?;
-            println!("{}", snapshot.text);
-            page.last_snapshot = Some(snapshot.text);
-            let (f, l) = snapshot.identity.map_or((None, None), |(f, l)| (Some(f), Some(l)));
+            // Same rule as the JSON branch above: the depth is a display flag.
+            let views = commands::inspect::views(client, false, max_depth, None, None).await?;
+            println!("{}", views.shown());
+            let full = views.full;
+            page.last_snapshot = Some(full.text);
+            let (f, l) = full.identity.map_or((None, None), |(f, l)| (Some(f), Some(l)));
             page.last_snapshot_frame = f;
             page.last_snapshot_loader = l;
-            page.uid_map = snapshot.uid_map;
+            page.uid_map = full.uid_map;
         }
     }
     Ok(())

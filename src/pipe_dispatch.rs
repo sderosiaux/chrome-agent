@@ -169,31 +169,34 @@ pub async fn dispatch_inspect(
     if scroll {
         commands::extract::scroll_to_load(client).await?;
     }
-    let (mut text, uid_map, doc_identity) = if let Some(max) = limit {
-        let result = commands::inspect::scroll_collect(client, verbose, uid, role_filter.as_deref(), max).await?;
-        (result.text, result.uid_map, result.identity)
+    let views = if let Some(max) = limit {
+        commands::inspect::scroll_collect(client, verbose, uid, role_filter.as_deref(), max).await?
     } else {
-        let s = commands::inspect::run(client, verbose, max_depth, uid, role_filter.as_deref()).await?;
-        (s.text, s.uid_map, s.identity)
+        commands::inspect::views(client, verbose, max_depth, uid, role_filter.as_deref()).await?
     };
-    if urls {
-        text = commands::inspect::resolve_urls(client, &text, &uid_map).await;
-    }
+    // `--urls` annotates the lines it returns. Applied to the baseline it would make every
+    // link read as changed on the next diff, which reads no url= token.
+    let shown = if urls {
+        commands::inspect::resolve_urls(client, views.shown(), &views.full.uid_map).await
+    } else {
+        views.shown().to_string()
+    };
 
     // Persist the FULL snapshot so diff and uid lookups stay complete;
-    // paging only affects what we return.
+    // filter/max_depth/uid/urls and paging only affect what we return.
     if let Some(browser_s) = store.browsers.get_mut(browser_name) {
         let page = session::ensure_page(browser_s, page_name, target_id);
-        page.uid_map = uid_map;
-        page.last_snapshot = Some(text.clone());
-        let (f, l) = doc_identity.map_or((None, None), |(f, l)| (Some(f), Some(l)));
+        let full = views.full;
+        page.uid_map = full.uid_map;
+        page.last_snapshot = Some(full.text);
+        let (f, l) = full.identity.map_or((None, None), |(f, l)| (Some(f), Some(l)));
         page.last_snapshot_frame = f;
         page.last_snapshot_loader = l;
     }
 
     let offset = cmd.get("offset").and_then(Value::as_u64).unwrap_or(0) as usize;
     let max_chars = cmd.get("max_chars").and_then(Value::as_u64).map(|n| n as usize);
-    let paged = commands::inspect::paginate(&text, offset, max_chars);
+    let paged = commands::inspect::paginate(&shown, offset, max_chars);
     Ok(json!({
         "ok": true,
         "snapshot": paged.text,
@@ -550,20 +553,31 @@ pub async fn dispatch_extract(client: &CdpClient, cmd: &Value) -> Result<Value, 
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Attach the tree a command's `inspect: true` asked for, and store the baseline.
+///
+/// This is the pipe/batch half of the rule `run_helpers::output_action_with` states for the
+/// CLI: the caller's `max_depth` decides what is RETURNED, never what is stored. It used to
+/// store the truncated rendering, which the change report then overwrote with a full one —
+/// so the bug only surfaced where nothing overwrote it: `goto` (deliberately outside
+/// `mutates_page`) and any action run under `--verdict off`. Measured on
+/// `snapshot_filter_baseline.html`, `{"cmd":"goto","inspect":true,"max_depth":1}` then one
+/// injected button then `diff` answered `added=10` where the truth is 1.
 pub async fn attach_snapshot(
     client: &CdpClient, store: &mut SessionStore, browser_name: &str, page_name: &str,
     target_id: &str, max_depth: Option<usize>,
 ) -> Result<String, crate::BoxError> {
-    let snapshot = commands::inspect::run(client, false, max_depth, None, None).await?;
+    let views = commands::inspect::views(client, false, max_depth, None, None).await?;
+    let shown = views.shown().to_string();
     if let Some(browser_s) = store.browsers.get_mut(browser_name) {
         let page = session::ensure_page(browser_s, page_name, target_id);
-        page.uid_map = snapshot.uid_map;
-        page.last_snapshot = Some(snapshot.text.clone());
-        let (f, l) = snapshot.identity.clone().map_or((None, None), |(f, l)| (Some(f), Some(l)));
+        let full = views.full;
+        page.uid_map = full.uid_map;
+        page.last_snapshot = Some(full.text);
+        let (f, l) = full.identity.map_or((None, None), |(f, l)| (Some(f), Some(l)));
         page.last_snapshot_frame = f;
         page.last_snapshot_loader = l;
     }
-    Ok(snapshot.text)
+    Ok(shown)
 }
 
 pub fn get_uid_map(store: &SessionStore, browser_name: &str, page_name: &str) -> HashMap<String, ElementRef> {
