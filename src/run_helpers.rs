@@ -751,8 +751,32 @@ pub fn cmd_close(browser_name: &str, purge: bool, json_mode: bool) -> Result<(),
 
     let outcome = browser.as_ref().and_then(|b| b.pid).map(|pid| (pid, kill_pid(pid)));
 
+    // A signal is not an exit. Chrome keeps its DevTools HTTP endpoint answering for a
+    // moment while it tears down, so a relaunch inside that window reconnects to the
+    // dying instance and fails its WebSocket handshake. Waiting until the pid is gone —
+    // and removing the port file it leaves — is what lets `close` immediately followed
+    // by a fresh command on the same name work instead of racing.
+    let exited = outcome.map(|(pid, o)| match o {
+        crate::kill::KillOutcome::Signalled => {
+            let gone = crate::kill::wait_until_gone(pid, std::time::Duration::from_secs(5));
+            if gone && let Ok(dir) = session::browsers_dir() {
+                let _ = std::fs::remove_file(dir.join(browser_name).join("DevToolsActivePort"));
+            }
+            gone
+        }
+        crate::kill::KillOutcome::Gone => true,
+        crate::kill::KillOutcome::NotABrowser => false,
+    });
+
     let message = match (&browser, outcome) {
-        (Some(_), Some((pid, outcome))) => close_message(browser_name, pid, outcome),
+        (Some(_), Some((pid, outcome))) => {
+            let base = close_message(browser_name, pid, outcome);
+            if exited == Some(false) && outcome == KillOutcome::Signalled {
+                format!("{base} — signalled but still shutting down after 5s")
+            } else {
+                base
+            }
+        }
         (Some(_), None) => format!("Removed external browser session: {browser_name}"),
         (None, _) => format!("No browser session named '{browser_name}'."),
     };
@@ -774,11 +798,18 @@ pub fn cmd_close(browser_name: &str, purge: bool, json_mode: bool) -> Result<(),
         // `ok` has always meant "the command ran", so a caller cannot read a kill out of
         // it. `signalled` is the act itself: false where the pid was gone or reused, and
         // the only field that separates a browser this closed from one it merely forgot.
-        json_output(&json!({
+        let mut response = json!({
             "ok": true,
             "message": message,
             "signalled": outcome.is_some_and(|(_, o)| o == KillOutcome::Signalled),
-        }));
+        });
+        // Only meaningful when something was signalled: whether the process was observed
+        // gone before `close` returned. Absent otherwise — a claim about a wait that
+        // never happened would be noise.
+        if outcome.is_some_and(|(_, o)| o == KillOutcome::Signalled) {
+            response["exited"] = json!(exited == Some(true));
+        }
+        json_output(&response);
     } else {
         println!("{message}");
     }
