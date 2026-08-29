@@ -219,6 +219,15 @@ pub async fn clear_overrides(client: &CdpClient) -> Result<(), CdpClientError> {
     emit.and(touch).and(metrics)
 }
 
+/// Make the emulated page Chrome's active target before touching its overrides.
+///
+/// Not cosmetic: the Screen Orientation API of a background target silently reports the ACTIVE
+/// target's orientation, so without this an `emulate status` on the mobile page right after a
+/// sibling page was created reads "landscape" off the sibling (the e2e suite pins this).
+/// The cost is stated rather than hidden: one target per browser is foreground, so every command
+/// on an emulated page backgrounds its siblings — their `visibilityState` flips and their rAF and
+/// timers throttle until they are acted on in turn. That is what a browser does when a user
+/// switches tabs, and side-by-side pages in one Chrome cannot both be foreground.
 async fn activate_target(client: &CdpClient, target_id: &str) -> Result<(), CdpClientError> {
     client
         .send("Target.activateTarget", json!({"targetId": target_id}))
