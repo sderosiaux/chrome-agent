@@ -530,7 +530,9 @@ pub enum Command {
         /// URL pattern to filter (case-insensitive contains match)
         #[arg(long)]
         filter: Option<String>,
-        /// Include response bodies (JSON/text only, truncated to 2000 chars)
+        /// Include response bodies, truncated to 2000 chars. Without --filter only textual
+        /// types (json/text/javascript/xml) are fetched; with --filter every match is —
+        /// the filter is the selection. Binary bodies are counted, never printed.
         #[arg(long)]
         body: bool,
         /// Capture live traffic for N seconds (default: show already-loaded resources via Performance API)

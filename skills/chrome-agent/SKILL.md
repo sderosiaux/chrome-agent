@@ -212,6 +212,8 @@ echo '{"cmd":"goto","url":"...","inspect":true}' | chrome-agent pipe
 # Network + console
 chrome-agent network [--filter "pattern"] [--body] [--limit N]   # already loaded, stealth-safe
 chrome-agent network --live 5 --body --filter "graphql"
+# --body + --filter fetches every match whatever its MIME (the filter is the selection);
+# without --filter only textual types. Binary: counted in body_omitted, never printed.
 chrome-agent network --abort "*tracking*" --live 30              # blocking; start before navigating
 chrome-agent console [--level error] [--clear]
 
