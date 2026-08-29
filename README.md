@@ -411,15 +411,20 @@ chrome-agent --page mobile emulate status
 chrome-agent --page mobile emulate reset
 ```
 
-Metrics are attached to one named page and reapplied on later CLI connections. Sibling and newly
-created pages stay unchanged. Closing or restarting Chrome discards the configuration. Values are
-explicit because device preset catalogs belong to the DevTools frontend, not CDP; the binary does
-not ship a copy that can drift from Chromium. Screen/orientation reporting and touch-event
-synthesis require experimental CDP fields. If Chromium rejects one, the command attempts every
-cleanup call and does not persist the incomplete configuration. Because CDP emulation state belongs
-to a connection, `device` and `reset` refuse to race another live client process; send the mutation
-through the active pipe or close that client first. Chromium exposes an orientation override only
-for its active target, so commands that reapply or inspect emulation activate that named tab first.
+Metrics are attached to one named page. Chrome reverts every override the moment the CDP session
+that set it detaches, so the configuration is persisted and reapplied at the start of each
+connection — which also means that between commands on a headed or `--connect` browser the page
+briefly shows its real metrics. Sibling pages keep their own metrics, with one visibility caveat:
+Chromium exposes an orientation override only for its active target, so commands on an emulated
+page activate that tab first, backgrounding its siblings the way switching tabs does. Closing or
+restarting Chrome discards the configuration. Values are explicit because device preset catalogs
+belong to the DevTools frontend, not CDP; the binary does not ship a copy that can drift from
+Chromium. Under `--touch`, `click` and `check` dispatch touch taps instead of mouse events
+(`dblclick`, `hover` and `drag` stay mouse — pages that only listen to touch will not see them);
+Chrome's own mouse-to-touch conversion was measured to leave `Input.dispatchMouseEvent`
+unanswered, which is why the taps are synthesized. `screenshot --max-width` counts CSS pixels, so
+a `--dpr 2.625` capture is that factor larger. If Chromium rejects one of the override calls, the
+command attempts every cleanup call and does not persist the incomplete configuration.
 
 ## Iframes
 

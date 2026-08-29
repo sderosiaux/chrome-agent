@@ -226,8 +226,20 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
             action: EmulateAction::Device { .. } | EmulateAction::Reset,
         } | Command::Batch { .. }
     );
-    if !defers_emulation_reapply {
-        crate::emulation::reapply(&client, &store, &cli.browser, &cli.page).await?;
+    if !defers_emulation_reapply
+        && let Err(error) =
+            crate::emulation::reapply(&client, &store, &cli.browser, &cli.page).await
+    {
+        // Same contract as the pipe's EmulationRecovery: the failure names the one command
+        // that repairs it, with the real values filled in, and the command was NOT run —
+        // acting on a page whose stored metrics silently failed to apply would report
+        // results measured under the wrong viewport.
+        return Err(format!(
+            "Could not reapply this page's stored device configuration: {error}. \
+             Clear it: chrome-agent --browser {} --page {} emulate reset",
+            cli.browser, cli.page
+        )
+        .into());
     }
 
     let json_mode = cli.json;

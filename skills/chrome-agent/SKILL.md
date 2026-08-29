@@ -192,9 +192,9 @@ chrome-agent hover <uid>
 chrome-agent --page mobile emulate device --label "checkout phone" --width 412 --height 915 --dpr 2.625 --mobile --touch
 chrome-agent --page mobile emulate status
 chrome-agent --page mobile emulate reset
-# Reapplied on later connections to this page; sibling/new pages remain unchanged; restart discards it.
-# Send device/reset through an active pipe; another client process is refused while it is open.
-# Reapplying/reading orientation activates the emulated named tab (a Chromium requirement).
+# Persisted per named page, reapplied at the start of each connection; restart discards it.
+# Acting on an emulated page activates its tab (backgrounds siblings — a Chromium requirement
+# for orientation). Under --touch, click/check tap; dblclick/hover/drag stay mouse events.
 
 # Iframes — the frame switch lives on the connection, so use pipe/batch:
 printf '%s\n' \

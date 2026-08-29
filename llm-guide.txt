@@ -127,9 +127,11 @@ LLM USAGE GUIDE:
     chrome-agent --page mobile emulate device --label "checkout phone" --width 412 --height 915 --dpr 2.625 --mobile --touch
     chrome-agent --page mobile emulate status
     chrome-agent --page mobile emulate reset
-    # Persisted and reapplied only for that named page. New/sibling pages remain unchanged.
-    # Send device/reset through an active pipe; another client process is refused while it is open.
-    # Reapplying/reading orientation activates the emulated named tab (a Chromium requirement).
+    # Persisted per named page, reapplied at the start of each connection (Chrome reverts
+    # overrides when the session that set them detaches). Sibling pages keep their own metrics.
+    # Acting on an emulated page activates its tab (Chromium reports orientation only for the
+    # active target), which backgrounds siblings like a tab switch does.
+    # Under --touch, click/check dispatch touch taps; dblclick/hover/drag stay mouse events.
     # Closing or restarting Chrome discards the configuration.
 
   Iframes:
