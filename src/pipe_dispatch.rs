@@ -332,13 +332,32 @@ pub async fn dispatch_screenshot(
     Ok(json!({"ok": true, "path": path}))
 }
 
-pub async fn dispatch_download(client: &CdpClient, default_timeout: u64, cmd: &Value) -> Result<Value, crate::BoxError> {
-    let url = cmd.get("url").and_then(Value::as_str).ok_or("download: missing \"url\"")?;
+/// `download` in pipe and batch. Same entry point as the CLI (`commands::download::dispatch`),
+/// so the URL and the click paths cannot drift into two response shapes across the three modes.
+pub async fn dispatch_download(
+    client: &CdpClient,
+    store: &SessionStore,
+    browser_name: &str,
+    page_name: &str,
+    default_timeout: u64,
+    report: crate::run_helpers::ReportPolicy,
+    cmd: &Value,
+) -> Result<Value, crate::BoxError> {
+    let target = commands::download::Target::parse(
+        cmd.get("url").and_then(Value::as_str),
+        cmd.get("uid").and_then(Value::as_str),
+        cmd.get("selector").and_then(Value::as_str),
+    )?;
     let out = cmd.get("out").and_then(Value::as_str);
     let timeout = cmd.get("timeout").and_then(Value::as_u64).unwrap_or(default_timeout);
     let max_bytes = parse_download_max_bytes(cmd)?;
-    let result = commands::download::run(client, url, out, timeout, max_bytes).await?;
-    Ok(json!({"ok": true, "path": result.path, "bytes": result.bytes, "mime": result.mime}))
+    let uid_map = get_uid_map(store, browser_name, page_name);
+    let on_intercept = crate::hit_test::OnIntercept::from_cmd(cmd, report.on_intercept);
+    let outcome = commands::download::dispatch(
+        client, &uid_map, &target, out, timeout, max_bytes, on_intercept, browser_name,
+    )
+    .await?;
+    Ok(outcome.to_json())
 }
 
 fn parse_download_max_bytes(cmd: &Value) -> Result<usize, crate::BoxError> {
@@ -749,7 +768,7 @@ pub async fn dispatch_single(
         "text" => dispatch_text(client, store, browser_name, page_name, cmd).await,
         "screenshot" => dispatch_screenshot(client, store, browser_name, page_name, cmd).await,
         "pdf" => dispatch_pdf(client, cmd).await,
-        "download" => dispatch_download(client, timeout, cmd).await,
+        "download" => dispatch_download(client, store, browser_name, page_name, timeout, report, cmd).await,
         "wait" => dispatch_wait(client, timeout, cmd).await,
         "back" => dispatch_back(client).await,
         "forward" => dispatch_forward(client).await,

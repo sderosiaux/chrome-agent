@@ -128,6 +128,100 @@ fn before_verb_form(argv: &[String], flag: &str) -> Option<String> {
     )
 }
 
+/// A `download --uid`/`--selector` whose click landed and produced no download.
+///
+/// Rule 3 carries this one. The click WAS dispatched, so the reflex — click again, maybe it
+/// works — is a second real click on a page that cannot tell it from a deliberate one, and on an
+/// "Export" button that means two orders, two exports, two of whatever the button does. So the
+/// prohibition is in words and comes before the command.
+///
+/// Rule 2 is satisfied by ONE command, `inspect --urls`, chosen because it answers both questions
+/// a caller has here with a single call: what the click did instead (the tree), and whether the
+/// element was a plain link whose href can be fetched with no click at all (the URLs). Offering
+/// two commands with no criterion is the shrug this contract exists to remove.
+#[must_use]
+pub fn no_download_hint(
+    browser: &str,
+    waited_secs: u64,
+    dispatched: &crate::hit_test::Dispatched,
+) -> String {
+    let run = invocation(browser);
+    // A hit test that named another receiver explains the silence, and the recovery is that
+    // element rather than the download machinery. It is stated first because it is the only
+    // branch where the caller's next action is not `inspect`.
+    let cause = match dispatched.receiver.as_ref() {
+        Some(receiver) => format!(
+            "The click was delivered, but {} occupied the point it was aimed at, so that element \
+             received it and the element you named never did. ",
+            receiver.describe()
+        ),
+        None => String::new(),
+    };
+    format!(
+        "{cause}Chrome reported no download beginning in the {waited_secs}s after the click, so \
+         nothing was written to disk. Do not click again: the first click reached the page, and \
+         the page has no way to tell a retry from a second deliberate action — on an export or a \
+         purchase that is two of them. Run `{run} inspect --urls` to see what the click did \
+         instead and whether the element is a plain link; when it is, its href downloads with no \
+         click at all."
+    )
+}
+
+/// A `download --uid`/`--selector` where the hit test refused to aim, so nothing was dispatched.
+///
+/// The one branch on this command where a retry is safe, and the hint has to say so: `not_settled`
+/// (the aim point was still moving, or outside the viewport) and `off_target` (no point inside the
+/// element's own boxes) both stop before the dispatch, so the page never saw an event. Forbidding
+/// the retry here would strand the caller on a recoverable refusal — the mirror of the mistake the
+/// other three hints avoid.
+#[must_use]
+pub fn undispatched_download_hint(browser: &str) -> String {
+    let run = invocation(browser);
+    format!(
+        "No mouse event was dispatched, so the page is exactly as it was and this click may be \
+         repeated. The aim point was still moving, outside the viewport, or nowhere inside the \
+         element's own boxes — an animated scroll and a zero-size element are what that looks \
+         like. Run `{run} inspect` to see where the element actually sits, then aim again."
+    )
+}
+
+/// A click-triggered download this tool cancelled because it went past `--max-bytes`.
+#[must_use]
+pub fn download_cap_hint(browser: &str, max_bytes: usize) -> String {
+    let run = invocation(browser);
+    format!(
+        "The transfer passed the {max_bytes}-byte ceiling this invocation set, so it was \
+         cancelled and the partial file removed. Raise the ceiling and click once more only if \
+         you accept a second click on the page: `{run} download --max-bytes {} …` with the same \
+         target. Nothing partial was kept.",
+        max_bytes.saturating_mul(4)
+    )
+}
+
+/// A click-triggered download Chrome itself ended.
+#[must_use]
+pub fn download_cancelled_hint(browser: &str) -> String {
+    let run = invocation(browser);
+    format!(
+        "Chrome ended the transfer before it finished, which is what a server closing the \
+         connection, a blocked file type and a revoked blob URL all look like from here. Do not \
+         click again blind: the first click landed. Run `{run} console` to read what the page \
+         logged while the download was running."
+    )
+}
+
+/// A click-triggered download still in flight when the window closed.
+#[must_use]
+pub fn download_unfinished_hint(browser: &str) -> String {
+    let run = invocation(browser);
+    format!(
+        "The transfer was still running when the wait ended, so the bytes on disk were a prefix \
+         of the file and were discarded rather than handed back as one. The download itself was \
+         real: raise the wait instead of clicking again, with `{run} --timeout 300 download` and \
+         the same target."
+    )
+}
+
 /// What to do about `msg`, phrased for the browser this invocation is driving.
 #[must_use]
 pub fn error_hint(msg: &str, browser: &str) -> Option<String> {
@@ -495,6 +589,72 @@ mod tests {
                 assert!(!out.contains(placeholder), "{flag} hands back {placeholder}: {out}");
             }
         }
+    }
+
+    /// The four hints a click-triggered download can carry are not reachable through
+    /// `error_hint` — the command succeeds — so they are held to the same three rules here.
+    fn download_hints(browser: &str) -> Vec<String> {
+        vec![
+            no_download_hint(browser, 30, &crate::hit_test::Dispatched::js()),
+            undispatched_download_hint(browser),
+            download_cap_hint(browser, 67_108_864),
+            download_cancelled_hint(browser),
+            download_unfinished_hint(browser),
+        ]
+    }
+
+    #[test]
+    fn every_download_hint_holds_to_the_contract() {
+        for hint in download_hints("agent-7") {
+            for placeholder in ["<uid>", "<url>", "<name>", "<selector>", "<n>", "<value>"] {
+                assert!(!hint.contains(placeholder), "hands back {placeholder}: {hint}");
+            }
+            for forbidden in ["Try running the command again", "run the command again"] {
+                assert!(!hint.contains(forbidden), "invites a blind retry: {hint}");
+            }
+            for word in hint.split('`').skip(1).step_by(2) {
+                if let Some(rest) = word.strip_prefix("chrome-agent ") {
+                    assert!(
+                        rest.starts_with("--browser agent-7 "),
+                        "command aimed at the wrong browser: {word}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Rule 3 is the whole point of this set: the click reached the page, so the reflex — click
+    /// again, it probably failed — is a second real click. Every hint on a DISPATCHED click has
+    /// to forbid it in words, and the one on a click that was never dispatched must not.
+    #[test]
+    fn a_delivered_click_forbids_the_second_one_and_an_undelivered_one_permits_it() {
+        let dispatched = [
+            no_download_hint("default", 30, &crate::hit_test::Dispatched::js()),
+            download_cancelled_hint("default"),
+        ];
+        for hint in dispatched {
+            assert!(
+                hint.contains("Do not click again") || hint.contains("do not click again"),
+                "a delivered click must forbid the retry: {hint}"
+            );
+        }
+        // Nothing was dispatched here, so the page never saw an event and aiming again is safe —
+        // saying otherwise would strand the caller on a recoverable refusal.
+        let safe = undispatched_download_hint("default");
+        assert!(safe.contains("may be repeated"), "{safe}");
+        assert!(!safe.contains("Do not click again"), "{safe}");
+        // Raising the wait is not clicking again, and the hint has to say which one it means.
+        let unfinished = download_unfinished_hint("default");
+        assert!(unfinished.contains("raise the wait instead of clicking again"), "{unfinished}");
+    }
+
+    /// Rule 1: when the hit test already measured why nothing downloaded, the hint states it
+    /// rather than sending the caller to `inspect` for a fact this response holds.
+    #[test]
+    fn an_intercepted_click_names_its_receiver_in_the_hint() {
+        let plain = no_download_hint("default", 5, &crate::hit_test::Dispatched::js());
+        assert!(!plain.contains("occupied the point"), "{plain}");
+        assert!(plain.contains("5s"), "the window is the fact: {plain}");
     }
 
     /// A missing snapshot has one command and now also the reason it is needed.

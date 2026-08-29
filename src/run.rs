@@ -683,18 +683,11 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
             }
         }
 
-        Command::Download { url, out, timeout, max_bytes } => {
-            let result = commands::download::run(&client, &url, out.as_deref(), timeout, max_bytes).await?;
-            if json_mode {
-                json_output(&json!({
-                    "ok": true,
-                    "path": result.path,
-                    "bytes": result.bytes,
-                    "mime": result.mime,
-                }));
-            } else {
-                println!("{} ({} bytes, {})", result.path, result.bytes, result.mime);
-            }
+        Command::Download { url, uid, selector, out, timeout, max_bytes } => {
+            let target = commands::download::Target::parse(url.as_deref(), uid.as_deref(), selector.as_deref())?;
+            let uid_map = get_uid_map(&store, &cli.browser, &cli.page);
+            let outcome = commands::download::dispatch(&client, &uid_map, &target, out.as_deref(), timeout, max_bytes, policy.on_intercept, &cli.browser).await?;
+            if json_mode { json_output(&outcome.to_json()); } else { outcome.print_text(); }
         }
 
         Command::Pdf { filename, landscape, background } => {

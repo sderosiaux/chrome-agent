@@ -269,7 +269,7 @@ async fn dispatch(
         "text" => dispatch_text(client, store, browser_name, page_name, cmd).await,
         "screenshot" => dispatch_screenshot(client, store, browser_name, page_name, cmd).await,
         "pdf" => dispatch_pdf(client, cmd).await,
-        "download" => dispatch_download(client, timeout, cmd).await,
+        "download" => dispatch_download(client, store, browser_name, page_name, timeout, report, cmd).await,
         "wait" => dispatch_wait(client, timeout, cmd).await,
         "back" => dispatch_back(client).await,
         "forward" => dispatch_forward(client).await,

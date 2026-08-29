@@ -407,20 +407,33 @@ pub enum Command {
         selector: Option<String>,
     },
 
-    /// Download a URL to disk, fetched in-page so cookies/auth are preserved
+    /// Download a file to disk: a URL fetched in-page (cookies/auth preserved), or whatever a
+    /// click produces
     ///
-    /// Click-triggered browser-native downloads are not supported; resolve the
-    /// target href (e.g. `inspect --urls`) and pass it here.
+    /// `download <url>` fetches the address. `download --uid n47` / `--selector "#export"`
+    /// clicks the element and captures the browser-native download it triggers — the only way
+    /// to a file built client-side (`Blob`) or handed out by a POST the anchor never names.
+    /// Read `downloaded`: a click that landed and produced no file answers ok:true with
+    /// `downloaded:false`, because an error there would invite a second real click.
     Download {
-        /// URL to download (fetched with the page's session)
-        url: String,
-        /// Output path or filename (default: derived from Content-Disposition/URL into ~/.chrome-agent/tmp)
+        /// URL to download (fetched with the page's session) — omit if using --uid or --selector
+        url: Option<String>,
+        /// Click this uid and capture the download it triggers
+        #[arg(long)]
+        uid: Option<String>,
+        /// Click the element matching this CSS selector and capture the download it triggers
+        #[arg(long)]
+        selector: Option<String>,
+        /// Output path or filename (default: derived from Content-Disposition/URL/the server's
+        /// suggested name into ~/.chrome-agent/tmp)
         #[arg(long)]
         out: Option<String>,
-        /// Timeout in seconds
+        /// Timeout in seconds — on a click, the whole window: the download must begin AND
+        /// finish inside it
         #[arg(long, default_value = "30")]
         timeout: u64,
-        /// Maximum response size in bytes
+        /// Maximum size in bytes. On a click the transfer is cancelled past it, and the partial
+        /// file removed
         #[arg(
             long,
             default_value = "67108864",

@@ -40,6 +40,21 @@ labels on purpose: `snapshot_secret` scrubs any node echoing a secret's value, s
 labels made the control come back redacted too — for a different reason, which is exactly the
 confusion a control is supposed to remove.
 
+## `download_click.html`
+
+The three shapes a click-triggered download takes, on one page: an `<a download>` whose `href`
+is a `Blob`, a button whose handler creates, clicks and removes the anchor so nothing in the DOM
+ever names the file, and a button that changes the page and downloads nothing.
+
+The point of the first two is that neither has an address anything outside the page could fetch,
+which is the gap `download <url>` cannot reach by construction. The third is the one that has to
+stay honest: the click lands, the handler writes a status line, and the response must say no
+download began rather than hang or claim a file. Its `#status` line is what proves the click was
+delivered — without it, a test asserting "no download" would also pass on a click that missed.
+
+The fourth case (a transfer that begins and does not finish) cannot be a `file://` fixture: it
+needs a server that answers slowly, so it lives in `download_click_tests.rs` as `SlowServer`.
+
 ## `checkable_kinds.html`
 
 Native checkbox, ARIA checkbox, text input, radio. Covers the two readings of "is this
