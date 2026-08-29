@@ -125,6 +125,28 @@ pub fn kill_pid(pid: u32) -> KillOutcome {
     }
 }
 
+/// Wait until `pid` no longer names a process, bounded.
+///
+/// A SIGTERM returns before Chrome exits, and the gap is not theoretical: a relaunch
+/// inside it finds the old `DevToolsActivePort`, whose HTTP endpoint still answers
+/// mid-teardown, and the WebSocket handshake then fails with a transport error —
+/// `close` immediately followed by `goto` on the same name failed reliably on this
+/// machine and passed with a 2 s sleep between them. Waiting here makes "Closed"
+/// mean closed. `false` after the deadline is reported, not papered over.
+#[must_use]
+pub fn wait_until_gone(pid: u32, timeout: std::time::Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if crate::session::liveness(pid) == crate::session::Liveness::Dead {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+}
+
 /// What `close` says, given what the kill actually did. The entry leaves the store in
 /// all three cases — a pid that is gone or reused describes a browser that is already
 /// not running — but only one of them closed anything, and the other two name a pid

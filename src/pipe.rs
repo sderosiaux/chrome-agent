@@ -9,13 +9,13 @@ use crate::commands;
 use crate::pipe_dispatch::{
     dispatch_assert, dispatch_back, dispatch_batch, dispatch_check, dispatch_click,
     dispatch_console, dispatch_dblclick, dispatch_diff, dispatch_download, dispatch_drag,
-    dispatch_eval, dispatch_extract, dispatch_fill, dispatch_fill_and_submit,
+    dispatch_emulate, dispatch_eval, dispatch_extract, dispatch_fill, dispatch_fill_and_submit,
     dispatch_fill_form, dispatch_forward, dispatch_frame, dispatch_goto,
     dispatch_history, dispatch_hover, dispatch_inspect,
     dispatch_navigate_and_read, dispatch_network, dispatch_pdf, dispatch_press,
     dispatch_read, dispatch_screenshot, dispatch_scroll, dispatch_select,
     dispatch_tabs, dispatch_text, dispatch_type, dispatch_upload,
-    dispatch_wait,
+    dispatch_wait, EmulationRecovery,
 };
 use crate::run_helpers::error_hint;
 use crate::session::{self, SessionStore};
@@ -77,12 +77,20 @@ pub async fn run_pipe(cli: &Cli) -> Result<(), crate::BoxError> {
     let dialog_policy = crate::setup::DialogPolicy::parse(&cli.dialog)?;
     client.spawn_dialog_handler(dialog_policy, cli.dialog_text.clone());
     let policy = report_policy(cli)?;
+    // Do not fail before reading stdin when a stored device configuration no longer applies. The
+    // recovery state reports that error for ordinary commands while still admitting
+    // `emulate device` and `emulate reset`, the two commands that can repair the configuration.
+    let mut emulation_recovery =
+        EmulationRecovery::new(&client, &store, &cli.browser, &cli.page).await;
 
     // Main loop: read JSON commands from stdin
     let stdin = BufReader::new(tokio::io::stdin());
     let mut lines = stdin.lines();
 
-    while let Ok(Some(line)) = lines.next_line().await {
+    loop {
+        let Ok(Some(line)) = lines.next_line().await else {
+            break;
+        };
         let line = line.trim().to_string();
         if line.is_empty() { continue; }
 
@@ -101,12 +109,18 @@ pub async fn run_pipe(cli: &Cli) -> Result<(), crate::BoxError> {
                 continue;
             }
 
-        let mut response = dispatch(
-            &client, &browser_client, &mut store,
-            &cli.browser, &cli.page, &target_id, cli.timeout, cli.max_depth,
-            policy,
-            &cmd,
-        ).await;
+        let mut response = if let Some(response) = emulation_recovery.refusal_for(&cmd) {
+            response
+        } else {
+            dispatch(
+                &client, &browser_client, &mut store,
+                &cli.browser, &cli.page, &target_id, cli.timeout, cli.max_depth,
+                policy,
+                &cmd,
+                &mut emulation_recovery,
+            ).await
+        };
+        emulation_recovery.update_after(&cmd, &response);
 
         if let Some(ref path) = record_path
             && let Err(e) = commands::record::log_entry(path, &cmd, &response) {
@@ -173,6 +187,10 @@ pub async fn run_replay(
     else { client.enable("Runtime").await?; }
     let dialog_policy = crate::setup::DialogPolicy::parse(&cli.dialog)?;
     client.spawn_dialog_handler(dialog_policy, cli.dialog_text.clone());
+    // A recording may begin with the device/reset command that repairs its stored configuration.
+    // Replay therefore uses the same recovery state as a live pipe.
+    let mut emulation_recovery =
+        EmulationRecovery::new(&client, &store, &cli.browser, &cli.page).await;
     let policy = report_policy(cli)?;
 
     for line in content.lines() {
@@ -190,12 +208,18 @@ pub async fn run_replay(
             parsed.get("cmd").cloned().unwrap_or_default()
         } else { parsed };
 
-        let response = dispatch(
-            &client, &browser_client, &mut store,
-            &cli.browser, &cli.page, &target_id, cli.timeout, cli.max_depth,
-            policy,
-            &cmd,
-        ).await;
+        let response = if let Some(response) = emulation_recovery.refusal_for(&cmd) {
+            response
+        } else {
+            dispatch(
+                &client, &browser_client, &mut store,
+                &cli.browser, &cli.page, &target_id, cli.timeout, cli.max_depth,
+                policy,
+                &cmd,
+                &mut emulation_recovery,
+            ).await
+        };
+        emulation_recovery.update_after(&cmd, &response);
 
         emit(&response);
     }
@@ -214,6 +238,7 @@ async fn dispatch(
     browser_name: &str, page_name: &str, target_id: &str,
     timeout: u64, global_max_depth: Option<usize>,
     report: crate::run_helpers::ReportPolicy, cmd: &Value,
+    emulation_recovery: &mut EmulationRecovery,
 ) -> Value {
     let cmd_name = cmd.get("cmd").and_then(Value::as_str).unwrap_or("");
     // Same contract as the CLI: an action says what it changed. Capture the baseline first,
@@ -274,8 +299,9 @@ async fn dispatch(
         "fill_and_submit" | "fill-and-submit" => dispatch_fill_and_submit(client, timeout, cmd).await,
         "history" => dispatch_history(cmd),
         "frame" => dispatch_frame(client, cmd).await,
+        "emulate" => dispatch_emulate(client, store, browser_name, page_name, cmd).await,
         "assert" => dispatch_assert(client, store, browser_name, page_name, cmd).await,
-        "batch" => dispatch_batch(client, browser_client, store, browser_name, page_name, target_id, timeout, global_max_depth, report, cmd).await,
+        "batch" => dispatch_batch(client, browser_client, store, browser_name, page_name, target_id, timeout, global_max_depth, report, cmd, emulation_recovery).await,
         "" => Err("Missing \"cmd\" field".into()),
         other => Err(format!("Unknown command: {other}").into()),
     };

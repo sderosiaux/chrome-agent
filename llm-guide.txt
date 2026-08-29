@@ -42,7 +42,7 @@ LLM USAGE GUIDE:
     # layout), so an identical retry misses identically -- look at the page instead.
     # verdict_reason is the machine token; verdict_hint names the next command in words.
 
-  "delivery" on a mouse action (click, dblclick, the check/uncheck click) — a hit test at the
+  "delivery" on a pointer-targeted action (click, dblclick, the check/uncheck click) — a hit test at the
   coordinate about to be dispatched, and the only thing that licenses the two strong words:
     target_hit   aimed at the target/descendant/label's control/shadow host — licenses no_effect
     intercepted  aimed at an element outside the target's subtree -> intercepted_by names it
@@ -122,6 +122,17 @@ LLM USAGE GUIDE:
     # Works with: Sortable.js, React DnD (mouse backend), custom mousedown handlers.
     # Does NOT work with HTML5 Drag and Drop API (sites using dragstart/dragover/drop).
     # For HTML5 DnD sites, use eval with custom JS to dispatch drag events.
+
+  Device emulation (explicit CDP metrics; no bundled preset catalog):
+    chrome-agent --page mobile emulate device --label "checkout phone" --width 412 --height 915 --dpr 2.625 --mobile --touch
+    chrome-agent --page mobile emulate status
+    chrome-agent --page mobile emulate reset
+    # Persisted per named page, reapplied at the start of each connection (Chrome reverts
+    # overrides when the session that set them detaches). Sibling pages keep their own metrics.
+    # Acting on an emulated page activates its tab (Chromium reports orientation only for the
+    # active target), which backgrounds siblings like a tab switch does.
+    # Under --touch, click/check dispatch touch taps; dblclick/hover/drag stay mouse events.
+    # Closing or restarting Chrome discards the configuration.
 
   Iframes:
     chrome-agent frame "#payment-iframe"               # switch to iframe context

@@ -399,7 +399,7 @@ async fn receiver_uid(client: &CdpClient, object_id: &str) -> Option<String> {
     Some(format!("n{backend_id}"))
 }
 
-/// What a mouse action did, and to whom.
+/// What a pointer-targeted action did, and to whom.
 pub struct Dispatched {
     pub delivery: Delivery,
     /// False when the aim never settled, or the caller asked to refuse an interception.

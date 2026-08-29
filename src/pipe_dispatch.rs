@@ -6,6 +6,7 @@ use crate::cdp::client::CdpClient;
 use crate::element_ref::ElementRef;
 use crate::session::{self, SessionStore};
 use crate::commands;
+pub use crate::pipe_emulation::{EmulationRecovery, dispatch_emulate};
 pub use crate::pipe_report::{attach_change_report, mutates_page};
 
 // Split out to stay under the 1000-line file cap; callers keep using `pipe_dispatch::*`.
@@ -684,13 +685,14 @@ pub async fn dispatch_batch(
     global_max_depth: Option<usize>,
     report: crate::run_helpers::ReportPolicy,
     cmd: &Value,
+    emulation_recovery: &mut EmulationRecovery,
 ) -> Result<Value, crate::BoxError> {
     let cmds = cmd.get("commands").and_then(Value::as_array)
         .ok_or("batch: missing \"commands\" array")?;
     let stop_on_error = cmd.get("stop_on_error").and_then(Value::as_bool).unwrap_or(false);
     Ok(run_batch(
         client, browser_client, store, browser_name, page_name, target_id, timeout,
-        global_max_depth, report, cmds, stop_on_error,
+        global_max_depth, report, cmds, stop_on_error, emulation_recovery,
     )
     .await)
 }
@@ -775,6 +777,7 @@ pub async fn dispatch_single(
         "fill_and_submit" | "fill-and-submit" => dispatch_fill_and_submit(client, timeout, cmd).await,
         "history" => dispatch_history(cmd),
         "frame" => dispatch_frame(client, cmd).await,
+        "emulate" => dispatch_emulate(client, store, browser_name, page_name, cmd).await,
         "assert" => dispatch_assert(client, store, browser_name, page_name, cmd).await,
         other => Err(unknown_cmd_error(other)),
     };

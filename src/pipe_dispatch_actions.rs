@@ -315,15 +315,22 @@ pub async fn run_batch(
     report: crate::run_helpers::ReportPolicy,
     commands_list: &[Value],
     stop_on_error: bool,
+    emulation_recovery: &mut crate::pipe_dispatch::EmulationRecovery,
 ) -> Value {
     let mut results = Vec::with_capacity(commands_list.len());
     let mut stopped_at = None;
+    // Check each entry independently: a reset can repair later entries, but it cannot make an
+    // earlier command safe retroactively.
     for (index, c) in commands_list.iter().enumerate() {
-        let r = crate::pipe_dispatch::dispatch_single(
-            client, browser_client, store, browser_name, page_name, target_id, timeout,
-            global_max_depth, report, c,
-        )
-        .await;
+        let r = if let Some(response) = emulation_recovery.refusal_for(c) {
+            response
+        } else {
+            crate::pipe_dispatch::dispatch_single(
+                client, browser_client, store, browser_name, page_name, target_id, timeout,
+                global_max_depth, report, c,
+            ).await
+        };
+        emulation_recovery.update_after(c, &r);
         let ok = r.get("ok").and_then(Value::as_bool).unwrap_or(false);
         results.push(r);
         if stop_on_error && !ok {

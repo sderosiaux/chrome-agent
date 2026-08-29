@@ -25,7 +25,7 @@
 //! The full taxonomy this is an on-ramp to (`docs/design/verdict-taxonomy.md`) does define
 //! `no_effect`, but only behind proof that the action was delivered: a hit test at the
 //! dispatched coordinates, or a postcondition read on the acted-on handle. The hit test
-//! (`src/hit_test.rs`) now exists for mouse actions, so `unchanged` has split: a click whose
+//! (`src/hit_test.rs`) now exists for pointer-targeted actions, so `unchanged` has split: a click whose
 //! delivery was proven and whose window stayed quiet is `no_effect`, one whose aim point
 //! belonged to another element is `intercepted`, and everything with no proof of delivery
 //! stays on the old floor.

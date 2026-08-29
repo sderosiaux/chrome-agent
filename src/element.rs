@@ -149,32 +149,52 @@ pub async fn click_handle(
     Ok(Dispatched::landed(delivery, point, receiver))
 }
 
-/// The two mouse events of a single click, at coordinates somebody else decided on.
+/// A click at coordinates somebody else decided on: mouse normally, touch under emulation.
 async fn dispatch_click_at(client: &CdpClient, cx: f64, cy: f64) -> Result<(), ElementError> {
     // Subscribe BEFORE dispatching so a fast navigation isn't missed.
     let nav_events = client.events();
     client.mark_dispatch();
-    client
-        .send("Input.dispatchMouseEvent", DispatchMouseEventParams {
-            event_type: MouseEventType::MousePressed,
-            x: cx, y: cy,
-            button: Some(MouseButton::Left), buttons: Some(1), click_count: Some(1),
-            modifiers: None, timestamp: None, delta_x: None, delta_y: None,
-            pointer_type: Some("mouse".into()),
-        })
-        .await
-        .map_err(|e| ElementError::Action(format!("mousePressed failed: {e}")))?;
+    if client.touch_emulation_enabled() {
+        client
+            .send(
+                "Input.dispatchTouchEvent",
+                json!({
+                    "type": "touchStart",
+                    "touchPoints": [{"x": cx, "y": cy, "id": 0}],
+                }),
+            )
+            .await
+            .map_err(|e| ElementError::Action(format!("touchStart failed: {e}")))?;
+        client
+            .send(
+                "Input.dispatchTouchEvent",
+                json!({"type": "touchEnd", "touchPoints": []}),
+            )
+            .await
+            .map_err(|e| ElementError::Action(format!("touchEnd failed: {e}")))?;
+    } else {
+        client
+            .send("Input.dispatchMouseEvent", DispatchMouseEventParams {
+                event_type: MouseEventType::MousePressed,
+                x: cx, y: cy,
+                button: Some(MouseButton::Left), buttons: Some(1), click_count: Some(1),
+                modifiers: None, timestamp: None, delta_x: None, delta_y: None,
+                pointer_type: Some("mouse".into()),
+            })
+            .await
+            .map_err(|e| ElementError::Action(format!("mousePressed failed: {e}")))?;
 
-    client
-        .send("Input.dispatchMouseEvent", DispatchMouseEventParams {
-            event_type: MouseEventType::MouseReleased,
-            x: cx, y: cy,
-            button: Some(MouseButton::Left), buttons: Some(0), click_count: Some(1),
-            modifiers: None, timestamp: None, delta_x: None, delta_y: None,
-            pointer_type: Some("mouse".into()),
-        })
-        .await
-        .map_err(|e| ElementError::Action(format!("mouseReleased failed: {e}")))?;
+        client
+            .send("Input.dispatchMouseEvent", DispatchMouseEventParams {
+                event_type: MouseEventType::MouseReleased,
+                x: cx, y: cy,
+                button: Some(MouseButton::Left), buttons: Some(0), click_count: Some(1),
+                modifiers: None, timestamp: None, delta_x: None, delta_y: None,
+                pointer_type: Some("mouse".into()),
+            })
+            .await
+            .map_err(|e| ElementError::Action(format!("mouseReleased failed: {e}")))?;
+    }
 
     wait_for_stabilization(nav_events).await;
     Ok(())

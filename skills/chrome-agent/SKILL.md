@@ -1,6 +1,6 @@
 ---
 name: chrome-agent
-description: Pull structured records out of a web page (product grids, search results, feeds, tables) with no CSS selectors and no model call spent reading HTML. Drives Chrome for everything else too: navigate, click, fill forms, screenshot, print to PDF, download files that sit behind a login, and get past bot detection. Every action says whether the page complied, who received the click, and what the field kept — so you never report a success the tool did not confirm. Runs locally as one binary, no API key, no cloud. Use when the user says scrape, extract the list of, get the data from, fill this form, log in to, click, take a screenshot, read this page, check this site, or when a site has no API.
+description: Local browser automation with structured, verified outcomes. Use for web navigation, scraping and extraction, form interaction, screenshots and downloads, network or console checks, responsive testing, or page-scoped device emulation.
 metadata:
   author: sderosiaux
   version: "0.12.0"
@@ -16,7 +16,7 @@ which chrome-agent || npm install -g chrome-agent   # or: cargo install chrome-a
 ## What this tool guarantees
 
 1. **Every mutating action states what it may claim about itself** — `verdict` + `verdict_reason` + `next`, always present, never four different silences collapsed into one empty report.
-2. **A mouse action says who received the event** — `delivery` comes from a hit test at the coordinate about to be dispatched, and `intercepted_by` names the element that took it instead.
+2. **A pointer-targeted action says who received the event** — `delivery` comes from a hit test at the coordinate about to be dispatched, and `intercepted_by` names the element that took it instead.
 3. **A write says what the page kept** — `value.actual` beside `value.requested`, read back through a stated window (`observed_after_ms`). Same field and same window for `fill`, `select` and `check`/`uncheck`: they are one measurement on three kinds of control.
 
 ## Reading a response
@@ -48,7 +48,7 @@ which chrome-agent || npm install -g chrome-agent   # or: cargo install chrome-a
 | `unknown` | `scroll_not_settled` | **retry** | The aim point was still moving or off-viewport — **nothing was dispatched**, and the miss is **transient**, so the retry is the fix: the animation ends and the next attempt aims at a settled box. `wait`, then repeat. |
 | `not_checked` | `reporting_disabled` | proceed | You passed `--verdict off`. The silence is yours, not the page's. |
 
-`delivery` rides on mouse actions (`click`, `dblclick`, and the `check`/`uncheck` click) and is what licenses the two strong words:
+`delivery` rides on pointer-targeted actions (`click`, `dblclick`, and the `check`/`uncheck` click) and is what licenses the two strong words:
 
 | `delivery` | Means | Licence |
 |---|---|---|
@@ -146,8 +146,9 @@ Every targeted action returns the `uid` it actually resolved, even when you aime
 belongs to the element you meant.
 
 `click --selector` is the same verb as `click <uid>`: both resolve the viewport centre and
-dispatch native mouse events. So a `--selector` on a button behind a cookie banner clicks the
-banner — which is what a pointer does, and what `intercepted_by` tells you.
+dispatch native input — mouse events normally, or a touch tap when the page uses `--touch`.
+So a `--selector` on a button behind a cookie banner clicks the banner — which is what a pointer
+does, and what `intercepted_by` tells you.
 
 ## Commands
 
@@ -186,6 +187,14 @@ chrome-agent check <uid> | chrome-agent uncheck <uid>     # idempotent; refuse w
 chrome-agent upload --uid <uid> /path/to/file.pdf         # --selector too (file inputs hide from a11y)
 chrome-agent drag <from-uid> <to-uid>                     # mouse events; NOT HTML5 DnD
 chrome-agent hover <uid>
+
+# Device metrics — explicit values, scoped to one named page, no preset catalog:
+chrome-agent --page mobile emulate device --label "checkout phone" --width 412 --height 915 --dpr 2.625 --mobile --touch
+chrome-agent --page mobile emulate status
+chrome-agent --page mobile emulate reset
+# Persisted per named page, reapplied at the start of each connection; restart discards it.
+# Acting on an emulated page activates its tab (backgrounds siblings — a Chromium requirement
+# for orientation). Under --touch, click/check tap; dblclick/hover/drag stay mouse events.
 
 # Iframes — the frame switch lives on the connection, so use pipe/batch:
 printf '%s\n' \
@@ -287,7 +296,7 @@ Error:   {"ok":false, "error":"message", "hint":"what to do next"}
   element already held the state: nothing was dispatched, so there was no post-action moment and
   no write of yours to have been kept — that response answers `no_baseline`/`identical_tree`, not
   `value_kept`, and it is not evidence that this action changed anything.
-- mouse actions → `"delivery"`, `"aim":[x,y]`, and `"intercepted_by":{...}` when intercepted.
+- pointer-targeted actions → `"delivery"`, `"aim":[x,y]`, and `"intercepted_by":{...}` when intercepted.
 - `inspect --max-chars` → `{"total_chars","truncated","next_offset"}`.
 - `read`/`text` → `{"text"}` · `eval` → `{"result"}` · `network` → `{"requests":[...]}` ·
   `console` → `{"messages":[...]}` · `batch` → `{"results":[...]}` ·

@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use serde::de::DeserializeOwned;
@@ -64,6 +64,11 @@ pub struct CdpClient {
     /// keeps the number measured rather than assumed, without threading an `Instant` through
     /// every dispatcher signature in all three modes.
     last_dispatch: std::sync::Mutex<Option<std::time::Instant>>,
+    /// Whether chrome-agent should synthesize taps instead of mouse clicks for this target.
+    ///
+    /// Device emulation is reapplied when each connection opens, so this connection-local flag
+    /// follows the target's persisted `--touch` setting without leaking it into sibling pages.
+    touch_emulation: AtomicBool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -104,6 +109,7 @@ impl CdpClient {
             frame_ctx: std::sync::Mutex::new(None),
             call_timeout: std::sync::Mutex::new(DEFAULT_CALL_TIMEOUT),
             last_dispatch: std::sync::Mutex::new(None),
+            touch_emulation: AtomicBool::new(false),
         })
     }
 
@@ -112,6 +118,14 @@ impl CdpClient {
         if let Ok(mut slot) = self.last_dispatch.lock() {
             *slot = Some(std::time::Instant::now());
         }
+    }
+
+    pub(crate) fn set_touch_emulation(&self, enabled: bool) {
+        self.touch_emulation.store(enabled, Ordering::Relaxed);
+    }
+
+    pub(crate) fn touch_emulation_enabled(&self) -> bool {
+        self.touch_emulation.load(Ordering::Relaxed)
     }
 
     /// How long ago the last input event went out, or `None` if none has.

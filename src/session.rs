@@ -61,6 +61,11 @@ pub struct PageSession {
     pub last_snapshot_frame: Option<String>,
     #[serde(default)]
     pub last_snapshot_loader: Option<String>,
+    /// Requested device metrics for this named page. They are reapplied to its current target on
+    /// each connection. A Chrome relaunch replaces the surrounding browser entry, so the metrics
+    /// expire with the browser process rather than leaking into a new one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_emulation: Option<crate::emulation::DeviceEmulation>,
 }
 
 /// Load the session store from disk. Returns empty store if file doesn't exist.
@@ -434,6 +439,7 @@ pub fn ensure_page<'a>(
             last_snapshot: None,
             last_snapshot_frame: None,
             last_snapshot_loader: None,
+            device_emulation: None,
         })
 }
 

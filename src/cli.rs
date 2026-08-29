@@ -586,6 +586,12 @@ pub enum Command {
         target: String,
     },
 
+    /// Manage explicit device metrics for this named page only
+    Emulate {
+        #[command(subcommand)]
+        action: EmulateAction,
+    },
+
     /// Execute multiple commands from a JSON array on stdin
     Batch {
         /// Stop at the first command that fails (default: run every command)
@@ -625,6 +631,38 @@ pub enum Command {
         #[command(subcommand)]
         action: DaemonAction,
     },
+}
+
+#[derive(Subcommand)]
+pub enum EmulateAction {
+    /// Apply and persist explicit metrics for this named page
+    Device {
+        /// Optional display label reported by `emulate status`
+        #[arg(long)]
+        label: Option<String>,
+        /// Emulated device width in CSS pixels
+        #[arg(long)]
+        width: u32,
+        /// Emulated device height in CSS pixels
+        #[arg(long)]
+        height: u32,
+        /// Device pixel ratio; must be finite and greater than zero
+        #[arg(long, default_value = "1")]
+        dpr: f64,
+        /// Enable Chromium's mobile viewport mode
+        #[arg(long)]
+        mobile: bool,
+        /// Advertise touch support and dispatch clicks as touch taps
+        #[arg(long)]
+        touch: bool,
+        /// Screen orientation; inferred from width and height when omitted
+        #[arg(long)]
+        orientation: Option<crate::emulation::DeviceOrientation>,
+    },
+    /// Show requested metrics and values currently observed by the page
+    Status,
+    /// Clear target overrides and the persisted metrics for this named page
+    Reset,
 }
 
 #[derive(Subcommand)]

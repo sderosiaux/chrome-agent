@@ -261,6 +261,8 @@ exit code — a failed assertion is `ok:false` with the same `assertion` object.
 | Command | What it does |
 |---------|------------|
 | `frame <selector\|main>` | Switch `eval`/`inspect` into an iframe (or back to main). Persists only within a `pipe`/`batch` process. |
+| `emulate device --width W --height H [--dpr N] [--mobile] [--touch] [--orientation portrait\|landscape] [--label name]` | Apply explicit device metrics to the current named page. |
+| `emulate status\|reset` | Report requested and page-observed metrics, or clear that page's overrides. |
 | `batch` | Execute multiple commands from a JSON array on stdin. |
 | `pipe` | Persistent JSON stdin/stdout connection. |
 
@@ -347,7 +349,7 @@ inline box, a clipped container, a transformed layout — so an identical retry 
 
 `unchanged` means the page did not change while the tool watched — not "the action had no
 effect", which it cannot know: an unchanged tree is also what a click swallowed by an overlay
-looks like. That is why mouse actions also report `delivery` (`target_hit`, `intercepted`,
+looks like. That is why pointer-targeted actions also report `delivery` (`target_hit`, `intercepted`,
 `off_target`, `not_settled`, `js`, `not_probed`) from a hit test at the coordinate about to be
 dispatched: `no_effect` is only ever emitted behind `target_hit`, and `not_settled`/`off_target`
 mean nothing was sent. `--on-intercept refuse` turns an interception into an error instead of
@@ -399,6 +401,30 @@ chrome-agent upload --uid n30 /path/to/document.pdf
 # Double-click (text selection, special controls)
 chrome-agent dblclick n42
 ```
+
+## Device emulation
+
+```bash
+chrome-agent --page mobile emulate device --label "checkout phone" \
+  --width 412 --height 915 --dpr 2.625 --mobile --touch
+chrome-agent --page mobile emulate status
+chrome-agent --page mobile emulate reset
+```
+
+Metrics are attached to one named page. Chrome reverts every override the moment the CDP session
+that set it detaches, so the configuration is persisted and reapplied at the start of each
+connection — which also means that between commands on a headed or `--connect` browser the page
+briefly shows its real metrics. Sibling pages keep their own metrics, with one visibility caveat:
+Chromium exposes an orientation override only for its active target, so commands on an emulated
+page activate that tab first, backgrounding its siblings the way switching tabs does. Closing or
+restarting Chrome discards the configuration. Values are explicit because device preset catalogs
+belong to the DevTools frontend, not CDP; the binary does not ship a copy that can drift from
+Chromium. Under `--touch`, `click` and `check` dispatch touch taps instead of mouse events
+(`dblclick`, `hover` and `drag` stay mouse — pages that only listen to touch will not see them);
+Chrome's own mouse-to-touch conversion was measured to leave `Input.dispatchMouseEvent`
+unanswered, which is why the taps are synthesized. `screenshot --max-width` counts CSS pixels, so
+a `--dpr 2.625` capture is that factor larger. If Chromium rejects one of the override calls, the
+command attempts every cleanup call and does not persist the incomplete configuration.
 
 ## Iframes
 
