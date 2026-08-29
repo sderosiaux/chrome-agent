@@ -282,6 +282,7 @@ where it is not declared is a usage error naming the invocation which works.
 --headed                 Show browser window (default: headless)
 --stealth                Anti-detection patches (Cloudflare, Turnstile)
 --copy-cookies           Use cookies from your real Chrome profile
+--chrome-arg <flag>      Extra flag for the Chrome chrome-agent launches (repeatable)
 --timeout <seconds>      Command timeout (default: 30)
 --max-depth <N>          Limit inspect depth
 --verdict <mode>         auto (default): an action reports what changed. off: report the action only
@@ -295,6 +296,20 @@ where it is not declared is a usage error naming the invocation which works.
 `--proxy-server` is launch-only and is persisted with the named browser session. Close or purge a
 running named browser before changing its proxy. Attached browsers (`--connect`) must be configured
 with their proxy before ChromeAgent attaches. Proxy URLs containing credentials are rejected.
+
+`--chrome-arg` passes an extra flag straight to the Chrome chrome-agent launches, repeatable:
+
+```bash
+chrome-agent --chrome-arg --enable-features=WebMCP,WebMCPTesting goto https://example.com
+```
+
+Like `--proxy-server`, it is launch-only (no effect under `--connect` — that Chrome is already
+running) and fixed for the life of a named browser: a follow-up command that omits it inherits
+whatever flags the browser already runs with, and one that names different flags is refused.
+Close or purge the browser to change them. A handful of flags are refused outright because
+chrome-agent depends on its own values for them to find and reconnect to the browser it launched:
+`--user-data-dir`, `--remote-debugging-port`, `--remote-debugging-pipe`, `--proxy-server` (use the
+dedicated flag above), and `--headless` (use `--headed`).
 
 JS dialogs (`alert`/`confirm`/`prompt`/`beforeunload`) are auto-answered by default (`--dialog accept`). A native dialog otherwise blocks the page with no DOM signal and the agent's next command hangs. Use `--dialog dismiss` to cancel them, or `--dialog manual` to opt out.
 

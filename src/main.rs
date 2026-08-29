@@ -1,8 +1,10 @@
 mod base64;
 mod browser;
 mod cdp;
+mod chrome_args;
 mod cli;
 mod commands;
+mod connect_cli;
 #[cfg(unix)]
 mod daemon;
 mod element;

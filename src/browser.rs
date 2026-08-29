@@ -13,6 +13,10 @@ pub struct BrowserOptions {
     pub connect: Option<String>,
     pub proxy_server: Option<String>,
     pub copy_cookies: bool,
+    /// Extra flags passed straight to the Chrome command line (`--chrome-arg`, repeatable).
+    /// Applies only to a browser this tool launches itself — see
+    /// [`normalized_chrome_args_option`] for the `--connect` and forbidden-flag rules.
+    pub chrome_args: Vec<String>,
 }
 
 impl Default for BrowserOptions {
@@ -25,6 +29,7 @@ impl Default for BrowserOptions {
             connect: None,
             proxy_server: None,
             copy_cookies: false,
+            chrome_args: Vec::new(),
         }
     }
 }
@@ -146,6 +151,10 @@ pub fn normalized_proxy_option(
     proxy_server.map(validate_proxy_server).transpose()
 }
 
+/// `--chrome-arg` validation lives in `chrome_args.rs` (split for the 1000-line cap);
+/// re-exported so call sites keep spelling it `browser::normalized_chrome_args_option`.
+pub use crate::chrome_args::normalized_chrome_args_option;
+
 /// Resolve a browser connection: either connect to an existing Chrome or launch one.
 pub async fn resolve_browser(opts: &BrowserOptions) -> Result<BrowserConnection, BrowserError> {
     validate_browser_name(&opts.name)?;
@@ -154,6 +163,8 @@ pub async fn resolve_browser(opts: &BrowserOptions) -> Result<BrowserConnection,
         resolved.connect.as_deref(),
         resolved.proxy_server.as_deref(),
     )?;
+    resolved.chrome_args =
+        normalized_chrome_args_option(resolved.connect.as_deref(), &resolved.chrome_args)?;
     if let Some(endpoint) = &opts.connect {
         if endpoint == "auto" {
             return auto_discover().await;
@@ -274,6 +285,10 @@ fn managed_launch_args(profile_dir: &Path, opts: &BrowserOptions) -> Vec<String>
         args.push("--disable-infobars".into());
         args.push("--disable-component-extensions-with-background-pages".into());
     }
+    // Appended last so a caller's `--chrome-arg` can override anything above that isn't on
+    // the forbidden list (`validate_chrome_args`) — Chromium keeps the last value it parses
+    // for a repeated switch.
+    args.extend(opts.chrome_args.iter().cloned());
     args
 }
 
@@ -855,6 +870,25 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(error.contains("applies only when chrome-agent launches Chrome"));
+    }
+
+    #[test]
+    fn managed_launch_args_include_chrome_args_in_order_and_last() {
+        let opts = BrowserOptions {
+            chrome_args: vec![
+                "--enable-features=WebMCP,WebMCPTesting".into(),
+                "--auto-open-devtools-for-tabs".into(),
+            ],
+            ..BrowserOptions::default()
+        };
+        let args = managed_launch_args(Path::new("/tmp/chrome-profile"), &opts);
+        assert_eq!(
+            &args[args.len() - 2..],
+            &[
+                "--enable-features=WebMCP,WebMCPTesting".to_string(),
+                "--auto-open-devtools-for-tabs".to_string(),
+            ]
+        );
     }
 
     #[tokio::test]

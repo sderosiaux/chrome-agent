@@ -36,6 +36,11 @@ pub struct BrowserSession {
     pub headless: bool,
     #[serde(default)]
     pub proxy_server: Option<String>,
+    /// Extra `--chrome-arg` flags this browser was launched with, in the order given.
+    /// Fixed at launch like `proxy_server` — a running Chrome cannot pick up a new one,
+    /// so a mismatch on reconnect is refused rather than silently reapplied.
+    #[serde(default)]
+    pub chrome_args: Vec<String>,
     #[serde(default)]
     pub daemon_pid: Option<u32>,
     #[serde(default)]
@@ -387,6 +392,7 @@ pub fn ensure_browser<'a>(
     pid: Option<u32>,
     headless: bool,
     proxy_server: Option<String>,
+    chrome_args: Vec<String>,
 ) -> &'a mut BrowserSession {
     store
         .browsers
@@ -396,6 +402,7 @@ pub fn ensure_browser<'a>(
             pid,
             headless,
             proxy_server,
+            chrome_args,
             daemon_pid: None,
             pages: HashMap::new(),
         })
@@ -423,6 +430,10 @@ pub fn ensure_proxy_compatible(
             .into(),
     ))
 }
+
+/// `--chrome-arg` compatibility lives in `chrome_args.rs` (split for the 1000-line cap);
+/// re-exported so call sites keep spelling it `session::ensure_chrome_args_compatible`.
+pub use crate::chrome_args::ensure_chrome_args_compatible;
 
 /// Ensure a page session entry exists, returning a mutable ref.
 pub fn ensure_page<'a>(
@@ -494,12 +505,12 @@ mod tests {
 
         // Agent A publishes its browser.
         let mut a = SessionStore::default();
-        ensure_browser(&mut a, "agent-a", "ws://a", None, true, None);
+        ensure_browser(&mut a, "agent-a", "ws://a", None, true, None, Vec::new());
         save_to(&path, &mut a).unwrap();
 
         // Agent B loads the file, so it now holds a copy of agent-a it never touched.
         let mut b = load_from(&path).unwrap();
-        ensure_browser(&mut b, "agent-b", "ws://b", None, true, None);
+        ensure_browser(&mut b, "agent-b", "ws://b", None, true, None, Vec::new());
 
         // Agent A moves on and records a snapshot while B is still working.
         let mut a2 = load_from(&path).unwrap();
@@ -541,7 +552,7 @@ mod tests {
 
         // The browser exists, and the heartbeat is about to judge it stale.
         let mut original = SessionStore::default();
-        ensure_browser(&mut original, "foo", "ws://old", Some(std::process::id()), true, None);
+        ensure_browser(&mut original, "foo", "ws://old", Some(std::process::id()), true, None, Vec::new());
         save_to(&path, &mut original).unwrap();
 
         // Heartbeat tick: loads, judges the entry stale, drops it in memory.
@@ -551,7 +562,7 @@ mod tests {
         // Before the heartbeat saves, another agent relaunches 'foo'.
         let mut agent = load_from(&path).unwrap();
         agent.browsers.remove("foo");
-        ensure_browser(&mut agent, "foo", "ws://fresh", Some(relaunched.id()), true, None);
+        ensure_browser(&mut agent, "foo", "ws://fresh", Some(relaunched.id()), true, None, Vec::new());
         save_to(&path, &mut agent).unwrap();
 
         // The heartbeat's delete was decided about the old entry, not this one.
@@ -604,7 +615,7 @@ mod tests {
         std::fs::create_dir_all(path.join("occupied")).unwrap();
 
         let mut store = SessionStore::default();
-        ensure_browser(&mut store, "leaky", "ws://x", None, true, None);
+        ensure_browser(&mut store, "leaky", "ws://x", None, true, None, Vec::new());
         let result = save_to(&path, &mut store);
         assert!(result.is_err(), "rename onto a directory should fail the save");
 
@@ -637,13 +648,13 @@ mod tests {
 
         let mut seed = SessionStore::default();
         // Alive: this very test process.
-        ensure_browser(&mut seed, "live", "ws://live", Some(std::process::id()), true, None);
+        ensure_browser(&mut seed, "live", "ws://live", Some(std::process::id()), true, None, Vec::new());
         // Dead: exited Chrome, the case that accumulated.
-        ensure_browser(&mut seed, "dead", "ws://dead", Some(a_dead_pid()), true, None);
-        ensure_browser(&mut seed, "dead-2", "ws://dead2", Some(a_dead_pid()), true, None);
+        ensure_browser(&mut seed, "dead", "ws://dead", Some(a_dead_pid()), true, None, Vec::new());
+        ensure_browser(&mut seed, "dead-2", "ws://dead2", Some(a_dead_pid()), true, None, Vec::new());
         // No pid: `--connect`, or a managed reconnect via DevToolsActivePort. Dropping
         // this is how an agent loses the user's real Chrome.
-        ensure_browser(&mut seed, "external", "ws://127.0.0.1:9222/x", None, false, None);
+        ensure_browser(&mut seed, "external", "ws://127.0.0.1:9222/x", None, false, None, Vec::new());
         // Give the dead entries the bulk an accumulated store carries.
         for name in ["dead", "dead-2"] {
             let browser = seed.browsers.get_mut(name).unwrap();
@@ -701,15 +712,15 @@ mod tests {
 
         // Agent A publishes a live browser and records a snapshot on it.
         let mut a = SessionStore::default();
-        ensure_browser(&mut a, "agent-a", "ws://a", Some(std::process::id()), true, None);
+        ensure_browser(&mut a, "agent-a", "ws://a", Some(std::process::id()), true, None, Vec::new());
         let browser = a.browsers.get_mut("agent-a").unwrap();
         ensure_page(browser, "default", "target-a").last_snapshot = Some("uid=n1 RootWebArea".into());
         save_to(&path, &mut a).unwrap();
 
         // Agent B loads that view, adds its own browser and a dead leftover, and saves.
         let mut b = load_from(&path).unwrap();
-        ensure_browser(&mut b, "agent-b", "ws://b", Some(std::process::id()), true, None);
-        ensure_browser(&mut b, "leftover", "ws://old", Some(a_dead_pid()), true, None);
+        ensure_browser(&mut b, "agent-b", "ws://b", Some(std::process::id()), true, None, Vec::new());
+        ensure_browser(&mut b, "leftover", "ws://old", Some(a_dead_pid()), true, None, Vec::new());
         save_to(&path, &mut b).unwrap();
 
         // A saves again, holding its own stale copy of agent-b.
@@ -773,6 +784,7 @@ mod tests {
                 Some(1234),
                 true,
                 Some("http://127.0.0.1:8080".into()),
+                vec!["--enable-features=WebMCP,WebMCPTesting".into()],
             );
         ensure_page(browser, "main", "target-abc");
 
@@ -785,6 +797,7 @@ mod tests {
         assert_eq!(b.pid, Some(1234));
         assert!(b.headless);
         assert_eq!(b.proxy_server.as_deref(), Some("http://127.0.0.1:8080"));
+        assert_eq!(b.chrome_args, vec!["--enable-features=WebMCP,WebMCPTesting".to_string()]);
         assert!(b.pages.contains_key("main"));
         assert_eq!(b.pages["main"].target_id, "target-abc");
     }
@@ -812,6 +825,8 @@ mod tests {
         // A different explicit proxy is refused.
         assert!(ensure_proxy_compatible(&existing, Some("http://127.0.0.1:9090")).is_err());
     }
+
+    // `ensure_chrome_args_compatible` itself is tested in `chrome_args.rs`, where it lives.
 
     #[test]
     fn bug_session_corrupt_json() {
@@ -870,6 +885,7 @@ mod tests {
             pid: Some(1),
             headless: true,
             proxy_server: None,
+            chrome_args: Vec::new(),
             daemon_pid: None,
             pages: HashMap::new(),
         }

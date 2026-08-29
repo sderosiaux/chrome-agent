@@ -129,6 +129,17 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub copy_cookies: bool,
 
+    /// Extra flag passed to the Chrome chrome-agent launches (repeatable, e.g.
+    /// `--chrome-arg --enable-features=WebMCP,WebMCPTesting`). No effect under --connect —
+    /// that Chrome is already running. Refuses flags this tool depends on for launch and
+    /// reconnection: --user-data-dir, --remote-debugging-port, --remote-debugging-pipe,
+    /// --proxy-server (use the dedicated --proxy-server flag), --headless (use --headed).
+    /// Fixed for the life of a named browser, like --proxy-server: a follow-up command that
+    /// omits it inherits what the browser is already running with, and one that names
+    /// different flags is refused rather than silently ignored.
+    #[arg(long = "chrome-arg", global = true, allow_hyphen_values = true)]
+    pub chrome_args: Vec<String>,
+
     /// Named page/tab within the browser (default: "default")
     #[arg(long, default_value = "default", global = true)]
     pub page: String,
@@ -871,5 +882,49 @@ mod tests {
         .unwrap();
 
         assert_eq!(cli.proxy_server.as_deref(), Some("http://127.0.0.1:8080"));
+    }
+
+    /// `--chrome-arg`'s value is itself a flag-shaped string (`--enable-features=...`), which
+    /// clap refuses by default unless the arg opts into `allow_hyphen_values` — without it,
+    /// the space-separated form (the one anyone reaches for first) parses the value as a
+    /// second, unrelated argument instead of this one's value.
+    #[test]
+    fn chrome_arg_accepts_a_flag_shaped_value_space_separated_and_glued() {
+        let space_separated = Cli::try_parse_from([
+            "chrome-agent",
+            "--chrome-arg",
+            "--enable-features=WebMCP,WebMCPTesting",
+            "status",
+        ])
+        .unwrap();
+        assert_eq!(
+            space_separated.chrome_args,
+            vec!["--enable-features=WebMCP,WebMCPTesting".to_string()]
+        );
+
+        let glued = Cli::try_parse_from([
+            "chrome-agent",
+            "--chrome-arg=--enable-features=WebMCP,WebMCPTesting",
+            "status",
+        ])
+        .unwrap();
+        assert_eq!(glued.chrome_args, space_separated.chrome_args);
+    }
+
+    #[test]
+    fn chrome_arg_is_repeatable_and_global() {
+        let cli = Cli::try_parse_from([
+            "chrome-agent",
+            "status",
+            "--chrome-arg",
+            "--disable-gpu",
+            "--chrome-arg",
+            "--auto-open-devtools-for-tabs",
+        ])
+        .unwrap();
+        assert_eq!(
+            cli.chrome_args,
+            vec!["--disable-gpu".to_string(), "--auto-open-devtools-for-tabs".to_string()]
+        );
     }
 }

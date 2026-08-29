@@ -89,6 +89,17 @@ LLM USAGE GUIDE:
     chrome-agent --connect http://127.0.0.1:9222 goto https://protected-site.com --inspect
     # Real Chrome passes fingerprint checks that Chromium can't
 
+  Extra Chrome flags (experimental CDP/feature flags, e.g. WebMCP):
+    chrome-agent --chrome-arg --enable-features=WebMCP,WebMCPTesting goto https://example.com
+    # Repeatable, applies only to the Chrome chrome-agent launches itself (no effect under
+    # --connect, refused with an error rather than silently ignored). Fixed for the life of a
+    # named browser like --proxy-server: a follow-up command that omits it inherits whatever
+    # the browser already runs with, and one naming DIFFERENT flags is refused rather than
+    # relaunched out from under you — close or purge the browser to change them.
+    # Refused outright: --user-data-dir, --remote-debugging-port, --remote-debugging-pipe,
+    # --proxy-server (use --proxy-server instead), --headless (use --headed instead) — chrome-agent
+    # depends on its own values for these to find and reconnect to the browser it launched.
+
   Targeting elements (3 modes):
     chrome-agent click n40                              # by uid from inspect
     chrome-agent click --selector "button.submit"      # by CSS selector

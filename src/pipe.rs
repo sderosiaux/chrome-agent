@@ -29,16 +29,23 @@ pub async fn run_pipe(cli: &Cli) -> Result<(), crate::BoxError> {
         cli.connect.as_deref(),
         cli.proxy_server.as_deref(),
     )?;
-    // Inherit a running named browser's proxy when the flag is omitted so a
+    let requested_chrome_args = browser::normalized_chrome_args_option(
+        cli.connect.as_deref(),
+        &cli.chrome_args,
+    )?;
+    // Inherit a running named browser's proxy/chrome-args when the flag is omitted so a
     // relaunch never silently drops it (see run.rs for the full rationale).
     let effective_proxy = requested_proxy
         .or_else(|| store.browsers.get(&cli.browser).and_then(|b| b.proxy_server.clone()));
+    let effective_chrome_args =
+        crate::chrome_args::effective_chrome_args(&store, &cli.browser, &requested_chrome_args);
 
     let (conn, browser_client) = connect_browser(
         &mut store,
         cli,
         want_headless,
         effective_proxy.clone(),
+        effective_chrome_args.clone(),
     )
     .await?;
 
@@ -54,6 +61,7 @@ pub async fn run_pipe(cli: &Cli) -> Result<(), crate::BoxError> {
             conn.pid,
             want_headless,
             effective_proxy,
+            effective_chrome_args,
         );
         crate::run_helpers::resolve_page_target(&browser_client, browser_session, &cli.page).await?
     };
@@ -152,13 +160,20 @@ pub async fn run_replay(
         cli.connect.as_deref(),
         cli.proxy_server.as_deref(),
     )?;
+    let requested_chrome_args = browser::normalized_chrome_args_option(
+        cli.connect.as_deref(),
+        &cli.chrome_args,
+    )?;
     let effective_proxy = requested_proxy
         .or_else(|| store.browsers.get(&cli.browser).and_then(|b| b.proxy_server.clone()));
+    let effective_chrome_args =
+        crate::chrome_args::effective_chrome_args(&store, &cli.browser, &requested_chrome_args);
     let (conn, browser_client) = connect_browser(
         &mut store,
         cli,
         want_headless,
         effective_proxy.clone(),
+        effective_chrome_args.clone(),
     )
     .await?;
 
@@ -171,6 +186,7 @@ pub async fn run_replay(
             conn.pid,
             want_headless,
             effective_proxy,
+            effective_chrome_args,
         );
         crate::run_helpers::resolve_page_target(&browser_client, browser_session, &cli.page).await?
     };
@@ -365,6 +381,7 @@ async fn connect_browser(
     cli: &Cli,
     want_headless: bool,
     effective_proxy: Option<String>,
+    effective_chrome_args: Vec<String>,
 ) -> Result<(browser::BrowserConnection, CdpClient), crate::BoxError> {
     if let Some(existing) = store.browsers.get(&cli.browser) {
         let mode_matches = existing.headless == want_headless;
@@ -374,6 +391,7 @@ async fn connect_browser(
         if mode_matches {
             if let Ok(client) = CdpClient::connect(ws).await {
                 session::ensure_proxy_compatible(existing, effective_proxy.as_deref())?;
+                session::ensure_chrome_args_compatible(existing, &effective_chrome_args)?;
                 let conn = browser::BrowserConnection {
                     ws_endpoint: ws.clone(), http_endpoint: Some(http), pid: existing.pid,
                 };
@@ -398,6 +416,7 @@ async fn connect_browser(
         ignore_https_errors: cli.ignore_https_errors, stealth: cli.stealth,
         connect: cli.connect.clone(), proxy_server: effective_proxy,
         copy_cookies: cli.copy_cookies,
+        chrome_args: effective_chrome_args,
     };
     let conn = browser::resolve_browser(&opts).await?;
     let client = CdpClient::connect(&conn.ws_endpoint).await?;
