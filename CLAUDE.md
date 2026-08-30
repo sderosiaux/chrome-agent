@@ -1,4 +1,4 @@
-# chrome-agent v0.14.0
+# chrome-agent v0.15.0
 
 Single Rust binary for browser automation via CDP. Built for AI agents.
 At v0.14.0: 22.4K lines of Rust code, 26.1K physical (`tokei src/`). A size with no metric and no
