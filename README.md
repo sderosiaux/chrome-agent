@@ -77,11 +77,11 @@ users, near-daily releases. If you want a platform, use it. Two honest differenc
 | **Bot detection** | 7 in-binary CDP patches, `--connect` to real Chrome | no stealth in core; delegated to paid cloud providers |
 | **Process model** | one command, one connection, exits | background daemon |
 | **Element IDs** | `backendNodeId`, still valid on the next inspect of the same page | sequential `@e1`, reassigned on every snapshot |
-| **Browser-native downloads** | not supported, `download --url` only | supported |
+| **Browser-native downloads** | `download --uid/--selector` clicks and captures the file, and says so when none began | supported |
 | **MCP server** | none | yes |
 
-Where it is genuinely behind: agent-browser has click-triggered downloads, an encrypted
-credential vault, cloud provider integrations and an MCP mode. It also reuses your real
+Where it is genuinely behind: agent-browser has an encrypted credential vault, cloud
+provider integrations and an MCP mode. It also reuses your real
 Chrome profile, same as `--copy-cookies` here, so logged-in access is not a differentiator
 for either of us.
 
@@ -248,6 +248,7 @@ exit code — a failed assertion is `ok:false` with the same `assertion` object.
 | `eval <expression> [--selector "css"]` | JS in page context. `el` = matched element. |
 | `extract [--selector "css"] [--limit N] [--scroll] [--a11y]` | Auto-detect repeating data. `--a11y` for React SPAs (X.com). |
 | `download <url> [--out path] [--timeout N] [--max-bytes N]` | Download a URL fetched in-page, so cookies/auth carry over (login-gated files). Rejects responses over 64 MiB by default. Returns `{path,bytes,mime}`. |
+| `download --uid n47 \| --selector "css"` | Click the element and capture the browser-native download it triggers — the only route to a file built in the page (`Blob`) or served by a POST no anchor names. Returns `{path,bytes,suggested_filename,source_url,delivery}`. A click that landed and produced nothing answers `ok:true` with `downloaded:false`. |
 
 ### Monitoring
 
@@ -534,7 +535,37 @@ chrome-agent screenshot --format jpeg --quality 60 --max-width 1024
 chrome-agent screenshot --uid n42            # capture a single element (or --selector "css")
 ```
 
-`download` uses an in-page `fetch` with `credentials:'include'`, so the request inherits the page's session. Click-triggered browser-native downloads are not handled: resolve the target href (`inspect --urls`) and download it directly.
+```bash
+# Click-triggered downloads: an "Export CSV" button that builds the file in the page has no
+# URL to fetch, so the only way to the bytes is to click it.
+chrome-agent download --selector "#export" --out ./export.csv
+# {"ok":true,"downloaded":true,"via":"click","path":"./export.csv","bytes":48213,
+#  "suggested_filename":"report.csv","delivery":"target_hit","uid":"n42"}
+
+# The click landed and nothing downloaded. Exit 0, because the click is not undoable and an
+# error here invites a second real one.
+chrome-agent download --selector "#maybe" --timeout 5 --json
+# {"ok":true,"downloaded":false,"observed_after_ms":5002,
+#  "message":"Clicked selector '#maybe' and no download began in the 5s that followed…",
+#  "hint":"…Do not click again: the first click reached the page…"}
+```
+
+Two mechanisms, one verb, one contract: a file at a named path, 0600, with its size and the
+name the server proposed. `download <url>` uses an in-page `fetch` with `credentials:'include'`,
+so the request inherits the page's session. `download --uid/--selector` runs the same click as
+`click` — same hit test, same `--on-intercept`, so a covered button reports its receiver — and
+arms `Browser.setDownloadBehavior` around it.
+
+**Read `downloaded`, not `ok`.** A click that was delivered is never an error, whatever it
+failed to produce, for the reason a lost connection is never a retry: the page cannot tell a
+second click from a second deliberate action. `--timeout` bounds the whole window (the transfer
+must begin *and* finish inside it) and `--max-bytes` cancels a transfer that goes past it,
+removing the partial file.
+
+The arming lives on the connection that clicks because Chrome's download override does not
+outlive the CDP session that set it — measured: a fresh connection clicking the same link with
+nothing armed produces no file. That is why this is a flag on `download` and not a separate
+`wait --download` verb, which would work in pipe mode and silently capture nothing from the CLI.
 
 ## Waiting for the network to settle
 
@@ -656,7 +687,7 @@ Claude Code permissions:
 | Annotated screenshots | not yet | `screenshot --annotate` | not yet |
 | Element/token-safe screenshots | `screenshot --uid/--selector`, `--format jpeg`, `--max-width` | via options | via options |
 | PDF export | `pdf` (`Page.printToPDF`) | none | none |
-| File download | `download` (in-page fetch, auth-preserving) | `download` | via events |
+| File download | `download <url>` (in-page fetch, auth-preserving) and `download --uid/--selector` (click-triggered) | `download` | via events |
 | Extra request headers | `goto --header` | yes | via context |
 | Network-idle wait | `wait network-idle` | yes | `browser_wait_for` |
 | JS dialog handling | auto (`--dialog accept/dismiss/manual`) | yes | `browser_handle_dialog` |

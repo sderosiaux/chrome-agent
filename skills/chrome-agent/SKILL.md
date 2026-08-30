@@ -224,6 +224,7 @@ chrome-agent console [--level error] [--clear]
 chrome-agent screenshot [--format jpeg] [--quality N] [--max-width N] [--uid nN|--selector "css"]
 chrome-agent pdf [--filename name] [--landscape] [--background]
 chrome-agent download <url> [--out path] [--max-bytes N]        # in-page fetch, keeps the login
+chrome-agent download --uid nN | --selector "css" [--out path]  # CLICK it, capture the download
 
 chrome-agent tabs
 chrome-agent close [--purge]
@@ -305,7 +306,16 @@ Error:   {"ok":false, "error":"message", "hint":"what to do next"}
 - `inspect --max-chars` → `{"total_chars","truncated","next_offset"}`.
 - `read`/`text` → `{"text"}` · `eval` → `{"result"}` · `network` → `{"requests":[...]}` ·
   `console` → `{"messages":[...]}` · `batch` → `{"results":[...]}` ·
-  `screenshot`/`pdf` → `{"path"}` · `download` → `{"path","bytes","mime"}`.
+  `screenshot`/`pdf` → `{"path"}` · `download <url>` → `{"via":"fetch","downloaded","path","bytes","mime"}`.
+- `download --uid/--selector` clicks and captures the browser-native download — the only route to
+  a file the page builds itself (`Blob`) or serves from a POST no anchor names. It runs the same
+  click as `click`, so `delivery`/`intercepted_by` ride along and `--on-intercept refuse` works.
+  **Branch on `downloaded`, never on `ok`.** A click that landed and produced no file answers
+  `ok:true` with `downloaded:false`, a `message`, and a hint that forbids the retry — an error
+  there would invite a second real click, and the page cannot tell that from a second deliberate
+  action. `--timeout` bounds the whole window (begin AND finish); `--max-bytes` cancels a
+  transfer past it and removes the partial file. `download` carries no verdict and no change
+  report: `downloaded`/`path` are the result, the way `landed` is for `goto`.
 
 ## Cheap reads: choose the right one
 

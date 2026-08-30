@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Click-triggered downloads</title></head>
+<body>
+  <h1>Click-triggered downloads</h1>
+
+  <!-- A real anchor with the download attribute, pointing at a Blob. This is the
+       shape a "Export CSV" button takes on most apps that build the file client-side:
+       there is no URL to resolve and hand to `download <url>`, which is exactly the
+       gap this fixture exists for. -->
+  <p><a id="blob-link" download="report.csv">Download report.csv</a></p>
+
+  <!-- Same file, produced by a click handler instead of an href: the anchor is created,
+       clicked and revoked inside JS, so nothing in the DOM ever names the file. -->
+  <p><button id="js-download">Export via JS</button></p>
+
+  <!-- A button that does something visible and downloads nothing: the response has to
+       say "no download began", not hang and not claim a file. -->
+  <p><button id="inert">No download here</button></p>
+  <p id="status">idle</p>
+
+  <script>
+    const CSV = "id,name\n1,ada\n2,grace\n";
+
+    const blob = new Blob([CSV], { type: "text/csv" });
+    document.getElementById("blob-link").href = URL.createObjectURL(blob);
+
+    document.getElementById("js-download").addEventListener("click", () => {
+      const url = URL.createObjectURL(new Blob([CSV], { type: "text/csv" }));
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "generated.csv";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    });
+
+    document.getElementById("inert").addEventListener("click", () => {
+      document.getElementById("status").textContent = "clicked, nothing downloaded";
+    });
+  </script>
+</body>
+</html>

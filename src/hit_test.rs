@@ -146,7 +146,11 @@ pub struct Hit {
 
 impl Hit {
     /// `tag#id.class`, the shape a person can find in the page source.
-    fn describe(&self) -> String {
+    ///
+    /// `pub(crate)` for `hints`: a click-triggered download that produced nothing has one
+    /// explanation the hit test already measured — another element took the click — and a hint
+    /// that cannot name it sends the caller to `inspect` for a fact this response holds.
+    pub(crate) fn describe(&self) -> String {
         let mut out = self.tag.to_lowercase();
         if let Some(id) = self.id.as_deref().filter(|s| !s.is_empty()) {
             out.push('#');
