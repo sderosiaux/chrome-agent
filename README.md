@@ -7,16 +7,23 @@
 [![Rust 2024](https://img.shields.io/badge/Rust-2024_edition-orange)](https://doc.rust-lang.org/edition-guide/rust-2024/)
 
 <p align="center">
-  <img src="docs/hero-logo.png" alt="chrome-agent — Browser automation for AI agents" width="500">
+  <img src="docs/hero-logo.png" alt="chrome-agent — web tasks that compile" width="500">
 </p>
 
 <p align="center">
   <a href="README.md">English</a> | <a href="README.cn.md">简体中文</a>
 </p>
 
-Browser automation for AI agents. One 3 MB Rust binary drives Chrome over CDP — no Node, no
-Playwright, no daemon. Every action reports whether the page actually complied, in JSON an agent
-can branch on.
+**Web tasks that compile.**
+
+A browser doesn't report back. The click lands on a cookie banner, the form drops what you typed,
+the page navigates away mid-action, and the tool returns success anyway. Everything the agent does
+next is built on that.
+
+chrome-agent reads the page back after every action and answers which one it was: the change held,
+something else took the click, or nothing could be observed. One word, in JSON, to branch on.
+
+One 3 MB Rust binary over CDP. No Node, no Playwright, no daemon.
 
 > Independent project. Not affiliated with, endorsed by, or sponsored by Google or the Chrome team.
 

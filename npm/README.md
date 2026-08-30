@@ -1,8 +1,15 @@
 # chrome-agent
 
-Browser automation for AI agents. One Rust binary drives Chrome over CDP — no Node runtime, no
-Playwright, no daemon. Every action reports whether the page actually complied, in JSON an agent
-can branch on.
+**Web tasks that compile.**
+
+A browser doesn't report back. The click lands on a cookie banner, the form drops what you typed,
+the page navigates away mid-action, and the tool returns success anyway. Everything the agent does
+next is built on that.
+
+chrome-agent reads the page back after every action and answers which one it was: the change held,
+something else took the click, or nothing could be observed. One word, in JSON, to branch on.
+
+One 3 MB Rust binary over CDP. No Node runtime, no Playwright, no daemon.
 
 chrome-agent v0.15.0 (~28.2K lines of Rust in `src/`, blank and comment-only lines excluded; 3 MB binary)
 

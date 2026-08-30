@@ -7,15 +7,22 @@
 [![Rust 2024](https://img.shields.io/badge/Rust-2024_edition-orange)](https://doc.rust-lang.org/edition-guide/rust-2024/)
 
 <p align="center">
-  <img src="docs/hero-logo.png" alt="chrome-agent — 面向 AI Agent 的浏览器自动化" width="500">
+  <img src="docs/hero-logo.png" alt="chrome-agent — 可以编译的网页任务" width="500">
 </p>
 
 <p align="center">
   <a href="README.md">English</a> | <a href="README.cn.md">简体中文</a>
 </p>
 
-面向 AI Agent 的浏览器自动化。一个 3 MB 的 Rust 二进制文件通过 CDP 驱动 Chrome——不需要 Node，不需要
-Playwright，不需要守护进程。每一次操作都会报告页面是否真的照做了，输出是 Agent 可以直接分支判断的 JSON。
+**可以编译的网页任务。**
+
+浏览器不会回话。点击落在 cookie 横幅上，表单丢掉你刚输入的内容，页面在操作中途跳走——工具照样返回成功。
+Agent 接下来做的一切，都建立在这个"成功"之上。
+
+chrome-agent 在每次操作之后回读页面，告诉你到底是哪一种：变更生效、点击被别的元素接走，或者什么都观测不到。
+一个词，JSON 格式，可以直接用来分支。
+
+一个 3 MB 的 Rust 二进制文件，通过 CDP 驱动 Chrome。不需要 Node，不需要 Playwright，不需要守护进程。
 
 > 独立项目。与 Google 或 Chrome 团队无关联、无背书、无赞助。
 
