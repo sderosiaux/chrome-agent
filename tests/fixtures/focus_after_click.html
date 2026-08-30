@@ -1,0 +1,44 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Where focus goes after a click</title>
+<!--
+  Four targets, four different answers from the browser about what ends up focused. The
+  question this fixture settles: when an action reports `focus: {from, to}`, does `to` name
+  the element that was clicked?
+
+  1. a real <button>              — focus lands on it
+  2. a <span> inside an <a href>  — focus lands on the ANCESTOR link, not the span
+  3. an inert <div> with a click handler — nothing focusable is involved at all
+  4. a <div tabindex=-1> wrapping a <span> — focus lands on the programmatically
+     focusable ANCESTOR, which is the shape a component library produces
+-->
+<style>
+  body { font: 16px system-ui; margin: 2rem; }
+  div, a, button { display: block; margin: .75rem 0; padding: .5rem; border: 1px solid #ccc; }
+</style>
+
+<button id="plain-button">Plain button</button>
+
+<a id="wrapping-link" href="#stay"><span id="span-in-link">Span inside a link</span></a>
+
+<div id="inert-div">Inert div with a click handler</div>
+
+<div id="focusable-wrapper" tabindex="-1"><span id="span-in-wrapper">Span inside a focusable wrapper</span></div>
+
+<p id="log">no click yet</p>
+
+<script>
+  // Every target reports what the DOM says is focused right after the click, so the page's
+  // own answer can be compared with the one the accessibility tree gives.
+  for (const id of ['plain-button', 'span-in-link', 'inert-div', 'span-in-wrapper']) {
+    document.getElementById(id).addEventListener('click', () => {
+      // A microtask so the browser's own focus handling has run first.
+      queueMicrotask(() => {
+        const a = document.activeElement;
+        document.getElementById('log').textContent =
+          'clicked ' + id + ' -> activeElement is ' + a.tagName +
+          (a.id ? '#' + a.id : '(no id)');
+      });
+    });
+  }
+</script>

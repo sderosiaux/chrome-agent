@@ -335,7 +335,18 @@ pub async fn attach_change_report(
             identity_known: cmp.identity_known,
             edits: cmp.added + cmp.removed + cmp.changed,
             moved: cmp.moved,
-            focus_moved: cmp.focus_from.is_some() || cmp.focus_to.is_some(),
+            // The document taking focus is not evidence an element received the click.
+            // `focus_only` claims the action ARRIVED somewhere, and it is the only such
+            // claim available on a path with no hit test (`--xy`, a JS click, a target in a
+            // frame). Chrome marks the RootWebArea `focused` whenever `<body>` holds focus,
+            // which is what a click on nothing focusable produces — and what the FIRST click
+            // anywhere in a fresh page produces, including one that hit nothing at all. So a
+            // move whose only content is "the document gained focus" cannot separate the two
+            // and must not license the word. A blur is still counted: if a real element LOST
+            // focus, something of ours reached the page. The `focus` field itself is
+            // untouched, because the reading is true — see `diff::focus_to_document`.
+            focus_moved: cmp.focus_from.is_some()
+                || (cmp.focus_to.is_some() && !cmp.focus_to_document),
             values_lost,
         },
     );

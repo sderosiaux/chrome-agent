@@ -18,6 +18,19 @@ pub struct Diff {
     /// nothing about content, so counting it drowns the real signal.
     pub focus_from: Option<String>,
     pub focus_to: Option<String>,
+    /// True when the node that GAINED focus is the document itself (`RootWebArea`).
+    ///
+    /// Chrome marks the `RootWebArea` `focused` whenever the document — in DOM terms, `<body>`
+    /// — holds focus, which is what happens after a click that touched nothing focusable.
+    /// Measured on `tests/fixtures/focus_after_click.html`: clicking an inert paragraph
+    /// reports `focus: none -> n1` while the page's own `document.activeElement` is `BODY`;
+    /// reproduced identically on `en.wikipedia.org` as `none -> n27`, its `RootWebArea`.
+    ///
+    /// The reading is right and the fact stays on the response. What it must not do is
+    /// license `focus_only`, whose whole claim is that the click reached an element: the
+    /// document takes focus on the FIRST click anywhere in a fresh page, including one that
+    /// hit nothing at all, so it cannot separate the two.
+    pub focus_to_document: bool,
     /// Nodes carrying a sequential `e{n}` uid. Those are renumbered on every snapshot, so
     /// they are never matched between two of them, only counted.
     pub anonymous: usize,
@@ -79,6 +92,7 @@ pub fn diff_snapshots(old: &str, new: &str) -> Diff {
     let mut unchanged: usize = 0;
     let mut focus_from: Option<String> = None;
     let mut focus_to: Option<String> = None;
+    let mut focus_to_document = false;
     let mut values_lost = Vec::new();
 
     // Removed and changed, in the order they appeared on the old page.
@@ -91,6 +105,7 @@ pub fn diff_snapshots(old: &str, new: &str) -> Diff {
                 } else if let Some(gained) = focus_only_change(old_line, new_line) {
                     if gained {
                         focus_to = Some((*uid).to_string());
+                        focus_to_document = is_document_node(new_line);
                     } else {
                         focus_from = Some((*uid).to_string());
                     }
@@ -152,6 +167,7 @@ pub fn diff_snapshots(old: &str, new: &str) -> Diff {
         unchanged,
         focus_from,
         focus_to,
+        focus_to_document,
         anonymous,
         moved,
         values_lost,
@@ -203,6 +219,15 @@ fn is_anonymous(uid: &str) -> bool {
 
 /// `Some(true)` when the node gained focus, `Some(false)` when it lost it, `None` when
 /// anything else about the node also changed.
+/// Whether a snapshot line describes the document itself rather than an element in it.
+///
+/// The role is the token after the uid: `uid=n1 RootWebArea "Title" focused`. `RootWebArea`
+/// is the only role Chrome gives a document, and it is what carries `focused` when `<body>`
+/// holds focus.
+fn is_document_node(line: &str) -> bool {
+    line.split_whitespace().nth(1) == Some("RootWebArea")
+}
+
 fn focus_only_change(old_line: &str, new_line: &str) -> Option<bool> {
     let (old_tokens, new_tokens) = (tokenize(old_line)?, tokenize(new_line)?);
     let had = old_tokens.contains(&"focused");
@@ -266,6 +291,8 @@ pub struct Comparison {
     pub anonymous: usize,
     pub focus_from: Option<String>,
     pub focus_to: Option<String>,
+    /// True when the node that gained focus is the document itself. See `Diff`.
+    pub focus_to_document: bool,
     /// True when the live page is a different document from the stored snapshot.
     pub document_changed: bool,
     /// False when we could not establish which document we are looking at.
@@ -303,6 +330,7 @@ pub fn compare(identity: Identity, old_text: &str, new_text: &str) -> Comparison
             anonymous: 0,
             focus_from: None,
             focus_to: None,
+            focus_to_document: false,
             document_changed: identity == Identity::Different,
             identity_known: identity != Identity::Unknown,
             hint: Some(hint),
@@ -321,6 +349,7 @@ pub fn compare(identity: Identity, old_text: &str, new_text: &str) -> Comparison
         anonymous: diff.anonymous,
         focus_from: diff.focus_from,
         focus_to: diff.focus_to,
+        focus_to_document: diff.focus_to_document,
         document_changed: false,
         identity_known: true,
         hint: None,
@@ -419,6 +448,44 @@ mod tests {
         assert_eq!(d.changed, 0, "focus moving is not a content change: {}", d.text);
         assert_eq!(d.focus_from.as_deref(), Some("n1"), "{}", d.text);
         assert_eq!(d.focus_to.as_deref(), Some("n2"), "{}", d.text);
+        assert!(!d.focus_to_document, "a button is not the document: {}", d.text);
+    }
+
+    /// The document taking focus is what a click on nothing focusable leaves behind, and it
+    /// is indistinguishable from the first click anywhere in a fresh page. Measured on
+    /// `tests/fixtures/focus_after_click.html`: `focus: none -> n1` with the page's own
+    /// `document.activeElement` reading `BODY`, and identically on `en.wikipedia.org`.
+    #[test]
+    fn focus_landing_on_the_document_is_marked_as_such() {
+        let old = "uid=n1 RootWebArea \"Title\"\nuid=n2 paragraph \"text\"\n";
+        let new = "uid=n1 RootWebArea \"Title\" focused\nuid=n2 paragraph \"text\"\n";
+        let d = diff_snapshots(old, new);
+        assert_eq!(d.focus_to.as_deref(), Some("n1"), "the fact is still reported: {}", d.text);
+        assert!(d.focus_to_document, "{}", d.text);
+        assert!(d.text.contains("focus: none -> n1"), "the line is unchanged: {}", d.text);
+    }
+
+    /// A blur is not the same event and keeps its evidence: if a real element LOST focus,
+    /// something reached the page. Only the destination is judged.
+    #[test]
+    fn losing_focus_to_the_document_is_not_a_document_gain() {
+        let old = "uid=n1 RootWebArea \"Title\"\nuid=n2 textbox \"Email\" focused\n";
+        let new = "uid=n1 RootWebArea \"Title\"\nuid=n2 textbox \"Email\"\n";
+        let d = diff_snapshots(old, new);
+        assert_eq!(d.focus_from.as_deref(), Some("n2"));
+        assert_eq!(d.focus_to, None);
+        assert!(!d.focus_to_document, "nothing gained focus at all: {}", d.text);
+    }
+
+    /// The role is read as a whole token, so a node whose NAME contains the word does not
+    /// pass for the document.
+    #[test]
+    fn a_node_named_after_the_document_role_is_not_the_document() {
+        let old = "uid=n5 heading \"About RootWebArea\"\n";
+        let new = "uid=n5 heading \"About RootWebArea\" focused\n";
+        let d = diff_snapshots(old, new);
+        assert_eq!(d.focus_to.as_deref(), Some("n5"));
+        assert!(!d.focus_to_document, "the role is the second token, not any token: {}", d.text);
     }
 
     /// A node with no backendDOMNodeId falls back to a sequential `e{n}` uid, renumbered on
