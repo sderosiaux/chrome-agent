@@ -10,7 +10,13 @@ LLM USAGE GUIDE:
     verdict     reason                next      what to do
     changed     tree_delta            proceed   the page moved; delta says how
     changed     nodes_moved           proceed   same nodes, reordered
-    changed     focus_only            proceed   only focus moved: the sole sign it arrived
+    changed     focus_only            proceed   only focus moved, onto a real ELEMENT: on a path
+                                                with no hit test that is the sole sign it arrived.
+                                                focus.to names what RECEIVED focus, often a focusable
+                                                ANCESTOR of what you clicked (a span inside a link
+                                                focuses the link) -- never read it as the element you
+                                                aimed at. Focus onto the DOCUMENT does not reach this
+                                                row: it answers identical_tree.
     changed     value_kept            proceed   the element held it when read back; no delta could
                                                 show it (a secret renders as a marker, and a first
                                                 action has no tree to compare). fill, select and
@@ -22,7 +28,11 @@ LLM USAGE GUIDE:
     changed     values_lost           confirm   moved AND emptied a filled field; values_lost names them
     navigated   document_replaced     inspect   new document, every stored uid is dead
     intercepted hit_test_receiver     dismiss   intercepted_by got the event; target unknown
-    intercepted modal_dialog          dismiss   a modal owns the top layer; Escape it first
+    intercepted modal_dialog          dismiss   a <dialog> opened with showModal() owns the top layer;
+                                                Escape it first. Covered by a fixture, never yet seen
+                                                on a real site (0 of 61): a <div role=dialog> overlay
+                                                is NOT in the top layer and arrives as
+                                                hit_test_receiver instead.
     not_kept    value_reverted        stop      element held NOTHING; read value.actual, do not re-fill
     not_kept    value_rewritten       stop      element holds something else (mask/normaliser)
     no_effect   delivered_no_change   confirm   delivery PROVEN + tree still in observed_after_ms
@@ -336,7 +346,10 @@ LLM USAGE GUIDE:
                                                        # (status lists them as orphan=<name>)
 
   Important tips:
-    - Use --stealth on sites with bot protection (Cloudflare, Turnstile).
+    - Use --stealth on a Cloudflare JS challenge (the "Just a moment..." interstitial):
+      measured on shop.app, 403 without it and the real page with it. It does NOT clear a
+      managed Turnstile (nowsecure.nl: identical with and without) nor DataDome
+      (leboncoin.fr: 403 either way) -- for those, --connect to a real Chrome.
     - UIDs (n47, n123) are stable across inspects on the same page.
     - After SPA navigation (back, forward, click that triggers route change), re-inspect — UIDs change.
     - For SPA product pages, prefer `goto <direct-url>` over `click` (avoids modal routing).

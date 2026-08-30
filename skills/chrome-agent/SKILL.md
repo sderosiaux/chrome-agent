@@ -31,12 +31,12 @@ which chrome-agent || npm install -g chrome-agent   # or: cargo install chrome-a
 |---|---|---|---|
 | `changed` | `tree_delta` | proceed | The page moved; `delta` says how. |
 | `changed` | `nodes_moved` | proceed | Same nodes, reordered (a drag landed). |
-| `changed` | `focus_only` | proceed | Nothing moved but focus — the only sign the action arrived. |
+| `changed` | `focus_only` | proceed | Nothing moved but focus, and focus landed on a real **element** — on a path with no hit test that is the only sign the action arrived. `focus.to` names what RECEIVED focus, which is often a focusable **ancestor** of what you clicked (a span inside a link focuses the link), so do not read it as "the element I aimed at". Focus landing on the **document** does not reach this row at all: see `identical_tree`. |
 | `changed` | `value_kept` | proceed / **inspect** | The element held what was asked of it when it was read back, and the tree could not show it — a secret field renders as a fixed marker, so a **refill** of one produces no delta, and on the first action of a session there is no tree to compare at all. `fill`, `select` and `check`/`uncheck` all reach this row, and the evidence is `value.verbatim` on each, not the delta. This is the one row whose `next` depends on more than the reason: if the PAGE read failed as well, the same verdict answers `inspect`, because the element is confirmed and nothing else on the page was seen. Branch on `next`. |
 | `changed` | `values_lost` | **confirm** | It moved AND emptied a field that held a value. `values_lost:[{uid,role,name,was}]` names each. A form that submitted-and-cleared and a form that discarded your input look identical here. Confirm with `assert text --contains` on the page's own confirmation, or `network`, before re-filling — a re-submit may send the work twice. |
 | `navigated` | `document_replaced` | inspect | New document. Every stored uid is dead. |
-| `intercepted` | `hit_test_receiver` | dismiss | Another element occupied the aim point and got the event. `intercepted_by` names it (`tag`/`id`/`class`/`uid`/`z_index`/`text`/`modal`). Nothing is known about the target. |
-| `intercepted` | `modal_dialog` | dismiss | A modal holds the top layer and receives everything outside itself. Press Escape or click its own dismiss control first. |
+| `intercepted` | `hit_test_receiver` | dismiss | Another element occupied the aim point and got the event. `intercepted_by` names it (`tag`/`id`/`class`/`uid`/`z_index`/`text`/`modal`). Nothing is known about the target. **This is the row you will actually get**: 8 interceptions over 61 real sites, all of them this one. Read `tag`/`id`/`class` — `z_index` was `auto` on 7 of the 8 and on both local fixtures, because scrims usually stack by DOM order and `position`, not by `z-index`. |
+| `intercepted` | `modal_dialog` | dismiss | A `<dialog>` opened with `showModal()` (or a fullscreen element) holds the **top layer** and receives everything outside itself. Press Escape or click its own dismiss control first. **Covered by a fixture, not yet seen in the wild**: 0 occurrences over 61 real sites. `modal` is `el.matches(':modal')`, which only the top layer satisfies — the `<div role="dialog">` overlays most sites ship never enter it and arrive as `hit_test_receiver` above. |
 | `not_kept` | `value_reverted` | **stop** | The write reached the element and it held **nothing** afterwards. Do not fill again — the same write produces the same answer. Read `value.actual`. |
 | `not_kept` | `value_rewritten` | **stop** | It holds something **else** — a mask, a trimmer, a normaliser. The write landed in the page's own shape. Read `value.actual` and decide whether that is the value you wanted. |
 | `no_effect` | `delivered_no_change` | confirm | Delivery **proven** to the target, and the tree stayed still within `observed_after_ms`. The strongest word available. Repeating is the one thing that cannot help. |
@@ -272,7 +272,8 @@ that declares its own takes it after the verb (`wait selector ".x" --timeout 5`,
 declared is an exit-1 usage error that names the invocation which works.
 
 ```bash
---stealth          # 7 anti-detection CDP patches (Cloudflare/Turnstile)
+--stealth          # 7 anti-detection CDP patches. Clears a Cloudflare JS challenge;
+                   # measured NOT to clear a managed Turnstile or DataDome
 --json             # structured JSON on stdout; errors exit 1 with {"ok":false,...} still on stdout
 --browser <name>   # isolate parallel agents — sharing "default" corrupts sessions
 --page <name>      # named tabs
@@ -309,12 +310,19 @@ Exit codes: **0** success · **1** error (including a bad flag) · **2** an asse
 
 ### Bot protection
 
-| Site protection | Solution |
-|---|---|
-| None | `chrome-agent goto ...` |
-| Cloudflare/Turnstile | `chrome-agent --stealth goto ...` |
-| Logged-in sites (X, Gmail) | `chrome-agent --stealth --copy-cookies goto ...` |
-| DataDome/Kasada | `google-chrome --remote-debugging-port=9222 &` then `chrome-agent --connect http://127.0.0.1:9222 goto ...` |
+| Site protection | Solution | Measured |
+|---|---|---|
+| None | `chrome-agent goto ...` | — |
+| Cloudflare **JS challenge** ("Just a moment…") | `chrome-agent --stealth goto ...` | `shop.app`: 403 / 6 nodes without, 200 / real page with |
+| Cloudflare **managed Turnstile** | `--stealth` does **not** get through | `nowsecure.nl`: 10 nodes with and without, identical |
+| Logged-in sites (X, Gmail) | `chrome-agent --stealth --copy-cookies goto ...` | — |
+| DataDome/Kasada | `google-chrome --remote-debugging-port=9222 &` then `chrome-agent --connect http://127.0.0.1:9222 goto ...` | `leboncoin.fr`: 403 with `--stealth` and without |
+
+The two Cloudflare rows are different products. "Just a moment…" is a JS challenge the seven
+patches satisfy; a managed Turnstile fingerprints the browser and no in-binary patch moves it.
+For that row and for DataDome, `--connect` to a real Chrome is the only route. Read the page
+after navigating rather than assuming the flag worked: a challenge that held answers with a
+title like "Just a moment…" and a handful of nodes.
 
 ## Response shapes (`--json`)
 

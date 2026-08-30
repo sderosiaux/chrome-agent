@@ -283,7 +283,9 @@ where it is not declared is a usage error naming the invocation which works.
 --connect [url]          Attach to a running Chrome
 --proxy-server <url>     Proxy a managed Chrome (http(s), socks4/5; explicit port required)
 --headed                 Show browser window (default: headless)
---stealth                Anti-detection patches (Cloudflare, Turnstile)
+--stealth                Anti-detection patches. Clears a Cloudflare JS challenge
+                         ("Just a moment..."); does NOT clear a managed Turnstile or
+                         DataDome -- see the protection table below
 --copy-cookies           Use cookies from your real Chrome profile
 --chrome-arg <flag>      Extra flag for the Chrome chrome-agent launches (repeatable)
 --timeout <seconds>      Command timeout (default: 30)
@@ -347,11 +349,11 @@ change report is never ambiguous and a caller can branch without parsing prose.
 
 | `verdict` | `verdict_reason` | `next` | What it means |
 |---|---|---|---|
-| `changed` | `tree_delta`, `nodes_moved`, `focus_only` | `proceed` | The page moved; `delta` says how. |
+| `changed` | `tree_delta`, `nodes_moved`, `focus_only` | `proceed` | The page moved; `delta` says how. On `focus_only` the move was focus alone, onto a real **element** — `focus.to` names what RECEIVED focus, which is often a focusable **ancestor** of the node clicked (a span inside a link focuses the link). Focus landing on the **document** is not counted: it is what a click on nothing focusable leaves behind, so it answers `identical_tree` instead. |
 | `changed` | `value_kept` | `proceed` / `inspect` | The state was confirmed by the read-back on the element itself, and the tree could not show it — a secret field renders as a fixed marker, so re-filling one leaves no delta to point at, and on a fresh session there is no tree to compare at all. `fill`, `select` and `check`/`uncheck` all reach it, through the same `value.verbatim`. The only row whose `next` is not a function of the reason alone: when the page read failed too, the verdict still stands (it is about the element) and `next` becomes `inspect` (nothing else was seen). |
 | `changed` | `values_lost` | `confirm` | It moved **and** emptied a field that held a value — `values_lost` names each one. A form that submitted and cleared itself looks identical to one that threw the input away. |
 | `navigated` | `document_replaced` | `inspect` | New document; every stored uid is dead. |
-| `intercepted` | `hit_test_receiver`, `modal_dialog` | `dismiss` | Another element occupied the point aimed at and received the event. **`intercepted_by`** names it (tag, id, class, uid, z-index, whether it is a modal). Nothing is known about the target. |
+| `intercepted` | `hit_test_receiver`, `modal_dialog` | `dismiss` | Another element occupied the point aimed at and received the event. **`intercepted_by`** names it (tag, id, class, uid, z-index, whether it is a modal). Nothing is known about the target. `hit_test_receiver` is the one that fires in practice — 8 interceptions over 61 real sites, all of them it. `modal_dialog` needs the **top layer** (`:modal`: a `<dialog>` opened with `showModal()`, or fullscreen), is covered by a fixture and has **not** been seen in the wild: the `<div role="dialog">` overlays most sites ship never enter the top layer. Read `tag`/`id`/`class` rather than `z_index`, which was `auto` on 7 of those 8 and on both fixtures — scrims usually stack by DOM order and `position`. |
 | `not_kept` | `value_reverted`, `value_rewritten` | `stop` | The write reached the element and it does not hold it: empty on the first, rewritten by a mask or normaliser on the second. Read `value.actual`; a second fill produces the same answer. |
 | `no_effect` | `delivered_no_change` | `confirm` | Delivery **proven** by a hit test and the tree stayed still inside `observed_after_ms`. |
 | `unchanged` | `identical_tree` | `confirm` | The tree was identical while the tool watched — delivery not proven. |
@@ -557,12 +559,19 @@ google-chrome --remote-debugging-port=9222 &
 chrome-agent --connect http://127.0.0.1:9222 goto https://www.leboncoin.fr --inspect
 ```
 
-| Protection | Solution |
-|---|---|
-| None | `chrome-agent goto ...` |
-| Cloudflare/Turnstile | `chrome-agent --stealth goto ...` |
-| Logged-in sites | `chrome-agent --stealth --copy-cookies goto ...` |
-| DataDome/Kasada | `chrome-agent --connect` to real Chrome |
+| Protection | Solution | Measured |
+|---|---|---|
+| None | `chrome-agent goto ...` | — |
+| Cloudflare **JS challenge** ("Just a moment…") | `chrome-agent --stealth goto ...` | `shop.app`: 403 and 6 nodes without it, 200 and the real page with it |
+| Cloudflare **managed Turnstile** | `--stealth` does **not** help | `nowsecure.nl`: 10 nodes with it and without it, no difference |
+| Logged-in sites | `chrome-agent --stealth --copy-cookies goto ...` | — |
+| DataDome/Kasada | `chrome-agent --connect` to real Chrome | `leboncoin.fr`: 403 with `--stealth` and without |
+
+The two Cloudflare rows are not the same product. The interstitial that says "Just a moment…"
+runs a JS challenge that the seven patches satisfy; a managed Turnstile widget fingerprints
+the browser itself, and no in-binary patch moves it. `--connect` to a real Chrome is the only
+route this tool has for the second row and for DataDome. Each measurement above was taken
+three times, with and without the flag, on the dates in the commit.
 
 ## Logged-in sites
 
