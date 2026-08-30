@@ -5,9 +5,10 @@ use std::process::{Command, Output};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 mod common;
+use common::TestBrowser;
 
 fn binary() -> PathBuf {
     let mut path = std::env::current_exe()
@@ -29,13 +30,6 @@ fn run(browser: &str, args: &[&str]) -> Output {
         .expect("run chrome-agent")
 }
 
-struct BrowserGuard(String);
-
-impl Drop for BrowserGuard {
-    fn drop(&mut self) {
-        let _ = run(&self.0, &["close", "--purge"]);
-    }
-}
 
 struct FixtureServer {
     addr: SocketAddr,
@@ -113,14 +107,7 @@ fn http_response(content_type: &str, body: &[u8]) -> Vec<u8> {
 }
 
 fn unique_temp_dir() -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let path = std::env::temp_dir().join(format!(
-        "chrome-agent-download-limit-{}-{nanos}",
-        std::process::id()
-    ));
+    let path = common::temp_path("download-limit", "d");
     std::fs::create_dir_all(&path).unwrap();
     path
 }
@@ -132,8 +119,8 @@ fn download_rejects_declared_and_streamed_overflow_without_writing_a_file() {
     }
 
     let server = FixtureServer::start();
-    let browser = format!("test-download-limit-{}", std::process::id());
-    let _browser_guard = BrowserGuard(browser.clone());
+    let guard = TestBrowser::new("test-download-limit");
+    let browser = guard.name().to_string();
     let temp_dir = unique_temp_dir();
 
     let root = server.url("/");

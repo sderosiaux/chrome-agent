@@ -1,6 +1,7 @@
 use std::process::Command;
 
 mod common;
+use common::TestBrowser;
 
 /// Get the path to the built binary.
 fn binary() -> String {
@@ -100,6 +101,8 @@ fn a_global_flag_is_accepted_on_either_side_of_the_verb() {
         (&["--json", "click", "n1"], &["click", "n1", "--json"]),
         (&["--json", "inspect"], &["inspect", "--json"]),
         (&["--verdict", "off", "click", "n1"], &["click", "n1", "--verdict", "off"]),
+        // isolation-exempt: CHROME_AGENT_PARSE_ONLY, so no browser is launched and the name
+        // reaches nothing — the case under test is where the flag sits, not what it names.
         (&["--browser", "a7", "eval", "1"], &["eval", "1", "--browser", "a7"]),
     ];
     for (before, after) in cases {
@@ -266,28 +269,6 @@ fn eval_subcommand_help() {
 // Integration tests that require Chrome (skipped in CI without Chrome)
 // These are guarded by a check for Chrome availability.
 
-/// RAII guard: closes browser on drop (even on panic).
-struct TestBrowser(String);
-
-impl TestBrowser {
-    /// Unique per process. A fixed name means two concurrent runs of this suite drive the same
-    /// browser: one navigates while the other clicks a uid from its own snapshot, and both fail
-    /// with "Node with given id does not belong to the document". CLAUDE.md documents the
-    /// hazard — `--browser <unique>` per agent — and the suites have to obey it too.
-    fn new(label: &str) -> Self {
-        Self(format!("{label}-{}", std::process::id()))
-    }
-    fn name(&self) -> &str {
-        &self.0
-    }
-}
-
-impl Drop for TestBrowser {
-    fn drop(&mut self) {
-        let _ = run_cli(&["--browser", &self.0, "close", "--purge"]);
-    }
-}
-
 #[test]
 fn headed_goto_and_eval() {
     if !common::browser_ready() {
@@ -343,8 +324,7 @@ fn dblclick_selector_fires_real_double_click() {
     let html = "<!doctype html><html><body><button id=\"b\" \
         onclick=\"window.__c=(window.__c||0)+1\" \
         ondblclick=\"window.__d=(window.__d||0)+1\">x</button></body></html>";
-    let mut path = std::env::temp_dir();
-    path.push("chrome-agent-dblclick-selector-test.html");
+    let path = common::temp_path("dblclick-selector-test", "html");
     std::fs::write(&path, html).expect("write fixture");
     let url = format!("file://{}", path.display());
 

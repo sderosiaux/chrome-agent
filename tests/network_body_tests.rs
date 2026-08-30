@@ -13,6 +13,7 @@ use std::process::Command;
 use serde_json::Value;
 
 mod common;
+use common::TestBrowser;
 
 fn binary() -> String {
     let mut path = std::env::current_exe()
@@ -88,7 +89,8 @@ fn a_filter_is_a_selection_and_a_binary_body_is_counted_not_printed() {
         return;
     }
     let port = spawn_server();
-    let browser = format!("network-body-{}", std::process::id());
+    let guard = TestBrowser::new("network-body");
+    let browser = guard.name().to_string();
     let probe = format!(
         "{}#http://127.0.0.1:{port}",
         common::fixture_url("network_body_probe.html")
@@ -135,11 +137,4 @@ fn a_filter_is_a_selection_and_a_binary_body_is_counted_not_printed() {
         "unfiltered --body fetched a non-allowlisted type: {yaml}"
     );
 
-    let (_, _, _) = {
-        let output = Command::new(binary())
-            .args(["--browser", &browser, "close", "--purge"])
-            .output()
-            .expect("close");
-        (output.stdout, output.stderr, output.status)
-    };
 }

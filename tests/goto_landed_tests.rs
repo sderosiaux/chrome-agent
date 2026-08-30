@@ -22,6 +22,7 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 mod common;
+use common::TestBrowser;
 
 fn binary() -> std::path::PathBuf {
     let mut path = std::env::current_exe().unwrap().parent().unwrap().parent().unwrap().to_path_buf();
@@ -92,23 +93,6 @@ fn run_piped(browser: &str, mode: &str, stdin_text: &str, timeout: Duration) -> 
     }
 }
 
-struct BrowserGuard(String);
-
-impl BrowserGuard {
-    fn new(suffix: &str) -> Self {
-        let name = format!("landed-{suffix}-{}", std::process::id());
-        Self(name)
-    }
-    fn name(&self) -> &str {
-        &self.0
-    }
-}
-
-impl Drop for BrowserGuard {
-    fn drop(&mut self) {
-        let _ = run(&self.0, &["close", "--purge"]);
-    }
-}
 
 struct Server {
     addr: SocketAddr,
@@ -236,7 +220,7 @@ fn a_clean_landing_reports_no_redirect() {
         return;
     }
     let server = Server::start();
-    let guard = BrowserGuard::new("clean");
+    let guard = TestBrowser::new("landed-clean");
     let url = server.url("/clean");
     let response = run_json(guard.name(), &["--json", "goto", &url]);
 
@@ -254,7 +238,7 @@ fn the_auth_bounce_is_reported_and_hinted() {
         return;
     }
     let server = Server::start();
-    let guard = BrowserGuard::new("bounce");
+    let guard = TestBrowser::new("landed-bounce");
     let requested = server.url("/orders");
     let response = run_json(guard.name(), &["--json", "goto", &requested]);
 
@@ -278,7 +262,7 @@ fn an_ordinary_redirect_carries_no_auth_wall_hint() {
         return;
     }
     let server = Server::start();
-    let guard = BrowserGuard::new("moved");
+    let guard = TestBrowser::new("landed-moved");
     let response = run_json(guard.name(), &["--json", "goto", &server.url("/moved")]);
 
     let landed = &response["landed"];
@@ -298,7 +282,7 @@ fn a_directory_slash_redirect_is_not_reported_as_one() {
         return;
     }
     let server = Server::start();
-    let guard = BrowserGuard::new("slash");
+    let guard = TestBrowser::new("landed-slash");
     let response = run_json(guard.name(), &["--json", "goto", &server.url("/dir")]);
 
     let landed = &response["landed"];
@@ -316,7 +300,7 @@ fn a_meta_refresh_redirect_is_reported() {
     if !common::browser_ready() {
         return;
     }
-    let guard = BrowserGuard::new("meta");
+    let guard = TestBrowser::new("landed-meta");
     let requested = common::fixture_url("goto_meta_redirect.html");
     let response = run_json(guard.name(), &["--json", "goto", &requested]);
 
@@ -340,10 +324,10 @@ fn cli_pipe_and_batch_report_the_same_landing() {
     let server = Server::start();
     let requested = server.url("/orders");
 
-    let cli_guard = BrowserGuard::new("parity-cli");
+    let cli_guard = TestBrowser::new("landed-parity-cli");
     let cli = run_json(cli_guard.name(), &["--json", "goto", &requested]);
 
-    let pipe_guard = BrowserGuard::new("parity-pipe");
+    let pipe_guard = TestBrowser::new("landed-parity-pipe");
     let pipe_lines = run_piped(
         pipe_guard.name(),
         "pipe",
@@ -352,7 +336,7 @@ fn cli_pipe_and_batch_report_the_same_landing() {
     );
     let piped = pipe_lines.last().expect("a pipe response");
 
-    let batch_guard = BrowserGuard::new("parity-batch");
+    let batch_guard = TestBrowser::new("landed-parity-batch");
     // `batch` never opens a browser, so it needs the session to exist first.
     run_json(batch_guard.name(), &["--json", "goto", &server.url("/clean")]);
     let batch_lines = run_piped(
@@ -383,7 +367,7 @@ fn navigate_and_read_reports_its_landing_too() {
         return;
     }
     let server = Server::start();
-    let guard = BrowserGuard::new("nav-read");
+    let guard = TestBrowser::new("landed-nav-read");
     let requested = server.url("/orders");
     let lines = run_piped(
         guard.name(),
@@ -408,7 +392,7 @@ fn text_mode_names_the_redirect_and_stays_quiet_otherwise() {
         return;
     }
     let server = Server::start();
-    let guard = BrowserGuard::new("text");
+    let guard = TestBrowser::new("landed-text");
 
     let bounced = run(guard.name(), &["goto", &server.url("/orders")]);
     let bounced_out = String::from_utf8_lossy(&bounced.stdout).to_string();
@@ -437,7 +421,7 @@ fn stealth_still_reports_a_landing() {
         return;
     }
     let server = Server::start();
-    let guard = BrowserGuard::new("stealth");
+    let guard = TestBrowser::new("landed-stealth");
     let response = run_json(guard.name(), &["--stealth", "--json", "goto", &server.url("/orders")]);
 
     let landed = &response["landed"];

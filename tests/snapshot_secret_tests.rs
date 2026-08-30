@@ -12,6 +12,7 @@ use std::process::Command;
 use serde_json::Value;
 
 mod common;
+use common::TestBrowser;
 
 /// Every string the fixture holds in a secret field, plus the digits it echoes into a
 /// `generic` node. None of these may appear in any output.
@@ -29,23 +30,6 @@ fn run_cli(args: &[&str]) -> (String, i32) {
         String::from_utf8_lossy(&output.stdout).to_string(),
         output.status.code().unwrap_or(-1),
     )
-}
-
-struct TestBrowser(String);
-impl TestBrowser {
-    /// Unique per process: a fixed name means two concurrent runs drive the same browser and
-    /// each invalidates the other's uids.
-    fn new(label: &str) -> Self {
-        Self(format!("{label}-{}", std::process::id()))
-    }
-    fn name(&self) -> &str {
-        &self.0
-    }
-}
-impl Drop for TestBrowser {
-    fn drop(&mut self) {
-        let _ = run_cli(&["--browser", &self.0, "close", "--purge"]);
-    }
 }
 
 fn open(browser: &str, fixture: &str) -> bool {

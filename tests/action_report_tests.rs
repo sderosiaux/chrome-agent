@@ -3,6 +3,7 @@ use std::process::Command;
 use serde_json::Value;
 
 mod common;
+use common::TestBrowser;
 
 fn binary() -> String {
     let mut path = std::env::current_exe().unwrap().parent().unwrap().parent().unwrap().to_path_buf();
@@ -16,25 +17,6 @@ fn run_cli(args: &[&str]) -> (String, i32) {
         String::from_utf8_lossy(&output.stdout).to_string(),
         output.status.code().unwrap_or(-1),
     )
-}
-
-struct TestBrowser(String);
-impl TestBrowser {
-    /// Unique per process. A fixed name means two concurrent runs of this suite drive the same
-    /// browser: one navigates while the other clicks a uid from its own snapshot, and both fail
-    /// with "Node with given id does not belong to the document". CLAUDE.md documents the
-    /// hazard — `--browser <unique>` per agent — and the suites have to obey it too.
-    fn new(label: &str) -> Self {
-        Self(format!("{label}-{}", std::process::id()))
-    }
-    fn name(&self) -> &str {
-        &self.0
-    }
-}
-impl Drop for TestBrowser {
-    fn drop(&mut self) {
-        let _ = run_cli(&["--browser", &self.0, "close", "--purge"]);
-    }
 }
 
 /// Arrange a page with a button that mutates the DOM, and a baseline snapshot.
@@ -128,11 +110,14 @@ fn pipe_reports_changes_like_the_cli() {
 }
 
 /// Run a pipe script and return the last JSON response.
-fn run_pipe(browser: &str, extra: &[&str], script: &str) -> Value {
+/// The label names the browser; the name itself is unique and the session is closed
+/// when this returns, panic included — see `common::TestBrowser`.
+fn run_pipe(label: &str, extra: &[&str], script: &str) -> Value {
     use std::io::Write as _;
     use std::process::Stdio;
 
-    let mut args: Vec<&str> = vec!["--browser", browser];
+    let guard = TestBrowser::new(label);
+    let mut args: Vec<&str> = vec!["--browser", guard.name()];
     args.extend_from_slice(extra);
     args.push("pipe");
     let mut child = Command::new(binary())
@@ -147,7 +132,6 @@ fn run_pipe(browser: &str, extra: &[&str], script: &str) -> Value {
     let out = child.wait_with_output().expect("pipe output");
     let stdout = String::from_utf8_lossy(&out.stdout);
     let last = stdout.lines().rfind(|l| !l.trim().is_empty()).unwrap_or("{}");
-    let _ = run_cli(&["--browser", browser, "close", "--purge"]);
     serde_json::from_str(last).unwrap_or_else(|e| panic!("last pipe line was not JSON ({e}): {last}"))
 }
 

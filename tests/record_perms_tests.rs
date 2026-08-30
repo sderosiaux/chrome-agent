@@ -14,6 +14,7 @@ use std::os::unix::fs::PermissionsExt as _;
 use std::process::{Command, Stdio};
 
 mod common;
+use common::TestBrowser;
 
 fn binary() -> String {
     let mut path = std::env::current_exe().unwrap().parent().unwrap().parent().unwrap().to_path_buf();
@@ -21,27 +22,21 @@ fn binary() -> String {
     path.to_string_lossy().into_owned()
 }
 
-fn run_cli(args: &[&str]) -> i32 {
-    Command::new(binary())
-        .args(args)
-        .output()
-        .expect("Failed to run chrome-agent")
-        .status
-        .code()
-        .unwrap_or(-1)
-}
 
 fn temp_path(name: &str) -> std::path::PathBuf {
-    let mut path = std::env::temp_dir();
-    path.push(format!("chrome-agent-{name}-{}.jsonl", std::process::id()));
+    let path = common::temp_path(name, "jsonl");
     let _ = std::fs::remove_file(&path);
     path
 }
 
-fn record_a_session(browser: &str, path: &std::path::Path) -> bool {
+/// The label names the browser; the name itself is unique and the session is closed when this
+/// returns, panic included — see `common::TestBrowser`.
+fn record_a_session(label: &str, path: &std::path::Path) -> bool {
     if !common::browser_ready() {
         return false;
     }
+    let guard = TestBrowser::new(label);
+    let browser = guard.name();
     let url = common::fixture_url("verdict_states.html");
     let script = format!(
         "{}\n",
@@ -57,7 +52,6 @@ fn record_a_session(browser: &str, path: &std::path::Path) -> bool {
     child.stdin.as_mut().unwrap().write_all(script.as_bytes()).unwrap();
     drop(child.stdin.take());
     let _ = child.wait();
-    let _ = run_cli(&["--browser", browser, "close", "--purge"]);
     true
 }
 
@@ -107,9 +101,7 @@ fn an_unwritable_record_path_is_reported_not_swallowed() {
     if !common::browser_ready() {
         return;
     }
-    let bad = std::env::temp_dir()
-        .join(format!("chrome-agent-no-such-dir-{}", std::process::id()))
-        .join("session.jsonl");
+    let bad = common::temp_path("no-such-dir", "d").join("session.jsonl");
     let url = common::fixture_url("verdict_states.html");
     let script = format!(
         "{}\n",
@@ -117,7 +109,8 @@ fn an_unwritable_record_path_is_reported_not_swallowed() {
     );
     // Unique per process: a fixed name lets a second concurrent run of this suite drive the
     // same browser and clobber this one's page.
-    let browser = format!("record-unwritable-{}", std::process::id());
+    let guard = TestBrowser::new("record-unwritable");
+    let browser = guard.name().to_string();
     let mut child = Command::new(binary())
         .args(["--browser", &browser, "pipe"])
         .stdin(Stdio::piped())
@@ -136,7 +129,6 @@ fn an_unwritable_record_path_is_reported_not_swallowed() {
         .output()
         .expect("read the page location");
     let location = String::from_utf8_lossy(&output.stdout).to_string();
-    let _ = run_cli(&["--browser", &browser, "close", "--purge"]);
 
     assert!(
         stdout.contains("recording"),

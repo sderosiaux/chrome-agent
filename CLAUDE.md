@@ -63,6 +63,32 @@ cargo test
 cargo clippy -- -D warnings  # zero warnings enforced in CI
 ```
 
+**`cargo test --test X` does not always rebuild the binary the tests exec.** The integration
+suites run `target/debug/chrome-agent` as a subprocess, and cargo does not necessarily refresh
+it for a single-suite run. An A/B that edits `src/`, re-runs one suite and reads the result is
+then measuring the PREVIOUS build — which reads as a regression that is not there, and cost
+three false failures once. Run `cargo build` between the two states.
+
+**Every test owns its browser, and the name says so** (`tests/common/mod.rs`). Two `cargo test`
+processes on one machine is the normal regime here, and a hard-coded `--browser` name means they
+drive ONE browser: the first to finish `close --purge`s it under the second. Measured by running
+the whole suite twice at once from two directories — `action_report_tests` died with
+`transport: transport closed` on the browser named `pipe-bootstrap`, `proxy_tests` timed out on
+`test-managed-proxy`, and a unit test in `src/browser.rs` read `None` because the other run had
+deleted `/tmp/chrome-agent_test_devtools` between its write and its read. None of the three had
+a bug; each had a name.
+
+So there is ONE mechanism: `common::TestBrowser::new(label)` for a browser, `common::temp_path`
+for a file, `common::unique_name` under both. The name carries the pid (which separates
+concurrent processes) AND a counter (which separates tests inside one process, since the harness
+runs them on parallel threads) — the pid half came from `hit_test_tests`, the counter half from
+`device_emulation_tests`, and this is the two of them in one place instead of twenty-five
+copies. `TestBrowser` closes and purges on `Drop`, which a `close` statement at the end of a
+helper does not do when an assertion panics — that is how a Chrome and its ~14 MB profile leak
+per failure. Three tests in `harness_tests.rs` scan the sources and fail on a hard-coded name, a
+second implementation of the rule, or a fixed temp path; a line that genuinely needs one says
+`isolation-exempt:` and why.
+
 ## Release
 
 ```bash

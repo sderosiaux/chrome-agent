@@ -9,6 +9,7 @@ use std::process::{Command, Stdio};
 use serde_json::Value;
 
 mod common;
+use common::TestBrowser;
 
 fn binary() -> String {
     let mut path = std::env::current_exe().unwrap().parent().unwrap().parent().unwrap().to_path_buf();
@@ -22,25 +23,6 @@ fn run_cli(args: &[&str]) -> (String, i32) {
         String::from_utf8_lossy(&output.stdout).to_string(),
         output.status.code().unwrap_or(-1),
     )
-}
-
-struct TestBrowser(String);
-impl TestBrowser {
-    /// Unique per process. A fixed name means two concurrent runs of this suite drive the same
-    /// browser: one navigates while the other clicks a uid from its own snapshot, and both fail
-    /// with "Node with given id does not belong to the document". CLAUDE.md documents the
-    /// hazard — `--browser <unique>` per agent — and the suites have to obey it too.
-    fn new(label: &str) -> Self {
-        Self(format!("{label}-{}", std::process::id()))
-    }
-    fn name(&self) -> &str {
-        &self.0
-    }
-}
-impl Drop for TestBrowser {
-    fn drop(&mut self) {
-        let _ = run_cli(&["--browser", &self.0, "close", "--purge"]);
-    }
 }
 
 /// Open the fixture and establish a baseline, so the next action is a comparison.
@@ -318,8 +300,11 @@ fn a_click_that_navigates_still_says_navigated() {
 }
 
 /// Run a pipe script and return every JSON response.
-fn run_pipe(browser: &str, extra: &[&str], script: &str) -> Vec<Value> {
-    let mut args: Vec<&str> = vec!["--browser", browser];
+/// The label names the browser; the name itself is unique and the session is closed
+/// when this returns, panic included — see `common::TestBrowser`.
+fn run_pipe(label: &str, extra: &[&str], script: &str) -> Vec<Value> {
+    let guard = TestBrowser::new(label);
+    let mut args: Vec<&str> = vec!["--browser", guard.name()];
     args.extend_from_slice(extra);
     args.push("pipe");
     let mut child = Command::new(binary())
@@ -338,7 +323,6 @@ fn run_pipe(browser: &str, extra: &[&str], script: &str) -> Vec<Value> {
         .filter(|l| !l.trim().is_empty())
         .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("not JSON ({e}): {l}")))
         .collect();
-    let _ = run_cli(&["--browser", browser, "close", "--purge"]);
     assert!(!responses.is_empty(), "pipe produced nothing");
     responses
 }

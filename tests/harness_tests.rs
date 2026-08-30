@@ -56,3 +56,149 @@ fn a_present_fixture_resolves_to_a_file_url() {
     assert!(url.starts_with("file:///"), "got {url}");
     assert!(url.ends_with("/tests/fixtures/press_keys.html"), "got {url}");
 }
+
+// ---------------------------------------------------------------------------
+// One isolation mechanism, enforced on the sources
+// ---------------------------------------------------------------------------
+
+/// Every Rust source of the suite and of the crate, so a file added later is scanned for free.
+fn sources() -> Vec<(String, String)> {
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let mut out = Vec::new();
+    for dir in ["tests", "src", "src/cdp", "src/commands"] {
+        let Ok(entries) = std::fs::read_dir(root.join(dir)) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().is_some_and(|e| e == "rs") {
+                let name = format!("{dir}/{}", path.file_name().unwrap_or_default().to_string_lossy());
+                out.push((name, std::fs::read_to_string(&path).unwrap_or_default()));
+            }
+        }
+    }
+    assert!(out.len() > 30, "the scan found almost nothing, so it is proving nothing");
+    out
+}
+
+/// This file, which spells out every pattern the rules below forbid and so cannot be scanned
+/// for them.
+const SCANNER: &str = "tests/harness_tests.rs";
+
+/// Whether line `n` is exempt: the marker is on it, or in the comment written directly above
+/// it. A reason on its own line is how a comment is normally written, and a rule that only
+/// accepted the marker inline would push authors to write worse comments to satisfy it.
+fn exempt(lines: &[&str], n: usize) -> bool {
+    let from = n.saturating_sub(3);
+    lines[from..=n].iter().any(|line| line.contains("isolation-exempt:"))
+}
+
+/// A hard-coded `--browser` name is a browser two concurrent runs share.
+///
+/// Measured before this rule existed, by running the whole suite twice at once from two
+/// directories: `action_report_tests` died with `transport: transport closed` on the browser
+/// named `pipe-bootstrap`, and `proxy_tests` timed out on `test-managed-proxy`. Neither had a
+/// bug; each had a name.
+#[test]
+fn no_test_hard_codes_a_browser_name() {
+    let mut offenders = Vec::new();
+    for (name, text) in sources() {
+        if !name.starts_with("tests/") || name == SCANNER {
+            continue;
+        }
+        let lines: Vec<&str> = text.lines().collect();
+        for (n, line) in lines.iter().enumerate() {
+            if exempt(&lines, n) {
+                continue;
+            }
+            // `"--browser", "literal"` — a name, as opposed to `guard.name()` or a variable.
+            if let Some(rest) = line.split("\"--browser\",").nth(1)
+                && rest.trim_start().starts_with('"')
+            {
+                offenders.push(format!("{name}:{}: {}", n + 1, line.trim()));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "a browser name belongs to `common::TestBrowser`, which makes it unique per process \
+         AND per test:\n{}",
+        offenders.join("\n")
+    );
+}
+
+/// One mechanism, not several. A second implementation is how the first one stops being true.
+#[test]
+fn the_uniqueness_rule_has_exactly_one_implementation() {
+    let mut offenders = Vec::new();
+    for (name, text) in sources() {
+        if !name.starts_with("tests/") || name == "tests/common/mod.rs" || name == SCANNER {
+            continue;
+        }
+        let lines: Vec<&str> = text.lines().collect();
+        for (n, line) in lines.iter().enumerate() {
+            if exempt(&lines, n) {
+                continue;
+            }
+            let hand_rolled = line.contains("std::process::id()")
+                || line.contains("struct TestBrowser")
+                || line.contains("struct BrowserGuard");
+            if hand_rolled {
+                offenders.push(format!("{name}:{}: {}", n + 1, line.trim()));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "use `common::TestBrowser` / `common::unique_name` / `common::temp_path` rather than \
+         spelling the rule again:\n{}",
+        offenders.join("\n")
+    );
+}
+
+/// A fixed path under the temp directory is the same collision as a fixed browser name, and it
+/// bit a unit test rather than an integration one: two runs of `src/browser.rs`'s
+/// `read_devtools_active_port_parses_correctly` shared `/tmp/chrome-agent_test_devtools`, and
+/// one `remove_dir_all` deleted the file the other was about to read (`left: None`).
+#[test]
+fn no_source_writes_to_a_fixed_temporary_path() {
+    let mut offenders = Vec::new();
+    for (name, text) in sources() {
+        if name == SCANNER {
+            continue;
+        }
+        let lines: Vec<&str> = text.lines().collect();
+        for (n, line) in lines.iter().enumerate() {
+            if exempt(&lines, n) {
+                continue;
+            }
+            // The dash matters: every suite's `binary()` helper pushes `"chrome-agent"`, which
+            // is the executable, not a file two runs would share.
+            if line.contains("temp_dir().join(\"") || line.contains("path.push(\"chrome-agent-") {
+                offenders.push(format!("{name}:{}: {}", n + 1, line.trim()));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "a temporary path a second process can guess is a shared file:\n{}",
+        offenders.join("\n")
+    );
+}
+
+/// The name has to be unique per call, not merely per process: the harness runs tests on
+/// parallel threads, so one pid covers several tests at once.
+#[test]
+fn a_unique_name_differs_from_the_last_one_and_carries_the_pid() {
+    let first = common::unique_name("iso");
+    let second = common::unique_name("iso");
+    assert_ne!(first, second, "two names in one process collided: {first}");
+    let pid = std::process::id().to_string();
+    assert!(first.starts_with("iso-"), "{first}");
+    assert!(first.contains(&pid), "the pid separates concurrent runs: {first}");
+    // A path built from it is unique too, and lands in the temp directory rather than the repo.
+    let path = common::temp_path("iso", "jsonl");
+    assert!(path.starts_with(std::env::temp_dir()), "{}", path.display());
+    assert!(path.to_string_lossy().ends_with(".jsonl"), "{}", path.display());
+    assert_ne!(path, common::temp_path("iso", "jsonl"));
+}

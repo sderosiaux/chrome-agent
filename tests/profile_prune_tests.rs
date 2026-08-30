@@ -9,6 +9,8 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+mod common;
+
 fn binary() -> PathBuf {
     let mut path = std::env::current_exe().expect("test binary path");
     path.pop();
@@ -34,7 +36,7 @@ fn run_in(home: &Path, args: &[&str]) -> (String, i32) {
 }
 
 fn tmp_home(tag: &str) -> PathBuf {
-    let home = std::env::temp_dir().join(format!("chrome-agent_prune_{}_{}", tag, std::process::id()));
+    let home = common::temp_path(&format!("prune-{tag}"), "d");
     let _ = std::fs::remove_dir_all(&home);
     std::fs::create_dir_all(home.join(".chrome-agent").join("browsers")).unwrap();
     home
@@ -120,6 +122,8 @@ fn a_save_removes_only_the_unreferenced_unheld_and_idle_profile() {
     .unwrap();
     age(&locked);
 
+    // isolation-exempt: a name that deliberately does not exist, in a temporary HOME of
+    // this test's own — nothing is launched and no store is shared.
     let (_, code) = run_in(&home, &["close", "--browser", "never-opened"]);
     assert_eq!(code, 0, "close should succeed");
 
@@ -142,6 +146,8 @@ fn one_save_removes_at_most_one_profile() {
         age(&profile(&home, &format!("orphan-{i}")));
     }
 
+    // isolation-exempt: a name that deliberately does not exist, in a temporary HOME of
+    // this test's own — nothing is launched and no store is shared.
     let (_, code) = run_in(&home, &["close", "--browser", "never-opened"]);
     assert_eq!(code, 0);
     assert_eq!(

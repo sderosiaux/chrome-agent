@@ -104,3 +104,88 @@ pub fn fixture_path(name: &str) -> PathBuf {
 pub fn fixture_url(name: &str) -> String {
     format!("file://{}", fixture_path(name).display())
 }
+
+// ---------------------------------------------------------------------------
+// Isolation between concurrent test processes
+// ---------------------------------------------------------------------------
+
+/// The binary under test, resolved from the test executable's own location.
+///
+/// Every suite had its own copy of this, and every copy was identical. It lives here now for
+/// the same reason [`TestBrowser`] does: the thing that must not drift is the thing that
+/// several files spell the same way.
+///
+/// One trap it cannot remove, so it is written down instead: `cargo test --test X` does not
+/// always rebuild this binary. An A/B that edits `src/` and re-runs one suite can measure the
+/// PREVIOUS build and read as a regression that is not there. Run `cargo build` between the
+/// two states.
+#[must_use]
+pub fn binary() -> PathBuf {
+    let mut path = std::env::current_exe().expect("test binary path");
+    path.pop(); // deps/
+    path.pop();
+    path.push("chrome-agent");
+    path
+}
+
+/// A name no other process is using, and no later run of this one will reuse.
+///
+/// Two ingredients, and both are needed. The pid separates concurrent processes — two
+/// `cargo test` runs, which is the normal regime on a machine with several worktrees. The
+/// counter separates tests INSIDE one process: the harness runs them on parallel threads, so
+/// two tests that happen to pass the same label would otherwise drive one browser, and the
+/// first to finish would `close --purge` it under the second.
+///
+/// Not a random number: a name that appears in a failure message is worth being able to find
+/// again in `chrome-agent status` while the run is still going.
+#[must_use]
+pub fn unique_name(label: &str) -> String {
+    static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("{label}-{}-{n}", std::process::id())
+}
+
+/// A browser this test owns, closed and purged when the test ends — including on panic.
+///
+/// This is the ONE mechanism. Twenty-four suites carried a byte-identical copy of it and five
+/// did not, and those five were the ones that failed: a fixed `--browser` name means two
+/// concurrent runs drive ONE browser, and the first to finish closes it under the second.
+/// Measured, before this existed, by running the whole suite twice at once from two
+/// directories: `action_report_tests` died with `transport: transport closed` on the browser
+/// named `pipe-bootstrap`, and `proxy_tests` timed out on `test-managed-proxy`. Both had
+/// hard-coded their name; neither had a bug.
+///
+/// RAII, and that matters as much as the name: a plain `close` statement at the end of a
+/// helper is skipped when an assertion panics, which leaks a Chrome and a ~14 MB profile
+/// directory per failure. `Drop` runs on the unwind.
+pub struct TestBrowser(String);
+
+impl TestBrowser {
+    #[must_use]
+    pub fn new(label: &str) -> Self {
+        Self(unique_name(label))
+    }
+
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Drop for TestBrowser {
+    fn drop(&mut self) {
+        let _ = std::process::Command::new(binary())
+            .args(["--browser", &self.0, "close", "--purge"])
+            .output();
+    }
+}
+
+/// A temporary file path this test owns.
+///
+/// The same rule as the browser name, for the same reason: two suites wrote
+/// `/tmp/chrome-agent-<fixed>.jsonl` and `/tmp/chrome-agent-dblclick-selector-test.html`, so a
+/// concurrent run could rewrite or unlink the file between another run's write and its read.
+#[must_use]
+pub fn temp_path(label: &str, extension: &str) -> PathBuf {
+    std::env::temp_dir().join(format!("chrome-agent-{}.{extension}", unique_name(label)))
+}

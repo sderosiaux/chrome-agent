@@ -11,6 +11,7 @@ use std::process::Command;
 use serde_json::Value;
 
 mod common;
+use common::TestBrowser;
 
 fn binary() -> String {
     let mut path = std::env::current_exe().unwrap().parent().unwrap().parent().unwrap().to_path_buf();
@@ -24,25 +25,6 @@ fn run_cli(args: &[&str]) -> (String, i32) {
         String::from_utf8_lossy(&output.stdout).to_string(),
         output.status.code().unwrap_or(-1),
     )
-}
-
-struct TestBrowser(String);
-impl TestBrowser {
-    /// Unique per process. A fixed name means two concurrent runs of this suite drive the same
-    /// browser: one navigates while the other clicks a uid from its own snapshot, and both fail
-    /// with "Node with given id does not belong to the document". CLAUDE.md documents the
-    /// hazard — `--browser <unique>` per agent — and the suites have to obey it too.
-    fn new(label: &str) -> Self {
-        Self(format!("{label}-{}", std::process::id()))
-    }
-    fn name(&self) -> &str {
-        &self.0
-    }
-}
-impl Drop for TestBrowser {
-    fn drop(&mut self) {
-        let _ = run_cli(&["--browser", &self.0, "close", "--purge"]);
-    }
 }
 
 /// Open a fixture and take the baseline the change report needs.
@@ -178,7 +160,8 @@ fn pipe_reports_the_lost_value_the_way_the_cli_does() {
     );
     // Unique per process: a fixed name lets a second concurrent run of this suite drive the
     // same browser and clobber this one's page.
-    let browser = format!("lost-pipe-{}", std::process::id());
+    let guard = TestBrowser::new("lost-pipe");
+    let browser = guard.name().to_string();
     let mut child = Command::new(binary())
         .args(["--browser", &browser, "pipe"])
         .stdin(std::process::Stdio::piped())
@@ -190,7 +173,6 @@ fn pipe_reports_the_lost_value_the_way_the_cli_does() {
     drop(child.stdin.take());
     let out = child.wait_with_output().expect("pipe output");
     let stdout = String::from_utf8_lossy(&out.stdout);
-    let _ = run_cli(&["--browser", &browser, "close", "--purge"]);
 
     let last: Value = stdout
         .lines()

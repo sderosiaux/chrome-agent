@@ -10,6 +10,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 mod common;
+use common::TestBrowser;
 
 /// Generous enough that a real answer always beats it, short enough that a hang is caught.
 const HANG_LIMIT: Duration = Duration::from_secs(45);
@@ -52,25 +53,6 @@ fn run_bounded(args: &[&str]) -> (String, i32, Duration) {
             panic!("command hung for more than {HANG_LIMIT:?}: {args:?}");
         }
         std::thread::sleep(Duration::from_millis(50));
-    }
-}
-
-struct TestBrowser(String);
-impl TestBrowser {
-    /// Unique per process. A fixed name means two concurrent runs of this suite drive the same
-    /// browser: one navigates while the other clicks a uid from its own snapshot, and both fail
-    /// with "Node with given id does not belong to the document". CLAUDE.md documents the
-    /// hazard — `--browser <unique>` per agent — and the suites have to obey it too.
-    fn new(label: &str) -> Self {
-        Self(format!("{label}-{}", std::process::id()))
-    }
-    fn name(&self) -> &str {
-        &self.0
-    }
-}
-impl Drop for TestBrowser {
-    fn drop(&mut self) {
-        let _ = run_cli(&["--browser", &self.0, "close", "--purge"]);
     }
 }
 
