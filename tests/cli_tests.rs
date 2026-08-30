@@ -198,6 +198,81 @@ fn an_unrelated_usage_error_is_left_to_clap() {
     assert!(!stderr.contains("read before the verb"), "{stderr}");
 }
 
+/// An invocation whose arguments are wrong must be told so, whatever the machine holds.
+///
+/// `run.rs` resolves the store, the browser and the CDP client BEFORE its second `match`, so any
+/// validation living inside an arm — or between the connection and the arm — answers "No browser
+/// session 'default'" on a machine with no session. That is a true sentence about a problem the
+/// caller does not have, and it sends them to launch a browser for an invocation that could never
+/// run. Four were reachable that way; each is now refused by the parser, before anything is
+/// resolved or launched. The `HOME` is empty on purpose: with a session present, all four
+/// happened to answer correctly, which is why the download case reached `main` green and CI red.
+#[test]
+fn an_invalid_invocation_is_refused_before_a_browser_is_resolved() {
+    let home = common::temp_path("argcheck", "home");
+    let _ = std::fs::remove_dir_all(&home);
+    std::fs::create_dir_all(&home).unwrap();
+
+    // Each pair is an invocation and a word its refusal has to contain — the argument the caller
+    // got wrong, never the state of the machine.
+    for (args, names) in [
+        (&["download"][..], "--selector"),
+        (&["download", "https://example.com/f.csv", "--uid", "n1"][..], "cannot be used with"),
+        (&["screenshot", "--format", "webp"][..], "--format"),
+        (&["--dialog", "nope", "inspect"][..], "--dialog"),
+        (&["goto", "https://example.com", "--header", "nocolon"][..], "--header"),
+    ] {
+        let output = Command::new(binary())
+            .args(args)
+            .env("HOME", &home)
+            .output()
+            .expect("run chrome-agent");
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        assert_eq!(output.status.code(), Some(1), "{args:?}: {stderr}");
+        assert!(stderr.contains(names), "{args:?} never names {names}: {stderr}");
+        assert!(
+            !stderr.contains("browser session"),
+            "{args:?} answered about a browser, not about its arguments: {stderr}"
+        );
+    }
+
+    // Nothing was launched on the way: the refusals happen in `Cli::try_parse`, which runs
+    // before the store is read. A profile directory here would mean one of them got as far as
+    // `resolve_cli_connection`.
+    assert!(
+        !home.join(".chrome-agent").join("browsers").exists(),
+        "a refused invocation still launched a browser"
+    );
+    std::fs::remove_dir_all(&home).ok();
+}
+
+/// The two value lists added above are checked case-insensitively, because the parsers behind
+/// them (`setup::DialogPolicy::parse`, `screenshot::ImgFormat::parse`) accept and unit-test
+/// those spellings. Moving the check to clap must not quietly narrow what the tool accepts.
+/// `CHROME_AGENT_PARSE_ONLY` is the project's own way to reach clap's verdict without a browser.
+#[test]
+fn the_spellings_those_parsers_accept_still_parse() {
+    for args in [
+        &["--dialog", "DISMISS", "inspect"][..],
+        &["--dialog", "Accept", "inspect"][..],
+        &["screenshot", "--format", "JPG"][..],
+        &["screenshot", "--format", "PNG"][..],
+        &["goto", "https://example.com", "--header", "X-Trace: a:b"][..],
+    ] {
+        let output = Command::new(binary())
+            .args(args)
+            .env("CHROME_AGENT_PARSE_ONLY", "1")
+            .output()
+            .expect("run chrome-agent");
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
 #[test]
 fn version_flag() {
     let (stdout, _, code) = run_cli(&["--version"]);

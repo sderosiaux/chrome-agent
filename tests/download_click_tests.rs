@@ -424,26 +424,45 @@ fn the_url_path_still_fetches_and_says_which_mechanism_it_used() {
 
 /// Two ways to name the same thing is a caller who has not decided; picking for them would
 /// silently ignore half the invocation.
+///
+/// Run against an empty `HOME`, which is the state of a CI runner and the state this test used
+/// to pass by accident: `Target::parse` sat in the `Command::Download` arm of `run.rs`, after
+/// the session and the CDP client were resolved, so on a developer machine the caller got the
+/// message about their argument and on a fresh one they got "No browser session 'default'" —
+/// advice for a problem they did not have. Asserting the absence of that sentence is the point
+/// of the test; accepting either message would freeze the bug in place.
 #[test]
 fn download_refuses_an_ambiguous_or_absent_target() {
-    let none = Command::new(binary()).args(["download"]).output().expect("run");
-    assert!(!none.status.success());
-    assert!(
-        String::from_utf8_lossy(&none.stderr).contains("provide a URL, --uid, or --selector"),
-        "{}",
-        String::from_utf8_lossy(&none.stderr)
-    );
+    let home = unique_temp_dir("download-target");
+    let refuse = |args: &[&str]| {
+        let out = Command::new(binary()).args(args).env("HOME", &home).output().expect("run");
+        let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+        assert_eq!(out.status.code(), Some(1), "{args:?}: {stderr}");
+        assert!(
+            !stderr.contains("browser session"),
+            "{args:?} answered about a browser, not about its arguments: {stderr}"
+        );
+        stderr
+    };
 
-    let both = Command::new(binary())
-        .args(["download", "https://example.com/f.csv", "--selector", "#a"])
-        .output()
-        .expect("run");
-    assert!(!both.status.success());
-    assert!(
-        String::from_utf8_lossy(&both.stderr).contains("provide only one of"),
-        "{}",
-        String::from_utf8_lossy(&both.stderr)
-    );
+    // Naming no target at all. The three ways to name one are listed, in the syntax that would
+    // have worked — clap's own rendering of the `download_target` group.
+    let none = refuse(&["download"]);
+    for form in ["<URL", "--uid", "--selector"] {
+        assert!(none.contains(form), "the refusal never names {form}: {none}");
+    }
+
+    // Naming two. Both spellings of the ambiguity, since the group covers the positional and
+    // the two flags alike.
+    for args in [
+        &["download", "https://example.com/f.csv", "--selector", "#a"][..],
+        &["download", "--uid", "n1", "--selector", "#a"][..],
+    ] {
+        let both = refuse(args);
+        assert!(both.contains("cannot be used with"), "{args:?}: {both}");
+    }
+
+    std::fs::remove_dir_all(&home).ok();
 }
 
 /// A server that answers an attachment slowly enough that a 2 s wait cannot see the end of it,

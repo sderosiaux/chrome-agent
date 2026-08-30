@@ -1,5 +1,15 @@
 use clap::{Parser, Subcommand};
 
+/// Validate `--header` at parse time, through the same function that splits it later.
+///
+/// The pair is not returned: `commands::goto::parse_header` stays the one definition of the
+/// mapping, since pipe/batch reach it from JSON where clap never runs. This gate only moves the
+/// refusal ahead of the browser `run` would otherwise launch and never use.
+fn validate_header(value: &str) -> Result<String, String> {
+    crate::commands::goto::parse_header(value).map_err(|e| e.to_string())?;
+    Ok(value.to_string())
+}
+
 fn parse_positive_usize(value: &str) -> Result<usize, String> {
     let parsed = value
         .parse::<usize>()
@@ -145,7 +155,11 @@ pub struct Cli {
     pub page: String,
 
     /// How to answer JS dialogs (alert/confirm/prompt/beforeunload): accept, dismiss, or manual
-    #[arg(long, default_value = "accept", global = true)]
+    ///
+    /// Checked here, not in `setup::DialogPolicy::parse`, which runs after the browser is
+    /// connected: `--dialog nope` used to answer "No browser session 'default'" on a machine that
+    /// had none. `ignore_case` keeps the spellings that parser accepts and unit-tests.
+    #[arg(long, default_value = "accept", value_parser = ["accept", "dismiss", "manual"], ignore_case = true, global = true)]
     pub dialog: String,
 
     /// Text to submit for `prompt()` dialogs when --dialog accept (default: empty)
@@ -173,7 +187,7 @@ pub enum Command {
         #[arg(long)]
         wait_for: Option<String>,
         /// Extra HTTP header "Name: Value" (repeatable) sent with the navigation
-        #[arg(long = "header")]
+        #[arg(long = "header", value_parser = validate_header)]
         headers: Vec<String>,
     },
 
@@ -402,7 +416,10 @@ pub enum Command {
         #[arg(long)]
         filename: Option<String>,
         /// Image format: png (default) or jpeg (smaller, use with --quality)
-        #[arg(long, default_value = "png")]
+        ///
+        /// Same reason as `--dialog`: `screenshot::ImgFormat::parse` runs after the connection,
+        /// so an unsupported format reported a missing session instead of itself.
+        #[arg(long, default_value = "png", value_parser = ["png", "jpeg", "jpg"], ignore_case = true)]
         format: String,
         /// JPEG quality 0-100 (ignored for png)
         #[arg(long)]
@@ -426,6 +443,10 @@ pub enum Command {
     /// to a file built client-side (`Blob`) or handed out by a POST the anchor never names.
     /// Read `downloaded`: a click that landed and produced no file answers ok:true with
     /// `downloaded:false`, because an error there would invite a second real click.
+    /// Exactly one target, enforced by clap rather than by the dispatcher: an invocation that
+    /// names none or two is wrong about its own arguments, and the answer must not depend on
+    /// whether a browser happens to exist.
+    #[command(group = clap::ArgGroup::new("download_target").required(true).args(["url", "uid", "selector"]))]
     Download {
         /// URL to download (fetched with the page's session) — omit if using --uid or --selector
         url: Option<String>,

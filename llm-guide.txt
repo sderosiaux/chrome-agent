@@ -326,7 +326,8 @@ LLM USAGE GUIDE:
     chrome-agent screenshot [--filename name]          # screenshot to file
     chrome-agent pdf [--filename name] [--landscape]        # current page to PDF
     chrome-agent download <url> [--out path] [--max-bytes N]   # auth-preserving; default max 64 MiB
-    chrome-agent download --uid n47 | --selector "css"      # click, capture the browser-native download
+    chrome-agent download --uid n47 [--out path]            # or CLICK it, capture the browser-native download
+    chrome-agent download --selector "css" [--out path]     # same by selector — exactly one target, never two
 
   Cleanup:
     chrome-agent close                                 # stop browser
