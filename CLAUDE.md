@@ -89,6 +89,18 @@ per failure. Three tests in `harness_tests.rs` scan the sources and fail on a ha
 second implementation of the rule, or a fixed temp path; a line that genuinely needs one says
 `isolation-exempt:` and why.
 
+The scan earns its keep on contact with new code. Six suites merged after it was written had
+each rewritten the rule by hand, and it caught all six on the first run — including a name bound
+to a variable (`let browser = "test-webmcp-list";`) that the flag-shaped rule walked straight
+past, which is the hole that second spelling now closes. One of the six, `download_click_tests`,
+also showed the third form of the same defect, which no naming rule can catch: it ASSERTED on a
+shared directory — the `.incoming-*` transfers under `~/.chrome-agent/tmp`, compared before and
+after — so a sibling process's in-flight download read as this test's leak (measured:
+`.incoming-76300-…` and `.incoming-76268-…`, neither pid a child of the test). Those directories
+are named after the process that opened them, so the assertion filters on the pids this test
+spawned. One rule behind all three forms: a test may name, write and assert on what it owns, and
+on nothing else.
+
 ## Release
 
 ```bash

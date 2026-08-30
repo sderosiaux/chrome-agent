@@ -15,9 +15,10 @@ use std::process::{Command, Output};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 mod common;
+use common::TestBrowser;
 
 fn binary() -> PathBuf {
     let mut path = std::env::current_exe().unwrap().parent().unwrap().parent().unwrap().to_path_buf();
@@ -25,12 +26,25 @@ fn binary() -> PathBuf {
     path
 }
 
+/// Every chrome-agent this test started, by pid.
+///
+/// A transfer directory is named `.incoming-<pid>-<nanos>` after the process that opened it, so
+/// this set is what tells THIS test's leftovers from a sibling's. See
+/// `assert_no_transfer_directory_left`.
+static OURS: std::sync::Mutex<Option<std::collections::HashSet<u32>>> = std::sync::Mutex::new(None);
+
 fn run(browser: &str, args: &[&str]) -> Output {
-    Command::new(binary())
+    let child = Command::new(binary())
         .args(["--browser", browser])
         .args(args)
-        .output()
-        .expect("run chrome-agent")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("run chrome-agent");
+    if let Ok(mut ours) = OURS.lock() {
+        ours.get_or_insert_with(std::collections::HashSet::new).insert(child.id());
+    }
+    child.wait_with_output().expect("run chrome-agent")
 }
 
 fn json_of(output: &Output) -> serde_json::Value {
@@ -40,18 +54,9 @@ fn json_of(output: &Output) -> serde_json::Value {
     })
 }
 
-struct BrowserGuard(String);
-
-impl Drop for BrowserGuard {
-    fn drop(&mut self) {
-        let _ = run(&self.0, &["close", "--purge"]);
-    }
-}
 
 fn unique_temp_dir(tag: &str) -> PathBuf {
-    let nanos = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_nanos();
-    let path = std::env::temp_dir()
-        .join(format!("chrome-agent-{tag}-{}-{nanos}", std::process::id()));
+    let path = common::temp_path(tag, "d");
     std::fs::create_dir_all(&path).unwrap();
     path
 }
@@ -75,15 +80,45 @@ fn incoming_dirs() -> std::collections::HashSet<String> {
         .collect()
 }
 
+/// Only OUR leftovers count.
+///
+/// The before/after difference was already there, and it is not enough: a second test process
+/// on the machine — the normal regime here — starts its own transfers after the `before`
+/// snapshot, and they sit in the difference for as long as they run. Measured on two full
+/// suites in parallel: `.incoming-76300-…` and `.incoming-76268-…`, neither pid a child of this
+/// test, reported as this test's leak. The directory is named after the process that opened it,
+/// so the pid is the discriminator and the poll stays for our own in-flight ones.
+fn ours(names: &std::collections::HashSet<String>) -> Vec<String> {
+    let pids = OURS.lock().ok().and_then(|o| o.clone()).unwrap_or_default();
+    names
+        .iter()
+        .filter(|name| {
+            name.split('-')
+                .nth(1)
+                .and_then(|pid| pid.parse::<u32>().ok())
+                .is_some_and(|pid| pids.contains(&pid))
+        })
+        .cloned()
+        .collect()
+}
+
 fn assert_no_transfer_directory_left(before: &std::collections::HashSet<String>) {
+    let lingering = || {
+        let now = incoming_dirs();
+        let new: std::collections::HashSet<String> = now.difference(before).cloned().collect();
+        ours(&new)
+    };
     for _ in 0..30 {
-        if incoming_dirs().difference(before).next().is_none() {
+        if lingering().is_empty() {
             return;
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-    let lingering: Vec<String> = incoming_dirs().difference(before).cloned().collect();
-    assert!(lingering.is_empty(), "transfer directories were left behind: {lingering:?}");
+    assert!(
+        lingering().is_empty(),
+        "transfer directories were left behind: {:?}",
+        lingering()
+    );
 }
 
 fn dirs_home() -> Option<PathBuf> {
@@ -104,8 +139,8 @@ fn a_click_captures_a_blob_download_by_selector_and_by_uid() {
     if !common::browser_ready() {
         return;
     }
-    let browser = format!("test-dl-click-{}", std::process::id());
-    let _guard = BrowserGuard(browser.clone());
+    let guard = TestBrowser::new("test-dl-click");
+    let browser = guard.name().to_string();
     let out_dir = unique_temp_dir("dl-click");
     let before = incoming_dirs();
 
@@ -175,8 +210,8 @@ fn a_click_that_downloads_nothing_says_so_and_forbids_the_retry() {
     if !common::browser_ready() {
         return;
     }
-    let browser = format!("test-dl-none-{}", std::process::id());
-    let _guard = BrowserGuard(browser.clone());
+    let guard = TestBrowser::new("test-dl-none");
+    let browser = guard.name().to_string();
     let before = incoming_dirs();
 
     let page = common::fixture_url("download_click.html");
@@ -213,8 +248,8 @@ fn a_click_download_past_the_byte_ceiling_is_cancelled_and_nothing_is_written() 
     if !common::browser_ready() {
         return;
     }
-    let browser = format!("test-dl-cap-{}", std::process::id());
-    let _guard = BrowserGuard(browser.clone());
+    let guard = TestBrowser::new("test-dl-cap");
+    let browser = guard.name().to_string();
     let out_dir = unique_temp_dir("dl-cap");
     let before = incoming_dirs();
 
@@ -258,8 +293,8 @@ fn a_transfer_still_running_when_the_wait_ends_writes_nothing() {
     if !common::browser_ready() {
         return;
     }
-    let browser = format!("test-dl-slow-{}", std::process::id());
-    let _guard = BrowserGuard(browser.clone());
+    let guard = TestBrowser::new("test-dl-slow");
+    let browser = guard.name().to_string();
     let out_dir = unique_temp_dir("dl-slow");
     let server = SlowServer::start();
     let before = incoming_dirs();
@@ -304,8 +339,8 @@ fn pipe_and_batch_report_a_click_download_the_same_way() {
     if !common::browser_ready() {
         return;
     }
-    let browser = format!("test-dl-modes-{}", std::process::id());
-    let _guard = BrowserGuard(browser.clone());
+    let guard = TestBrowser::new("test-dl-modes");
+    let browser = guard.name().to_string();
     let out_dir = unique_temp_dir("dl-modes");
     let page = common::fixture_url("download_click.html");
 
@@ -366,8 +401,8 @@ fn the_url_path_still_fetches_and_says_which_mechanism_it_used() {
     if !common::browser_ready() {
         return;
     }
-    let browser = format!("test-dl-fetch-{}", std::process::id());
-    let _guard = BrowserGuard(browser.clone());
+    let guard = TestBrowser::new("test-dl-fetch");
+    let browser = guard.name().to_string();
     let out_dir = unique_temp_dir("dl-fetch");
     let server = SlowServer::start();
 

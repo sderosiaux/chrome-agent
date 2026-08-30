@@ -11,6 +11,7 @@ use std::process::{Command, Stdio};
 use serde_json::Value;
 
 mod common;
+use common::TestBrowser;
 
 fn binary() -> String {
     let mut path = std::env::current_exe()
@@ -49,16 +50,6 @@ fn run_pipe(browser: &str, commands: &[Value]) -> Vec<Value> {
         .collect()
 }
 
-fn close(browser: &str) {
-    let _ = Command::new(binary()).args(["--browser", browser, "close", "--purge"]).output();
-}
-
-struct BrowserGuard<'a>(&'a str);
-impl Drop for BrowserGuard<'_> {
-    fn drop(&mut self) {
-        close(self.0);
-    }
-}
 
 // ---------------------------------------------------------------------------
 // list
@@ -69,8 +60,8 @@ fn list_reports_all_three_tools_with_no_output_schema() {
     if !common::browser_ready() {
         return;
     }
-    let browser = "test-webmcp-list";
-    let _guard = BrowserGuard(browser);
+    let guard = TestBrowser::new("test-webmcp-list");
+    let browser = guard.name();
     let responses = run_pipe(
         browser,
         &[
@@ -78,7 +69,6 @@ fn list_reports_all_three_tools_with_no_output_schema() {
             serde_json::json!({"cmd": "webmcp_list"}),
         ],
     );
-    close(browser);
 
     assert_eq!(responses[1]["ok"], Value::Bool(true), "{:?}", responses[1]);
     assert_eq!(responses[1]["frame_scoped"], Value::Bool(false));
@@ -101,8 +91,8 @@ fn list_on_a_page_with_no_model_context_is_refused_with_a_chrome_arg_hint() {
     if !common::browser_ready() {
         return;
     }
-    let browser = "test-webmcp-no-context";
-    let _guard = BrowserGuard(browser);
+    let guard = TestBrowser::new("test-webmcp-no-context");
+    let browser = guard.name();
     // Any ordinary fixture with no WebMCP polyfill.
     let responses = run_pipe(
         browser,
@@ -111,7 +101,6 @@ fn list_on_a_page_with_no_model_context_is_refused_with_a_chrome_arg_hint() {
             serde_json::json!({"cmd": "webmcp_list"}),
         ],
     );
-    close(browser);
 
     assert_eq!(responses[1]["ok"], Value::Bool(false), "{:?}", responses[1]);
     let hint = responses[1]["hint"].as_str().unwrap_or("");
@@ -132,8 +121,8 @@ fn an_honest_tool_reports_the_tree_delta_that_backs_its_declared_success() {
     if !common::browser_ready() {
         return;
     }
-    let browser = "test-webmcp-honest";
-    let _guard = BrowserGuard(browser);
+    let guard = TestBrowser::new("test-webmcp-honest");
+    let browser = guard.name();
     let responses = run_pipe(
         browser,
         &[
@@ -142,7 +131,6 @@ fn an_honest_tool_reports_the_tree_delta_that_backs_its_declared_success() {
             serde_json::json!({"cmd": "webmcp_call", "name": "add_to_cart", "args": {"item": "Espresso Blend"}}),
         ],
     );
-    close(browser);
 
     let call = &responses[2];
     assert_eq!(call["ok"], Value::Bool(true), "{call:?}");
@@ -159,8 +147,8 @@ fn a_liar_tool_reports_an_identical_tree_and_names_it_unproven_not_absent() {
     if !common::browser_ready() {
         return;
     }
-    let browser = "test-webmcp-liar";
-    let _guard = BrowserGuard(browser);
+    let guard = TestBrowser::new("test-webmcp-liar");
+    let browser = guard.name();
     let responses = run_pipe(
         browser,
         &[
@@ -169,7 +157,6 @@ fn a_liar_tool_reports_an_identical_tree_and_names_it_unproven_not_absent() {
             serde_json::json!({"cmd": "webmcp_call", "name": "add_to_cart_broken", "args": {"item": "Espresso Blend"}}),
         ],
     );
-    close(browser);
 
     let call = &responses[2];
     assert_eq!(call["ok"], Value::Bool(true), "{call:?}");
@@ -190,8 +177,8 @@ fn a_partial_tool_is_distinguished_from_the_liar_by_degree_of_change() {
     if !common::browser_ready() {
         return;
     }
-    let browser = "test-webmcp-partial";
-    let _guard = BrowserGuard(browser);
+    let guard = TestBrowser::new("test-webmcp-partial");
+    let browser = guard.name();
     let responses = run_pipe(
         browser,
         &[
@@ -200,7 +187,6 @@ fn a_partial_tool_is_distinguished_from_the_liar_by_degree_of_change() {
             serde_json::json!({"cmd": "webmcp_call", "name": "add_to_cart_partial", "args": {"item": "Espresso Blend"}}),
         ],
     );
-    close(browser);
 
     let call = &responses[2];
     assert_eq!(call["ok"], Value::Bool(true), "{call:?}");
@@ -224,8 +210,8 @@ fn an_unknown_tool_name_is_refused_with_the_known_names_and_a_hint() {
     if !common::browser_ready() {
         return;
     }
-    let browser = "test-webmcp-unknown";
-    let _guard = BrowserGuard(browser);
+    let guard = TestBrowser::new("test-webmcp-unknown");
+    let browser = guard.name();
     let responses = run_pipe(
         browser,
         &[
@@ -233,7 +219,6 @@ fn an_unknown_tool_name_is_refused_with_the_known_names_and_a_hint() {
             serde_json::json!({"cmd": "webmcp_call", "name": "not_a_real_tool", "args": {}}),
         ],
     );
-    close(browser);
 
     let call = &responses[1];
     assert_eq!(call["ok"], Value::Bool(false), "{call:?}");
@@ -259,12 +244,11 @@ fn cli_args_that_are_not_valid_json_text_are_refused_before_touching_the_page() 
     if !common::browser_ready() {
         return;
     }
-    let browser = "test-webmcp-cli-bad-args";
-    let _guard = BrowserGuard(browser);
+    let guard = TestBrowser::new("test-webmcp-cli-bad-args");
+    let browser = guard.name();
     let url = common::fixture_url("webmcp_honest_liar_partial.html");
     let _ = cli_run(browser, &["goto", &url]);
     let response = cli_run(browser, &["webmcp", "call", "add_to_cart", "--args", "not json at all"]);
-    close(browser);
 
     assert_eq!(response["ok"], Value::Bool(false), "{response:?}");
     let error = response["error"].as_str().unwrap_or("");
@@ -276,8 +260,8 @@ fn cli_list_and_call_agree_with_pipe_mode() {
     if !common::browser_ready() {
         return;
     }
-    let browser = "test-webmcp-cli";
-    let _guard = BrowserGuard(browser);
+    let guard = TestBrowser::new("test-webmcp-cli");
+    let browser = guard.name();
     let url = common::fixture_url("webmcp_honest_liar_partial.html");
     let _ = cli_run(browser, &["goto", &url]);
     let list = cli_run(browser, &["webmcp", "list"]);
@@ -289,7 +273,6 @@ fn cli_list_and_call_agree_with_pipe_mode() {
         browser,
         &["webmcp", "call", "add_to_cart_broken", "--args", "{\"item\":\"Espresso Blend\"}"],
     );
-    close(browser);
     assert_eq!(call["ok"], Value::Bool(true), "{call:?}");
     assert_eq!(call["declared_result"], IDENTICAL_RETURN);
     assert_eq!(call["verdict"], "unchanged", "{call:?}");
@@ -304,8 +287,8 @@ fn a_frame_scoped_list_reports_undefined_and_says_it_is_unproven() {
     if !common::browser_ready() {
         return;
     }
-    let browser = "test-webmcp-frame";
-    let _guard = BrowserGuard(browser);
+    let guard = TestBrowser::new("test-webmcp-frame");
+    let browser = guard.name();
     let responses = run_pipe(
         browser,
         &[
@@ -314,7 +297,6 @@ fn a_frame_scoped_list_reports_undefined_and_says_it_is_unproven() {
             serde_json::json!({"cmd": "webmcp_list"}),
         ],
     );
-    close(browser);
 
     assert_eq!(responses[1]["ok"], Value::Bool(true), "frame switch: {:?}", responses[1]);
     let call = &responses[2];

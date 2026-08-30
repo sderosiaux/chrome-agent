@@ -15,6 +15,7 @@ use serde_json::Value;
 use std::process::Command;
 
 mod common;
+use common::TestBrowser;
 
 fn binary() -> String {
     let mut path = std::env::current_exe()
@@ -28,15 +29,6 @@ fn binary() -> String {
     path.to_string_lossy().into_owned()
 }
 
-struct BrowserGuard(&'static str);
-
-impl Drop for BrowserGuard {
-    fn drop(&mut self) {
-        let _ = Command::new(binary())
-            .args(["--browser", self.0, "close", "--purge"])
-            .output();
-    }
-}
 
 fn status_pid(browser: &str) -> Option<u32> {
     let output = Command::new(binary())
@@ -69,8 +61,8 @@ fn chrome_arg_reaches_the_real_chrome_process() {
         return;
     }
 
-    let browser = "test-chrome-arg";
-    let _guard = BrowserGuard(browser);
+    let guard = TestBrowser::new("test-chrome-arg");
+    let browser = guard.name();
     let url = common::fixture_url("assert_page.html");
     let output = Command::new(binary())
         .args([
@@ -115,8 +107,8 @@ fn a_conflicting_chrome_arg_is_refused_rather_than_relaunching() {
         return;
     }
 
-    let browser = "test-chrome-arg-conflict";
-    let _guard = BrowserGuard(browser);
+    let guard = TestBrowser::new("test-chrome-arg-conflict");
+    let browser = guard.name();
     let url = common::fixture_url("assert_page.html");
     let first = Command::new(binary())
         .args([

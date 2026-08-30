@@ -111,10 +111,21 @@ fn no_test_hard_codes_a_browser_name() {
             if exempt(&lines, n) {
                 continue;
             }
-            // `"--browser", "literal"` — a name, as opposed to `guard.name()` or a variable.
-            if let Some(rest) = line.split("\"--browser\",").nth(1)
-                && rest.trim_start().starts_with('"')
-            {
+            // Two spellings of one name. The first is `"--browser", "literal"`. The second is a
+            // literal bound to a variable and passed on, which is what six suites merged after
+            // this rule was written actually did — `let browser = "test-webmcp-list";` — and it
+            // walked straight past a rule that only looked at the flag. It was caught by the
+            // one-implementation rule below instead, and only because each of them also carried
+            // its own guard; a file that hard-coded a name and used the shared guard would have
+            // passed both. That is the hole this second clause closes.
+            let after_flag = line
+                .split("\"--browser\",")
+                .nth(1)
+                .is_some_and(|rest| rest.trim_start().starts_with('"'));
+            let bound_to_a_literal = line.trim_start().starts_with("let browser")
+                && line.contains('=')
+                && line.split('=').nth(1).is_some_and(|rest| rest.trim_start().starts_with('"'));
+            if after_flag || bound_to_a_literal {
                 offenders.push(format!("{name}:{}: {}", n + 1, line.trim()));
             }
         }
