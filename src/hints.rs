@@ -219,6 +219,40 @@ pub fn download_unfinished_hint(browser: &str) -> String {
          of the file and were discarded rather than handed back as one. The download itself was \
          real: raise the wait instead of clicking again, with `{run} --timeout 300 download` and \
          the same target."
+/// A pointer action `--on-intercept refuse` stopped before it dispatched.
+///
+/// The one error in this module whose fact is a measurement rather than a symptom: the hit test
+/// named the element sitting on the aim point, so rule 1 is satisfied by naming it rather than
+/// by describing the class of thing it might be.
+///
+/// Rule 3 applies in its second flavour. A retry here is not dangerous — nothing was
+/// dispatched, so it cannot double an action — it is *futile*, and an agent that reads "safe to
+/// repeat" will repeat it until it runs out of turns. So the prohibition is on repeating the
+/// command *while the receiver is still there*, and the command named is the one that leads to
+/// getting rid of it.
+///
+/// Two wordings, because a modal dialog has one dismissal every page agrees on and a banner or
+/// scrim does not — the criterion is the receiver's own `modal` flag, which rule 2 requires
+/// stating rather than offering two commands and a shrug.
+#[must_use]
+pub fn intercepted_refusal_hint(browser: &str, receiver: Option<&crate::hit_test::Hit>) -> String {
+    let run = invocation(browser);
+    let who = receiver.map_or_else(|| "Another element".to_string(), crate::hit_test::Hit::describe);
+    if receiver.is_some_and(|hit| hit.modal) {
+        return format!(
+            "{who} is a modal dialog: it holds the top layer, so every pointer event outside it \
+             goes to it, and nothing was dispatched here. Run `{run} press Escape` to close it, \
+             then repeat this action — the page saw no event from this command, so the repeat \
+             duplicates nothing. Repeating it while the dialog is open produces this same \
+             refusal."
+        );
+    }
+    format!(
+        "{who} occupies the point this action would have been aimed at, and --on-intercept \
+         refuse was set, so nothing was dispatched and the page is exactly as it was. Do not \
+         repeat this command while that element is there: it will refuse identically. Run \
+         `{run} inspect` to find that element's own dismiss control, act on it, and aim here \
+         again once it is gone."
     )
 }
 
@@ -771,6 +805,60 @@ mod tests {
         let plain = no_download_hint("default", 5, &crate::hit_test::Dispatched::js());
         assert!(!plain.contains("occupied the point"), "{plain}");
         assert!(plain.contains("5s"), "the window is the fact: {plain}");
+    /// The refusal hint holds the same three rules as every other, on the one error whose fact
+    /// is a measurement: the receiver was named by the hit test, so the hint names it too.
+    #[test]
+    fn the_refusal_hint_names_the_receiver_and_this_browser() {
+        let receiver = crate::hit_test::Hit {
+            tag: "DIV".into(),
+            id: Some("gdpr-wall".into()),
+            cls: Some("wall".into()),
+            z: Some("9999".into()),
+            text: "We use cookies".into(),
+            modal: false,
+            iframe: false,
+            same_doc: true,
+            uid: Some("n210".into()),
+        };
+        let hint = intercepted_refusal_hint("agent-7", Some(&receiver));
+        assert!(hint.starts_with("div#gdpr-wall.wall"), "rule 1, the fact first: {hint}");
+        assert!(
+            hint.contains("`chrome-agent --browser agent-7 inspect`"),
+            "rule 2, one command, on this invocation's browser: {hint}"
+        );
+        assert!(
+            hint.contains("Do not repeat this command while that element is there"),
+            "rule 3: the retry here is futile rather than dangerous, and has to be refused in \
+             words or an agent will spin on it: {hint}"
+        );
+        for placeholder in ["<uid>", "<selector>", "<name>"] {
+            assert!(!hint.contains(placeholder), "{hint}");
+        }
+    }
+
+    /// A modal has one dismissal every page agrees on; a banner does not. Two wordings, and
+    /// the criterion that picks between them is the receiver's own flag, not the reader's guess.
+    #[test]
+    fn a_modal_receiver_gets_the_dismissal_a_modal_actually_has() {
+        let mut dialog = crate::hit_test::Hit {
+            tag: "DIALOG".into(),
+            id: Some("terms".into()),
+            cls: None,
+            z: None,
+            text: "Terms".into(),
+            modal: true,
+            iframe: false,
+            same_doc: true,
+            uid: None,
+        };
+        let modal = intercepted_refusal_hint("default", Some(&dialog));
+        assert!(modal.contains("`chrome-agent press Escape`"), "{modal}");
+        dialog.modal = false;
+        assert_ne!(modal, intercepted_refusal_hint("default", Some(&dialog)));
+        // And with nothing to name, it is still a hint rather than a silence.
+        let anonymous = intercepted_refusal_hint("default", None);
+        assert!(anonymous.starts_with("Another element"), "{anonymous}");
+        assert!(anonymous.contains("chrome-agent inspect"), "{anonymous}");
     }
 
     /// A missing snapshot has one command and now also the reason it is needed.

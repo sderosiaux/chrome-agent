@@ -68,8 +68,8 @@ impl OnIntercept {
 /// `IntersectionObserver` inserting content above the target) and deliberately NOT enough to
 /// sit out a long animation: a caller who needs that has `wait`, and silently absorbing
 /// seconds inside every click is worse than saying the aim never settled.
-const SETTLE_ATTEMPTS: u32 = 5;
-const SETTLE_GAP_MS: u64 = 30;
+pub const SETTLE_ATTEMPTS: u32 = 5;
+pub const SETTLE_GAP_MS: u64 = 30;
 
 /// A point counts as the same point across two readings within half a CSS pixel — a scroll
 /// still animating moves much further than that between readings.
@@ -147,9 +147,10 @@ pub struct Hit {
 impl Hit {
     /// `tag#id.class`, the shape a person can find in the page source.
     ///
-    /// `pub(crate)` for `hints`: a click-triggered download that produced nothing has one
-    /// explanation the hit test already measured — another element took the click — and a hint
-    /// that cannot name it sends the caller to `inspect` for a fact this response holds.
+    /// `pub(crate)` for two readers, both of which would otherwise send the caller to `inspect`
+    /// for a fact the response already holds: the refusal that names this element, written in
+    /// `hit_test_report`, and `hints` — a click-triggered download that produced nothing has one
+    /// explanation the hit test already measured, which is that another element took the click.
     pub(crate) fn describe(&self) -> String {
         let mut out = self.tag.to_lowercase();
         if let Some(id) = self.id.as_deref().filter(|s| !s.is_empty()) {
@@ -165,7 +166,7 @@ impl Hit {
         out
     }
 
-    fn report(&self) -> Value {
+    pub(crate) fn report(&self) -> Value {
         json!({
             "uid": self.uid,
             "tag": self.tag,
@@ -259,15 +260,47 @@ const PROBE_JS: &str = r"function () {
   };
 }";
 
-/// Turn one probe reading into a delivery. Pure; the temporal half (whether the aim point has
-/// stopped moving) belongs to [`aim`], which owns the loop.
+/// Whether the aim point stopped moving, which is the one thing a single reading cannot say.
+///
+/// [`aim`] owns the loop and hands the answer here, because the two failures it separates are
+/// identical in a single probe and opposite in what the caller should do: a point still moving
+/// will be somewhere else in a moment (repeat), a point that has stopped and is still off
+/// screen will be in exactly the same place next time (look at the page).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Settle {
+    /// Two consecutive readings agreed to within [`SAME_POINT_EPSILON`], or the first reading
+    /// was already inside the viewport and nothing had to be waited for.
+    Converged,
+    /// The readings still disagreed when the settle budget ran out.
+    Moving,
+}
+
+/// Turn one probe reading into a delivery. Pure; the temporal half comes in as [`Settle`],
+/// measured by [`aim`], which owns the loop.
+///
+/// The off-viewport rung is why `settle` is a parameter rather than an inference. A point
+/// outside the viewport used to be `not_settled` unconditionally, which reads as "wait and it
+/// will be fine" — and on a consent wall in `position: fixed` over a document whose scroll is
+/// locked, it never is: the same coordinate came back seven times, the verdict said `retry`
+/// each time, and the retry is the loop. Two readings that AGREE about a point off screen are
+/// a measurement, not an unfinished one, so they report `off_target` — which is the reading
+/// whose `next` is `inspect`.
 #[must_use]
-pub const fn classify(probe: &Probe) -> Delivery {
+pub const fn classify(probe: &Probe, settle: Settle) -> Delivery {
     if !probe.rendered {
         // Nothing to aim at. The caller falls back to a JS click and records that instead.
         return Delivery::NotProbed;
     }
     if !probe.in_viewport {
+        return match settle {
+            // Stable and out of reach: no scroll this tool can perform will change it.
+            Settle::Converged => Delivery::OffTarget,
+            Settle::Moving => Delivery::NotSettled,
+        };
+    }
+    // In the viewport but still moving: the smooth-scroll case with a smaller offset, and the
+    // reason a point being on screen is not on its own enough to dispatch at.
+    if matches!(settle, Settle::Moving) {
         return Delivery::NotSettled;
     }
     if !probe.aim_in {
@@ -287,7 +320,14 @@ pub const fn classify(probe: &Probe) -> Delivery {
 /// The result of aiming at a node.
 pub enum Aim {
     /// A point to dispatch at, in top-level coordinates, and what sits there.
-    At { point: (f64, f64), delivery: Delivery, receiver: Option<Hit> },
+    At {
+        point: (f64, f64),
+        delivery: Delivery,
+        receiver: Option<Hit>,
+        /// Why nothing can be aimed at, when that is the reading. `Delivery::OffTarget` covers
+        /// two shapes with one token; this is which of them was measured.
+        unaimable: Option<Unaimable>,
+    },
     /// The node has no layout box at all. There is nothing to aim at.
     NoBox,
     /// The probe could not be run, or could not map its own coordinates. The caller keeps
@@ -337,9 +377,13 @@ pub async fn aim(client: &CdpClient, object_id: &str) -> Aim {
     if !probe.rendered {
         return Aim::NoBox;
     }
-    let mut settled = probe.in_viewport;
+    // Two independent facts, and collapsing them into one flag is what made a permanent miss
+    // read as a temporary one: the loop only ever exited on `in_viewport && agreed`, so a
+    // point that agreed with itself five times over while sitting off screen came out as
+    // "never settled". Convergence is about the readings, the viewport is about the page.
+    let mut settle = if probe.in_viewport { Settle::Converged } else { Settle::Moving };
     let mut attempts = 0;
-    while !settled && attempts < SETTLE_ATTEMPTS {
+    while !(settle == Settle::Converged && probe.in_viewport) && attempts < SETTLE_ATTEMPTS {
         let previous = probe.aim;
         tokio::time::sleep(Duration::from_millis(SETTLE_GAP_MS)).await;
         let Some(next) = probe_once(client, object_id).await else {
@@ -348,7 +392,7 @@ pub async fn aim(client: &CdpClient, object_id: &str) -> Aim {
         if !next.rendered {
             return Aim::NoBox;
         }
-        settled = next.in_viewport && same_point(previous, next.aim);
+        settle = if same_point(previous, next.aim) { Settle::Converged } else { Settle::Moving };
         probe = next;
         attempts += 1;
     }
@@ -358,12 +402,19 @@ pub async fn aim(client: &CdpClient, object_id: &str) -> Aim {
     let Some(top) = probe.top.filter(|_| probe.offset_known) else {
         return Aim::Unprobed;
     };
-    let delivery = if settled { classify(&probe) } else { Delivery::NotSettled };
+    let delivery = classify(&probe, settle);
+    // Which shape of `off_target` this is. On screen and unaimable is a layout the caller can
+    // aim around; off screen and unaimable is the page holding the element there.
+    let unaimable = match delivery {
+        Delivery::OffTarget if probe.in_viewport => Some(Unaimable::NoBoxToAimAt),
+        Delivery::OffTarget => Some(Unaimable::StableOffViewport),
+        _ => None,
+    };
     let mut receiver = if delivery == Delivery::Intercepted { probe.hit.clone() } else { None };
     if let Some(hit) = receiver.as_mut() {
         hit.uid = receiver_uid(client, object_id).await;
     }
-    Aim::At { point: (top[0], top[1]), delivery, receiver }
+    Aim::At { point: (top[0], top[1]), delivery, receiver, unaimable }
 }
 
 /// The uid of the element that received the event, when it has one.
@@ -403,120 +454,21 @@ async fn receiver_uid(client: &CdpClient, object_id: &str) -> Option<String> {
     Some(format!("n{backend_id}"))
 }
 
-/// What a pointer-targeted action did, and to whom.
-pub struct Dispatched {
-    pub delivery: Delivery,
-    /// False when the aim never settled, or the caller asked to refuse an interception.
-    pub sent: bool,
-    pub aim: Option<(f64, f64)>,
-    pub receiver: Option<Hit>,
-    /// The node that was acted on, resolved before the action from the same handle that was
-    /// probed and clicked — so the uid in the response and the uid in the delta are the same
-    /// node by construction, whichever way the caller aimed.
-    pub uid: Option<String>,
-    pub role: Option<String>,
-    pub name: Option<String>,
-}
+/// What the response says about all this: moved to `hit_test_report` for the 1000-line file
+/// cap and re-exported here, so a caller still writes `crate::hit_test::Dispatched` beside the
+/// probe that produced it.
+pub use crate::hit_test_report::{Dispatched, Refused, Unaimable};
 
-impl Dispatched {
-    const fn bare(delivery: Delivery, sent: bool) -> Self {
-        Self {
-            delivery,
-            sent,
-            aim: None,
-            receiver: None,
-            uid: None,
-            role: None,
-            name: None,
-        }
-    }
-
-    /// A JS `click()`/`MouseEvent`: no hit test happened and none could have.
-    #[must_use]
-    pub const fn js() -> Self {
-        Self::bare(Delivery::JsDispatch, true)
-    }
-
-    #[must_use]
-    pub fn landed(delivery: Delivery, aim: (f64, f64), receiver: Option<Hit>) -> Self {
-        Self { aim: Some(aim), receiver, ..Self::bare(delivery, true) }
-    }
-
-    /// Aimed, refused, nothing sent. Keeps the receiver so the refusal can name it.
-    #[must_use]
-    pub fn skipped(delivery: Delivery, aim: (f64, f64), receiver: Option<Hit>) -> Self {
-        Self { aim: Some(aim), receiver, ..Self::bare(delivery, false) }
-    }
-
-    /// Carry over the identity of the node an action resolved for itself.
-    #[must_use]
-    pub fn named(mut self, uid: Option<String>, role: Option<String>, name: Option<String>) -> Self {
-        self.uid = uid;
-        self.role = role;
-        self.name = name;
-        self
-    }
-
-    /// The fields this outcome contributes to the response.
-    #[must_use]
-    pub fn report(&self) -> Value {
-        let mut out = json!({"delivery": self.delivery.as_str()});
-        if let Some(uid) = &self.uid {
-            out["uid"] = json!(uid);
-        }
-        if let Some(role) = &self.role {
-            out["role"] = json!(role);
-        }
-        if let Some(name) = &self.name {
-            out["name"] = json!(name);
-        }
-        if let Some((x, y)) = self.aim {
-            out["aim"] = json!([x, y]);
-        }
-        if let Some(receiver) = &self.receiver {
-            out["intercepted_by"] = receiver.report();
-            // Written here rather than left to the verdict's generic hint: this one can name
-            // the element, and an agent that has to guess which overlay to deal with is back
-            // to spending a turn finding out.
-            out["verdict_hint"] = json!(format!(
-                "The event was aimed at the target's centre and {} occupies that point, so it \
-                 received the event instead. Deal with it first (dismiss the banner or scrim, \
-                 close the dialog), then repeat this action. Nothing is known about what the \
-                 target itself would have done.",
-                receiver.describe()
-            ));
-        }
-        out
-    }
-
-    /// The message for an action that never dispatched, or `None` when it did.
-    ///
-    /// "Clicked" would be false for both refusals, and a false message is what the change
-    /// report cannot undo.
-    #[must_use]
-    pub fn refusal_message(&self, verb: &str, target: &str) -> Option<String> {
-        if self.sent {
-            return None;
-        }
-        Some(match self.delivery {
-            Delivery::NotSettled => format!(
-                "Did not {verb} {target}: the aim point was still moving, or outside the \
-                 viewport, after {}ms of settling, so nothing was dispatched.",
-                u64::from(SETTLE_ATTEMPTS) * SETTLE_GAP_MS
-            ),
-            Delivery::OffTarget => format!(
-                "Did not {verb} {target}: no point inside the element's own boxes could be \
-                 aimed at, so nothing was dispatched."
-            ),
-            _ => format!(
-                "Did not {verb} {target}: {} occupies the point it would have been aimed at, \
-                 and --on-intercept refuse was set.",
-                self.receiver.as_ref().map_or_else(
-                    || "another element".to_string(),
-                    Hit::describe
-                )
-            ),
-        })
+/// The structured refusal inside an error, when it is one.
+///
+/// The three error boundaries (`main`, `pipe::dispatch`, `pipe_dispatch::dispatch_single`) each
+/// hold a `BoxError` and print `{"ok":false,"error":…}` from its `Display`. This is how they
+/// ask whether the thing they are about to flatten was measured rather than merely worded.
+#[must_use]
+pub fn refusal_in(error: &crate::BoxError) -> Option<&Refused> {
+    match error.downcast_ref::<ElementError>() {
+        Some(ElementError::Refused(refused)) => Some(refused),
+        _ => None,
     }
 }
 
@@ -627,7 +579,7 @@ mod tests {
 
     #[test]
     fn a_clean_hit_is_the_only_reading_that_licenses_no_effect() {
-        assert_eq!(classify(&probe(CLEAN)), Delivery::TargetHit);
+        assert_eq!(classify(&probe(CLEAN), Settle::Converged), Delivery::TargetHit);
     }
 
     /// The canonical false success: the aim point is on the target's own box, and another
@@ -640,7 +592,7 @@ mod tests {
             "hit":{"tag":"DIV","id":"scrim","cls":null,"z":"auto","text":"",
             "modal":false,"iframe":false,"sameDoc":true}}"#,
         );
-        assert_eq!(classify(&covered), Delivery::Intercepted);
+        assert_eq!(classify(&covered, Settle::Converged), Delivery::Intercepted);
         assert_eq!(covered.hit.as_ref().unwrap().describe(), "div#scrim");
     }
 
@@ -654,7 +606,7 @@ mod tests {
             "hit":{"tag":"DIALOG","id":"terms","cls":null,"z":"auto","text":"Terms",
             "modal":true,"iframe":false,"sameDoc":true}}"#,
         );
-        assert_eq!(classify(&backdrop), Delivery::Intercepted);
+        assert_eq!(classify(&backdrop, Settle::Converged), Delivery::Intercepted);
         assert!(backdrop.hit.expect("receiver").modal);
     }
 
@@ -666,20 +618,46 @@ mod tests {
             r#"{"rendered":true,"inViewport":false,"aimIn":true,"landed":false,
             "depth":0,"offsetKnown":true,"aim":[200,3028],"top":[200,3028],"hit":null}"#,
         );
-        assert_eq!(classify(&mid_scroll), Delivery::NotSettled);
+        assert_eq!(classify(&mid_scroll, Settle::Moving), Delivery::NotSettled);
+        assert_ne!(classify(&mid_scroll, Settle::Converged), Delivery::TargetHit);
+    }
+
+    /// The reading this fix is about. The same probe, twice, differing only in whether the
+    /// point was still moving — and the two answers have opposite `next` steps.
+    ///
+    /// Measured on a real consent wall: `(378, -14)` on seven attempts, three of them on a
+    /// fresh profile, identical to the pixel. Reported as `not_settled` → `unknown /
+    /// scroll_not_settled` → `next: retry`, which for a `position: fixed` container over a
+    /// document whose scroll is locked is an instruction to loop forever.
+    #[test]
+    fn a_point_that_stopped_moving_off_screen_is_off_target_not_unsettled() {
+        let pinned = probe(
+            r#"{"rendered":true,"inViewport":false,"aimIn":true,"landed":false,
+            "depth":0,"offsetKnown":true,"aim":[378,-14],"top":[378,-14],"hit":null}"#,
+        );
+        assert_eq!(classify(&pinned, Settle::Converged), Delivery::OffTarget);
+        assert_eq!(classify(&pinned, Settle::Moving), Delivery::NotSettled);
+    }
+
+    /// In the viewport is not enough on its own: a point that is on screen and still moving is
+    /// the smooth-scroll bug with a smaller offset, and dispatching at it is the same mistake.
+    #[test]
+    fn a_point_still_moving_is_refused_even_inside_the_viewport() {
+        assert_eq!(classify(&probe(CLEAN), Settle::Moving), Delivery::NotSettled);
     }
 
     /// Ordering matters here: an off-viewport point must not be reported as an interception
-    /// just because `elementFromPoint` returned nothing.
+    /// just because `elementFromPoint` returned nothing, nor as a frame's unprobed target.
     #[test]
-    fn not_settled_outranks_every_other_reading() {
+    fn a_refusal_to_aim_outranks_every_other_reading() {
         let mid_scroll = probe(
             r#"{"rendered":true,"inViewport":false,"aimIn":false,"landed":false,
             "depth":3,"offsetKnown":false,"aim":[200,3028],"top":[200,3028],
             "hit":{"tag":"DIV","id":"scrim","cls":null,"z":"9","text":"","modal":false,
             "iframe":false,"sameDoc":true}}"#,
         );
-        assert_eq!(classify(&mid_scroll), Delivery::NotSettled);
+        assert_eq!(classify(&mid_scroll, Settle::Moving), Delivery::NotSettled);
+        assert_eq!(classify(&mid_scroll, Settle::Converged), Delivery::OffTarget);
     }
 
     #[test]
@@ -690,7 +668,7 @@ mod tests {
             "hit":{"tag":"P","id":"prose","cls":null,"z":"auto","text":"a link that wraps",
             "modal":false,"iframe":false,"sameDoc":true}}"#,
         );
-        assert_eq!(classify(&wrapped), Delivery::OffTarget);
+        assert_eq!(classify(&wrapped, Settle::Converged), Delivery::OffTarget);
     }
 
     /// A target inside a frame gets a correct aim point and no claim: the parent's overlays
@@ -703,7 +681,7 @@ mod tests {
             "hit":{"tag":"BUTTON","id":"buy","cls":null,"z":"auto","text":"Buy",
             "modal":false,"iframe":false,"sameDoc":true}}"#,
         );
-        assert_eq!(classify(&inside), Delivery::NotProbed);
+        assert_eq!(classify(&inside, Settle::Converged), Delivery::NotProbed);
         assert_eq!(inside.top, Some([52.0, 132.0]), "the dispatch point is still mapped");
     }
 
@@ -716,14 +694,14 @@ mod tests {
             "hit":{"tag":"DIV","id":"veil","cls":null,"z":"5","text":"","modal":false,
             "iframe":false,"sameDoc":true}}"#,
         );
-        assert_eq!(classify(&cross_origin), Delivery::NotProbed);
+        assert_eq!(classify(&cross_origin, Settle::Converged), Delivery::NotProbed);
     }
 
     /// A zero-size element has no point to aim at. The absence is encoded as an absence, and
     /// the caller falls back to a JS click.
     #[test]
     fn an_element_with_no_box_yields_no_claim() {
-        assert_eq!(classify(&probe(r#"{"rendered":false}"#)), Delivery::NotProbed);
+        assert_eq!(classify(&probe(r#"{"rendered":false}"#), Settle::Converged), Delivery::NotProbed);
     }
 
     /// The settle loop compares points, and a page still scrolling moves much further than
@@ -768,20 +746,6 @@ mod tests {
         );
     }
 
-    /// An action that did not dispatch must not answer "Clicked".
-    #[test]
-    fn a_refusal_says_what_it_did_not_do() {
-        let not_settled = Dispatched::skipped(Delivery::NotSettled, (10.0, 20.0), None);
-        let msg = not_settled.refusal_message("click", "uid=n9").expect("a refusal message");
-        assert!(msg.starts_with("Did not click uid=n9"), "{msg}");
-        assert!(msg.contains("150ms"), "the settle budget is stated: {msg}");
-        assert!(
-            Dispatched::landed(Delivery::TargetHit, (10.0, 20.0), None)
-                .refusal_message("click", "uid=n9")
-                .is_none()
-        );
-    }
-
     /// `DOM.describeNode` hands attributes back as one flat list; a pair-wise read of it is
     /// the difference between a role and a value.
     #[test]
@@ -791,31 +755,5 @@ mod tests {
         assert_eq!(pairs.len(), 3);
         assert_eq!(pairs[1], ("role".to_string(), "button".to_string()));
         assert!(attribute_pairs(&json!({})).is_empty());
-    }
-
-    /// The response is what the classifier reads back, so the delivery token and the receiver
-    /// must both survive the trip.
-    #[test]
-    fn the_report_carries_the_receiver_and_a_hint_that_names_it() {
-        let hit = Hit {
-            tag: "DIV".into(),
-            id: Some("scrim".into()),
-            cls: None,
-            z: Some("auto".into()),
-            text: String::new(),
-            modal: false,
-            iframe: false,
-            same_doc: true,
-            uid: Some("n11".into()),
-        };
-        let report = Dispatched::landed(Delivery::Intercepted, (200.0, 130.0), Some(hit)).report();
-        assert_eq!(report["delivery"], "intercepted");
-        assert_eq!(report["intercepted_by"]["id"], "scrim");
-        assert_eq!(report["intercepted_by"]["uid"], "n11");
-        assert_eq!(report["aim"], json!([200.0, 130.0]));
-        assert!(
-            report["verdict_hint"].as_str().unwrap().contains("div#scrim"),
-            "the hint has to name the receiver: {report}"
-        );
     }
 }

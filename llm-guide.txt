@@ -36,25 +36,33 @@ LLM USAGE GUIDE:
     # unknown = could not compare, never "nothing happened". scroll_not_settled is the ONE
     # unknown that licenses a repeat, and "next" is where that shows.
     # Both dispatch nothing, so neither can double an action -- but only the transient one can
-    # succeed on a repeat: scroll_not_settled means the page was still moving, so the animation
-    # ends and the next attempt aims at a settled box. aim_point_off_target means the computed
-    # point does not belong to the target (wrapped inline box, clipped container, transformed
-    # layout), so an identical retry misses identically -- look at the page instead.
+    # succeed on a repeat: scroll_not_settled means two readings of the aim point DISAGREED, so
+    # the movement ends and the next attempt aims at a settled box. aim_point_off_target means
+    # two readings AGREED and the point still could not be aimed at -- either it is outside the
+    # element's own boxes (wrapped inline box, clipped container) or it is outside the viewport
+    # and the page is holding it there (a position:fixed wall, a locked document scroll, which
+    # the probe's own scrollIntoView already failed to change). Read "aim": a coordinate off
+    # screen is the second shape. An identical retry misses identically -- look at the page.
     # verdict_reason is the machine token; verdict_hint names the next command in words.
 
   "delivery" on a pointer-targeted action (click, dblclick, the check/uncheck click) — a hit test at the
   coordinate about to be dispatched, and the only thing that licenses the two strong words:
     target_hit   aimed at the target/descendant/label's control/shadow host — licenses no_effect
     intercepted  aimed at an element outside the target's subtree -> intercepted_by names it
-    off_target   no point inside the element's own rects: NOTHING WAS DISPATCHED, but the miss
-                 is stable, so a repeat misses the same way -> inspect
-    not_settled  still moving or off-viewport: NOTHING WAS DISPATCHED and the miss is transient,
-                 so repeating is safe AND is the fix -> retry
+    off_target   no point on the element could be aimed at and two readings AGREED: NOTHING WAS
+                 DISPATCHED, the miss is stable (outside its own rects, or outside the viewport
+                 and pinned there), so a repeat misses the same way -> inspect
+    not_settled  two readings of the aim point DISAGREED, it was still moving: NOTHING WAS
+                 DISPATCHED and the miss is transient, repeating is safe AND is the fix -> retry
     js           went through a JS click()/MouseEvent: no hit test, licenses nothing
     not_probed   no hit test, or its answer misses the document that matters (iframe target):
                  absence of evidence, licenses NO conclusion
     # --on-intercept refuse errors instead of dispatching; default dispatch sends it anyway
-    # (what a pointer does) and names the receiver in intercepted_by.
+    # (what a pointer does) and names the receiver in intercepted_by. The refusal is ok:false
+    # (exit 1) and carries the SAME fields as the dispatch -- delivery, intercepted_by, verdict,
+    # verdict_reason, next, verdict_hint, hint -- plus dispatched:false. Branch on "next" there
+    # too; nothing reached the page, so acting on the receiver and re-aiming duplicates nothing.
+    # dispatched:false is on every response that aimed and sent nothing, refusal or not.
     # Two blind spots no retry can fix: the read-back window is a fixed 60ms (a validator at
     # 400ms is outside it -- use wait + assert value), and canvas/WebGL/CSS-only effects are
     # invisible to the a11y tree (use screenshot or eval, never a second click).

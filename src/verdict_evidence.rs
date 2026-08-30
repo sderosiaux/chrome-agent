@@ -23,10 +23,15 @@ pub enum Delivery {
     TargetHit,
     /// The aim point resolved to an element outside the target's flat subtree.
     Intercepted,
-    /// No point inside the target's own client rects could be aimed at.
+    /// No point on the target could be aimed at, and the reading is STABLE — two consecutive
+    /// probes agreed. Two shapes reach here: a point outside every one of the element's own
+    /// client rects, and a point that stopped moving outside the viewport (a `position: fixed`
+    /// wall pinned past an edge, a document whose scroll is locked). Nothing was dispatched,
+    /// and a repeat measures the same coordinate.
     OffTarget,
-    /// The aim point was outside the viewport, or still moving, after the settle loop.
-    /// Nothing was dispatched.
+    /// Two consecutive readings of the aim point disagreed: it was still moving when the settle
+    /// budget ran out. Nothing was dispatched, and the miss is TRANSIENT — this is the one
+    /// reading a repeat can fix.
     NotSettled,
     /// The action went through a JS `click()`/`MouseEvent`, which performs no hit test.
     /// Interception is not undetected here, it is inapplicable.
