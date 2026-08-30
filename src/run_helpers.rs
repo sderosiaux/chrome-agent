@@ -412,7 +412,7 @@ pub async fn output_goto(
     if json_mode {
         let mut obj = json!({"ok": true, "url": url, "title": title});
         if let Some(landing) = landed {
-            landing.attach(&mut obj);
+            landing.attach(&mut obj, browser_name);
         }
         if inspect {
             // `--max-depth` decides what is printed, never what is stored: a truncated
@@ -433,7 +433,7 @@ pub async fn output_goto(
         } else {
             println!("{url} — {title}");
         }
-        if let Some(line) = landed.and_then(crate::landing::Landing::text_line) {
+        if let Some(line) = landed.and_then(|landing| landing.text_line(browser_name)) {
             println!("{line}");
         }
         if inspect {

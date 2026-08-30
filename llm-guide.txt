@@ -284,12 +284,28 @@ LLM USAGE GUIDE:
 
   Navigation:
     chrome-agent goto https://example.com              # navigate
-    # goto also returns "landed": {"requested","final","redirected","http_status"}.
+    # goto also returns "landed": {"requested","final","redirected","http_status","serving"}.
     # Check "redirected" before trusting the page — an expired session bouncing to a
     # login wall otherwise reads as a successful load. Fragment-only and trailing-slash
     # differences are not redirects. "http_status" is the final hop's status as the
     # browser reports it, and is absent (never 0) when it reports none. A redirect onto /login, /signin,
     # /auth or /sso adds a "hint": a guess from the URL, so inspect to confirm.
+    #
+    # "serving" is what answered, and it is the field to branch on. ok:true only means the
+    # navigation happened.
+    #   page                a page was served; nothing measured says otherwise. NOT a
+    #                       certificate — a paywall or an unknown captcha reads as page too.
+    #   challenge           an anti-bot vendor's frame/script is here and there is no form of
+    #                       the site's own. "challenge_from" names the vendor's host. --stealth
+    #                       does not defeat these; use --connect to a real Chrome.
+    #   error               the server answered 4xx/5xx. Read http_status for which.
+    #   nothing_actionable  no link, no form control, no script, almost no text. What an
+    #                       edge-served refusal looks like — and what a page that had not
+    #                       rendered yet looks like. A measurement, not a claim you were
+    #                       blocked: inspect before giving up.
+    #   unreadable          the shape probe did not run; nothing is known about the document.
+    # "challenge_from" can also appear under serving:"page" — a captcha widget on a usable
+    # form. The word is the branch; the field is the evidence.
     chrome-agent goto https://spa.com --wait-for "main" # wait for selector after nav
     chrome-agent goto https://api.co --header "Authorization: Bearer XYZ"  # extra HTTP headers (repeatable)
     chrome-agent back                                  # history back

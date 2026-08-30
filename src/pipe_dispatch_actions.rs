@@ -15,7 +15,7 @@ use crate::pipe_dispatch::{attach_snapshot, cmd_max_depth, get_uid_map, merge_in
 // ---------------------------------------------------------------------------
 
 pub async fn dispatch_navigate_and_read(
-    client: &CdpClient, _store: &mut SessionStore, _browser_name: &str, page_name: &str,
+    client: &CdpClient, _store: &mut SessionStore, browser_name: &str, page_name: &str,
     _target_id: &str, timeout: u64, cmd: &Value,
 ) -> Result<Value, crate::BoxError> {
     let url = cmd.get("url").and_then(Value::as_str).ok_or("navigate_and_read: missing \"url\"")?;
@@ -27,7 +27,7 @@ pub async fn dispatch_navigate_and_read(
     let mut out = json!({"ok": true, "url": goto_result.url, "title": goto_result.title, "content": read_result.text_content});
     // The bounce this reports matters more here than on a bare `goto`: without it the caller
     // gets a login page's prose back as if it were the article they asked for.
-    goto_result.landed.attach(&mut out);
+    goto_result.landed.attach(&mut out, browser_name);
     Ok(out)
 }
 

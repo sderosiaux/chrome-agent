@@ -76,7 +76,11 @@ pub async fn run(
         .await?;
 
     if let Some(error_text) = &nav_result.error_text {
-        return Err(format!("Navigation failed: {error_text}").into());
+        // The URL is in the message because the hint needs it: `hints::error_hint` gets a
+        // string and nothing else, and rule 2 of its contract wants a command with real
+        // values in it. Without this, five distinct network failures could only ever be
+        // answered with a sentence that named neither the host nor the scheme.
+        return Err(format!("Navigation failed for {url}: {error_text}").into());
     }
 
     // Wait for Page.loadEventFired on the pre-navigate subscription.
@@ -133,6 +137,18 @@ pub async fn run(
     // retroactive network capture already uses: no `Network.enable`, so `--stealth` keeps
     // its promise, and no extra round trip. `responseStatus` is missing on older Chrome and
     // 0 on a document with no HTTP response, both of which `Landing` reports as absence.
+    //
+    // The document's SHAPE rides on it too, for `serving.rs` to judge — three numbers, no
+    // interpretation in the page. Deliberately not the accessibility tree: `goto` takes no
+    // snapshot on purpose, `getFullAXTree` on every navigation is the cost that decision
+    // avoids, and the two signals that matter (a frame's `src`, whether an anchor resolves to
+    // http) are DOM facts the tree does not carry.
+    //
+    // Every measurement below over-counts rather than under-counts — hidden text is counted,
+    // an off-screen button is counted — because over-counting produces `serving: "page"`,
+    // which is silence, and silence is the direction this rule errs in. Text is walked with a
+    // TreeWalker and capped rather than read from `innerText`: `innerText` forces layout,
+    // and a bound of 4096 characters ends the walk on the first paragraph of any real page.
     let eval_result: EvaluateResult = client
         .call(
             "Runtime.evaluate",
@@ -143,7 +159,50 @@ pub async fn run(
                         const nav = performance.getEntriesByType('navigation')[0];
                         if (nav && typeof nav.responseStatus === 'number') status = nav.responseStatus;
                     } catch (e) {}
-                    return { url: location.href, title: document.title, status };
+                    let shape = null;
+                    try {
+                        const root = document.body || document.documentElement;
+                        // Frames AND scripts: Cloudflare's interstitial injects into an
+                        // `about:blank` frame whose `src` is empty, and its only vendor-hosted
+                        // URL is the Turnstile script (measured on nowsecure.nl). DataDome
+                        // puts the URL on the frame. Query strings are dropped: they carry a
+                        // per-visit id and nothing the vendor table matches on.
+                        const resources = [];
+                        const collect = (selector, cap) => {
+                            let taken = 0;
+                            for (const el of document.querySelectorAll(selector)) {
+                                if (taken >= cap) break;
+                                if (!el.src) continue;
+                                resources.push(el.src.split('?')[0]);
+                                taken++;
+                            }
+                        };
+                        collect('iframe,frame', 20);
+                        collect('script[src]', 60);
+                        const controls = root.querySelectorAll(
+                            'button,select,textarea,input:not([type=hidden]),[role=button],[contenteditable]'
+                        ).length;
+                        let links = 0;
+                        for (const a of root.querySelectorAll('a[href]')) {
+                            // A `javascript:` anchor is not a destination — the F5 refusal
+                            // notice's only link is one, and counting it would hide the page
+                            // this whole probe exists to see.
+                            if (a.protocol !== 'http:' && a.protocol !== 'https:') continue;
+                            if (++links >= 64) break;
+                        }
+                        const scripts = document.querySelectorAll('script[src]').length;
+                        let text = 0;
+                        const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+                        while (text < 4096) {
+                            const node = walker.nextNode();
+                            if (!node) break;
+                            const tag = node.parentNode && node.parentNode.nodeName;
+                            if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'NOSCRIPT' || tag === 'TEMPLATE') continue;
+                            text += node.data.trim().length;
+                        }
+                        shape = { resources, controls, links, scripts, text };
+                    } catch (e) { shape = null; }
+                    return { url: location.href, title: document.title, status, shape };
                 })()",
                 "returnByValue": true,
             }),
@@ -170,10 +229,16 @@ pub async fn run(
         .and_then(serde_json::Value::as_u64)
         .and_then(|code| u16::try_from(code).ok());
 
+    // Absent rather than defaulted: a zero-valued shape reads as "an empty document", which
+    // is the strongest thing `serving` can say, from having measured nothing at all.
+    let shape = crate::serving::PageShape::from_probe(
+        page_state.and_then(|state| state.get("shape")),
+    );
+
     // `url`, not the caller's raw argument: the https:// prefixing above is the tool's own
     // normalisation, and comparing against the pre-normalised form would report a redirect
     // on every `goto example.com`.
-    let landed = crate::landing::Landing::new(url, &settled_url, status);
+    let landed = crate::landing::Landing::new(url, &settled_url, status, shape.as_ref());
 
     Ok(GotoResult {
         url: settled_url,

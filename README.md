@@ -712,7 +712,7 @@ One JSON line per response. About 10x faster than spawning a process per command
 
 ```bash
 chrome-agent --json goto https://example.com --inspect
-# {"ok":true,"url":"...","title":"...","landed":{"requested":"...","final":"...","redirected":false,"http_status":200},"snapshot":"uid=n1 heading..."}
+# {"ok":true,"url":"...","title":"...","landed":{"requested":"...","final":"...","redirected":false,"http_status":200,"serving":"page"},"snapshot":"uid=n1 heading..."}
 
 # `landed` is where you aimed vs where you ended up. An expired session redirecting to a
 # login wall used to be indistinguishable from a successful load:
@@ -720,11 +720,29 @@ chrome-agent --json goto https://app.example.com/orders
 # {"ok":true,"url":"https://app.example.com/login?next=/orders","title":"Sign in",
 #  "landed":{"requested":"https://app.example.com/orders",
 #            "final":"https://app.example.com/login?next=/orders",
-#            "redirected":true,"http_status":200},
+#            "redirected":true,"http_status":200,"serving":"page"},
 #  "hint":"The redirect landed on a path containing 'login', which often means the session expired. ..."}
 # A fragment-only or trailing-slash change is not a redirect. `http_status` is the final
 # hop's status (a followed 302 reports 200), read from the Navigation Timing API so
 # --stealth is untouched, and absent — never 0 — when the page reports none.
+
+# `serving` is what answered. `ok:true` only says the navigation happened — a WAF refusal
+# served with a 200, a captcha interstitial and a 403 all used to look like a load:
+chrome-agent --json goto https://www.leboncoin.fr
+# {"ok":true,"title":"leboncoin",
+#  "landed":{...,"http_status":403,"serving":"challenge",
+#            "challenge_from":"geo.captcha-delivery.com"},
+#  "hint":"A challenge frame from geo.captcha-delivery.com is the only thing here to act on..."}
+#
+#   page                nothing measured contradicts the load — an absence of evidence,
+#                       not a certificate (a paywall reads as `page` too)
+#   challenge           an anti-bot vendor's frame or script, and no form of the site's own;
+#                       `challenge_from` names the host. Use --connect, not --stealth
+#   error               the server answered 4xx/5xx — `http_status` says which
+#   nothing_actionable  no link, no form control, no script, almost no text. What an
+#                       edge-served refusal looks like, and what a page that had not
+#                       rendered yet looks like. Run `inspect` before giving up
+#   unreadable          the shape probe did not run
 
 chrome-agent --json eval "1+1"
 # {"ok":true,"result":2}
