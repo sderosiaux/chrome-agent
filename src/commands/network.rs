@@ -18,8 +18,8 @@ pub struct NetworkEntry {
     pub content_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
-    /// Why `body` is absent although capture was requested: the response was binary. Names
-    /// the size and the command that does fetch bytes.
+    /// Why `body` is absent although capture was requested: binary, unavailable from CDP, or
+    /// unfinished when the live window ended.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body_omitted: Option<String>,
     pub size: u64,
@@ -167,10 +167,11 @@ pub async fn run_live(
     limit: usize,
     timeout_secs: u64,
 ) -> Result<Vec<NetworkEntry>, crate::BoxError> {
-    client.enable("Network").await?;
-
     let mut rx = client.events();
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
+    client.enable("Network").await?;
+    let deadline = tokio::time::Instant::now()
+        .checked_add(Duration::from_secs(timeout_secs))
+        .ok_or("Network live timeout is too large")?;
     let filter_lower = filter.map(str::to_ascii_lowercase);
 
     let mut entries: Vec<NetworkEntry> = Vec::new();
@@ -180,26 +181,20 @@ pub async fn run_live(
 
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if remaining.is_zero() || entries.len() >= limit {
+        if remaining.is_zero() || (entries.len() >= limit && pending_bodies.is_empty()) {
             break;
         }
 
-        let event = tokio::time::timeout(remaining, async {
-            loop {
-                match rx.recv().await {
-                    Ok(ev) => return Ok(ev),
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                        return Err("Event channel closed".to_string());
-                    }
-                }
-            }
-        })
-        .await;
+        let event = tokio::time::timeout(remaining, rx.recv()).await;
 
         let event = match event {
-            Ok(Ok(ev)) => ev,
-            Ok(Err(e)) => return Err(e.into()),
+            Ok(Ok(event)) => event,
+            Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(missed))) => {
+                return Err(event_loss("Network capture", missed).into());
+            }
+            Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => {
+                return Err("Event channel closed".into());
+            }
             Err(_) => break, // timeout
         };
 
@@ -219,6 +214,12 @@ pub async fn run_live(
         }
 
         if event.method != "Network.responseReceived" {
+            continue;
+        }
+
+        // The limit bounds returned entries, not the observation needed to finish bodies already
+        // selected. Keep draining their loadingFinished events without admitting more responses.
+        if entries.len() >= limit {
             continue;
         }
 
@@ -280,33 +281,29 @@ pub async fn run_live(
             size: encoded_length,
             duration_ms: 0, // not available from responseReceived
         });
-
-        if entries.len() >= limit {
-            break;
-        }
     }
 
-    // Whatever never announced `loadingFinished` in the window gets one best-effort read, so
-    // a missing body means "not there" rather than "the deadline landed between two events".
-    for (request_id, index) in pending_bodies {
-        fill_body(client, &request_id, &mut entries[index]).await;
+    for (_, index) in pending_bodies {
+        entries[index].body_omitted = Some(format!(
+            "body did not finish within the {timeout_secs}s live capture window"
+        ));
     }
 
     Ok(entries)
 }
 
-/// Fetch and classify one entry's body, in place. A failed fetch leaves the entry bodyless
-/// rather than inventing an explanation for it.
+/// Fetch and classify one entry's body in place. CDP can discard a completed body; that refusal
+/// is part of this entry instead of becoming an unexplained absent field or erasing other entries.
 async fn fill_body(client: &CdpClient, request_id: &str, entry: &mut NetworkEntry) {
     match fetch_response_body(client, request_id).await {
-        Some(FetchedBody::Text(text)) => entry.body = Some(text),
-        Some(FetchedBody::Binary { bytes }) => {
+        Ok(FetchedBody::Text(text)) => entry.body = Some(text),
+        Ok(FetchedBody::Binary { bytes }) => {
             entry.body_omitted = Some(format!(
                 "binary body ({bytes} bytes) not shown; `chrome-agent download {}` fetches the bytes",
                 entry.url
             ));
         }
-        None => {}
+        Err(error) => entry.body_omitted = Some(format!("body unavailable from CDP: {error}")),
     }
 }
 
@@ -424,22 +421,28 @@ pub fn format_text(entries: &[NetworkEntry]) -> String {
     out
 }
 
-/// `Network.getResponseBody`. `None` when the body is gone (evicted, or never completed).
-async fn fetch_response_body(client: &CdpClient, request_id: &str) -> Option<FetchedBody> {
+/// `Network.getResponseBody`, preserving a refusal instead of turning it into an absent body.
+async fn fetch_response_body(
+    client: &CdpClient,
+    request_id: &str,
+) -> Result<FetchedBody, crate::BoxError> {
     let result: Value = client
         .call(
             "Network.getResponseBody",
             json!({ "requestId": request_id }),
         )
         .await
-        .ok()?;
+        .map_err(|error| format!("Could not read network response body {request_id}: {error}"))?;
 
     let base64_encoded = result
         .get("base64Encoded")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let body = result.get("body")?.as_str()?;
-    Some(classify_body(body, base64_encoded))
+    let body = result
+        .get("body")
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("Network response body {request_id} was not a string"))?;
+    Ok(classify_body(body, base64_encoded))
 }
 
 /// `Fetch.enable` params pausing every request matching `pattern`. Extracted so tests can
@@ -464,60 +467,84 @@ pub async fn run_route_abort(
     pattern: &str,
     timeout_secs: u64,
 ) -> Result<Vec<String>, crate::BoxError> {
+    let deadline = std::time::Instant::now()
+        .checked_add(std::time::Duration::from_secs(timeout_secs))
+        .ok_or("Network abort timeout is too large")?;
+    // Subscribe before enabling Fetch: a matching request can pause as soon as enable lands.
+    let mut rx = client.events();
     client
         .send("Fetch.enable", fetch_enable_params(pattern))
         .await?;
 
-    // Subscribe ONCE, before the loop: re-subscribing per iteration drops the
-    // `Fetch.requestPaused` events emitted during the `Fetch.failRequest` round trip.
-    let mut rx = client.events();
-    let mut blocked = Vec::new();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    let capture: Result<Vec<String>, String> = async {
+        let mut blocked = Vec::new();
+        while std::time::Instant::now() < deadline {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            let event = tokio::time::timeout(remaining, async {
+                loop {
+                    match rx.recv().await {
+                        Ok(ev) if ev.method == "Fetch.requestPaused" => return Ok(ev),
+                        Ok(_) => continue,
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
+                            return Err(event_loss("Network abort", missed));
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            return Err("Event channel closed during network abort".to_string());
+                        }
+                    }
+                }
+            })
+            .await;
 
-    while std::time::Instant::now() < deadline {
-        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-        if remaining.is_zero() {
-            break;
-        }
-        let event = tokio::time::timeout(remaining, async {
-            loop {
-                match rx.recv().await {
-                    Ok(ev) if ev.method == "Fetch.requestPaused" => return Some(ev),
-                    Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+            match event {
+                Err(_) => break,
+                Ok(Err(error)) => return Err(error),
+                Ok(Ok(ev)) => {
+                    let request_id = ev
+                        .params
+                        .get("requestId")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let url = ev
+                        .params
+                        .get("request")
+                        .and_then(|r| r.get("url"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    client
+                        .send("Fetch.failRequest", fail_request_params(request_id))
+                        .await
+                        .map_err(|e| format!("Failed to abort request {request_id}: {e}"))?;
+                    if !url.is_empty() {
+                        blocked.push(url);
+                    }
                 }
             }
-        })
-        .await;
-
-        match event {
-            Ok(Some(ev)) => {
-                let request_id = ev
-                    .params
-                    .get("requestId")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let url = ev
-                    .params
-                    .get("request")
-                    .and_then(|r| r.get("url"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let _ = client
-                    .send("Fetch.failRequest", fail_request_params(request_id))
-                    .await;
-                if !url.is_empty() {
-                    blocked.push(url);
-                }
-            }
-            // Channel closed, or the timeout elapsed.
-            Ok(None) | Err(_) => break,
         }
+        Ok(blocked)
     }
+    .await;
 
-    let _ = client.send("Fetch.disable", serde_json::json!({})).await;
-    Ok(blocked)
+    let disabled = client.send("Fetch.disable", serde_json::json!({})).await;
+    match (capture, disabled) {
+        (Ok(blocked), Ok(())) => Ok(blocked),
+        (Err(error), Ok(())) => Err(error.into()),
+        (Ok(_), Err(error)) => {
+            Err(format!("Failed to disable network abort routing: {error}").into())
+        }
+        (Err(capture_error), Err(disable_error)) => Err(format!(
+            "{capture_error}; also failed to disable network abort routing: {disable_error}"
+        )
+        .into()),
+    }
+}
+
+fn event_loss(operation: &str, missed: u64) -> String {
+    format!("{operation} lost {missed} CDP event(s); refusing an incomplete result")
 }
 
 #[cfg(test)]
@@ -552,6 +579,13 @@ mod tests {
         let fail = fail_request_params("req-42");
         assert_eq!(fail["requestId"], "req-42");
         assert_eq!(fail["reason"], "BlockedByClient");
+    }
+
+    #[test]
+    fn event_loss_is_an_explicit_refusal() {
+        let message = event_loss("Network capture", 42);
+        assert!(message.contains("lost 42 CDP event(s)"));
+        assert!(message.contains("refusing an incomplete result"));
     }
 
     #[test]

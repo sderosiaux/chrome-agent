@@ -215,3 +215,62 @@ fn pipe_names_the_node_for_every_targeted_command() {
         );
     }
 }
+
+#[test]
+fn selector_identity_and_fill_use_the_same_resolved_node() {
+    if !common::browser_ready() {
+        return;
+    }
+    let guard = TestBrowser::new("selector-one-handle-fill");
+    let url = common::fixture_url("form_value_plain_input.html");
+    let setup = r#"(() => {
+        document.body.innerHTML = '<input id="first" class="flip" name="first"><input id="second" class="flip" name="second">';
+        const original = document.querySelector.bind(document);
+        let calls = 0;
+        document.querySelector = selector => selector === '.flip'
+            ? (++calls % 2 ? document.getElementById('first') : document.getElementById('second'))
+            : original(selector);
+        return true;
+    })()"#;
+    let script = format!(
+        "{}\n{}\n{}\n{}\n",
+        serde_json::json!({"cmd": "goto", "url": url}),
+        serde_json::json!({"cmd": "eval", "expression": setup}),
+        serde_json::json!({"cmd": "fill", "selector": ".flip", "value": "WRITTEN"}),
+        serde_json::json!({"cmd": "eval", "expression": "({first: document.getElementById('first').value, second: document.getElementById('second').value})"}),
+    );
+    let mut child = Command::new(common::binary())
+        .args(["--browser", guard.name(), "--verdict", "off", "pipe"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn pipe");
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(script.as_bytes())
+        .unwrap();
+    drop(child.stdin.take());
+    let out = child.wait_with_output().expect("pipe output");
+    let responses: Vec<Value> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str(line).expect("JSON"))
+        .collect();
+    assert_eq!(
+        responses.len(),
+        4,
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert_eq!(responses[2]["ok"], true, "{}", responses[2]);
+    assert_eq!(responses[2]["name"], "first", "{}", responses[2]);
+    assert_eq!(
+        responses[3]["result"]["first"], "WRITTEN",
+        "{}",
+        responses[3]
+    );
+    assert_eq!(responses[3]["result"]["second"], "", "{}", responses[3]);
+}

@@ -55,6 +55,8 @@ pub struct ScreenshotOpts<'a> {
 }
 
 pub async fn run(client: &CdpClient, opts: &ScreenshotOpts<'_>) -> Result<String, crate::BoxError> {
+    validate_options(opts)?;
+
     // The clip rect and the base width the downscale is computed from. A full page with
     // `max_width` needs a whole-document clip, since `scale` only applies to a clip.
     let (clip, base_width) = match (opts.clip, opts.max_width) {
@@ -95,17 +97,23 @@ pub async fn run(client: &CdpClient, opts: &ScreenshotOpts<'_>) -> Result<String
     let bytes = crate::base64::decode(&result.data)?;
 
     let dir = screenshot_dir()?;
-    std::fs::create_dir_all(&dir)?;
+    crate::secure_fs::create_private_dir_all(&dir)?;
     let path = dir.join(output_name(opts.filename, opts.format));
     std::fs::write(&path, &bytes)?;
 
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-    }
+    crate::secure_fs::restrict_file(&path)?;
 
     Ok(path.display().to_string())
+}
+
+fn validate_options(opts: &ScreenshotOpts<'_>) -> Result<(), crate::BoxError> {
+    if opts.quality.is_some_and(|quality| quality > 100) {
+        return Err("Screenshot quality must be between 0 and 100".into());
+    }
+    if opts.max_width == Some(0) {
+        return Err("Screenshot max_width must be greater than zero".into());
+    }
+    Ok(())
 }
 
 /// Resolve the output file name, forcing the extension to match the format.
@@ -226,5 +234,24 @@ mod tests {
         let n = output_name(None, ImgFormat::Jpeg);
         assert!(n.starts_with("screenshot-"));
         assert!(n.ends_with(".jpg"));
+    }
+
+    #[test]
+    fn numeric_options_are_checked_before_capture() {
+        let opts = ScreenshotOpts {
+            filename: None,
+            format: ImgFormat::Jpeg,
+            quality: Some(101),
+            max_width: None,
+            clip: None,
+        };
+        assert!(validate_options(&opts).is_err());
+
+        let opts = ScreenshotOpts {
+            quality: Some(100),
+            max_width: Some(0),
+            ..opts
+        };
+        assert!(validate_options(&opts).is_err());
     }
 }

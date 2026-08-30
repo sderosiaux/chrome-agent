@@ -4,9 +4,7 @@
 use serde_json::json;
 
 use crate::cdp::client::CdpClient;
-use crate::element::{
-    ElementError, PointerVerb, check_js_exception, js_exception, wait_for_stabilization,
-};
+use crate::element::{ElementError, PointerVerb, js_exception};
 
 /// Bind `el` to what the selector matches, in the words the rest of the tool uses.
 ///
@@ -85,66 +83,18 @@ pub async fn fill_selector_with(
     value: &str,
     asserted_secret: bool,
 ) -> Result<crate::element::FillOutcome, ElementError> {
-    let js = format!(
-        r"(() => {{
-            {bind}
-            if (el.matches(':disabled')) throw new Error('Element is disabled and cannot be filled: ' + {sel});
-            if (el.readOnly) throw new Error('Element is readonly and cannot be filled: ' + {sel});
-            el.focus();
-            const proto = el instanceof HTMLTextAreaElement
-                ? window.HTMLTextAreaElement.prototype
-                : window.HTMLInputElement.prototype;
-            const setter = Object.getOwnPropertyDescriptor(proto, 'value');
-            if (setter && setter.set) {{
-                setter.set.call(el, {val});
-            }} else {{
-                el.value = {val};
-            }}
-            el.dispatchEvent(new Event('input', {{bubbles: true}}));
-            el.dispatchEvent(new Event('change', {{bubbles: true}}));
-            // Read after the window, not on the next line: a controlled component reverting in
-            // a promise callback has not run yet when the write returns.
-            return new Promise(resolve => setTimeout(() => resolve({{
-                value: el.value === undefined ? null : String(el.value),
-                maxLength: typeof el.maxLength === 'number' ? el.maxLength : null,
-                sensitive: {secret}
-            }}), {window}));
-        }})()",
-        bind = bind_element_js(selector),
-        sel = serde_json::to_string(selector).unwrap_or_default(),
-        val = serde_json::to_string(value).unwrap_or_default(),
-        window = crate::element::READ_BACK_MS,
-        secret = crate::element::SECRET_FIELD
-    );
-    let nav_events = client.events();
-    let result: serde_json::Value = client
-        .call(
-            "Runtime.evaluate",
-            json!({ "expression": js, "returnByValue": true, "awaitPromise": true }),
-        )
-        .await
-        .map_err(|e| ElementError::Action(format!("fill_selector failed: {e}")))?;
+    let handle = crate::hit_test::resolve_selector(client, selector).await?;
+    fill_selector_handle(client, &handle, value, asserted_secret).await
+}
 
-    check_js_exception(&result)?;
-
-    let payload = result
-        .get("result")
-        .and_then(|r| r.get("value"))
-        .cloned()
-        .unwrap_or_default();
-    let actual = payload
-        .get("value")
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_string);
-    let max_length = payload.get("maxLength").and_then(serde_json::Value::as_i64);
-    let sensitive = payload
-        .get("sensitive")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false);
-    wait_for_stabilization(client, nav_events).await;
-    Ok(crate::element::FillOutcome::new(value, actual)
-        .with_max_length(max_length)
-        .secret(asserted_secret || sensitive))
+/// Fill the exact selector handle the response will name.
+pub async fn fill_selector_handle(
+    client: &CdpClient,
+    handle: &crate::hit_test::SelectorHandle,
+    value: &str,
+    asserted_secret: bool,
+) -> Result<crate::element::FillOutcome, ElementError> {
+    crate::element::fill_object_with(client, &handle.object_id, value, asserted_secret).await
 }
 
 /// Focus an element matched by a CSS selector via `Runtime.evaluate`.

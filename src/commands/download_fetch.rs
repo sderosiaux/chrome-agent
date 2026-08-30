@@ -194,15 +194,15 @@ pub async fn run(
 
     let path = resolve_out_path(out, cd, url)?;
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+        if out.is_none() {
+            crate::secure_fs::create_private_dir_all(parent)?;
+        } else {
+            std::fs::create_dir_all(parent)?;
+        }
     }
     std::fs::write(&path, &bytes)?;
 
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-    }
+    crate::secure_fs::restrict_file(&path)?;
 
     Ok(DownloadResult {
         path: path.display().to_string(),

@@ -21,13 +21,8 @@ pub fn save_to(path: &Path, store: &mut SessionStore) -> Result<(), SessionError
     let parent = path
         .parent()
         .ok_or_else(|| SessionError("session path has no parent directory".into()))?;
-    std::fs::create_dir_all(parent)
+    crate::secure_fs::create_private_dir_all(parent)
         .map_err(|e| SessionError(format!("Failed to create dir: {e}")))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
-    }
 
     // Serialize concurrent writers for the read-merge-write critical section.
     let _lock = FileLock::acquire(&parent.join("sessions.lock"))?;
@@ -77,11 +72,12 @@ pub fn save_to(path: &Path, store: &mut SessionStore) -> Result<(), SessionError
     std::fs::write(&tmp_path, &json)
         .map_err(|e| SessionError(format!("Failed to write {}: {e}", tmp_path.display())))?;
     // 0600 before publishing: the file holds WebSocket URLs granting full browser control.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600));
-    }
+    crate::secure_fs::restrict_file(&tmp_path).map_err(|e| {
+        SessionError(format!(
+            "Failed to restrict {} to mode 0600: {e}",
+            tmp_path.display()
+        ))
+    })?;
     std::fs::rename(&tmp_path, path).map_err(|e| {
         // The temp name is per-PID, so nothing else will ever reclaim it.
         let _ = std::fs::remove_file(&tmp_path);
@@ -120,6 +116,12 @@ impl FileLock {
             .write(true)
             .open(path)
             .map_err(|e| SessionError(format!("Failed to open lock {}: {e}", path.display())))?;
+        crate::secure_fs::restrict_file(path).map_err(|e| {
+            SessionError(format!(
+                "Failed to restrict lock {} to mode 0600: {e}",
+                path.display()
+            ))
+        })?;
         // SAFETY: flock on a valid fd only takes an advisory lock; no memory unsafety.
         #[allow(unsafe_code)]
         let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };

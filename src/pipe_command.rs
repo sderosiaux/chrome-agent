@@ -114,6 +114,10 @@ impl PipeCommand {
             Self::Batch(_) => "batch",
         }
     }
+
+    fn validate(&self) -> Result<(), crate::BoxError> {
+        crate::pipe_validate::validate(self)
+    }
 }
 
 /// Parse one command object. The tag is read first so an absent or unknown `cmd` keeps the
@@ -126,7 +130,9 @@ pub fn parse(cmd: &Value) -> Result<PipeCommand, crate::BoxError> {
     else {
         return Err("Missing \"cmd\" field".into());
     };
-    PipeCommand::deserialize(cmd).map_err(|e| describe(name, cmd, &e.to_string()))
+    let parsed = PipeCommand::deserialize(cmd).map_err(|e| describe(name, cmd, &e.to_string()))?;
+    parsed.validate()?;
+    Ok(parsed)
 }
 
 /// serde's message, made to say what this protocol's messages have always said.
@@ -366,9 +372,9 @@ pub struct ScreenshotArgs {
     #[serde(default)]
     pub format: Option<String>,
     #[serde(default)]
-    pub quality: Option<u64>,
+    pub quality: Option<u32>,
     #[serde(default)]
-    pub max_width: Option<u64>,
+    pub max_width: Option<u32>,
     #[serde(default)]
     pub uid: Option<String>,
     #[serde(default)]
@@ -776,13 +782,75 @@ mod tests {
         assert!(parse(&json!({"cmd": "click", "xy": [1, 2, 3]})).is_err());
         assert!(parse(&json!({"cmd": "click", "xy": [1]})).is_err());
         assert!(parse(&json!({"cmd": "click", "xy": "100,200"})).is_err());
-        let PipeCommand::Click(args) = parse(&json!({"cmd": "click", "xy": null})).unwrap() else {
+        let PipeCommand::Click(args) =
+            parse(&json!({"cmd": "click", "uid": "n1", "xy": null})).unwrap()
+        else {
             panic!("click");
         };
         assert!(
             args.xy.is_none(),
             "an explicit null is an absent flag, as it always was"
         );
+    }
+
+    #[test]
+    fn target_groups_match_the_cli() {
+        for command in [
+            json!({"cmd": "click"}),
+            json!({"cmd": "click", "uid": "n1", "selector": "#go"}),
+            json!({"cmd": "fill", "value": "x"}),
+            json!({"cmd": "fill", "value": "x", "uid": "n1", "selector": "#field"}),
+            json!({"cmd": "select", "value": "x", "uid": "n1", "selector": "select"}),
+            json!({"cmd": "check", "uid": "n1", "selector": "#box"}),
+            json!({"cmd": "uncheck", "uid": "n1", "selector": "#box"}),
+            json!({"cmd": "upload", "files": [], "uid": "n1", "selector": "input"}),
+            json!({"cmd": "text", "uid": "n1", "selector": "main"}),
+            json!({"cmd": "screenshot", "uid": "n1", "selector": "main"}),
+            json!({"cmd": "download", "url": "https://example.test", "uid": "n1"}),
+        ] {
+            let message = err(&command);
+            assert!(message.contains("provide"), "{command}: {message}");
+        }
+        assert!(parse(&json!({"cmd": "text"})).is_ok());
+        assert!(parse(&json!({"cmd": "screenshot"})).is_ok());
+    }
+
+    #[test]
+    fn invalid_interception_policy_is_a_refusal() {
+        for command in [
+            json!({"cmd": "click", "uid": "n1", "on_intercept": "refuze"}),
+            json!({"cmd": "check", "uid": "n1", "on_intercept": "refuze"}),
+            json!({"cmd": "uncheck", "uid": "n1", "on_intercept": "refuze"}),
+            json!({"cmd": "download", "url": "https://example.test", "on_intercept": "refuze"}),
+            json!({"cmd": "fill_and_submit", "fields": [], "submit": "#go", "on_intercept": "refuze"}),
+        ] {
+            let message = err(&command);
+            assert!(
+                message.contains("Unknown --on-intercept value"),
+                "{message}"
+            );
+        }
+    }
+
+    #[test]
+    fn ambiguous_waits_and_irrelevant_emulation_fields_are_refused() {
+        for command in [
+            json!({"cmd": "wait", "what": "text", "pattern": "done", "url": "/done"}),
+            json!({"cmd": "wait", "text": "done", "selector": ".done"}),
+            json!({"cmd": "wait", "pattern": "done"}),
+            json!({"cmd": "emulate", "action": "status", "width": 320}),
+            json!({"cmd": "emulate", "action": "reset", "mobile": true}),
+        ] {
+            assert!(parse(&command).is_err(), "accepted {command}");
+        }
+    }
+
+    #[test]
+    fn screenshot_numbers_cannot_wrap_the_cdp_types() {
+        let message = err(&json!({"cmd": "screenshot", "max_width": 4_294_967_296_u64}));
+        assert!(message.contains("max_width"), "{message}");
+        let message = err(&json!({"cmd": "screenshot", "quality": 4_294_967_296_u64}));
+        assert!(message.contains("quality"), "{message}");
     }
 
     /// `assert` round-trips through the CLI's own parser, so the two cannot disagree.

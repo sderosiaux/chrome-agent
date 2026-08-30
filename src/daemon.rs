@@ -10,32 +10,16 @@ use crate::session;
 const IDLE_TIMEOUT: Duration = Duration::from_mins(5);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(2);
 
-/// Set an explicit mode on a path this tool created. Best effort: a daemon that started is more
-/// useful than one that refused over a chmod, and the two callers below both create the file
-/// themselves a moment earlier.
-fn restrict(path: &Path, mode: u32) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode));
-    }
-    #[cfg(not(unix))]
-    let _ = (path, mode);
-}
-
 /// Create `~/.chrome-agent` (or wherever the socket lives) 0700. Only `session::save_to` set
 /// this mode, so a daemon that came up first left the directory at whatever the umask allowed.
 fn prepare_dir(parent: &Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(parent)?;
-    restrict(parent, 0o700);
-    Ok(())
+    crate::secure_fs::create_private_dir_all(parent)
 }
 
 /// Write the pid file 0600. It names the process any local user could then signal.
-fn write_pid_file(pid_path: &Path) {
-    if std::fs::write(pid_path, format!("{}\n", std::process::id())).is_ok() {
-        restrict(pid_path, 0o600);
-    }
+fn write_pid_file(pid_path: &Path) -> std::io::Result<()> {
+    std::fs::write(pid_path, format!("{}\n", std::process::id()))?;
+    crate::secure_fs::restrict_file(pid_path)
 }
 
 /// Run the micro-daemon. Blocks until idle timeout or explicit stop.
@@ -50,7 +34,8 @@ pub async fn run_daemon(socket_path: &Path) -> Result<(), DaemonError> {
     }
 
     if let Ok(pid_path) = session::daemon_pid_path() {
-        write_pid_file(&pid_path);
+        write_pid_file(&pid_path)
+            .map_err(|e| DaemonError(format!("Failed to write daemon pid file: {e}")))?;
     }
 
     let listener = UnixListener::bind(socket_path)
@@ -58,7 +43,8 @@ pub async fn run_daemon(socket_path: &Path) -> Result<(), DaemonError> {
     // Right after `bind`, before the first `accept`: `process_command` answers `status`, which
     // enumerates every browser name, and `stop` to whoever connects. The umask decides the
     // socket's mode otherwise, and on a typical 022 that is 0755 — every local user.
-    restrict(socket_path, 0o600);
+    crate::secure_fs::restrict_file(socket_path)
+        .map_err(|e| DaemonError(format!("Failed to restrict daemon socket: {e}")))?;
 
     eprintln!("daemon ready on {}", socket_path.display());
 
@@ -296,7 +282,7 @@ mod tests {
         let dir = scratch("pid");
         prepare_dir(&dir).expect("create it");
         let path = dir.join("daemon.pid");
-        write_pid_file(&path);
+        write_pid_file(&path).expect("write pid");
         let mode = std::fs::metadata(&path)
             .expect("pid file")
             .permissions()
@@ -322,7 +308,7 @@ mod tests {
             .build()
             .expect("a test runtime");
         let listener = runtime.block_on(async { UnixListener::bind(&path).expect("bind") });
-        restrict(&path, 0o600);
+        crate::secure_fs::restrict_file(&path).expect("restrict socket");
         let mode = std::fs::metadata(&path)
             .expect("socket")
             .permissions()

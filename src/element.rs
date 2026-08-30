@@ -156,7 +156,17 @@ pub async fn fill_with(
     asserted_secret: bool,
 ) -> Result<FillOutcome, ElementError> {
     let resolved = resolve_uid(client, uid_map, uid).await?;
+    fill_object_with(client, &resolved.object_id, value, asserted_secret).await
+}
 
+/// Fill one already-resolved object. Selector callers use this so identity, write and read-back
+/// cannot resolve different nodes between CDP round trips.
+pub async fn fill_object_with(
+    client: &CdpClient,
+    object_id: &str,
+    value: &str,
+    asserted_secret: bool,
+) -> Result<FillOutcome, ElementError> {
     // The native value setter, so React's synthetic onChange fires: React intercepts direct
     // assignment but not the setter reached through Object.getOwnPropertyDescriptor.
     let js = r"function(v) {
@@ -194,7 +204,7 @@ pub async fn fill_with(
         .call(
             "Runtime.callFunctionOn",
             json!({
-                "objectId": resolved.object_id,
+                "objectId": object_id,
                 "functionDeclaration": js,
                 "arguments": [{"value": value}],
                 "returnByValue": true,
@@ -404,17 +414,20 @@ pub async fn press_key(client: &CdpClient, key: &str) -> Result<(), ElementError
 }
 
 /// Wait (≤`timeout`) for one event satisfying `matches` on an already-open subscription. `true`
-/// if it arrived; on Lagged, keep going — the event may follow. A predicate rather than a method
-/// name, because the name alone cannot tell the two navigations apart ([`main_frame_navigated`]).
+/// if it arrived. `lost_means_match` is for the short navigation probe: a dropped event cannot
+/// prove navigation absent, so it conservatively arms the load wait. A predicate rather than a
+/// method name, because the name alone cannot tell two navigations apart ([`main_frame_navigated`]).
 async fn recv_event_where(
     rx: &mut broadcast::Receiver<CdpEvent>,
     matches: impl Fn(&CdpEvent) -> bool + Send + Sync,
     timeout: Duration,
+    lost_means_match: bool,
 ) -> bool {
     tokio::time::timeout(timeout, async {
         loop {
             match rx.recv().await {
                 Ok(event) if matches(&event) => return true,
+                Err(broadcast::error::RecvError::Lagged(_)) if lost_means_match => return true,
                 Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(broadcast::error::RecvError::Closed) => return false,
             }
@@ -430,7 +443,7 @@ async fn recv_event(
     method: &str,
     timeout: Duration,
 ) -> bool {
-    recv_event_where(rx, |event| event.method == method, timeout).await
+    recv_event_where(rx, |event| event.method == method, timeout, false).await
 }
 
 /// A `Page.frameNavigated` for the TOP frame, the only one whose load can be waited for.
@@ -467,6 +480,7 @@ async fn settle_after_navigation(
         &mut nav_events,
         main_frame_navigated,
         Duration::from_millis(50),
+        true,
     )
     .await
     {
@@ -514,14 +528,14 @@ impl ElementError {
 // Form controls, the pointer path and the selector-based actions live in their own modules,
 // re-exported so callers keep using `crate::element::*`.
 pub use crate::element_controls::{
-    CheckOutcome, SelectOutcome, drag, select_option, select_option_selector, set_checked,
-    set_checked_selector, set_file_input, set_file_input_selector,
+    CheckOutcome, SelectOutcome, drag, select_option, select_option_handle, set_checked,
+    set_checked_handle, set_file_input, set_file_input_handle,
 };
 pub use crate::element_pointer::{
     PointerVerb, aim_and_dispatch, click, click_at_coords, dblclick, dblclick_at_coords, hover,
 };
 pub use crate::element_selector::{
-    click_selector, dblclick_selector, fill_selector_with, focus_selector,
+    click_selector, dblclick_selector, fill_selector_handle, fill_selector_with, focus_selector,
 };
 
 /// What a `Runtime` reply says was thrown, if anything. A throw is not a transport failure: CDP
@@ -675,6 +689,25 @@ mod tests {
         assert!(
             waited.is_some(),
             "the top-frame navigation still arms the wait"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_lost_probe_event_conservatively_arms_the_load_wait() {
+        let (tx, _) = broadcast::channel::<CdpEvent>(1);
+        let rx = tx.subscribe();
+        tx.send(ev("Runtime.consoleAPICalled")).unwrap();
+        tx.send(ev("Runtime.consoleAPICalled")).unwrap();
+        let task = tokio::spawn(settle_after_navigation(rx));
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        tx.send(ev("Page.loadEventFired")).unwrap();
+        let waited = tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("the conservative wait should see the later load")
+            .expect("task");
+        assert!(
+            waited.is_some(),
+            "a lost navigation cannot be reported absent"
         );
     }
 

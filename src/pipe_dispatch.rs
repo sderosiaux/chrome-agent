@@ -66,7 +66,7 @@ pub async fn dispatch_click(
     args: &PointerArgs,
 ) -> Result<Value, crate::BoxError> {
     let max_depth = args.max_depth.map(as_usize).or(ctx.max_depth);
-    let on_intercept = on_intercept(args.on_intercept.as_deref(), ctx.report.on_intercept);
+    let on_intercept = on_intercept(args.on_intercept.as_deref(), ctx.report.on_intercept)?;
 
     let (msg, details) = if let Some(sel) = &args.selector {
         let outcome = crate::element::click_selector(ctx.client, sel, on_intercept).await?;
@@ -104,19 +104,17 @@ pub async fn dispatch_fill(
     let max_depth = args.max_depth.map(as_usize).or(ctx.max_depth);
     let secret = args.secret.unwrap_or(false);
 
-    let target = crate::run_helpers::target_details(
-        ctx.client,
-        args.selector.as_deref(),
-        args.uid.as_deref(),
-    )
-    .await;
-    let (msg, outcome) = if let Some(sel) = &args.selector {
+    let (target, msg, outcome) = if let Some(sel) = &args.selector {
+        let handle = crate::hit_test::resolve_selector(ctx.client, sel).await?;
+        let target = handle.report();
         let outcome =
-            crate::element::fill_selector_with(ctx.client, sel, &args.value, secret).await?;
-        (format!("Filled selector '{sel}'"), outcome)
+            crate::element::fill_selector_handle(ctx.client, &handle, &args.value, secret).await?;
+        (target, format!("Filled selector '{sel}'"), outcome)
     } else if let Some(uid) = &args.uid {
         let uid_map = ctx.uid_map();
-        commands::fill::run(ctx.client, &uid_map, uid, &args.value, secret).await?
+        let (msg, outcome) =
+            commands::fill::run(ctx.client, &uid_map, uid, &args.value, secret).await?;
+        (Some(json!({"uid": uid})), msg, outcome)
     } else {
         return Err("fill: provide \"uid\" or \"selector\"".into());
     };
@@ -294,8 +292,8 @@ pub async fn dispatch_screenshot(
     let opts = commands::screenshot::ScreenshotOpts {
         filename: args.filename.as_deref(),
         format,
-        quality: args.quality.map(|q| q as u32),
-        max_width: args.max_width.map(|w| w as u32),
+        quality: args.quality,
+        max_width: args.max_width,
         clip,
     };
     let path = commands::screenshot::run(ctx.client, &opts).await?;
@@ -319,7 +317,7 @@ pub async fn dispatch_download(
         out: args.out.as_deref(),
         timeout_secs: args.timeout.unwrap_or(ctx.timeout),
         max_bytes: download_max_bytes(args.max_bytes)?,
-        on_intercept: on_intercept(args.on_intercept.as_deref(), ctx.report.on_intercept),
+        on_intercept: on_intercept(args.on_intercept.as_deref(), ctx.report.on_intercept)?,
         browser: ctx.browser,
     };
     let outcome = commands::download::dispatch(ctx.client, &uid_map, &req).await?;
@@ -571,13 +569,12 @@ pub const fn as_usize(value: u64) -> usize {
 }
 
 /// The per-command `on_intercept` override, falling back to the session's policy.
-/// A value that does not parse is not a refusal: the session's policy stands.
 pub fn on_intercept(
     value: Option<&str>,
     fallback: crate::hit_test::OnIntercept,
-) -> crate::hit_test::OnIntercept {
-    value.map_or(fallback, |v| {
-        crate::hit_test::OnIntercept::parse(v).unwrap_or(fallback)
+) -> Result<crate::hit_test::OnIntercept, crate::BoxError> {
+    value.map_or(Ok(fallback), |v| {
+        crate::hit_test::OnIntercept::parse(v).map_err(Into::into)
     })
 }
 
@@ -823,17 +820,26 @@ mod tests {
     }
 
     #[test]
-    fn text_maps_uid_and_selector_and_truncate() {
+    fn text_maps_each_exclusive_target_and_truncate() {
         let a = args(
-            &json!({"cmd": "text", "uid": "n47", "selector": "main", "truncate": 80}),
+            &json!({"cmd": "text", "uid": "n47", "truncate": 80}),
             |c| match c {
                 PipeCommand::Text(a) => Some(a),
                 _ => None,
             },
         );
         assert_eq!(a.uid.as_deref(), Some("n47"));
-        assert_eq!(a.selector.as_deref(), Some("main"));
+        assert!(a.selector.is_none());
         assert_eq!(a.truncate.map(as_usize), Some(80));
+
+        let a = args(&json!({"cmd": "text", "selector": "main"}), |c| match c {
+            PipeCommand::Text(a) => Some(a),
+            _ => None,
+        });
+        assert_eq!(a.selector.as_deref(), Some("main"));
+        assert!(a.uid.is_none());
+
+        assert!(parse(&json!({"cmd": "text", "uid": "n47", "selector": "main"})).is_err());
 
         let a = args(&json!({"cmd": "text"}), |c| match c {
             PipeCommand::Text(a) => Some(a),

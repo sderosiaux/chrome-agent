@@ -164,7 +164,7 @@ pub async fn resolve_cli_connection(
         );
         resolve_page_target(&browser_client, browser_session, &cli.page).await?
     };
-    let _ = session::save_session(&mut store);
+    session::save_session(&mut store)?;
 
     let client = Box::pin(connect_page(http_endpoint, &target_id, cli.stealth)).await?;
 

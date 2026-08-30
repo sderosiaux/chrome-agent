@@ -35,15 +35,11 @@ pub async fn run(client: &CdpClient, opts: &PdfOpts<'_>) -> Result<String, crate
     let bytes = crate::base64::decode(&result.data)?;
 
     let dir = pdf_dir()?;
-    std::fs::create_dir_all(&dir)?;
+    crate::secure_fs::create_private_dir_all(&dir)?;
     let path = dir.join(output_name(opts.filename));
     std::fs::write(&path, &bytes)?;
 
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-    }
+    crate::secure_fs::restrict_file(&path)?;
 
     Ok(path.display().to_string())
 }

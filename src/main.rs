@@ -1,3 +1,20 @@
+/// All stdout writes share one non-panicking sink. A closed consumer is a delivery failure and
+/// exits 1; Rust's standard print macros panic and would violate the 0/1/2/130 contract with 101.
+macro_rules! println {
+    () => {
+        $crate::write_stdout(format_args!(""), true)
+    };
+    ($($arg:tt)*) => {
+        $crate::write_stdout(format_args!($($arg)*), true)
+    };
+}
+
+macro_rules! print {
+    ($($arg:tt)*) => {
+        $crate::write_stdout(format_args!($($arg)*), false)
+    };
+}
+
 mod base64;
 mod browser;
 mod cdp;
@@ -32,11 +49,13 @@ mod pipe_dispatch;
 mod pipe_dispatch_actions;
 mod pipe_emulation;
 mod pipe_report;
+mod pipe_validate;
 mod profiles;
 mod read_back;
 mod render;
 mod run;
 mod run_helpers;
+mod secure_fs;
 mod serving;
 mod session;
 mod session_load;
@@ -58,6 +77,25 @@ use serde_json::json;
 
 use crate::cli::Cli;
 use crate::run_helpers::error_hint;
+
+fn write_stdout(args: std::fmt::Arguments<'_>, newline: bool) {
+    use std::io::Write as _;
+
+    let stdout = std::io::stdout();
+    let mut handle = stdout.lock();
+    let result = if newline {
+        writeln!(handle, "{args}")
+    } else {
+        write!(handle, "{args}")
+    };
+    if let Err(error) = result {
+        let _ = writeln!(
+            std::io::stderr().lock(),
+            "error: failed to write stdout: {error}"
+        );
+        std::process::exit(1);
+    }
+}
 
 #[tokio::main]
 async fn main() {

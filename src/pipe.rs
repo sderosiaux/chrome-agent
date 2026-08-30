@@ -25,8 +25,10 @@ pub async fn run_pipe(cli: &Cli) -> Result<(), crate::BoxError> {
     let mut history: Vec<crate::macros_record::Observed> = Vec::new();
 
     loop {
-        let Ok(Some(line)) = lines.next_line().await else {
-            break;
+        let line = match lines.next_line().await {
+            Ok(Some(line)) => line,
+            Ok(None) => break,
+            Err(error) => return Err(format!("Failed to read pipe input: {error}").into()),
         };
         let line = line.trim().to_string();
         if line.is_empty() {
@@ -36,7 +38,7 @@ pub async fn run_pipe(cli: &Cli) -> Result<(), crate::BoxError> {
         let mut cmd: Value = match serde_json::from_str(&line) {
             Ok(v) => v,
             Err(e) => {
-                emit(&json!({"ok": false, "error": format!("Invalid JSON: {e}")}));
+                emit(&json!({"ok": false, "error": format!("Invalid JSON: {e}")}))?;
                 continue;
             }
         };
@@ -46,7 +48,7 @@ pub async fn run_pipe(cli: &Cli) -> Result<(), crate::BoxError> {
         let record_path = match take_record_path(&mut cmd) {
             Ok(path) => path,
             Err(e) => {
-                emit(&json!({"ok": false, "error": e}));
+                emit(&json!({"ok": false, "error": e}))?;
                 continue;
             }
         };
@@ -55,7 +57,7 @@ pub async fn run_pipe(cli: &Cli) -> Result<(), crate::BoxError> {
         {
             emit(
                 &json!({"ok": false, "error": format!("{e}"), "hint": "Check the --record path's directory exists and is writable."}),
-            );
+            )?;
             continue;
         }
 
@@ -64,7 +66,7 @@ pub async fn run_pipe(cli: &Cli) -> Result<(), crate::BoxError> {
         if cmd.get("cmd").and_then(Value::as_str) == Some("macro") {
             let answer = crate::macros_cmd::dispatch_pipe(&cmd, &history)
                 .unwrap_or_else(|e| json!({"ok": false, "error": e.to_string()}));
-            emit(&answer);
+            emit(&answer)?;
             continue;
         }
 
@@ -92,10 +94,10 @@ pub async fn run_pipe(cli: &Cli) -> Result<(), crate::BoxError> {
             snapshot.as_deref(),
         ));
 
-        emit(&response);
+        emit(&response)?;
     }
 
-    let _ = session::save_session(&mut session.store);
+    session::save_session(&mut session.store)?;
     Ok(())
 }
 
@@ -154,7 +156,7 @@ pub async fn open_session(cli: &Cli) -> Result<Session, crate::BoxError> {
         );
         crate::run_helpers::resolve_page_target(&browser_client, browser_session, &cli.page).await?
     };
-    let _ = session::save_session(&mut store);
+    session::save_session(&mut store)?;
 
     let page_ws = browser::get_page_ws_url(http_endpoint, &target_id).await?;
     let client = CdpClient::connect(&page_ws).await?;
@@ -250,10 +252,10 @@ pub async fn run_replay(
         let _ = take_record_path(&mut cmd);
 
         let response = dispatch_on(&mut session, cli, &cmd, &mut emulation_recovery).await;
-        emit(&response);
+        emit(&response)?;
     }
 
-    let _ = session::save_session(&mut session.store);
+    session::save_session(&mut session.store)?;
     Ok(())
 }
 
@@ -284,12 +286,13 @@ fn report_policy(cli: &Cli) -> Result<crate::run_helpers::ReportPolicy, crate::B
     })
 }
 
-fn emit(value: &Value) {
-    let line = serde_json::to_string(value).unwrap_or_default();
+fn emit(value: &Value) -> Result<(), crate::BoxError> {
+    let line = serde_json::to_string(value)?;
     let stdout = std::io::stdout();
     let mut handle = stdout.lock();
-    let _ = writeln!(handle, "{line}");
-    let _ = handle.flush();
+    writeln!(handle, "{line}")?;
+    handle.flush()?;
+    Ok(())
 }
 
 async fn connect_browser(

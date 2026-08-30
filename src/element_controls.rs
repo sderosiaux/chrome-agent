@@ -136,13 +136,21 @@ pub async fn select_option(
     value: &str,
 ) -> Result<SelectOutcome, ElementError> {
     let resolved = resolve_uid(client, uid_map, uid).await?;
+    select_option_object(client, &resolved.object_id, value).await
+}
+
+async fn select_option_object(
+    client: &CdpClient,
+    object_id: &str,
+    value: &str,
+) -> Result<SelectOutcome, ElementError> {
     let apply = select_apply();
     let js = format!("function(target, windowMs) {{ return ({apply})(this, target, windowMs); }}");
     let result: serde_json::Value = client
         .call(
             "Runtime.callFunctionOn",
             json!({
-                "objectId": resolved.object_id,
+                "objectId": object_id,
                 "functionDeclaration": js,
                 "arguments": [{"value": value}, {"value": crate::element::READ_BACK_MS}],
                 "returnByValue": true,
@@ -155,31 +163,12 @@ pub async fn select_option(
     select_outcome(&result)
 }
 
-pub async fn select_option_selector(
+pub async fn select_option_handle(
     client: &CdpClient,
-    selector: &str,
+    handle: &crate::hit_test::SelectorHandle,
     value: &str,
 ) -> Result<SelectOutcome, ElementError> {
-    let sel_json = serde_json::to_string(selector).unwrap_or_default();
-    let val_json = serde_json::to_string(value).unwrap_or_default();
-    let js = format!(
-        r"(() => {{
-            const el = document.querySelector({sel_json});
-            if (!el) throw new Error('No element matches selector: ' + {sel_json});
-            return ({apply})(el, {val_json}, {window});
-        }})()",
-        apply = select_apply(),
-        window = crate::element::READ_BACK_MS
-    );
-    let result: serde_json::Value = client
-        .call(
-            "Runtime.evaluate",
-            json!({"expression": js, "returnByValue": true, "awaitPromise": true}),
-        )
-        .await
-        .map_err(|e| ElementError::Action(format!("select_option_selector failed: {e}")))?;
-
-    select_outcome(&result)
+    select_option_object(client, &handle.object_id, value).await
 }
 
 /// Classify a checkable and read its current state, as a JS expression taking `el`.
@@ -413,20 +402,18 @@ pub async fn set_checked(
     ))
 }
 
-/// Idempotent check/uncheck by CSS selector.
-pub async fn set_checked_selector(
+pub async fn set_checked_handle(
     client: &CdpClient,
+    handle: &crate::hit_test::SelectorHandle,
     selector: &str,
     desired: bool,
 ) -> Result<CheckOutcome, ElementError> {
-    let sel_json = serde_json::to_string(selector).unwrap_or_default();
     let want = if desired { "true" } else { "false" };
-    // One evaluation does probe, click and read-back, so all three bind the same node even if
-    // the document changes between round trips.
+    // One handle and one call do probe, click and read-back, even if the document changes between
+    // the selector resolution and the action.
     let js = format!(
-        r"(() => {{
-            const el = document.querySelector({sel_json});
-            if (!el) throw new Error('No element matches selector: ' + {sel_json});
+        r"function() {{
+            const el = this;
             const probe = ({CHECKABLE_PROBE});
             const before = probe(el);
             if (before.kind === 'none') return before;
@@ -445,13 +432,18 @@ pub async fn set_checked_selector(
                     held: after.state,
                 }});
             }}, {window}));
-        }})()",
+        }}",
         window = crate::element::READ_BACK_MS
     );
     let result: serde_json::Value = client
         .call(
-            "Runtime.evaluate",
-            json!({"expression": js, "returnByValue": true, "awaitPromise": true}),
+            "Runtime.callFunctionOn",
+            json!({
+                "objectId": handle.object_id,
+                "functionDeclaration": js,
+                "returnByValue": true,
+                "awaitPromise": true
+            }),
         )
         .await
         .map_err(|e| ElementError::Action(format!("set_checked_selector failed: {e}")))?;
@@ -530,43 +522,15 @@ pub async fn set_file_input(
     Ok(())
 }
 
-pub async fn set_file_input_selector(
+pub async fn set_file_input_handle(
     client: &CdpClient,
-    selector: &str,
+    handle: &crate::hit_test::SelectorHandle,
     files: &[String],
 ) -> Result<(), ElementError> {
     validate_upload_paths(files)?;
-    let sel_json = serde_json::to_string(selector).unwrap_or_default();
-    let node: serde_json::Value = client
-        .call("Runtime.evaluate", json!({
-            "expression": format!("(() => {{ const el = document.querySelector({sel_json}); if (!el) throw new Error('No element matches selector: ' + {sel_json}); return true; }})()"),
-            "returnByValue": true,
-        }))
-        .await
-        .map_err(|e| ElementError::Action(format!("set_file_input_selector resolve failed: {e}")))?;
-    check_js_exception(&node)?;
-
-    let doc: serde_json::Value = client
-        .call("DOM.getDocument", json!({"depth": 0}))
-        .await
-        .map_err(|e| ElementError::Action(format!("DOM.getDocument failed: {e}")))?;
-    let root_node_id = doc
-        .get("root")
-        .and_then(|r| r.get("nodeId"))
-        .and_then(serde_json::Value::as_i64)
-        .ok_or_else(|| ElementError::Action("Could not get root nodeId".into()))?;
-
-    let qs_result: serde_json::Value = client
-        .call(
-            "DOM.querySelector",
-            json!({"nodeId": root_node_id, "selector": selector}),
-        )
-        .await
-        .map_err(|e| ElementError::Action(format!("DOM.querySelector failed: {e}")))?;
-    let node_id = qs_result
-        .get("nodeId")
-        .and_then(serde_json::Value::as_i64)
-        .ok_or_else(|| ElementError::Action(format!("No element matches selector: {selector}")))?;
+    let backend_node_id = handle
+        .backend_node_id
+        .ok_or_else(|| ElementError::Action("Resolved file input has no backend node id".into()))?;
 
     let nav_events = client.events();
     client
@@ -574,7 +538,7 @@ pub async fn set_file_input_selector(
             "DOM.setFileInputFiles",
             json!({
                 "files": files,
-                "nodeId": node_id,
+                "backendNodeId": backend_node_id,
             }),
         )
         .await

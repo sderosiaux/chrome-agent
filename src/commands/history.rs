@@ -29,25 +29,10 @@ fn history_path() -> Result<PathBuf, crate::BoxError> {
 
 /// chmod 0600, like `record::restrict` and every other file this tool writes. Applied on every
 /// append, since the file may already exist wider from a run that predates this.
-fn restrict(path: &std::path::Path) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
-    }
-    #[cfg(not(unix))]
-    let _ = path;
-}
-
 /// The store directory, 0700 at creation. `session::save_to` sets the same mode, but a first run
 /// whose command fails before the save never reaches it and left the directory at 0755.
 fn ensure_dir(parent: &std::path::Path) -> Result<(), crate::BoxError> {
-    std::fs::create_dir_all(parent)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
-    }
+    crate::secure_fs::create_private_dir_all(parent)?;
     Ok(())
 }
 
@@ -99,7 +84,7 @@ pub fn append(url: &str, title: &str, page: &str) -> Result<(), crate::BoxError>
         .create(true)
         .append(true)
         .open(&path)?;
-    restrict(&path);
+    crate::secure_fs::restrict_file(&path)?;
     writeln!(file, "{}", serde_json::to_string(&entry)?)?;
     Ok(())
 }
@@ -126,11 +111,15 @@ fn rotate_if_large(path: &std::path::Path) {
     let temp = path.with_extension(format!("jsonl.{}", std::process::id()));
     let mut body = kept.join("\n");
     body.push('\n');
-    if std::fs::write(&temp, body).is_ok() {
-        restrict(&temp);
-        if std::fs::rename(&temp, path).is_err() {
-            let _ = std::fs::remove_file(&temp);
-        }
+    if std::fs::write(&temp, body).is_err() {
+        return;
+    }
+    if crate::secure_fs::restrict_file(&temp).is_err() {
+        let _ = std::fs::remove_file(&temp);
+        return;
+    }
+    if std::fs::rename(&temp, path).is_err() {
+        let _ = std::fs::remove_file(&temp);
     }
 }
 

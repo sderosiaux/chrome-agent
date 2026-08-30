@@ -110,6 +110,39 @@ fn every_failure_under_json_is_one_ok_false_object_on_stdout_and_exits_one() {
     }
 }
 
+#[test]
+fn oversized_numeric_inputs_do_not_escape_the_json_error_channel() {
+    let browser = TestBrowser::new("error-channel-oversized-numbers");
+    if !open(browser.name()) {
+        return;
+    }
+
+    let huge = u64::MAX.to_string();
+    let (stdout, stderr, code) = run(
+        browser.name(),
+        &["--json", "wait", "selector", "body", "--timeout", &huge]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>(),
+    );
+    assert_eq!(code, 1, "{stdout}{stderr}");
+    let response: serde_json::Value = serde_json::from_str(stdout.trim()).expect("one JSON error");
+    assert_eq!(response["ok"], false, "{response}");
+    assert!(!stderr.contains("panic"), "{stderr}");
+
+    let (stdout, stderr, code) = run(
+        browser.name(),
+        &["--json", "inspect", "--limit", &huge]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>(),
+    );
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    let response: serde_json::Value = serde_json::from_str(stdout.trim()).expect("one JSON result");
+    assert_eq!(response["ok"], true, "{response}");
+    assert!(!stderr.contains("panic"), "{stderr}");
+}
+
 /// Without `--json`, the same failures leave stdout empty. A caller capturing stdout must not
 /// find half an answer there.
 #[test]
@@ -252,4 +285,20 @@ fn a_usage_error_exits_one_and_leaves_stdout_empty_in_both_modes() {
         assert!(stdout.trim().is_empty(), "usage text on stdout: {stdout:?}");
         assert!(stderr.contains("error:"), "{stderr:?}");
     }
+}
+
+#[test]
+fn a_closed_stdout_consumer_exits_one_without_panicking() {
+    let mut child = Command::new(binary())
+        .args(["--json", "history"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn history");
+    drop(child.stdout.take());
+    let output = child.wait_with_output().expect("wait");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains("failed to write stdout"), "{stderr}");
+    assert!(!stderr.contains("panicked"), "{stderr}");
 }

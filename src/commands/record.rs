@@ -5,14 +5,9 @@ use serde_json::Value;
 /// chmod 0600: a recording holds every command and response, including values redacted on
 /// stdout because they are secrets. Applied on every write, since the file may already exist
 /// with wider permissions from an earlier run.
-fn restrict(path: &str) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
-    }
-    #[cfg(not(unix))]
-    let _ = path;
+fn restrict(path: &str) -> Result<(), crate::BoxError> {
+    crate::secure_fs::restrict_file(std::path::Path::new(path))?;
+    Ok(())
 }
 
 /// Open or create the recording file for append, writing nothing. Errors when it cannot be
@@ -23,7 +18,7 @@ pub fn start_recording(path: &str) -> Result<(), crate::BoxError> {
         .append(true)
         .open(path)
         .map_err(|e| format!("Failed to open recording file '{path}': {e}"))?;
-    restrict(path);
+    restrict(path)?;
     Ok(())
 }
 
@@ -34,7 +29,7 @@ pub fn log_entry(path: &str, cmd: &Value, response: &Value) -> Result<(), crate:
         .append(true)
         .open(path)
         .map_err(|e| format!("Failed to open recording file '{path}': {e}"))?;
-    restrict(path);
+    restrict(path)?;
 
     let entry = serde_json::json!({
         "cmd": cmd,

@@ -187,15 +187,8 @@ pub async fn resolve_browser(opts: &BrowserOptions) -> Result<BrowserConnection,
 /// Launch a Chromium instance with remote debugging.
 async fn launch_browser(opts: &BrowserOptions) -> Result<BrowserConnection, BrowserError> {
     let profile_dir = browser_profile_dir(&opts.name)?;
-    std::fs::create_dir_all(&profile_dir)
+    crate::secure_fs::create_private_dir_all(&profile_dir)
         .map_err(|e| BrowserError::Launch(format!("Failed to create profile dir: {e}")))?;
-    // 0700: the profile can hold cookies and the Local State decryption key copied from
-    // the user's real Chrome profile (--copy-cookies).
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&profile_dir, std::fs::Permissions::from_mode(0o700));
-    }
 
     // A DevToolsActivePort pointing at a live Chrome means reconnect, not a second launch.
     let port_file = profile_dir.join("DevToolsActivePort");
@@ -655,7 +648,7 @@ fn copy_chrome_cookies(profile_dir: &Path) -> Result<(), BrowserError> {
     }
 
     let cookies_dst = profile_dir.join("Default");
-    std::fs::create_dir_all(&cookies_dst)
+    crate::secure_fs::create_private_dir_all(&cookies_dst)
         .map_err(|e| BrowserError::Launch(format!("Failed to create Default dir: {e}")))?;
     std::fs::copy(&cookies_src, cookies_dst.join("Cookies"))
         .map_err(|e| BrowserError::Launch(format!("Failed to copy Cookies: {e}")))?;

@@ -208,6 +208,101 @@ fn a_missing_or_mistyped_field_names_the_command_and_the_field() {
     );
 }
 
+#[test]
+fn invalid_policy_and_ambiguous_target_are_refused_without_dispatch() {
+    if !browser_ready() {
+        return;
+    }
+    let browser = TestBrowser::new("pipe-protocol-no-ambiguous-dispatch");
+    let mut session = PipeSession::start(browser.name());
+    assert_eq!(
+        session.send(&json!({
+            "cmd": "goto",
+            "url": fixture_url("intercept_actionable_overlay.html")
+        }))["ok"],
+        true
+    );
+
+    let invalid = session.send(&json!({
+        "cmd": "click",
+        "selector": "#target",
+        "on_intercept": "refuze"
+    }));
+    assert_eq!(invalid["ok"], false, "{invalid}");
+    assert!(error_of(&invalid).contains("Unknown --on-intercept value"));
+    let receiver = session.send(&json!({"cmd": "eval", "expression": "window.receiver || null"}));
+    assert!(
+        receiver["result"].is_null(),
+        "the invalid command dispatched: {receiver}"
+    );
+
+    assert_eq!(
+        session.send(&json!({
+            "cmd": "goto",
+            "url": fixture_url("checkable_kinds.html")
+        }))["ok"],
+        true
+    );
+    let ambiguous = session.send(&json!({
+        "cmd": "click",
+        "uid": "n999999",
+        "selector": "#native"
+    }));
+    assert_eq!(ambiguous["ok"], false, "{ambiguous}");
+    assert!(error_of(&ambiguous).contains("exactly one"));
+    let checked = session.send(&json!({
+        "cmd": "eval",
+        "expression": "document.getElementById('native').checked"
+    }));
+    assert_eq!(
+        checked["result"], false,
+        "the ambiguous command acted: {checked}"
+    );
+}
+
+#[test]
+fn navigate_and_read_clears_uids_even_when_readability_refuses() {
+    if !browser_ready() {
+        return;
+    }
+    let browser = TestBrowser::new("pipe-navigate-read-clears-uids");
+    let mut session = PipeSession::start(browser.name());
+    assert_eq!(
+        session.send(&json!({
+            "cmd": "goto",
+            "url": fixture_url("checkable_kinds.html")
+        }))["ok"],
+        true
+    );
+    let inspected = session.send(&json!({"cmd": "inspect"}));
+    let stale_uid = inspected["snapshot"]
+        .as_str()
+        .and_then(|snapshot| {
+            snapshot.lines().find_map(|line| {
+                line.trim_start()
+                    .strip_prefix("uid=")
+                    .and_then(|rest| rest.split_whitespace().next())
+            })
+        })
+        .unwrap_or_else(|| panic!("no uid in {inspected}"))
+        .to_string();
+
+    let navigation = session.send(&json!({
+        "cmd": "navigate_and_read",
+        "url": fixture_url("upload_form.html")
+    }));
+    assert_eq!(
+        navigation["ok"], false,
+        "fixture should not be an article: {navigation}"
+    );
+    let stale = session.send(&json!({"cmd": "click", "uid": stale_uid}));
+    assert_eq!(stale["ok"], false, "{stale}");
+    assert!(
+        error_of(&stale).contains("not found. Run 'chrome-agent inspect'"),
+        "the old document's uid map survived navigation: {stale}"
+    );
+}
+
 /// `back` at the start of the history stack did not move, and says so.
 ///
 /// It used to fire `history.back()` blind and wait five seconds for a `Page.loadEventFired` that

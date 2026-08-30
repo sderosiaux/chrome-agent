@@ -590,8 +590,8 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
                 uid,
                 selector,
                 format: Some(format),
-                quality: quality.map(u64::from),
-                max_width: max_width.map(u64::from),
+                quality,
+                max_width,
             };
             let out = Box::pin(dispatch::dispatch_screenshot(&ctx, &args)).await?;
             let path = out["path"].as_str().unwrap_or_default().to_string();
