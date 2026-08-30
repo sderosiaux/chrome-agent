@@ -352,12 +352,30 @@ Success: {"ok":true, ...}
 Error:   {"ok":false, "error":"message", "hint":"what to do next"}
 ```
 
-- `goto` → `{"url","title","landed":{"requested","final","redirected","http_status"}}`. Check
-  `redirected` before trusting the page: an expired session bouncing to a login wall otherwise
-  reads as a successful load. A fragment-only or trailing-slash difference is not a redirect.
-  `http_status` is the final hop as the browser reported it, **absent** (never 0) when there is
-  none. A redirect onto `/login`, `/signin`, `/auth`, `/sso` adds a `hint` — a guess from the
-  URL, so `inspect` to confirm. `goto` carries no verdict: you navigated on purpose.
+- `goto` → `{"url","title","landed":{"requested","final","redirected","http_status","serving","challenge_from"?}}`.
+  Check `redirected` before trusting the page: an expired session bouncing to a login wall
+  otherwise reads as a successful load. A fragment-only or trailing-slash difference is not a
+  redirect. `http_status` is the final hop as the browser reported it, **absent** (never 0)
+  when there is none. A redirect onto `/login`, `/signin`, `/auth`, `/sso` adds a `hint` — a
+  guess from the URL, so `inspect` to confirm. `goto` carries no verdict: you navigated on
+  purpose.
+- **`serving` is what answered, and it is the field to branch on.** `ok:true` only says the
+  navigation happened; it says nothing about what is on the other end.
+
+  | `serving` | means | do |
+  |---|---|---|
+  | `page` | nothing measured contradicts the load | proceed |
+  | `challenge` | an anti-bot vendor's frame or script is here and the site has no form of its own on the page; `challenge_from` names the vendor host | `--connect` to a real Chrome — `--stealth` does not defeat these |
+  | `error` | the server answered 4xx/5xx; read `http_status` for which | fix the URL (404), authenticate (401/403), or wait (429/5xx) |
+  | `nothing_actionable` | no link, no form control, no script, almost no text | `inspect` before giving up — see below |
+  | `unreadable` | the shape probe did not run | `inspect` |
+
+  `page` is the absence of evidence, not a certificate: a paywall, a cookie wall and a captcha
+  vendor the tool does not know all read as `page`. `nothing_actionable` is a measurement of
+  the document and **not** a claim that you were blocked — an edge-served refusal notice and a
+  page that had not finished rendering look identical from here, so `inspect` decides.
+  `challenge_from` can also appear under `serving:"page"` (a captcha widget on a working login
+  form): the word is the branch, the field is the evidence.
 - `click`/`fill`/`select`/`check`/… → `{"message", "uid", "verdict", "verdict_reason", "next",
   "verdict_hint"?, "changed":{"added","removed","changed","unchanged","moved","anonymous",
   "document_changed","identity_known"}, "delta":"+ uid=n88 heading \"Saved\""}`, plus
