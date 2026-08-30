@@ -30,29 +30,155 @@ fn run_cli(args: &[&str]) -> (String, String, i32) {
     (stdout, stderr, code)
 }
 
-#[test]
-fn help_shows_all_subcommands() {
+/// Every verb `--help` lists, minus clap's own `help`.
+///
+/// Derived, not typed: this used to be nineteen names written by hand under an assertion that
+/// promised "all subcommands", against the forty-two the CLI has. A verb added to `Command`
+/// joined `--help` and no test noticed — the same defect as a documentation table nobody
+/// re-reads, one directory away.
+fn subcommands() -> Vec<String> {
     let (stdout, _, code) = run_cli(&["--help"]);
     assert_eq!(code, 0);
-    assert!(stdout.contains("goto"));
-    assert!(stdout.contains("click"));
-    assert!(stdout.contains("fill"));
-    assert!(stdout.contains("fill-form"));
-    assert!(stdout.contains("inspect"));
-    assert!(stdout.contains("screenshot"));
-    assert!(stdout.contains("eval"));
-    assert!(stdout.contains("tabs"));
-    assert!(stdout.contains("wait"));
-    assert!(stdout.contains("type"));
-    assert!(stdout.contains("press"));
-    assert!(stdout.contains("scroll"));
-    assert!(stdout.contains("hover"));
-    assert!(stdout.contains("close"));
-    assert!(stdout.contains("status"));
-    assert!(stdout.contains("stop"));
-    assert!(stdout.contains("daemon"));
-    assert!(stdout.contains("assert"));
-    assert!(stdout.contains("emulate"));
+    let listing = stdout
+        .split_once("\nCommands:\n")
+        .expect("--help lists its commands")
+        .1
+        .split_once("\n\nOptions:")
+        .expect("the command listing ends where the options begin")
+        .0;
+    let verbs: Vec<String> = listing
+        .lines()
+        // A wrapped description line is indented deeper than the verb it belongs to.
+        .filter_map(|line| line.strip_prefix("  "))
+        .filter(|line| !line.starts_with(' '))
+        .filter_map(|line| line.split_whitespace().next())
+        .filter(|verb| *verb != "help")
+        .map(str::to_string)
+        .collect();
+    assert!(
+        verbs.len() >= 40,
+        "only {} verb(s) parsed out of --help — did the listing's shape change? {verbs:?}",
+        verbs.len()
+    );
+    verbs
+}
+
+#[test]
+fn help_shows_all_subcommands() {
+    let verbs = subcommands();
+    for verb in &verbs {
+        let (_, stderr, code) = run_cli(&[verb, "--help"]);
+        assert_eq!(code, 0, "--help lists `{verb}`, which the parser does not accept: {stderr}");
+    }
+}
+
+/// The documents an agent reads show every verb in a form it can copy.
+///
+/// A verb that exists only in `--help` is a verb an agent will not reach for: the guide is
+/// what `--help` appends, and the README and SKILL.md are what a coding agent is handed on
+/// install. Nothing checked that the three of them together covered the CLI, and five verbs
+/// were missing from at least one.
+///
+/// Two forms count, and a plain word match is neither — `stop`, `status`, `type` and `macro`
+/// are ordinary English, and `stop` is also a `next` token printed in the verdict table of
+/// every one of these files. Measured: a substring search finds all four everywhere and turns
+/// five genuinely undocumented verbs green.
+#[test]
+fn every_verb_appears_as_an_invocation_in_the_documents_an_agent_reads() {
+    let verbs = subcommands();
+    let docs = [
+        ("llm-guide.txt", include_str!("../llm-guide.txt")),
+        ("README.md", include_str!("../README.md")),
+        ("skills/chrome-agent/SKILL.md", include_str!("../skills/chrome-agent/SKILL.md")),
+    ];
+    let mut missing = Vec::new();
+    for (name, doc) in docs {
+        for verb in &verbs {
+            if exempt(verb, name).is_some() {
+                continue;
+            }
+            if !invoked(doc, verb, &verbs) && !heads_a_command_row(doc, verb) {
+                missing.push(format!("{name} never shows `chrome-agent {verb}`"));
+            }
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "{} verb(s) exist but are not documented in invocation form:\n{}\n\
+         Document them, or add the pair to UNDOCUMENTED_ON_PURPOSE with its reason.",
+        missing.len(),
+        missing.join("\n")
+    );
+}
+
+/// A verb no document shows in invocation form, and why that is the right answer for it.
+///
+/// The marker carries its reason in line, on the model of `isolation-exempt:` in
+/// `harness_tests.rs`: a bare list of names is a list nobody can ever shrink, because nothing
+/// records what would have to become true to remove an entry. `"*"` means every document.
+const UNDOCUMENTED_ON_PURPOSE: &[(&str, &str, &str)] = &[
+    (
+        "daemon",
+        "*",
+        "the optional micro-daemon: its one subcommand, `daemon start`, is marked \
+         \"used internally\" in its own help because chrome-agent spawns it. An agent \
+         that types it has already gone wrong.",
+    ),
+    (
+        "stop",
+        "*",
+        "stops that daemon, so it is reachable only by someone who started one by hand. \
+         `close` is the verb for a browser, and it is documented everywhere.",
+    ),
+    (
+        "frame",
+        "skills/chrome-agent/SKILL.md",
+        "SKILL.md documents `frame` as the pipe command it has to be, and says why in the \
+         same block: separate CLI calls do not work, because each is a fresh connection and \
+         the binding lives on the connection. A CLI invocation form here would show something \
+         that cannot do what it looks like it does.",
+    ),
+];
+
+fn exempt(verb: &str, doc: &str) -> Option<&'static str> {
+    UNDOCUMENTED_ON_PURPOSE
+        .iter()
+        .find(|(name, scope, _)| *name == verb && (*scope == "*" || *scope == doc))
+        .map(|(_, _, reason)| *reason)
+}
+
+/// The document shows `chrome-agent … <verb>` somewhere.
+///
+/// The verb is the first KNOWN verb after the binary's name, not the first word: global flags
+/// parse on either side of it, so `chrome-agent --page mobile emulate status` names `emulate`
+/// and `chrome-agent --json extract` names `extract`. A flag's value is skipped because it is
+/// not a verb — and where one would be (`--connect auto inspect`), it is not one either.
+fn invoked(doc: &str, verb: &str, verbs: &[String]) -> bool {
+    doc.match_indices("chrome-agent ").any(|(at, _)| {
+        let rest = &doc[at..];
+        let line = rest.split('\n').next().unwrap_or(rest);
+        line["chrome-agent ".len()..]
+            .split(|c: char| c.is_whitespace() || c == '|' || c == '`')
+            .find(|word| verbs.iter().any(|known| known == word))
+            .is_some_and(|word| word == verb)
+    })
+}
+
+/// The document has a table row whose FIRST cell is a backticked command starting with the verb.
+///
+/// The first cell only. The verdict table's third column holds `` `stop` ``, which is the `next`
+/// token and not the verb — accepting any cell would report `stop` as documented in all three
+/// files on the strength of a table about something else entirely.
+fn heads_a_command_row(doc: &str, verb: &str) -> bool {
+    doc.lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with('|'))
+        .filter_map(|line| line.trim_start_matches('|').split('|').next())
+        .any(|cell| {
+            cell.trim().strip_prefix('`').and_then(|rest| rest.strip_prefix(verb)).is_some_and(
+                |tail| tail.starts_with('`') || tail.starts_with(' ') || tail.starts_with('\\'),
+            )
+        })
 }
 
 #[test]
@@ -344,46 +470,32 @@ fn eval_subcommand_help() {
 // Integration tests that require Chrome (skipped in CI without Chrome)
 // These are guarded by a check for Chrome availability.
 
+/// Two CLI invocations reach the same named browser: the second sees what the first navigated to.
+///
+/// This test used to answer three different questions with the same green. It navigated to
+/// `https://example.com`, and on a non-zero exit it printed `goto failed (may be network
+/// issue)` and returned — an `eprintln!` and a bare `return`, past `common::unavailable`,
+/// so `CHROME_AGENT_REQUIRE_BROWSER` could not turn that silence into a failure the way it
+/// does for every other skip in this suite. The `eval` half then asserted only `if code == 0`,
+/// which is a test that cannot fail on the thing it is named after. Both branches are gone,
+/// and so is the network: the page is a fixture on disk, so a failure here is this tool's.
 #[test]
-fn headed_goto_and_eval() {
+fn goto_then_eval_share_one_named_browser() {
     if !common::browser_ready() {
         return;
     }
 
     let b = TestBrowser::new("test-integration");
+    let url = format!("file://{}", common::fixture_path("assert_page.html").display());
 
-    // Navigate
-    let (stdout, stderr, code) = run_cli(&[
-        "--browser",
-        b.name(),
-        "goto",
-        "https://example.com",
-    ]);
+    let (stdout, stderr, code) = run_cli(&["--browser", b.name(), "goto", &url]);
+    assert_eq!(code, 0, "goto {url} failed: {stderr}");
+    assert!(stdout.contains("Assertable page"), "goto output: {stdout}");
 
-    if code != 0 {
-        eprintln!("goto failed (may be network issue): {stderr}");
-        return;
-    }
-
-    assert!(
-        stdout.contains("example.com") || stdout.contains("Example"),
-        "goto output: {stdout}"
-    );
-
-    // Eval on same browser
-    let (stdout, _, code) = run_cli(&[
-        "--browser",
-        b.name(),
-        "eval",
-        "document.title",
-    ]);
-
-    if code == 0 {
-        assert!(
-            stdout.contains("Example Domain") || stdout.contains("example"),
-            "eval output: {stdout}"
-        );
-    }
+    // Same browser name, a second process, a second connection: the page has to still be there.
+    let (stdout, stderr, code) = run_cli(&["--browser", b.name(), "eval", "document.title"]);
+    assert_eq!(code, 0, "eval failed: {stderr}");
+    assert!(stdout.contains("Assertable page"), "eval output: {stdout}");
 }
 
 #[test]

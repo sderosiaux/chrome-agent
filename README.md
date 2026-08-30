@@ -268,6 +268,9 @@ exit code — a failed assertion is `ok:false` with the same `assertion` object.
 | `webmcp call <name> [--args '{"k":"v"}'] [--inspect]` | Call a tool by name and report what it declared next to what the page's accessibility tree measurably did. |
 | `batch` | Execute multiple commands from a JSON array on stdin. |
 | `pipe` | Persistent JSON stdin/stdout connection. |
+| `status` | Which browsers the session store knows, their pids, and the running ones no entry claims (`orphan=` lines). |
+| `history` | The pages this browser visited. |
+| `replay <file>` | Re-run a `pipe --record` file command by command. `macro` is the guarded, parameterised form of the same idea — see below. |
 
 ## Global flags
 
@@ -280,7 +283,8 @@ where it is not declared is a usage error naming the invocation which works.
 ```
 --browser <name>         Named browser profile (default: "default")
 --page <name>            Named tab (default: "default")
---connect [url]          Attach to a running Chrome
+--connect <auto|url>     Attach to a running Chrome (a value is required: "auto", or a
+                         ws:// or http:// URL)
 --proxy-server <url>     Proxy a managed Chrome (http(s), socks4/5; explicit port required)
 --headed                 Show browser window (default: headless)
 --stealth                Anti-detection patches. Clears a Cloudflare JS challenge
@@ -854,7 +858,7 @@ Claude Code permissions:
 | Iframe switching | `frame` | `frame` | via selectors |
 | Batch execution | `batch` (JSON stdin) | `batch` (JSON or quoted) | N/A |
 | AI chat built-in | no (the agent IS the LLM) | yes (AI Gateway) | N/A |
-| Codebase | ~10.2K lines | ~40K lines | Playwright |
+| Codebase | ~22.2K lines of Rust in `src/` (blank and comment-only lines excluded; a test re-measures it) | ~40K lines (their figure, unverified here) | Playwright |
 | Design goal | minimal tokens, maximal autonomy | feature-complete platform | browser testing |
 
 ## License

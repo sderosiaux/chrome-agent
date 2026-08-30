@@ -96,9 +96,13 @@ LLM USAGE GUIDE:
     # invisible to the a11y tree (use screenshot or eval, never a second click).
 
   Macros — a path that already worked, kept and replayable:
-    macro record <name> --from-recording <file>   distil a recorded session into a macro
-    macro run <name> --var k=v                    run it, guarding every step
-    macro list / macro show <name>                what exists, without relearning it
+    chrome-agent macro record <name> --from-recording <file>  # distil a recorded session
+    chrome-agent macro run <name> --var k=v                   # run it, guarding every step
+    chrome-agent macro list                                   # what exists, without relearning it
+    chrome-agent macro show <name>                            # one macro's steps and its guards
+    chrome-agent replay <file>                                # the raw form: re-run a pipe --record
+                                                              # file step by step, with no guards
+                                                              # and no parameters
     In pipe: {"cmd":"macro","action":"record","name":"x"} distils THIS session — no marker is
     needed beforehand, and "from" overrides where the task is taken to start (default: the last
     successful navigation, reported as started_at).
@@ -202,6 +206,13 @@ LLM USAGE GUIDE:
     # Works with: Sortable.js, React DnD (mouse backend), custom mousedown handlers.
     # Does NOT work with HTML5 Drag and Drop API (sites using dragstart/dragover/drop).
     # For HTML5 DnD sites, use eval with custom JS to dispatch drag events.
+
+  Keyboard:
+    chrome-agent type "search term"                     # type into whatever holds focus
+    chrome-agent type "laptop" --selector "input.search" # focus that element first, then type
+    chrome-agent press Enter                            # Enter/Tab/Escape/ArrowDown/... by name
+    chrome-agent press a                                # a single printable character types it
+    # An unmapped key NAME is refused rather than dispatched with virtual key code 0.
 
   Device emulation (explicit CDP metrics; no bundled preset catalog):
     chrome-agent --page mobile emulate device --label "checkout phone" --width 412 --height 915 --dpr 2.625 --mobile --touch

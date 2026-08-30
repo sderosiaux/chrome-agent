@@ -441,7 +441,19 @@ mod tests {
 mod guide {
     use super::*;
 
+    use crate::verdict::Delivery;
+
     const GUIDE: &str = include_str!("../llm-guide.txt");
+
+    /// The two documents that reprint this module's tables in markdown.
+    ///
+    /// There were five copies of the verdict/reason/next mapping in print and exactly one of
+    /// them — the guide's — was confronted with `next_for`. A table an agent copies its
+    /// branching from is not documentation, it is a second implementation, and the four
+    /// unchecked ones were free to promise a `next` this module does not return. The `delivery`
+    /// table had two copies and neither was checked.
+    const SKILL: &str = include_str!("../skills/chrome-agent/SKILL.md");
+    const README: &str = include_str!("../README.md");
 
     /// `verdict reason next …`, as the guide's fixed-column block spells it.
     fn rows() -> Vec<(&'static str, &'static str, &'static str)> {
@@ -522,6 +534,195 @@ mod guide {
                 "{} is undocumented in llm-guide.txt",
                 assessment.reason
             );
+        }
+    }
+
+    /// A markdown copy of the table, as `(verdict, reasons, nexts)`.
+    ///
+    /// One reader for two shapes: `SKILL.md` gives each reason its own row, `README.md` merges
+    /// several into one (`` `tree_delta`, `nodes_moved`, `focus_only` ``). Neither can use the
+    /// guide's fixed-column reader, and giving each its own would be a third parser to keep in
+    /// step — so a cell is read as a LIST, which the one-reason case is a case of.
+    fn markdown_rows(doc: &str) -> Vec<(String, Vec<String>, Vec<String>)> {
+        const HEADER: &str = "| `verdict` | `verdict_reason` | `next` |";
+        let table = doc.split_once(HEADER).expect("the verdict table's header row").1;
+        table
+            .lines()
+            .map(str::trim)
+            .skip_while(|line| !line.starts_with('|'))
+            .skip(1) // the |---|---| separator
+            .take_while(|line| line.starts_with('|'))
+            .map(|line| {
+                let cells: Vec<&str> = line.trim_matches('|').split('|').collect();
+                assert!(cells.len() >= 3, "a verdict row needs three columns: {line}");
+                (bare(cells[0]), cell_list(cells[1], ','), cell_list(cells[2], '/'))
+            })
+            .collect()
+    }
+
+    /// A markdown cell's token, without the backticks and bolding the prose dresses it in.
+    fn bare(cell: &str) -> String {
+        cell.replace(['`', '*'], "").trim().to_string()
+    }
+
+    fn cell_list(cell: &str, separator: char) -> Vec<String> {
+        cell.split(separator).map(bare).filter(|token| !token.is_empty()).collect()
+    }
+
+    /// The same re-borrow `leak` does, from a markdown document: the token sits inside
+    /// backticks there, so whitespace is not what separates it.
+    fn leak_from(doc: &'static str, reason: &str) -> &'static str {
+        doc.split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+            .find(|word| *word == reason)
+            .expect("the reason came from this document")
+    }
+
+    /// The two markdown reprints of the ladder promise the same `next` this module returns.
+    ///
+    /// Five copies of this mapping were in print and one — the guide's — was confronted with
+    /// `next_for`. A table an agent branches on is a second implementation of `next_for`, and
+    /// an unchecked one is free to drift: `proceed` and `confirm` are opposite branches of the
+    /// closed set of six, so a single wrong cell makes an agent do a different thing.
+    #[test]
+    fn every_markdown_copy_of_the_table_is_the_mapping_this_module_implements() {
+        for (name, doc, expected) in
+            [("skills/chrome-agent/SKILL.md", SKILL, 18), ("README.md", README, 12)]
+        {
+            let rows = markdown_rows(doc);
+            assert_eq!(rows.len(), expected, "{name} lost rows, or grew columns: {rows:?}");
+            for (verdict, reasons, nexts) in rows {
+                assert!(!reasons.is_empty(), "{name}: {verdict} names no reason");
+                for reason in &reasons {
+                    let seen = Assessment {
+                        verdict: parse_verdict(&verdict),
+                        reason: leak_from(doc, reason),
+                        page: PageSight::Readable,
+                    };
+                    assert_eq!(
+                        next_for(seen).as_str(),
+                        nexts[0],
+                        "{name} promises {} for {verdict}/{reason}",
+                        nexts[0]
+                    );
+                    // A cell naming two tokens is the documented exception, and it is exactly
+                    // one row. Asserting WHICH row is the point: without it, any row could grow
+                    // a second answer and this test would check it against the blind page.
+                    match nexts.len() {
+                        1 => {}
+                        2 => {
+                            assert_eq!(
+                                reason, "value_kept",
+                                "{name}: only a confirmed write on a page that could not be \
+                                 read has two answers, not {verdict}/{reason}"
+                            );
+                            let blind = Assessment { page: PageSight::Unreadable, ..seen };
+                            assert_eq!(
+                                next_for(blind).as_str(),
+                                nexts[1],
+                                "{name} promises {} for {verdict}/{reason} on a blind page",
+                                nexts[1]
+                            );
+                        }
+                        n => panic!("{name}: {verdict}/{reason} names {n} tokens in one cell"),
+                    }
+                }
+            }
+        }
+    }
+
+    /// The `delivery` readings the guide's fixed-column block lists.
+    ///
+    /// Scoped to the section rather than matched by shape: `intercepted` is a word of the
+    /// verdict table above too, and a reader that took every line starting with it would mix
+    /// the two blocks. A row sits at the block's own indent; the wrapped continuations that
+    /// follow one sit deeper, and the `#` notes below the block end it.
+    fn delivery_rows_in_the_guide() -> Vec<&'static str> {
+        let section = GUIDE
+            .split_once("\"delivery\" on a pointer-targeted action")
+            .expect("the delivery block's own heading")
+            .1;
+        let mut rows = Vec::new();
+        let mut indent = None;
+        for line in section.lines() {
+            let body = line.trim_start();
+            if body.is_empty() {
+                continue;
+            }
+            if body.starts_with('#') {
+                break;
+            }
+            let depth = line.len() - body.len();
+            match indent {
+                None if body.starts_with("target_hit") => indent = Some(depth),
+                None => continue,
+                Some(row) if depth != row => continue, // a wrapped continuation
+                Some(_) => {}
+            }
+            rows.push(body.split_whitespace().next().expect("a non-empty line"));
+        }
+        rows
+    }
+
+    /// The same readings, from `SKILL.md`'s markdown table.
+    fn delivery_rows_in_the_skill() -> Vec<String> {
+        const HEADER: &str = "| `delivery` | Means | Licence |";
+        SKILL
+            .split_once(HEADER)
+            .expect("the delivery table's header row")
+            .1
+            .lines()
+            .map(str::trim)
+            .skip_while(|line| !line.starts_with('|'))
+            .skip(1)
+            .take_while(|line| line.starts_with('|'))
+            .map(|line| bare(line.trim_matches('|').split('|').next().expect("a first cell")))
+            .collect()
+    }
+
+    /// Both copies of the `delivery` table name the six readings the code can produce, in order.
+    ///
+    /// `Delivery::parse` answers `not_probed` for anything it does not recognise, and that is
+    /// the right answer where it is used — a response written by an older binary carries a
+    /// token this one has not been taught, and "no evidence" is what that means. It is the
+    /// wrong answer for a documentation table: a reading invented or misspelled here would
+    /// collapse onto the floor and read as verified. So a row must ROUND-TRIP, not merely
+    /// parse, and the count is asserted as well — a row this reader skips would otherwise
+    /// leave the remaining five agreeing with themselves.
+    #[test]
+    fn both_copies_of_the_delivery_table_name_the_readings_the_code_produces() {
+        let expected = [
+            Delivery::TargetHit,
+            Delivery::Intercepted,
+            Delivery::OffTarget,
+            Delivery::NotSettled,
+            Delivery::JsDispatch,
+            Delivery::NotProbed,
+        ];
+        let guide: Vec<String> =
+            delivery_rows_in_the_guide().into_iter().map(str::to_string).collect();
+        for (name, rows) in
+            [("llm-guide.txt", guide), ("skills/chrome-agent/SKILL.md", delivery_rows_in_the_skill())]
+        {
+            assert_eq!(
+                rows.len(),
+                expected.len(),
+                "{name} lists {} delivery readings, the code has {}: {rows:?}",
+                rows.len(),
+                expected.len()
+            );
+            for (row, want) in rows.iter().zip(expected) {
+                assert_eq!(
+                    Delivery::parse(row).as_str(),
+                    row.as_str(),
+                    "{name} names a delivery reading the code does not have: {row}"
+                );
+                assert_eq!(
+                    Delivery::parse(row),
+                    want,
+                    "{name} lists the readings in another order: expected {} here, found {row}",
+                    want.as_str()
+                );
+            }
         }
     }
 
