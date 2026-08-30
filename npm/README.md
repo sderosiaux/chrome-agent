@@ -11,7 +11,7 @@ something else took the click, or nothing could be observed. One word, in JSON, 
 
 One 3 MB Rust binary over CDP. No Node runtime, no Playwright, no daemon.
 
-chrome-agent v0.15.0 (~28.2K lines of Rust in `src/`, blank and comment-only lines excluded; 3 MB binary)
+chrome-agent v0.16.0 (~28.2K lines of Rust in `src/`, blank and comment-only lines excluded; 3 MB binary)
 
 Full documentation: [github.com/sderosiaux/chrome-agent](https://github.com/sderosiaux/chrome-agent).
 

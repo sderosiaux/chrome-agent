@@ -1,6 +1,6 @@
 {
   "name": "chrome-agent",
-  "version": "0.15.0",
+  "version": "0.16.0",
   "description": "Web tasks that compile. Browser automation that reads the page back after every action and reports what actually happened, in JSON. Single binary, CDP direct.",
   "type": "module",
   "bin": {

@@ -1,4 +1,4 @@
-# chrome-agent v0.15.0
+# chrome-agent v0.16.0
 
 Single Rust binary for browser automation via CDP, built for AI agents. 43 subcommands
 (`chrome-agent --help`), 29.0K lines of Rust in `src/` across 84 files (measure: `tokei src/`),

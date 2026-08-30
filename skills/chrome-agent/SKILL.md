@@ -3,7 +3,7 @@ name: chrome-agent
 description: Local browser automation with structured, verified outcomes. Use for web navigation, scraping and extraction, form interaction, screenshots and downloads, network or console checks, responsive testing, or page-scoped device emulation.
 metadata:
   author: sderosiaux
-  version: "0.15.0"
+  version: "0.16.0"
   tags: ["browser", "automation", "scraping", "chrome", "cdp"]
 ---
 
