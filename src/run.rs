@@ -61,6 +61,13 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
             return Box::pin(pipe::run_pipe(&cli)).await;
         }
 
+        // Before the browser is opened: `list` and `show` read files, and `record` distils a
+        // recording — none of the three needs a page, and opening one to answer "what macros
+        // exist" would launch a Chrome to read a directory.
+        Command::Macro { ref action } => {
+            return Box::pin(crate::macros_cmd::run_cli(&cli, action)).await;
+        }
+
         Command::Replay { ref file, ref vars } => {
             return Box::pin(pipe::run_replay(&cli, file, vars.as_deref())).await;
         }
@@ -910,7 +917,7 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
 
         // Already handled above
         Command::Daemon { .. } | Command::Status | Command::Stop | Command::Close { .. }
-        | Command::Pipe | Command::Replay { .. } | Command::History { .. } => {
+        | Command::Pipe | Command::Replay { .. } | Command::History { .. } | Command::Macro { .. } => {
             unreachable!()
         }
     }

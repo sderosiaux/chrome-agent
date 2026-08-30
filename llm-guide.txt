@@ -95,6 +95,22 @@ LLM USAGE GUIDE:
     # 400ms is outside it -- use wait + assert value), and canvas/WebGL/CSS-only effects are
     # invisible to the a11y tree (use screenshot or eval, never a second click).
 
+  Macros — a path that already worked, kept and replayable:
+    macro record <name> --from-recording <file>   distil a recorded session into a macro
+    macro run <name> --var k=v                    run it, guarding every step
+    macro list / macro show <name>                what exists, without relearning it
+    In pipe: {"cmd":"macro","action":"record","name":"x"} distils THIS session — no marker is
+    needed beforehand, and "from" overrides where the task is taken to start (default: the last
+    successful navigation, reported as started_at).
+    A step keeps only what survives tomorrow: delivery target_hit, the verdict WORD (never the
+    reason), value.verbatim, and a url_matches built from the PATH. Never the changed counters,
+    never a uid, never a duration -- a macro that pins those breaks on a page that still works.
+    A step aimed by uid is recorded by role+name or REFUSED; --xy is never recordable.
+    A secret field is declared as a parameter and never stored: the run refuses without --var.
+    A guard that does not hold STOPS the run: the report gives the step index, the guard, what
+    was observed, and the action's own next. Nothing is repaired, retried or skipped.
+    Steps that promise nothing say so (unguarded), in the file and in both reports.
+
   Flag position: the flags on the top-level command (--json, --browser, --verdict, --budget,
   --stealth, --on-intercept, --page, --dialog ...) are accepted on either side of the verb, so
   `fill --selector "#q" x --json` works as well as `--json fill --selector "#q" x`. Two are the

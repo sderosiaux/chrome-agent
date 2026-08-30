@@ -94,6 +94,9 @@ pub async fn run_pipe(cli: &Cli) -> Result<(), crate::BoxError> {
     // Main loop: read JSON commands from stdin
     let stdin = BufReader::new(tokio::io::stdin());
     let mut lines = stdin.lines();
+    // What `macro record` distils at the end of the session. Slim entries, so this stays small
+    // whatever the session did.
+    let mut history: Vec<crate::macros_record::Observed> = Vec::new();
 
     loop {
         let Ok(Some(line)) = lines.next_line().await else {
@@ -117,6 +120,16 @@ pub async fn run_pipe(cli: &Cli) -> Result<(), crate::BoxError> {
                 continue;
             }
 
+        // A macro is distilled from the session's own history, so `macro record` needs no
+        // foresight: the agent finds out it succeeded, and only then asks for the path to be
+        // kept. Answered before `dispatch` because it acts on the session rather than the page.
+        if cmd.get("cmd").and_then(Value::as_str) == Some("macro") {
+            let answer = crate::macros_cmd::dispatch_pipe(&cmd, &history)
+                .unwrap_or_else(|e| json!({"ok": false, "error": e.to_string()}));
+            emit(&answer);
+            continue;
+        }
+
         let mut response = if let Some(response) = emulation_recovery.refusal_for(&cmd) {
             response
         } else {
@@ -137,6 +150,20 @@ pub async fn run_pipe(cli: &Cli) -> Result<(), crate::BoxError> {
                 response["recording_error"] = json!(format!("{e}"));
             }
 
+        // Slim on purpose (`macros_record::Observed`): a session keeps this for its whole life
+        // and a full response carries snapshots. What is retained is what the whitelist and the
+        // filter read, which is also why a session's history cannot leak a page's text.
+        let snapshot = store
+            .browsers
+            .get(&cli.browser)
+            .and_then(|b| b.pages.get(&cli.page))
+            .and_then(|p| p.last_snapshot.clone());
+        history.push(crate::macros_record::Observed::read_with_snapshot(
+            &cmd,
+            &response,
+            snapshot.as_deref(),
+        ));
+
         emit(&response);
     }
 
@@ -145,6 +172,102 @@ pub async fn run_pipe(cli: &Cli) -> Result<(), crate::BoxError> {
 }
 
 /// Replay a recorded session file, optionally substituting variables.
+/// Everything a session needs to dispatch commands: the two clients, the store, the page.
+///
+/// `run_pipe`, `run_replay` and `macros_run` opened this identically, sixty lines each. One
+/// copy, because a fourth entry point is a fourth chance for them to drift.
+pub struct Session {
+    pub store: SessionStore,
+    pub browser_client: CdpClient,
+    pub client: CdpClient,
+    pub target_id: String,
+    pub policy: crate::run_helpers::ReportPolicy,
+}
+
+pub async fn open_session(cli: &Cli) -> Result<Session, crate::BoxError> {
+    let mut store = session::load_session()?;
+    let want_headless = !cli.headed;
+    let requested_proxy =
+        browser::normalized_proxy_option(cli.connect.as_deref(), cli.proxy_server.as_deref())?;
+    let requested_chrome_args =
+        browser::normalized_chrome_args_option(cli.connect.as_deref(), &cli.chrome_args)?;
+    let effective_proxy = requested_proxy
+        .or_else(|| store.browsers.get(&cli.browser).and_then(|b| b.proxy_server.clone()));
+    let effective_chrome_args =
+        crate::chrome_args::effective_chrome_args(&store, &cli.browser, &requested_chrome_args);
+
+    let (conn, browser_client) = connect_browser(
+        &mut store,
+        cli,
+        want_headless,
+        effective_proxy.clone(),
+        effective_chrome_args.clone(),
+    )
+    .await?;
+
+    let http_endpoint = conn
+        .http_endpoint
+        .as_deref()
+        .ok_or("No HTTP endpoint available. Cannot resolve page WebSocket URL.")?;
+    let target_id = {
+        let browser_session = session::ensure_browser(
+            &mut store,
+            &cli.browser,
+            &conn.ws_endpoint,
+            conn.pid,
+            want_headless,
+            effective_proxy,
+            effective_chrome_args,
+        );
+        crate::run_helpers::resolve_page_target(&browser_client, browser_session, &cli.page).await?
+    };
+    let _ = session::save_session(&mut store);
+
+    let page_ws = browser::get_page_ws_url(http_endpoint, &target_id).await?;
+    let client = CdpClient::connect(&page_ws).await?;
+    client.set_call_timeout(std::time::Duration::from_secs(cli.timeout));
+    client.enable("Page").await?;
+    commands::console::inject(&client).await;
+    if cli.stealth {
+        crate::setup::apply_stealth(&client).await;
+    } else {
+        client.enable("Runtime").await?;
+    }
+    let dialog_policy = crate::setup::DialogPolicy::parse(&cli.dialog)?;
+    client.spawn_dialog_handler(dialog_policy, cli.dialog_text.clone());
+    let policy = report_policy(cli)?;
+    Ok(Session { store, browser_client, client, target_id, policy })
+}
+
+/// Dispatch one command on an open session. `pub` for `macros_run`, which needs exactly the
+/// same execution semantics as pipe and batch — a macro step IS a pipe command.
+pub async fn dispatch_on(
+    session: &mut Session,
+    cli: &Cli,
+    cmd: &Value,
+    emulation_recovery: &mut EmulationRecovery,
+) -> Value {
+    if let Some(response) = emulation_recovery.refusal_for(cmd) {
+        return response;
+    }
+    let response = dispatch(
+        &session.client,
+        &session.browser_client,
+        &mut session.store,
+        &cli.browser,
+        &cli.page,
+        &session.target_id,
+        cli.timeout,
+        cli.max_depth,
+        session.policy,
+        cmd,
+        emulation_recovery,
+    )
+    .await;
+    emulation_recovery.update_after(cmd, &response);
+    response
+}
+
 pub async fn run_replay(
     cli: &Cli, file: &str, vars: Option<&[String]>,
 ) -> Result<(), crate::BoxError> {
