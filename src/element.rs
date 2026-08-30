@@ -139,8 +139,14 @@ pub async fn click_handle(
         // holding off screen. Same verdict, same absence of a dispatch, different recovery.
         return Ok(Dispatched::skipped(delivery, point, None).unaimed(unaimable));
     }
-    if delivery == Delivery::Intercepted && on_intercept == crate::hit_test::OnIntercept::Refuse {
-        return Err(refusal(Dispatched::skipped(delivery, point, receiver), "click", target));
+    if delivery == Delivery::Intercepted
+        && crate::hit_test::should_refuse_intercept(on_intercept, receiver.as_ref())
+    {
+        return Err(refusal(
+            Dispatched::skipped(delivery, point, receiver).under(on_intercept),
+            "click",
+            target,
+        ));
     }
 
     dispatch_click_at(client, point.0, point.1).await?;
@@ -804,8 +810,14 @@ pub async fn dblclick_handle(
         // holding off screen. Same verdict, same absence of a dispatch, different recovery.
         return Ok(Dispatched::skipped(delivery, point, None).unaimed(unaimable));
     }
-    if delivery == Delivery::Intercepted && on_intercept == crate::hit_test::OnIntercept::Refuse {
-        return Err(refusal(Dispatched::skipped(delivery, point, receiver), "double-click", target));
+    if delivery == Delivery::Intercepted
+        && crate::hit_test::should_refuse_intercept(on_intercept, receiver.as_ref())
+    {
+        return Err(refusal(
+            Dispatched::skipped(delivery, point, receiver).under(on_intercept),
+            "double-click",
+            target,
+        ));
     }
 
     dblclick_at_coords(client, point.0, point.1).await?;

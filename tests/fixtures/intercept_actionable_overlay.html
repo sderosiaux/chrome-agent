@@ -1,0 +1,24 @@
+<!doctype html>
+<html>
+<head>
+<title>Actionable overlay</title>
+<style>
+  #target { position: absolute; top: 100px; left: 100px; width: 200px; height: 60px; }
+  /* A consent wall, the shape lequipe.fr's own "accept" button took when it intercepted a
+     click aimed at unrelated navigation and consented on the caller's behalf. */
+  #consent { position: absolute; top: 0; left: 0; width: 100%; height: 400px; background: rgba(0,0,0,.3); }
+  #consent button { position: absolute; top: 90px; left: 90px; width: 220px; height: 80px; }
+</style>
+</head>
+<body>
+  <a id="target" href="#chrono" onclick="window.receiver = 'target'; return false;">chrono</a>
+  <div id="consent">
+    <button id="accept" class="Cmp__action Cmp__action--yes" onclick="window.receiver = 'accept'">oui, j'accepte</button>
+  </div>
+  <p id="report">nothing yet</p>
+  <script>
+    window.receiver = null;
+    // A real pointer at the link's centre lands on the accept button, which covers it.
+  </script>
+</body>
+</html>
