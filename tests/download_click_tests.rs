@@ -26,12 +26,16 @@ fn binary() -> PathBuf {
     path
 }
 
-/// Every chrome-agent this test started, by pid.
+/// Every chrome-agent this suite started, by pid, and the browser it was started for.
 ///
 /// A transfer directory is named `.incoming-<pid>-<nanos>` after the process that opened it, so
-/// this set is what tells THIS test's leftovers from a sibling's. See
-/// `assert_no_transfer_directory_left`.
-static OURS: std::sync::Mutex<Option<std::collections::HashSet<u32>>> = std::sync::Mutex::new(None);
+/// the pid is what tells this suite's leftovers from another test PROCESS's. The browser name is
+/// what tells one test in this process from another: `TestBrowser` makes it unique per test, and
+/// without it a test asserts on a sibling thread's in-flight transfers — which is the same "a test
+/// owns what it names and nothing else" rule `harness_tests` enforces, one level in. See
+/// `assert_nothing_outlives_its_process`.
+static OURS: std::sync::Mutex<Option<std::collections::HashMap<u32, String>>> =
+    std::sync::Mutex::new(None);
 
 fn run(browser: &str, args: &[&str]) -> Output {
     let child = Command::new(binary())
@@ -42,7 +46,8 @@ fn run(browser: &str, args: &[&str]) -> Output {
         .spawn()
         .expect("run chrome-agent");
     if let Ok(mut ours) = OURS.lock() {
-        ours.get_or_insert_with(std::collections::HashSet::new).insert(child.id());
+        ours.get_or_insert_with(std::collections::HashMap::new)
+            .insert(child.id(), browser.to_string());
     }
     child.wait_with_output().expect("run chrome-agent")
 }
@@ -63,11 +68,11 @@ fn unique_temp_dir(tag: &str) -> PathBuf {
 
 /// The private directories `download --selector` writes into while Chrome is transferring.
 ///
-/// Named after the chrome-agent process, and swept before it exits, so by the time a `run()`
-/// returns its own directory is gone. Compared as a SET rather than a count because these tests
-/// run in parallel and a sibling's in-flight transfer would otherwise read as this one's leak;
-/// the regression this guards against left the directory behind for good, so a short poll on the
-/// difference separates the two without a false failure.
+/// Named after the chrome-agent process that opened it. Swept before that process exits, which
+/// usually removes it — but not always, and never on a transfer Chrome is still running, which is
+/// why `assert_nothing_outlives_its_process` and not a count. Compared as a SET rather than a
+/// count for a second reason: these tests run in parallel, and a sibling's in-flight transfer
+/// would otherwise read as this one's leak.
 fn incoming_dirs() -> std::collections::HashSet<String> {
     let Some(home) = dirs_home() else { return std::collections::HashSet::new() };
     let Ok(entries) = std::fs::read_dir(home.join(".chrome-agent").join("tmp")) else {
@@ -80,44 +85,81 @@ fn incoming_dirs() -> std::collections::HashSet<String> {
         .collect()
 }
 
-/// Only OUR leftovers count.
+/// Only leftovers THIS test produced count.
 ///
-/// The before/after difference was already there, and it is not enough: a second test process
-/// on the machine — the normal regime here — starts its own transfers after the `before`
-/// snapshot, and they sit in the difference for as long as they run. Measured on two full
-/// suites in parallel: `.incoming-76300-…` and `.incoming-76268-…`, neither pid a child of this
-/// test, reported as this test's leak. The directory is named after the process that opened it,
-/// so the pid is the discriminator and the poll stays for our own in-flight ones.
-fn ours(names: &std::collections::HashSet<String>) -> Vec<String> {
-    let pids = OURS.lock().ok().and_then(|o| o.clone()).unwrap_or_default();
+/// Two neighbours are excluded, and both were measured rather than imagined. A second test
+/// PROCESS on the machine — the normal regime here — starts its own transfers after the `before`
+/// snapshot and they sit in the difference for as long as they run: on two full suites in
+/// parallel, `.incoming-76300-…` and `.incoming-76268-…`, neither pid a child of this test,
+/// were reported as this test's leak. And a second test in THIS process does the same across
+/// threads: `.incoming-71509-…` and `.incoming-71525-…`, opened by the slow-transfer test and
+/// still being written to by Chrome, failed three sibling tests at once. The pid separates the
+/// first, the browser name separates the second, and `TestBrowser` is what makes that name unique
+/// per test.
+///
+/// Third property, which is what lets the assertion below need no liveness probe of its own:
+/// `run` waits for its child, so every pid in this map has already been reaped. A name this
+/// returns is therefore always a directory whose owner is gone.
+fn ours(browser: &str, names: &std::collections::HashSet<String>) -> Vec<String> {
+    let started = OURS.lock().ok().and_then(|o| o.clone()).unwrap_or_default();
     names
         .iter()
         .filter(|name| {
             name.split('-')
                 .nth(1)
                 .and_then(|pid| pid.parse::<u32>().ok())
-                .is_some_and(|pid| pids.contains(&pid))
+                .and_then(|pid| started.get(&pid))
+                .is_some_and(|theirs| theirs == browser)
         })
         .cloned()
         .collect()
 }
 
-fn assert_no_transfer_directory_left(before: &std::collections::HashSet<String>) {
-    let lingering = || {
-        let now = incoming_dirs();
-        let new: std::collections::HashSet<String> = now.difference(before).cloned().collect();
-        ours(&new)
+/// A selector no fixture has. Arming happens before the click, so a `download` that cannot find
+/// its target is still the cheapest invocation that collects.
+const SWEEPING_TARGET: &str = "#no-element-has-this-id";
+
+/// The promise, which is not the one this used to assert.
+///
+/// It used to demand that no transfer directory of ours be on disk within three seconds, and it
+/// polled for those three seconds without doing anything that could bring it about — nothing in
+/// the tool collects one of these except the invocation that opened it, and that invocation had
+/// already exited. So the assertion held only when Chrome happened to finish inside `clean_up`'s
+/// 120 ms window, and failed on a loaded runner. That is a promise the product does not make and
+/// cannot: measured on the path where the transfer is still running when `--timeout` expires,
+/// eight invocations out of eight had their directory back on disk fifteen seconds later, because
+/// Chrome keeps the download after chrome-agent is gone. Any window wide enough to cover that is
+/// the length of the download.
+///
+/// What IS promised, and what this now asserts: nothing accumulates from one invocation to the
+/// next. A transfer directory belongs to the process named in it, and once that process is gone
+/// nothing can write to it any more, so the next `download` that arms collects it. This therefore
+/// RUNS one instead of waiting for one, and repeats — a transfer still finishing can put another
+/// directory there after a sweep, and the promise is that it converges, not that it is instant.
+///
+/// The other half of the promise — that no partial file is ever handed back to the caller — is
+/// asserted at each call site on the caller's own `--out` path, where it belongs.
+fn assert_nothing_outlives_its_process(browser: &str, before: &std::collections::HashSet<String>) {
+    // Everything `ours` returns has an exited owner by construction (see its docs), so this needs
+    // no liveness probe — and must not grow one, since that would be a second implementation of a
+    // rule `session::liveness` already owns and this binary-only crate cannot export.
+    let abandoned = || {
+        let new: std::collections::HashSet<String> =
+            incoming_dirs().difference(before).cloned().collect();
+        ours(browser, &new)
     };
-    for _ in 0..30 {
-        if lingering().is_empty() {
+    for _ in 0..5 {
+        let _ = run(browser, &["download", "--selector", SWEEPING_TARGET, "--timeout", "1", "--json"]);
+        if abandoned().is_empty() {
             return;
         }
-        std::thread::sleep(Duration::from_millis(100));
+        std::thread::sleep(Duration::from_millis(200));
     }
     assert!(
-        lingering().is_empty(),
-        "transfer directories were left behind: {:?}",
-        lingering()
+        abandoned().is_empty(),
+        "transfer directories outlived the processes that opened them, so a later invocation \
+         could not collect them: {:?}",
+        abandoned()
     );
 }
 
@@ -196,7 +238,7 @@ fn a_click_captures_a_blob_download_by_selector_and_by_uid() {
     assert_eq!(value["uid"], uid, "{value}");
     assert_eq!(std::fs::read_to_string(&generated).unwrap(), "id,name\n1,ada\n2,grace\n");
 
-    assert_no_transfer_directory_left(&before);
+    assert_nothing_outlives_its_process(&browser, &before);
     std::fs::remove_dir_all(out_dir).unwrap();
 }
 
@@ -238,7 +280,7 @@ fn a_click_that_downloads_nothing_says_so_and_forbids_the_retry() {
         "the click was not delivered, so this test proves nothing"
     );
 
-    assert_no_transfer_directory_left(&before);
+    assert_nothing_outlives_its_process(&browser, &before);
 }
 
 /// `--max-bytes` means one thing on both halves of the verb. On the click path Chrome is asked to
@@ -275,14 +317,65 @@ fn a_click_download_past_the_byte_ceiling_is_cancelled_and_nothing_is_written() 
     assert_eq!(value["downloaded"], false, "{value}");
     assert!(value["message"].as_str().unwrap().contains("exceeded 5 bytes"), "{value}");
     assert!(!capped.exists(), "a cancelled transfer wrote {capped:?}");
-    // Repeated, because the cancel is the path where Chrome finalises after we have swept: it
-    // used to recreate the directory and a zero-byte stub behind us, once per invocation.
+    // Repeated, because the cancel is the path where Chrome can finalise after we have swept,
+    // recreating the directory and a zero-byte stub behind us. Three invocations is a backlog the
+    // collector has to drain, not a single directory it could have got lucky on.
     for _ in 0..2 {
         let _ = run(&browser, &["download", "--selector", "#blob-link", "--max-bytes", "5", "--json"]);
     }
-    assert_no_transfer_directory_left(&before);
+    assert_nothing_outlives_its_process(&browser, &before);
 
     std::fs::remove_dir_all(out_dir).unwrap();
+}
+
+/// Arming is where the collection happens, and this is the only test that says so end to end.
+///
+/// The unit tests in `download_click.rs` pin the predicate; what they cannot see is whether
+/// anything calls it. Without this, a `collect_abandoned` that was written and never wired would
+/// pass every other test here — verified by neutering the predicate and running the suite: seven
+/// of eight still passed, and this one did not.
+///
+/// The race itself is deliberately NOT what the suite reproduces. It is timing-dependent by
+/// construction — the leak was measured at eight invocations out of eight against a transfer that
+/// was still running, and at zero out of fifteen against a blob that finalises in milliseconds —
+/// so a test built on it would be green on one machine and red on another, which is the failure
+/// mode that brought this fix about. A directory whose owner has exited is the state the race
+/// LEAVES BEHIND, it can be planted deterministically, and collecting it is the whole promise.
+#[test]
+fn a_directory_left_by_a_process_that_has_exited_is_collected_by_the_next_arming() {
+    if !common::browser_ready() {
+        return;
+    }
+    let guard = TestBrowser::new("test-dl-collect");
+    let browser = guard.name().to_string();
+    let before = incoming_dirs();
+
+    // A pid nothing holds any more: spawned, waited on, and therefore reaped. It is not one of
+    // OURS, so the planted directory is identified by its path rather than through `ours` — and
+    // if a sibling test process happens to collect it first, that is this feature working.
+    let mut child =
+        Command::new("/bin/sh").args(["-c", "exit 0"]).spawn().expect("spawn a short-lived process");
+    let dead = child.id();
+    child.wait().expect("reap it");
+
+    let tmp = dirs_home().expect("HOME").join(".chrome-agent").join("tmp");
+    std::fs::create_dir_all(&tmp).unwrap();
+    let planted = tmp.join(format!(".incoming-{dead}-1788086042802162000"));
+    std::fs::create_dir_all(&planted).unwrap();
+    std::fs::write(planted.join("6f1c1f0e-guid"), b"partial").unwrap();
+    assert!(planted.exists(), "the fixture did not get planted, so this proves nothing");
+
+    let page = common::fixture_url("download_click.html");
+    assert!(run(&browser, &["goto", &page]).status.success());
+    // Any `download` with a click target arms, and arming is what collects — the click itself is
+    // beside the point, so this one is aimed at nothing and fails.
+    let _ = run(&browser, &["download", "--selector", SWEEPING_TARGET, "--timeout", "1", "--json"]);
+
+    assert!(
+        !planted.exists(),
+        "a transfer directory whose process is gone survived an arming: {planted:?}"
+    );
+    assert_nothing_outlives_its_process(&browser, &before);
 }
 
 /// A transfer that begins and does not finish is not a file. The bytes on disk are a prefix, so
@@ -328,7 +421,7 @@ fn a_transfer_still_running_when_the_wait_ends_writes_nothing() {
     assert!(!partial.exists(), "an unfinished transfer wrote {partial:?}");
 
     drop(server);
-    assert_no_transfer_directory_left(&before);
+    assert_nothing_outlives_its_process(&browser, &before);
     std::fs::remove_dir_all(out_dir).unwrap();
 }
 
