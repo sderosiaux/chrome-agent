@@ -256,7 +256,7 @@ chrome-agent console [--level error] [--clear]
 chrome-agent screenshot [--format jpeg] [--quality N] [--max-width N] [--uid nN|--selector "css"]
 chrome-agent pdf [--filename name] [--landscape] [--background]
 chrome-agent download <url> [--out path] [--max-bytes N]        # in-page fetch, keeps the login
-chrome-agent download --uid nN | --selector "css" [--out path]  # CLICK it, capture the download
+chrome-agent download <--uid nN|--selector "css"> [--out path]  # CLICK it, capture the download
 
 chrome-agent tabs
 chrome-agent close [--purge]
@@ -363,7 +363,11 @@ Error:   {"ok":false, "error":"message", "hint":"what to do next"}
   there would invite a second real click, and the page cannot tell that from a second deliberate
   action. `--timeout` bounds the whole window (begin AND finish); `--max-bytes` cancels a
   transfer past it and removes the partial file. `download` carries no verdict and no change
-  report: `downloaded`/`path` are the result, the way `landed` is for `goto`.
+  report: `downloaded`/`path` are the result, the way `landed` is for `goto`. Exactly one target
+  — a URL, `--uid`, or `--selector`. Naming none or two is a clap usage error on stderr with
+  exit 1, before any browser is resolved, so it arrives even from a shell that has never run
+  this tool; under `--json` there is no `{"ok":false}` on stdout for it, as with any malformed
+  invocation.
 
 ## Cheap reads: choose the right one
 
