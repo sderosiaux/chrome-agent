@@ -219,6 +219,9 @@ pub fn download_unfinished_hint(browser: &str) -> String {
          of the file and were discarded rather than handed back as one. The download itself was \
          real: raise the wait instead of clicking again, with `{run} --timeout 300 download` and \
          the same target."
+    )
+}
+
 /// A pointer action `--on-intercept refuse` stopped before it dispatched.
 ///
 /// The one error in this module whose fact is a measurement rather than a symptom: the hit test
@@ -805,6 +808,8 @@ mod tests {
         let plain = no_download_hint("default", 5, &crate::hit_test::Dispatched::js());
         assert!(!plain.contains("occupied the point"), "{plain}");
         assert!(plain.contains("5s"), "the window is the fact: {plain}");
+    }
+
     /// The refusal hint holds the same three rules as every other, on the one error whose fact
     /// is a measurement: the receiver was named by the hit test, so the hint names it too.
     #[test]
