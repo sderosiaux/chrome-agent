@@ -1,11 +1,8 @@
 //! The three dispatch modes agree on which commands carry a change report.
 //!
-//! `mutates_page` (`pipe_report.rs`) is the single allowlist: a mutating command owes the
-//! caller `changed`/`delta`/`verdict`, everything else answers plainly. Pipe and batch
-//! already obeyed it; the CLI attached the full observation machinery to *every* command
-//! routed through `output_action` — so `wait`, `frame` and `forward` returned a
-//! structurally different JSON shape depending on which mode ran them. An agent script
-//! ported between modes silently gained or lost the `verdict` field it keyed on.
+//! `mutates_page` (`pipe_report.rs`) is the single allowlist: a mutating command owes the caller
+//! `changed`/`delta`/`verdict`, everything else answers plainly. `wait`, `frame` and `forward`
+//! must therefore return the same JSON shape in CLI, batch and pipe.
 
 use std::io::Write as _;
 use std::process::{Command, Stdio};
@@ -15,14 +12,11 @@ use serde_json::Value;
 mod common;
 use common::TestBrowser;
 
-fn binary() -> String {
-    let mut path = std::env::current_exe().unwrap().parent().unwrap().parent().unwrap().to_path_buf();
-    path.push("chrome-agent");
-    path.to_string_lossy().into_owned()
-}
-
 fn run_cli(args: &[&str]) -> (String, i32) {
-    let output = Command::new(binary()).args(args).output().expect("Failed to run chrome-agent");
+    let output = Command::new(common::binary())
+        .args(args)
+        .output()
+        .expect("Failed to run chrome-agent");
     (
         String::from_utf8_lossy(&output.stdout).to_string(),
         output.status.code().unwrap_or(-1),
@@ -30,7 +24,7 @@ fn run_cli(args: &[&str]) -> (String, i32) {
 }
 
 fn run_batch(browser: &str, commands_json: &str) -> Value {
-    let mut child = Command::new(binary())
+    let mut child = Command::new(common::binary())
         .args(["--browser", browser, "--json", "batch"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -47,8 +41,8 @@ fn run_batch(browser: &str, commands_json: &str) -> Value {
     serde_json::from_slice(&output.stdout).expect("batch JSON")
 }
 
-/// Establish a page and a baseline snapshot, so that a drifting CLI would have
-/// everything it needs to attach a change report to the next command.
+/// Establish a page and a baseline snapshot, so a drifting CLI would have everything it needs
+/// to attach a change report to the next command.
 fn setup(browser: &str) -> bool {
     if !common::browser_ready() {
         return false;
@@ -84,7 +78,10 @@ fn wait_answers_with_the_same_shape_in_cli_and_batch() {
     let cli: Value = serde_json::from_str(&stdout).expect("JSON response");
     assert_no_observation(&cli, "CLI wait");
 
-    let batch = run_batch(b.name(), r#"[{"cmd":"wait","what":"selector","pattern":"body"}]"#);
+    let batch = run_batch(
+        b.name(),
+        r#"[{"cmd":"wait","what":"selector","pattern":"body"}]"#,
+    );
     let results = batch["results"].as_array().expect("batch results");
     assert_no_observation(&results[0], "batch wait");
 }
@@ -123,8 +120,10 @@ fn forward_answers_with_the_same_shape_in_cli_and_batch() {
     let cli: Value = serde_json::from_str(&stdout).expect("JSON response");
     assert_no_observation(&cli, "CLI forward");
 
-    // uid_map hygiene, same as `back` and `goto`: the document was replaced, so a
-    // uid from the old page must answer "not found", not resolve into the new one.
+    // uid_map hygiene: the document was replaced, so an old uid must answer "not found".
     let (stdout, code) = run_cli(&["--browser", b.name(), "--json", "click", "n999999"]);
-    assert!(code != 0 || stdout.contains("not found"), "stale uid must not survive forward: {stdout}");
+    assert!(
+        code != 0 || stdout.contains("not found"),
+        "stale uid must not survive forward: {stdout}"
+    );
 }

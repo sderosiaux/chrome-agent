@@ -1,10 +1,8 @@
-//! `network --live --body`: a URL filter is an explicit selection, so it overrides the
-//! MIME allowlist (issue #27 — an `application/yaml` response matched `--filter` and its
-//! body was silently omitted), and a binary body is counted rather than printed.
+//! `network --live --body`: a URL filter is an explicit selection and overrides the MIME
+//! allowlist (issue #27), and a binary body is counted rather than printed.
 //!
-//! The server is real: a `TcpListener` on a loopback port serving one YAML and one
-//! binary response, fetched on an interval by a fixture page so the requests happen
-//! while the capture window is open.
+//! The server is a real `TcpListener` on a loopback port, fetched on an interval by a fixture
+//! page so the requests fall inside the capture window.
 
 use std::io::{Read as _, Write as _};
 use std::net::TcpListener;
@@ -15,20 +13,8 @@ use serde_json::Value;
 mod common;
 use common::TestBrowser;
 
-fn binary() -> String {
-    let mut path = std::env::current_exe()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .to_path_buf();
-    path.push("chrome-agent");
-    path.to_string_lossy().into_owned()
-}
-
 fn run_json(args: &[&str]) -> Value {
-    let output = Command::new(binary())
+    let output = Command::new(common::binary())
         .args(args)
         .output()
         .expect("run chrome-agent");
@@ -43,9 +29,8 @@ fn run_json(args: &[&str]) -> Value {
         .unwrap_or_else(|error| panic!("invalid JSON for {args:?}: {error}\nstdout: {stdout}"))
 }
 
-/// Serve `/config.yaml` (textual, non-allowlisted MIME) and `/blob.bin` (256 bytes that
-/// force `base64Encoded: true`) until the process exits. `Access-Control-Allow-Origin: *`
-/// because the fixture fetches from a `file://` origin.
+/// Serve `/config.yaml` (non-allowlisted MIME) and `/blob.bin` (256 bytes, forcing
+/// `base64Encoded: true`). CORS is open because the fixture fetches from a `file://` origin.
 fn spawn_server() -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
     let port = listener.local_addr().unwrap().port();
@@ -53,7 +38,9 @@ fn spawn_server() -> u16 {
         for stream in listener.incoming() {
             let Ok(mut stream) = stream else { continue };
             let mut request = [0u8; 2048];
-            let Ok(n) = stream.read(&mut request) else { continue };
+            let Ok(n) = stream.read(&mut request) else {
+                continue;
+            };
             let request = String::from_utf8_lossy(&request[..n]);
             let (mime, body): (&str, Vec<u8>) = if request.starts_with("GET /config.yaml") {
                 (
@@ -101,10 +88,17 @@ fn a_filter_is_a_selection_and_a_binary_body_is_counted_not_printed() {
         true
     );
 
-    // Filtered: application/yaml is not on the allowlist, and the filter overrides it.
+    // application/yaml is not on the allowlist, and the filter overrides it.
     let filtered = run_json(&[
-        "--browser", &browser, "--json",
-        "network", "--live", "6", "--body", "--filter", "config.yaml",
+        "--browser",
+        &browser,
+        "--json",
+        "network",
+        "--live",
+        "6",
+        "--body",
+        "--filter",
+        "config.yaml",
     ]);
     let yaml = entry_for(&filtered, "/config.yaml");
     assert_eq!(yaml["contentType"], "application/yaml");
@@ -115,8 +109,15 @@ fn a_filter_is_a_selection_and_a_binary_body_is_counted_not_printed() {
 
     // Filtered binary: selected, fetched, counted — never printed.
     let blob = run_json(&[
-        "--browser", &browser, "--json",
-        "network", "--live", "6", "--body", "--filter", "blob.bin",
+        "--browser",
+        &browser,
+        "--json",
+        "network",
+        "--live",
+        "6",
+        "--body",
+        "--filter",
+        "blob.bin",
     ]);
     let bin = entry_for(&blob, "/blob.bin");
     assert!(bin["body"].is_null(), "binary body was printed: {bin}");
@@ -128,13 +129,17 @@ fn a_filter_is_a_selection_and_a_binary_body_is_counted_not_printed() {
 
     // Unfiltered: the allowlist still guards --body, so the yaml body stays out.
     let unfiltered = run_json(&[
-        "--browser", &browser, "--json",
-        "network", "--live", "4", "--body",
+        "--browser",
+        &browser,
+        "--json",
+        "network",
+        "--live",
+        "4",
+        "--body",
     ]);
     let yaml = entry_for(&unfiltered, "/config.yaml");
     assert!(
         yaml["body"].is_null(),
         "unfiltered --body fetched a non-allowlisted type: {yaml}"
     );
-
 }

@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>A target that never stops moving, entirely inside the viewport</title>
+<style>
+  /* Nothing scrolls: the point moves because the ELEMENT moves, which is the case a viewport
+     test cannot see. A smooth scroll passes through the viewport too, and
+     `scrollIntoView({behavior:'instant'})` throwing drops the probe onto a fallback that
+     honours the page's own `scroll-behavior` — both end here, at a rect being read while it
+     is still travelling. */
+  html, body { height: 100%; overflow: hidden; margin: 0; font: 14px system-ui, sans-serif; }
+  #track { position: relative; height: 120px; margin: 60px 20px; border: 1px dashed #ccc; }
+  /* Well inside the viewport at every position it takes, so no scroll is ever attempted and
+     `inViewport` is true on the first reading and every reading after it. */
+  #runner { position: absolute; top: 40px; left: 0; padding: 8px 16px; }
+  #anchor { margin: 20px; padding: 8px 16px; }
+</style>
+</head>
+<body>
+  <div id="track"><button id="runner">Moving target</button></div>
+  <!-- The control: same page, same viewport, a button that does not move. -->
+  <button id="anchor">Still target</button>
+  <script>
+    window.receiver = null;
+    for (const id of ['runner', 'anchor']) {
+      document.getElementById(id).addEventListener('click', () => { window.receiver = id; });
+    }
+    // ~300 px/s, bouncing inside a 300 px track: two readings 30 ms apart differ by ~9 px,
+    // far past SAME_POINT_EPSILON, and the element never leaves the viewport.
+    const runner = document.getElementById('runner');
+    let x = 0, dx = 1, last = null;
+    function step(now) {
+      if (last !== null) {
+        x += dx * 0.3 * (now - last);
+        if (x > 300) { x = 300; dx = -1; }
+        if (x < 0) { x = 0; dx = 1; }
+        runner.style.left = x + 'px';
+      }
+      last = now;
+      requestAnimationFrame(step);
+    }
+    requestAnimationFrame(step);
+  </script>
+</body>
+</html>

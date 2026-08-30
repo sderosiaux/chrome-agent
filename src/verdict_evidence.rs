@@ -1,37 +1,29 @@
 //! The evidence a verdict is made from, and the one thing it carries but never prints.
+//! Re-exported from `verdict.rs`, so call sites write `crate::verdict::Delivery`.
 //!
-//! Split out of `verdict.rs` for the repo's 1000-line file cap and re-exported from it, so every
-//! call site stays `crate::verdict::Delivery` / `crate::verdict::Postcondition`. The ladder, the
-//! verdict words and the classifier stay next door: this file is only what `classify` reads and
-//! what it hands on.
-//!
-//! Every type here has a floor variant that means "no evidence" — `Delivery::NotProbed`,
-//! `Postcondition::NotRead` — and never a claim. That is the property the ladder depends on.
+//! Invariant the ladder depends on: every type here has a floor variant meaning "no evidence" —
+//! `Delivery::NotProbed`, `Postcondition::NotRead` — and never a claim.
 
 use std::fmt;
 
 /// What the hit test said about a pointer-targeted action's delivery before dispatch.
 ///
-/// `NotProbed` is the floor and the default: every command that dispatches no pointer event —
-/// and every mouse path where the probe could not answer, or answered about a document we
-/// cannot hit-test (a target inside an iframe) — reports it. It is an absence of evidence
-/// and never licenses a claim.
+/// `NotProbed` is the floor and the default: every command that dispatches no pointer event, and
+/// every mouse path where the probe could not answer or answered about a document we cannot
+/// hit-test (a target inside an iframe).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Delivery {
-    /// The aim point resolved to the target itself, a descendant, its label's control, or
-    /// its shadow host. This is the only value that licenses `no_effect`.
+    /// The aim point resolved to the target, a descendant, its label's control or its shadow
+    /// host. The only value that licenses `no_effect`.
     TargetHit,
     /// The aim point resolved to an element outside the target's flat subtree.
     Intercepted,
-    /// No point on the target could be aimed at, and the reading is STABLE — two consecutive
-    /// probes agreed. Two shapes reach here: a point outside every one of the element's own
-    /// client rects, and a point that stopped moving outside the viewport (a `position: fixed`
-    /// wall pinned past an edge, a document whose scroll is locked). Nothing was dispatched,
-    /// and a repeat measures the same coordinate.
+    /// No point on the target could be aimed at, and two consecutive probes agreed. Reached by a
+    /// point outside every client rect of the element, and by one that stopped moving outside the
+    /// viewport. Nothing was dispatched, and a repeat measures the same coordinate.
     OffTarget,
-    /// Two consecutive readings of the aim point disagreed: it was still moving when the settle
-    /// budget ran out. Nothing was dispatched, and the miss is TRANSIENT — this is the one
-    /// reading a repeat can fix.
+    /// Two readings of the aim point disagreed: still moving when the settle budget ran out.
+    /// Nothing was dispatched, and the miss is TRANSIENT — the one reading a repeat can fix.
     NotSettled,
     /// The action went through a JS `click()`/`MouseEvent`, which performs no hit test.
     /// Interception is not undetected here, it is inapplicable.
@@ -53,9 +45,8 @@ impl Delivery {
         }
     }
 
-    /// Read back a delivery the action wrote onto its own response.
-    ///
-    /// Anything unrecognised is `NotProbed`: an unknown token is not evidence.
+    /// Read back a delivery the action wrote onto its own response. Anything unrecognised is
+    /// `NotProbed`: an unknown token is not evidence.
     #[must_use]
     pub fn parse(token: &str) -> Self {
         match token {
@@ -77,25 +68,17 @@ impl fmt::Display for Delivery {
 
 /// What a read-back on the acted-on handle said once the action had run.
 ///
-/// `NotRead` is the floor and the default: every command that has no postcondition to read
-/// (click, dblclick, press, hover, drag, scroll) reports it, as does any response that never
-/// carried one. It is an absence of evidence and never licenses a claim.
+/// `NotRead` is the floor and the default: every command with no postcondition to read (click,
+/// dblclick, press, hover, drag, scroll), and any response that never carried one.
 ///
-/// Only `fill` and the bulk fills reach the two failing variants. `check`/`uncheck` and
-/// `select` read their state back too and reach `Kept` through the same field, but they REFUSE
-/// when the reading disagrees with the request — the error is the report — so a successful
-/// response from those two is `Kept`, or `NotRead` for a `check` that dispatched nothing
-/// because the element already held the state.
+/// Only `fill` and the bulk fills reach the two failing variants. `check`/`uncheck` and `select`
+/// read their state back too and reach `Kept` through the same field, but they REFUSE when the
+/// reading disagrees — the error is the report — so their successful responses are `Kept`, or
+/// `NotRead` for a `check` that dispatched nothing because the state already held.
 ///
-/// `Kept` is evidence in its own right and has its own rung, ranked below every statement that
-/// describes the page and above every admission that none was available — see the ladder in the
-/// module docs for why the two outcomes of one measurement are not ranked symmetrically.
-///
-/// `Discarded` and `Rewritten` are one verdict and two reasons, because they are one fact
-/// ("the element does not hold what was asked for") with two different recoveries: an empty
-/// field means the write cannot land this way, a rewritten one means it landed in a shape the
-/// page chose. Collapsing them would put `value_reverted` on every phone and currency mask on
-/// the web, which is a machine-readable token saying something false.
+/// `Discarded` and `Rewritten` are one fact with two recoveries: an empty field means the write
+/// cannot land this way, a rewritten one that it landed in a shape the page chose. Collapsing
+/// them would put `value_reverted` on every phone and currency mask on the web.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Postcondition {
     /// Nothing was read back, or the response carried no readable answer.
@@ -104,8 +87,7 @@ pub enum Postcondition {
     Kept,
     /// The handle held nothing: the page took the write and kept none of it.
     Discarded,
-    /// The handle held something other than what was asked for — a mask, a normaliser, a
-    /// controlled component that wrote its own value over ours.
+    /// The handle held something else — a mask, a normaliser, a controlled component.
     Rewritten,
 }
 
@@ -116,15 +98,18 @@ pub struct Delivered {
     /// The receiver of an intercepted click was in the top layer (`:modal`). Its own reason
     /// token, because the recovery differs: close the dialog rather than re-aim.
     pub modal_receiver: bool,
-    /// Milliseconds between the dispatch and the observation. `no_effect` is only ever a
-    /// claim about a window, so without a window the verdict falls back to `unchanged`.
+    /// Milliseconds between dispatch and observation. `no_effect` is a claim about a window, so
+    /// without one the verdict falls back to `unchanged`.
     pub observed_after_ms: Option<u64>,
 }
 
 impl Delivered {
     /// The floor: no pointer event, or no answer from the hit test.
-    pub const NOT_PROBED: Self =
-        Self { how: Delivery::NotProbed, modal_receiver: false, observed_after_ms: None };
+    pub const NOT_PROBED: Self = Self {
+        how: Delivery::NotProbed,
+        modal_receiver: false,
+        observed_after_ms: None,
+    };
 }
 
 /// What we observed after an action.
@@ -143,25 +128,21 @@ pub enum Observation {
         edits: usize,
         moved: usize,
         focus_moved: bool,
-        /// Fields that held a value before this action and hold none after it. Derived from
-        /// the diff, so unlike a postcondition it belongs in Group B: without a comparable
-        /// tree there is nothing to have lost.
+        /// Fields that held a value before this action and hold none after it. Derived from the
+        /// diff, so it is Group B: without a comparable tree there is nothing to have lost.
         values_lost: usize,
     },
 }
 
 /// What the tool managed to see of the page after the action.
 ///
-/// Deliberately NOT part of the verdict, and never printed: the verdict is about the thing this
-/// action did, while this is about whether anything else could be observed. It rides on the
-/// assessment because `next` needs it and no word of the verdict carries it — see `next_for`.
+/// Not part of the verdict and never printed: the verdict is about what this action did, this is
+/// about whether anything else could be observed. It rides on the assessment for `next_for`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PageSight {
-    /// The page was read, or the caller declined the read (`--verdict off`). Either way, no
-    /// observation is missing that the caller did not choose to miss.
+    /// The page was read, or the caller declined the read (`--verdict off`) and owns the silence.
     Readable,
-    /// The tool tried to read the page after the action and could not. Whatever it says about
-    /// the handle it wrote to, it is blind to everything else.
+    /// The read after the action failed, so the tool is blind to everything but its own handle.
     Unreadable,
 }
 
@@ -169,8 +150,7 @@ pub enum PageSight {
 mod tests {
     use super::*;
 
-    /// Two spellings of the same delivery must not exist: the token on the response is what
-    /// the classifier reads back, so it has to round-trip.
+    /// The token on the response is what the classifier reads back, so it has to round-trip.
     #[test]
     fn every_delivery_token_round_trips() {
         for how in [

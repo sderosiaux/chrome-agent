@@ -1,37 +1,15 @@
 //! Rust shapes for the slice of the Chrome `DevTools` Protocol this tool speaks.
 //!
-//! **There is no `dead_code` allow in this module, and a field added here that nothing reads is
-//! a build failure.** That is the end of a two-step correction worth writing down, because both
-//! steps were justified and only the second was right.
-//!
-//! It began with one `#[allow(dead_code)]` on `pub mod types;`, justified as "CDP fields kept for
-//! serde deserialization completeness". That was wrong on every count. Serde ignores unknown
-//! fields by default, so a field this tool does not read costs nothing to omit and buys nothing
-//! to keep; `MouseButton` is `Serialize` only, so no reading of "completeness" reaches it at all;
-//! and for the fields that were neither `Option` nor `#[serde(default)]` — four on `BoxModel`,
-//! three on `ExceptionDetails`, one each on `AXValue` and `NavigateResult` — keeping them
-//! TIGHTENED what Chrome must send. `serde_proof` below pins both halves of that.
-//!
-//! The step in between replaced the blanket with 28 per-item allows, each carrying its reason in
-//! one of three families. That made the audit possible, which is what it was for, and it did not
-//! survive the audit: **`pinned` was false** (the four `BoxModel` fields were named by one
-//! `#[cfg(test)]` struct literal in `snapshot.rs` and read by no assertion in it — an
-//! initializer, not a dependency); **`shape` was documentation written in struct syntax**, and a
-//! comment says the same thing without asking the compiler to carry it or letting it go stale
-//! unnoticed; **`envelope` was speculative**, a `sessionId` kept against the day this tool drives
-//! several sessions per connection, which is the kind of claim about the unmeasured future this
-//! repository refuses everywhere else.
-//!
-//! So the protocol's unread fields are now documented on the type that would carry them, in
-//! prose, where they cost nothing to compile and cannot pretend to be used. What each struct
-//! declares is what something reads.
+//! A struct declares only what something reads. There is no `dead_code` allow here, so a field
+//! added and never read is a build failure. Serde ignores undeclared fields, so omitting one is
+//! free; a declared field that is neither `Option` nor `#[serde(default)]` is a field Chrome
+//! MUST send. Unread protocol fields are noted in prose on the type that would carry them.
+//! `serde_proof` below pins both halves.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-// ---------------------------------------------------------------------------
-// Generic CDP wire protocol
-// ---------------------------------------------------------------------------
+// --- Generic CDP wire protocol ---
 
 /// Outgoing CDP request envelope.
 #[derive(Debug, Serialize)]
@@ -45,15 +23,9 @@ pub struct CdpRequest {
 
 /// Incoming CDP message — either a response to a request or an async event.
 ///
-/// `untagged` makes every field below load-bearing in one direction nobody expects: when a
-/// message fails BOTH variants it is not a message with a missing field, it is a message with
-/// no home, and `dispatch_loop` used to drop it silently. A response carries `id` and no
-/// `method`, an event carries `method` and no `id`, so the discriminating fields never
-/// mis-assign; the only way to fall out of the enum entirely is an optional field arriving with
-/// a JSON type the struct did not declare. Every optional field here is therefore either
-/// `Value` (which accepts anything) or a type CDP genuinely pins. See
-/// `client::resolve_unreadable`, which now answers the waiting caller instead of leaving it to
-/// time out.
+/// `untagged`, and a response carries `id` while an event carries `method`, so the two never
+/// mis-assign. Falling out of the enum takes an optional field of an undeclared JSON type, so
+/// every optional field here is `Value` or a type CDP pins; see `client::resolve_unreadable`.
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 pub enum CdpMessage {
@@ -71,17 +43,9 @@ pub struct CdpResponse {
     pub error: Option<CdpError>,
 }
 
-/// Protocol-level error attached to a response.
-///
-/// CDP also sends a free-form `data` beside `code`/`message`. It is not declared here, and that
-/// is the safest of the three options rather than the laziest. It was once `Option<String>`, and
-/// an object arriving there would have failed `CdpResponse`, then — `CdpMessage` being
-/// `untagged` — failed `CdpEvent` too, so the message would have been dropped: an error Chrome
-/// answered in milliseconds reaching the caller half a minute later as a timeout. `Option<Value>`
-/// closed that hole; declaring nothing closes it further, because serde ignores what it was not
-/// told about whatever JSON type arrives. `client::call_within` and `Display` report `code` and
-/// `message`, which is every reader this type has ever had; `client::resolve_unreadable` covers
-/// the class of message we cannot parse at all.
+/// Protocol-level error attached to a response. CDP's free-form `data` stays undeclared: typed
+/// `Option<String>`, an object-valued `data` fell out of both `CdpMessage` variants and turned
+/// an immediate error into a timeout. Only `code` and `message` are read.
 #[derive(Debug, Deserialize)]
 pub struct CdpError {
     pub code: i64,
@@ -96,9 +60,7 @@ pub struct CdpEvent {
     pub params: Value,
 }
 
-// ---------------------------------------------------------------------------
-// Target domain
-// ---------------------------------------------------------------------------
+// --- Target domain ---
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -136,9 +98,7 @@ pub struct TargetInfo {
     pub url: String,
 }
 
-// ---------------------------------------------------------------------------
-// Page domain
-// ---------------------------------------------------------------------------
+// --- Page domain ---
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -152,11 +112,9 @@ pub struct NavigateParams {
     pub frame_id: Option<String>,
 }
 
-/// `Page.navigate`'s answer. Deliberately only `errorText`: document identity comes from
+/// `Page.navigate`'s answer, reduced to `errorText`. Document identity comes from
 /// `Page.getFrameTree` afterwards (`diff::Identity` reads `(frameId, loaderId)` there), which
-/// answers for a document arrived at by any route and not only by a `goto` this tool sent.
-/// `frameId` was declared here and required, so a Chrome that omitted it would have failed the
-/// navigation this tool had just performed.
+/// answers for a document arrived at by any route, not only by a `goto` this tool sent.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NavigateResult {
@@ -187,9 +145,7 @@ pub struct CaptureScreenshotResult {
     pub data: String,
 }
 
-// ---------------------------------------------------------------------------
-// Runtime domain
-// ---------------------------------------------------------------------------
+// --- Runtime domain ---
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -212,15 +168,9 @@ pub struct RemoteObject {
     pub object_id: Option<String>,
 }
 
-/// A throw, as the eight readers of `exception_details` use it: they report
-/// `exception.description` and fall back to `text`.
-///
-/// CDP also sends `exceptionId`, `lineNumber`, `columnNumber`, `scriptId`, `url` and
-/// `executionContextId`. None is declared, and the three that were declared were *required* —
-/// every script this tool evaluates is one it wrote itself and injected as a single expression,
-/// so a line and column point into a string in this repository rather than at anything the
-/// caller can open, and requiring them of Chrome to then not read them was a constraint bought
-/// for nothing.
+/// A throw, as its readers use it: `exception.description`, falling back to `text`. CDP's
+/// `exceptionId`, `lineNumber`, `columnNumber`, `scriptId`, `url` and `executionContextId` stay
+/// undeclared — a line and column point into an expression this repository injected.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExceptionDetails {
@@ -229,9 +179,7 @@ pub struct ExceptionDetails {
     pub exception: Option<RemoteObject>,
 }
 
-// ---------------------------------------------------------------------------
-// DOM domain
-// ---------------------------------------------------------------------------
+// --- DOM domain ---
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -259,13 +207,8 @@ pub struct GetBoxModelResult {
 }
 
 /// CDP box model. Each quad is an array of 8 floats: [x1,y1, x2,y2, x3,y3, x4,y4].
-///
-/// `content` is what `content_center` aims at and `border` is what `geometry` clips a screenshot
-/// to. `padding`, `margin`, `width` and `height` are not declared, and this is the one struct
-/// where dropping a field LOOSENS rather than merely tidies: none of the six was `Option` or
-/// `#[serde(default)]`, so each was a field Chrome had to send for `DOM.getBoxModel` to parse at
-/// all. Keeping an unread required field is the opposite of leniency — a constraint this tool
-/// imposed for nothing.
+/// `content_center` aims at `content`, `geometry` clips a screenshot to `border`. `padding`,
+/// `margin`, `width` and `height` stay undeclared: unread, and none was `Option`.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BoxModel {
@@ -276,9 +219,7 @@ pub struct BoxModel {
 /// A quad is 4 (x, y) points = 8 floats.
 pub type Quad = Vec<f64>;
 
-// ---------------------------------------------------------------------------
-// Input domain
-// ---------------------------------------------------------------------------
+// --- Input domain ---
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -313,40 +254,17 @@ pub enum MouseEventType {
     MouseMoved,
 }
 
-/// The mouse button this tool sends. CDP defines six; one is wired.
-///
-/// It used to declare all six — `None`, `Left`, `Middle`, `Right`, `Back`, `Forward` — and
-/// construct exactly one of them, at the eight sites that dispatch pointer input (`element.rs`
-/// ×4 for click and dblclick, `element_controls.rs` ×4 for drag). Nothing else in the repository
-/// mentions a right click: no command, no flag, no test, no line of documentation. So this enum
-/// was the only place that said anything at all about the subject, and what it said was untrue —
-/// a reader of the type concluded a right click existed somewhere, and there is nowhere for it
-/// to exist. The five went, and the absence became a fact of the type rather than a discovery
-/// made by grepping.
-///
-/// Two things make the removal cheap. Nothing deserializes `MouseButton` (`Serialize` only), so
-/// no message Chrome sends can stop fitting; and the value only ever leaves in
-/// `DispatchMouseEventParams::button`, so removing a variant narrows what this tool can emit and
-/// changes nothing it accepts. `None` went with the rest and was redundant besides: a move with
-/// no button held is already spelled `button: None` in Rust, which omits the field entirely
-/// (`skip_serializing_if`) and lets CDP apply its own `"none"` default — `element_controls`'s
-/// drag does exactly that between press and release.
-///
-/// **What this costs, stated:** adding a right click later means adding a variant back. That is
-/// one line, and it will be the smallest part of the work — there is no verb, no CLI surface and
-/// no `hit_test` story for a context menu today, and whoever writes them will not be slowed by
-/// this. `types.rs` is a hand-picked subset of CDP, not a mirror of it (there are no `Network.*`
-/// types here either), so carrying a complete enum inside an incomplete module bought fidelity
-/// nowhere and asserted a capability in the one spot a reader would look for it.
+/// The mouse button this tool sends. CDP defines six; only `Left` is wired, since no verb,
+/// flag or test here produces another. `Serialize` only, so narrowing it changes nothing this
+/// tool accepts. A move with no button held is `button: None`, which omits the field
+/// (`skip_serializing_if`) and lets CDP apply its own `"none"` default.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum MouseButton {
     Left,
 }
 
-// ---------------------------------------------------------------------------
-// Accessibility domain
-// ---------------------------------------------------------------------------
+// --- Accessibility domain ---
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -355,10 +273,8 @@ pub struct GetFullAXTreeResult {
 }
 
 /// One accessibility node, reduced to what `snapshot_render` renders and what the traversal
-/// needs to walk. `description` and `frameId` are not declared: the render strips to role, name
-/// and value precisely to keep a tree an agent can read, and frame scoping is done on the way
-/// out — `snapshot` passes `frameId` as a REQUEST parameter, so the tree that comes back is
-/// already the frame's.
+/// walks. `description` and `frameId` are undeclared: the render keeps role, name and value
+/// only, and `snapshot` scopes frames by passing `frameId` as a request parameter.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AXNode {
@@ -381,14 +297,9 @@ pub struct AXNode {
     pub parent_id: Option<String>,
 }
 
-/// A tagged accessibility value.
-///
-/// CDP sends a `type` (`"string"`, `"boolean"`, `"idrefList"`, `"computedString"`…) and, for
-/// relations, `relatedNodes`. Neither is declared. Every reader here goes through
-/// `AXNode::role_name`/`name_value` or `AXProperty`, all of which ask `value.as_str()`/`as_bool()`
-/// and get `None` when the type is not the one they wanted — so the tag is checked by the read
-/// rather than before it, and `type` was *required*, which made a value Chrome sent untagged an
-/// unparseable tree rather than a `None`.
+/// A tagged accessibility value. CDP's `type` and `relatedNodes` stay undeclared: readers ask
+/// `value.as_str()`/`as_bool()` and get `None` on a mismatch, so the tag is checked by the
+/// read, whereas a declared `type` was required and an untagged value broke the whole tree.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AXValue {
@@ -403,9 +314,7 @@ pub struct AXProperty {
     pub value: AXValue,
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+// --- Helpers ---
 
 impl BoxModel {
     /// Return the center (x, y) of the content quad.
@@ -440,23 +349,17 @@ impl std::fmt::Display for CdpError {
 
 impl std::error::Error for CdpError {}
 
-/// The two facts the module doc rests on, so neither can rot into a comment nobody rechecks.
-///
-/// They are asserted rather than asserted-about: the first says an undeclared field cannot break
-/// a parse, which is why removing 28 of them was safe; the second says a declared non-`Option`
-/// field is a demand this tool makes of Chrome, which is why removing nine of them was an
-/// improvement and not merely tidying.
+/// The two facts the module doc rests on: an undeclared field cannot break a parse, and a
+/// declared non-`Option` field is a demand made of Chrome.
 #[cfg(test)]
 mod serde_proof {
     use super::*;
 
-    /// A field we do not declare is IGNORED, whatever it holds — so no removal above can make a
-    /// message Chrome really sends stop fitting.
+    /// An undeclared field is ignored whatever it holds.
     #[test]
     fn an_undeclared_field_cannot_break_a_parse() {
-        // `sessionId` and `data` were declared until this pass; `whatever` never was. All three
-        // arrive here, one of them as an object, which is the JSON type that used to drop the
-        // whole message when `data` was typed `Option<String>`.
+        // One arrives as an object: the JSON type that dropped the whole message when `data`
+        // was typed `Option<String>`.
         let json = r#"{"id":7,"error":{"code":-32000,"message":"boom","data":{"detail":"x"}},
                        "sessionId":"S1","whatever":42}"#;
         let r: CdpResponse = serde_json::from_str(json).expect("undeclared fields are ignored");
@@ -464,23 +367,22 @@ mod serde_proof {
         assert_eq!(r.error.expect("error parsed").code, -32000);
     }
 
-    /// A declared field that is neither `Option` nor `#[serde(default)]` is REQUIRED. That is the
-    /// cost the old "kept for deserialization completeness" had backwards, and this is the
-    /// relaxation the removals bought: `DOM.getBoxModel` now parses from the two quads that are
-    /// read, and a Chrome that omitted `margin` would once have failed the whole reply.
+    /// A declared field that is neither `Option` nor `#[serde(default)]` is REQUIRED.
     #[test]
     fn only_what_is_read_is_demanded_of_chrome() {
         let two_quads_only = r#"{"content":[0,0,1,0,1,1,0,1],"border":[0,0,1,0,1,1,0,1]}"#;
         assert!(serde_json::from_str::<BoxModel>(two_quads_only).is_ok());
 
-        // `content` IS read, so it stays required — the lint above is about unread fields only.
+        // `content` IS read, so it stays required.
         let err = serde_json::from_str::<BoxModel>(r#"{"border":[0,0,1,0,1,1,0,1]}"#)
             .expect_err("content is read, so it is still demanded")
             .to_string();
-        assert!(err.contains("content"), "expected a missing-field error naming content: {err}");
+        assert!(
+            err.contains("content"),
+            "expected a missing-field error naming content: {err}"
+        );
 
-        // Same relaxation on the other three: `exceptionId`/`lineNumber`/`columnNumber` and
-        // `type` were required and unread.
+        // Same on the other three, whose unread fields were required too.
         assert!(serde_json::from_str::<ExceptionDetails>(r#"{"text":"ReferenceError"}"#).is_ok());
         assert!(serde_json::from_str::<AXValue>(r#"{"value":"button"}"#).is_ok());
         assert!(serde_json::from_str::<NavigateResult>("{}").is_ok());

@@ -1,25 +1,16 @@
-//! What an action reports about the page once it ran, for pipe and batch.
+//! What an action reports about the page once it ran, for pipe and batch. Re-exported from
+//! `pipe_dispatch.rs`.
 //!
-//! Split out of `pipe_dispatch.rs` for the 1000-line cap, and re-exported from it so the
-//! dispatchers keep their existing call sites. This is the central hook the CLAUDE.md
-//! design note describes: adding a mutating command means adding it to `mutates_page` and
-//! nothing else.
+//! The central hook: adding a mutating command means adding it to `mutates_page` and nothing else.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::cdp::client::CdpClient;
 use crate::commands;
-use crate::session::{self, SessionStore};
 
-/// What the action said about its own delivery, read back off the response it built.
-///
-/// The hit test runs inside the action, in `element`; the verdict is decided afterwards, in
-/// three different places (CLI, pipe, batch). Passing the delivery through the response rather
-/// than through every dispatcher signature is what keeps those three in agreement — and keeps
-/// `mutates_page` the only thing a new command has to be added to.
-///
-/// A response with no `delivery` field is `NotProbed`: every non-mouse command, and any action
-/// that predates this wiring. Absence of evidence, never a claim.
+/// What the action said about its own delivery, read back off the response it built. The hit test
+/// runs inside the action and the verdict is settled afterwards in three places, so the delivery
+/// rides on the response rather than on every dispatcher signature. No field means `NotProbed`.
 pub fn delivery_from_response(client: &CdpClient, obj: &Value) -> crate::verdict::Delivered {
     let Some(token) = obj.get("delivery").and_then(Value::as_str) else {
         return crate::verdict::Delivered::NOT_PROBED;
@@ -31,47 +22,39 @@ pub fn delivery_from_response(client: &CdpClient, obj: &Value) -> crate::verdict
             .and_then(|r| r.get("modal"))
             .and_then(Value::as_bool)
             .unwrap_or(false),
-        // Measured from the dispatch, not from here: the window `no_effect` names has to be
-        // the one the page actually had.
+        // Measured from the dispatch, not from here: `no_effect` must name the page's own window.
         observed_after_ms: client.ms_since_dispatch(),
     }
 }
 
-/// What the action's own read-back said, off the response it built.
+/// What the action's own read-back said, off the response it built. Same reason as
+/// `delivery_from_response`.
 ///
-/// Same reason as `delivery_from_response`: the read-back happens inside the action, the
-/// verdict is settled afterwards in three different places, and carrying the answer on the
-/// response is what keeps those three in agreement without a signature per command.
+/// One key, `value`, for all four verbs that read a state back. `fill` reports `value.verbatim`;
+/// `fill-form` and `fill_and_submit` report one per field under `values`. `select` and
+/// `check`/`uncheck` write the same object (`read_back::select_report`, `check_report`), but each
+/// REFUSES when its read-back disagrees, so `Discarded` and `Rewritten` are unreachable from them.
 ///
-/// One key, `value`, for all four verbs that read a state back. `fill` reports
-/// `value.verbatim`; `fill-form` and `fill_and_submit` report one per field under `values`, and
-/// one field the page did not keep is enough — a form half-filled is not filled, and for
-/// `fill_and_submit` those per-field reports are the only witness there is. `select` and
-/// `check`/`uncheck` write the same object (`read_back::select_report`, `check_report`): they
-/// perform the same measurement on a different kind of control, and while each REFUSES when the
-/// read-back disagrees — so `Discarded` and `Rewritten` are unreachable from them — a
-/// CONFIRMED state is evidence in exactly the way a confirmed fill is. They used to report the
-/// window and nothing else, so the classifier saw no postcondition at all and a fresh session
-/// answered `unknown / no_baseline` for an action whose own target had been measured. That is
-/// the asymmetry this module exists to remove, in the same shape it removed it for `fill`.
+/// A `check` that dispatched nothing (the element already held the state) deliberately carries no
+/// `value`: `value_kept` there would be a claim about a click that never happened.
 ///
-/// A `check` that dispatched nothing (the element already held the state) deliberately carries
-/// no `value`: there is no write of ours to have been kept, and `value_kept` there would be a
-/// claim about a click that never happened.
-///
-/// A `verbatim` that is not a boolean is `NotRead`, not a failure: an unreadable field is an
-/// absence of evidence, and this rung outranks the page read.
+/// A `verbatim` that is not a boolean is `NotRead`: an unreadable field is an absence of evidence,
+/// and this rung outranks the page read.
 pub fn postcondition_from_response(out: &Value) -> crate::verdict::Postcondition {
     let Some(fields) = out.get("values").and_then(Value::as_array) else {
         return field_postcondition(out.get("value"));
     };
-    // The worst of the fields decides, and `Discarded` is the worst: a form where one field
-    // took nothing is not filled, whatever the others kept.
+    // The worst field decides, `Discarded` being the worst: a form where one field took nothing
+    // is not filled, whatever the others kept.
     let mut seen = crate::verdict::Postcondition::NotRead;
     for field in fields {
         match field_postcondition(field.get("value")) {
-            crate::verdict::Postcondition::Discarded => return crate::verdict::Postcondition::Discarded,
-            crate::verdict::Postcondition::Rewritten => seen = crate::verdict::Postcondition::Rewritten,
+            crate::verdict::Postcondition::Discarded => {
+                return crate::verdict::Postcondition::Discarded;
+            }
+            crate::verdict::Postcondition::Rewritten => {
+                seen = crate::verdict::Postcondition::Rewritten;
+            }
             crate::verdict::Postcondition::Kept
                 if seen == crate::verdict::Postcondition::NotRead =>
             {
@@ -83,51 +66,46 @@ pub fn postcondition_from_response(out: &Value) -> crate::verdict::Postcondition
     seen
 }
 
-/// One field's `value` report, read as a postcondition.
-///
-/// Emptiness is what separates the two failures, and it is readable without the value: a
-/// redacted secret reports `actual_length` in place of `actual`, so a password the page threw
-/// away is classified the same way as any other field and nothing secret is read to do it.
+/// One field's `value` report, read as a postcondition. Emptiness separates the two failures and
+/// is readable without the value: a redacted secret reports `actual_length` in place of `actual`.
 fn field_postcondition(value: Option<&Value>) -> crate::verdict::Postcondition {
     use crate::verdict::Postcondition;
 
-    let Some(value) = value else { return Postcondition::NotRead };
+    let Some(value) = value else {
+        return Postcondition::NotRead;
+    };
     match value.get("verbatim").and_then(Value::as_bool) {
         Some(true) => Postcondition::Kept,
         None => Postcondition::NotRead,
         Some(false) => {
             let empty = match value.get("actual_length").and_then(Value::as_u64) {
                 Some(len) => len == 0,
-                // No length means a plain field: `actual` is the string itself, and `null`
-                // (an element with no `value` at all) counts as holding nothing.
+                // No length means a plain field: `actual` is the string, and `null` (an element
+                // with no `value` at all) counts as holding nothing.
                 None => value
                     .get("actual")
                     .and_then(Value::as_str)
                     .is_none_or(str::is_empty),
             };
-            if empty { Postcondition::Discarded } else { Postcondition::Rewritten }
+            if empty {
+                Postcondition::Discarded
+            } else {
+                Postcondition::Rewritten
+            }
         }
     }
 }
 
-/// How many lost values are reported before the list is cut off.
-///
-/// A page that clears fifty fields at once has said what it needed to say in the first few, and
-/// each entry costs a pair of CDP calls to classify. The count is reported whatever the cap.
+/// How many lost values are reported before the list is cut off. Each entry costs a pair of CDP
+/// calls to classify; the count is reported whatever the cap.
 const LOST_VALUE_LIMIT: usize = 10;
 
 /// Attach `values_lost` to the response and return how many there were.
 ///
-/// The diff already knew a field had gone from holding something to holding nothing — the
-/// `value=` token stops appearing after the `->` on its line. What it could not do is make that
-/// contractual: an agent reading JSON saw `ok:true` and `verdict:"changed"`, both true, and
-/// never learnt the field it had just filled was empty again.
-///
-/// Every entry is classified against `element::SECRET_FIELD`, the same predicate `fill` redacts
-/// on, by resolving the node and asking the page. It FAILS CLOSED: a field whose kind could not
-/// be read is redacted, because the alternative is printing a password. A redacted entry
-/// carries no length either — the only length available is the one the accessibility tree
-/// reported, and for a `type=password` that is the length of Chrome's mask, not of the value.
+/// Every entry is classified against `element::SECRET_FIELD` by resolving the node and asking the
+/// page, and it FAILS CLOSED: a field whose kind could not be read is redacted. A redacted entry
+/// carries no length either — the only one available is the a11y tree's, which for a
+/// `type=password` is the mask's length.
 pub async fn attach_values_lost(
     client: &CdpClient,
     uid_map: &std::collections::HashMap<String, crate::element_ref::ElementRef>,
@@ -159,9 +137,8 @@ pub async fn attach_values_lost(
     lost.len()
 }
 
-/// Whether this uid names a field whose value must never be printed.
-///
-/// `true` on any failure: an unclassified field is treated as a secret.
+/// Whether this uid names a field whose value must never be printed. `true` on any failure: an
+/// unclassified field is treated as a secret.
 async fn is_secret_field(
     client: &CdpClient,
     uid_map: &std::collections::HashMap<String, crate::element_ref::ElementRef>,
@@ -187,7 +164,11 @@ async fn is_secret_field(
     else {
         return true;
     };
-    if result.get("exceptionDetails").is_some() {
+    // Discarded on purpose: this answers one bool and fails closed, so a throw redacts. Every
+    // other failure on this path (an unresolvable uid, an unreadable reply) is already silent for
+    // the same reason, and one of the three growing a message would only make the rule look
+    // conditional.
+    if crate::element::js_exception(&result).is_some() {
         return true;
     }
     result
@@ -198,11 +179,8 @@ async fn is_secret_field(
         .unwrap_or(true)
 }
 
-/// Decide and attach the verdict for one observation, reading the delivery and the
-/// postcondition off the response.
-///
-/// The single place all three modes settle a verdict, so `no_effect` cannot appear in one of
-/// them without the window it was measured over, and `not_kept` cannot be missed in another.
+/// Decide and attach the verdict for one observation, reading the delivery and the postcondition
+/// off the response. The single place all three modes settle a verdict.
 pub fn attach_verdict_for(
     client: &CdpClient,
     out: &mut Value,
@@ -215,13 +193,12 @@ pub fn attach_verdict_for(
         && let Some(ms) = delivered.observed_after_ms
         && let Some(map) = out.as_object_mut()
     {
-        // `or_insert`: a command with its own read-back window (check, select) already
-        // reported a narrower, more specific one, and that claim is the stronger of the two.
+        // `or_insert`: a command with its own read-back window (check, select) already reported
+        // a narrower one, and that claim is the stronger of the two.
         map.entry("observed_after_ms").or_insert_with(|| json!(ms));
     }
-    // What the action spent waiting, when it waited. Attached here because this is the one
-    // place all three modes pass through, and absent otherwise: a field that reads `waited_ms: 0`
-    // on every fast action is a field nobody reads on the one action that took ten seconds.
+    // What the action spent waiting, when it waited. Absent otherwise: a field reading
+    // `waited_ms: 0` on every fast action is one nobody reads on the action that took ten seconds.
     if let Some(ms) = client.take_settle_wait_ms()
         && let Some(map) = out.as_object_mut()
     {
@@ -233,63 +210,66 @@ pub fn attach_verdict_for(
 
 /// Commands that can move the page, and therefore owe the caller a change report.
 ///
-/// `webmcp_call` is here and `webmcp_list` is not: calling a tool is the one `WebMCP` action that
-/// can move the page, and its declared result carries no schema to check against (no
-/// `outputSchema` exists in the protocol) — the accessibility-tree delta this hook attaches is
-/// the only corroboration available, exactly the reason this predicate exists. Listing tools is
-/// a read, like `assert`.
+/// `webmcp_call` is here and `webmcp_list` is not: a tool call can move the page and its declared
+/// result has no schema to check against, so the a11y delta is the only corroboration available.
+/// Listing tools is a read, like `assert`.
 pub fn mutates_page(cmd: &str) -> bool {
     matches!(
         cmd,
-        "click" | "tap" | "dblclick" | "double_click" | "double-click"
-            | "fill" | "type" | "press" | "select" | "check" | "uncheck"
-            | "upload" | "drag" | "hover" | "scroll"
-            | "fill-form" | "fill_form" | "fillform"
-            | "fill_and_submit" | "fill-and-submit"
-            | "webmcp_call" | "webmcp-call"
+        "click"
+            | "tap"
+            | "dblclick"
+            | "double_click"
+            | "double-click"
+            | "fill"
+            | "type"
+            | "press"
+            | "select"
+            | "check"
+            | "uncheck"
+            | "upload"
+            | "drag"
+            | "hover"
+            | "scroll"
+            | "fill-form"
+            | "fill_form"
+            | "fillform"
+            | "fill_and_submit"
+            | "fill-and-submit"
+            | "webmcp_call"
+            | "webmcp-call"
     )
 }
 
-/// Re-read the page after an action and say what moved, mirroring the CLI default.
-///
-/// Failures here are swallowed on purpose: the action itself already succeeded, and losing
-/// the report is a smaller problem than turning a successful action into an error.
+/// Re-read the page after an action and say what moved, mirroring the CLI default. Failures here
+/// are swallowed: the action succeeded, and losing the report beats turning it into an error.
 pub async fn attach_change_report(
-    client: &CdpClient,
-    store: &mut SessionStore,
-    browser_name: &str,
-    page_name: &str,
-    target_id: &str,
-    report: crate::run_helpers::ReportPolicy,
+    ctx: &mut crate::page_ctx::PageCtx<'_>,
     old_text: Option<&str>,
     stored: Option<(String, String)>,
     out: &mut Value,
 ) {
+    let client = ctx.client;
+    let report = ctx.report;
     crate::snapshot::settle(client, 100, 1000).await;
     let Ok(snapshot) = commands::inspect::run(client, false, None, None, None).await else {
-        // The action landed and the read did not. Saying nothing here is what made this
-        // indistinguishable from a page that did not move.
+        // The action landed and the read did not; silence would look like a page that did not move.
         attach_verdict_for(client, out, crate::verdict::Observation::ReadFailed);
         return;
     };
-    // Store the fresh snapshot whatever happens: without this the very first action of a
-    // session had no baseline, so it wrote none, so the session never acquired one and the
-    // change report stayed silently off for its whole life.
+    // Store the fresh snapshot whatever happens. Without this the first action of a session has
+    // no baseline, so it writes none, so the session never acquires one.
     let Some(old_text) = old_text else {
-        if let Some(browser_s) = store.browsers.get_mut(browser_name) {
-            let page = session::ensure_page(browser_s, page_name, target_id);
-            page.uid_map = snapshot.uid_map;
-            page.last_snapshot = Some(snapshot.text);
-            let (f, l) = snapshot.identity.map_or((None, None), |(f, l)| (Some(f), Some(l)));
-            page.last_snapshot_frame = f;
-            page.last_snapshot_loader = l;
-        }
+        ctx.store_snapshot(snapshot);
         attach_verdict_for(client, out, crate::verdict::Observation::NoBaseline);
         return;
     };
     let identity = commands::diff::Identity::from_loader(
         stored.as_ref().map(|(f, l)| (f.as_str(), l.as_str())),
-        snapshot.identity.as_ref().map(|(f, l)| (f.as_str(), l.as_str())),
+        snapshot
+            .identity
+            .as_ref()
+            .map(|(f, l)| (f.as_str(), l.as_str())),
     );
     let cmp = commands::diff::compare(identity, old_text, &snapshot.text);
     let body = if report.budget == 0 {
@@ -318,14 +298,17 @@ pub async fn attach_change_report(
         );
         obj.insert("delta".into(), json!(body));
         if cmp.focus_from.is_some() || cmp.focus_to.is_some() {
-            obj.insert("focus".into(), json!({"from": cmp.focus_from, "to": cmp.focus_to}));
+            obj.insert(
+                "focus".into(),
+                json!({"from": cmp.focus_from, "to": cmp.focus_to}),
+            );
         }
         if let Some(hint) = cmp.hint {
             obj.entry("hint").or_insert_with(|| json!(hint));
         }
     }
-    // Before the verdict: it is one of the classifier's inputs, and it is read off the fresh
-    // uid_map, which the store does not own yet.
+    // Before the verdict: it is one of the classifier's inputs, and it reads the fresh uid_map,
+    // which the store does not own yet.
     let values_lost = attach_values_lost(client, &snapshot.uid_map, &cmp.values_lost, out).await;
     attach_verdict_for(
         client,
@@ -335,29 +318,17 @@ pub async fn attach_change_report(
             identity_known: cmp.identity_known,
             edits: cmp.added + cmp.removed + cmp.changed,
             moved: cmp.moved,
-            // The document taking focus is not evidence an element received the click.
-            // `focus_only` claims the action ARRIVED somewhere, and it is the only such
-            // claim available on a path with no hit test (`--xy`, a JS click, a target in a
-            // frame). Chrome marks the RootWebArea `focused` whenever `<body>` holds focus,
-            // which is what a click on nothing focusable produces — and what the FIRST click
-            // anywhere in a fresh page produces, including one that hit nothing at all. So a
-            // move whose only content is "the document gained focus" cannot separate the two
-            // and must not license the word. A blur is still counted: if a real element LOST
-            // focus, something of ours reached the page. The `focus` field itself is
-            // untouched, because the reading is true — see `diff::focus_to_document`.
+            // The document taking focus is not evidence an element received the click: Chrome
+            // marks the RootWebArea `focused` whenever `<body>` holds focus, which is also what
+            // the first click anywhere in a fresh page produces. So it cannot license
+            // `focus_only`, whose claim is that the action ARRIVED somewhere. A blur still
+            // counts. The `focus` field itself is untouched — see `diff::focus_to_document`.
             focus_moved: cmp.focus_from.is_some()
                 || (cmp.focus_to.is_some() && !cmp.focus_to_document),
             values_lost,
         },
     );
-    if let Some(browser_s) = store.browsers.get_mut(browser_name) {
-        let page = session::ensure_page(browser_s, page_name, target_id);
-        page.uid_map = snapshot.uid_map;
-        page.last_snapshot = Some(snapshot.text);
-            let (f, l) = snapshot.identity.map_or((None, None), |(f, l)| (Some(f), Some(l)));
-            page.last_snapshot_frame = f;
-            page.last_snapshot_loader = l;
-    }
+    ctx.store_snapshot(snapshot);
 }
 
 #[cfg(test)]
@@ -381,7 +352,7 @@ mod tests {
         assert_eq!(postcondition_from_response(&out), Postcondition::Kept);
     }
 
-    /// `form_value_microtask_revert.html`: the page emptied the field.
+    /// The page emptied the field (`form_value_microtask_revert.html`).
     #[test]
     fn an_emptied_field_reads_as_discarded() {
         let out = json!({"ok": true, "value": value("hello@example.com", Some(""))});
@@ -391,15 +362,15 @@ mod tests {
         assert_eq!(postcondition_from_response(&out), Postcondition::Discarded);
     }
 
-    /// `form_value_phone_mask.html`: the write landed, in the page's own shape.
+    /// The write landed in the page's own shape (`form_value_phone_mask.html`).
     #[test]
     fn a_reformatted_field_reads_as_rewritten() {
         let out = json!({"ok": true, "value": value("5551234567", Some("(555) 123-4567"))});
         assert_eq!(postcondition_from_response(&out), Postcondition::Rewritten);
     }
 
-    /// A secret is redacted down to `verbatim` and two lengths. That is enough to classify it,
-    /// which is the point: a password the page threw away must not be the one silent case.
+    /// A secret is redacted to `verbatim` and two lengths, which is enough to classify it: a
+    /// password the page threw away must not be the one silent case.
     #[test]
     fn a_redacted_secret_is_classified_from_its_lengths_alone() {
         let kept = json!({"ok": true, "value": {
@@ -409,15 +380,20 @@ mod tests {
         let emptied = json!({"ok": true, "value": {
             "redacted": true, "requested_length": 12, "actual_length": 0, "verbatim": false,
         }});
-        assert_eq!(postcondition_from_response(&emptied), Postcondition::Discarded);
+        assert_eq!(
+            postcondition_from_response(&emptied),
+            Postcondition::Discarded
+        );
         let rewritten = json!({"ok": true, "value": {
             "redacted": true, "requested_length": 12, "actual_length": 8, "verbatim": false,
         }});
-        assert_eq!(postcondition_from_response(&rewritten), Postcondition::Rewritten);
+        assert_eq!(
+            postcondition_from_response(&rewritten),
+            Postcondition::Rewritten
+        );
     }
 
-    /// A bulk fill is judged on its worst field: a form with one empty field is not filled,
-    /// whatever the others kept.
+    /// A form with one empty field is not filled, whatever the others kept.
     #[test]
     fn a_bulk_fill_is_judged_on_its_worst_field() {
         let all_kept = json!({"ok": true, "values": [
@@ -430,17 +406,22 @@ mod tests {
             {"uid": "n1", "value": value("a", Some("a"))},
             {"uid": "n2", "value": value("5551234567", Some("(555) 123-4567"))},
         ]});
-        assert_eq!(postcondition_from_response(&one_masked), Postcondition::Rewritten);
+        assert_eq!(
+            postcondition_from_response(&one_masked),
+            Postcondition::Rewritten
+        );
 
         let one_emptied = json!({"ok": true, "values": [
             {"uid": "n1", "value": value("5551234567", Some("(555) 123-4567"))},
             {"uid": "n2", "value": value("b", Some(""))},
         ]});
-        assert_eq!(postcondition_from_response(&one_emptied), Postcondition::Discarded);
+        assert_eq!(
+            postcondition_from_response(&one_emptied),
+            Postcondition::Discarded
+        );
     }
 
-    /// Every command with nothing to read back, and any response that lost the field. This is
-    /// the rung that outranks the page read, so an absence here must never read as a failure.
+    /// This rung outranks the page read, so an absence here must never read as a failure.
     #[test]
     fn a_response_with_no_read_back_claims_nothing() {
         for out in [
@@ -450,7 +431,11 @@ mod tests {
             json!({"ok": true, "values": []}),
             json!({"ok": true, "values": [{"uid": "n1"}]}),
         ] {
-            assert_eq!(postcondition_from_response(&out), Postcondition::NotRead, "for {out}");
+            assert_eq!(
+                postcondition_from_response(&out),
+                Postcondition::NotRead,
+                "for {out}"
+            );
         }
     }
 }

@@ -1,101 +1,27 @@
 use std::io::Write as _;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, BufReader};
 
 use crate::browser::{self, BrowserOptions};
 use crate::cdp::client::CdpClient;
-use crate::commands;
-use crate::pipe_dispatch::{
-    dispatch_assert, dispatch_back, dispatch_batch, dispatch_check, dispatch_click,
-    dispatch_console, dispatch_dblclick, dispatch_diff, dispatch_download, dispatch_drag,
-    dispatch_emulate, dispatch_eval, dispatch_extract, dispatch_fill, dispatch_fill_and_submit,
-    dispatch_fill_form, dispatch_forward, dispatch_frame, dispatch_goto,
-    dispatch_history, dispatch_hover, dispatch_inspect,
-    dispatch_navigate_and_read, dispatch_network, dispatch_pdf, dispatch_press,
-    dispatch_read, dispatch_screenshot, dispatch_scroll, dispatch_select,
-    dispatch_tabs, dispatch_text, dispatch_type, dispatch_upload,
-    dispatch_wait, dispatch_webmcp_call, dispatch_webmcp_list, EmulationRecovery,
-};
-use crate::run_helpers::error_hint;
-use crate::session::{self, SessionStore};
 use crate::cli::Cli;
+use crate::commands;
+use crate::pipe_dispatch::EmulationRecovery;
+use crate::session::{self, SessionStore};
 
 /// Run pipe mode: persistent CDP connection, reading JSON commands from stdin.
 pub async fn run_pipe(cli: &Cli) -> Result<(), crate::BoxError> {
-    let mut store = session::load_session()?;
-    let want_headless = !cli.headed;
-    let requested_proxy = browser::normalized_proxy_option(
-        cli.connect.as_deref(),
-        cli.proxy_server.as_deref(),
-    )?;
-    let requested_chrome_args = browser::normalized_chrome_args_option(
-        cli.connect.as_deref(),
-        &cli.chrome_args,
-    )?;
-    // Inherit a running named browser's proxy/chrome-args when the flag is omitted so a
-    // relaunch never silently drops it (see run.rs for the full rationale).
-    let effective_proxy = requested_proxy
-        .or_else(|| store.browsers.get(&cli.browser).and_then(|b| b.proxy_server.clone()));
-    let effective_chrome_args =
-        crate::chrome_args::effective_chrome_args(&store, &cli.browser, &requested_chrome_args);
-
-    let (conn, browser_client) = connect_browser(
-        &mut store,
-        cli,
-        want_headless,
-        effective_proxy.clone(),
-        effective_chrome_args.clone(),
-    )
-    .await?;
-
-    let http_endpoint = conn.http_endpoint.as_deref().ok_or(
-        "No HTTP endpoint available. Cannot resolve page WebSocket URL.",
-    )?;
-
-    let target_id = {
-        let browser_session = session::ensure_browser(
-            &mut store,
-            &cli.browser,
-            &conn.ws_endpoint,
-            conn.pid,
-            want_headless,
-            effective_proxy,
-            effective_chrome_args,
-        );
-        crate::run_helpers::resolve_page_target(&browser_client, browser_session, &cli.page).await?
-    };
-    let _ = session::save_session(&mut store);
-
-    let page_ws = browser::get_page_ws_url(http_endpoint, &target_id).await?;
-    let client = CdpClient::connect(&page_ws).await?;
-    // The caller's own answer to "how long am I willing to wait" also bounds every CDP
-    // response, so a page promise that never settles fails instead of hanging forever.
-    client.set_call_timeout(std::time::Duration::from_secs(cli.timeout));
-    client.enable("Page").await?;
-
-    // Console interceptor (stealth-safe)
-    commands::console::inject(&client).await;
-
-    if cli.stealth {
-        crate::setup::apply_stealth(&client).await;
-    } else {
-        client.enable("Runtime").await?;
-    }
-    let dialog_policy = crate::setup::DialogPolicy::parse(&cli.dialog)?;
-    client.spawn_dialog_handler(dialog_policy, cli.dialog_text.clone());
-    let policy = report_policy(cli)?;
-    // Do not fail before reading stdin when a stored device configuration no longer applies. The
-    // recovery state reports that error for ordinary commands while still admitting
-    // `emulate device` and `emulate reset`, the two commands that can repair the configuration.
+    let mut session = open_session(cli).await?;
+    // A stored device configuration that no longer applies must not fail the session before
+    // stdin is read: the recovery state reports it per command, while still admitting the
+    // `emulate device`/`emulate reset` that repair it.
     let mut emulation_recovery =
-        EmulationRecovery::new(&client, &store, &cli.browser, &cli.page).await;
+        EmulationRecovery::new(&session.client, &session.store, &cli.browser, &cli.page).await;
 
-    // Main loop: read JSON commands from stdin
     let stdin = BufReader::new(tokio::io::stdin());
     let mut lines = stdin.lines();
-    // What `macro record` distils at the end of the session. Slim entries, so this stays small
-    // whatever the session did.
+    // What `macro record` distils at the end of the session. Slim entries, so it stays small.
     let mut history: Vec<crate::macros_record::Observed> = Vec::new();
 
     loop {
@@ -103,26 +29,38 @@ pub async fn run_pipe(cli: &Cli) -> Result<(), crate::BoxError> {
             break;
         };
         let line = line.trim().to_string();
-        if line.is_empty() { continue; }
+        if line.is_empty() {
+            continue;
+        }
 
-        let cmd: Value = match serde_json::from_str(&line) {
+        let mut cmd: Value = match serde_json::from_str(&line) {
             Ok(v) => v,
-            Err(e) => { emit(&json!({"ok": false, "error": format!("Invalid JSON: {e}")})); continue; }
-        };
-
-        // A recording that never opened used to be silent: the response was ok:true and
-        // stdout was indistinguishable from a session being written, so the agent finds
-        // out at `replay` time that there is nothing to replay.
-        let record_path = cmd.get("_record").and_then(Value::as_str).map(String::from);
-        if let Some(ref path) = record_path
-            && let Err(e) = commands::record::start_recording(path) {
-                emit(&json!({"ok": false, "error": format!("{e}"), "hint": "Check the --record path's directory exists and is writable."}));
+            Err(e) => {
+                emit(&json!({"ok": false, "error": format!("Invalid JSON: {e}")}));
                 continue;
             }
+        };
 
-        // A macro is distilled from the session's own history, so `macro record` needs no
-        // foresight: the agent finds out it succeeded, and only then asks for the path to be
-        // kept. Answered before `dispatch` because it acts on the session rather than the page.
+        // A recording that cannot be opened refuses the command: running it unrecorded is
+        // not what the caller asked for, and the gap would only surface at `replay` time.
+        let record_path = match take_record_path(&mut cmd) {
+            Ok(path) => path,
+            Err(e) => {
+                emit(&json!({"ok": false, "error": e}));
+                continue;
+            }
+        };
+        if let Some(ref path) = record_path
+            && let Err(e) = commands::record::start_recording(path)
+        {
+            emit(
+                &json!({"ok": false, "error": format!("{e}"), "hint": "Check the --record path's directory exists and is writable."}),
+            );
+            continue;
+        }
+
+        // Answered before `dispatch`: `macro` acts on the session's history, not the page,
+        // so it can be asked for after the fact.
         if cmd.get("cmd").and_then(Value::as_str) == Some("macro") {
             let answer = crate::macros_cmd::dispatch_pipe(&cmd, &history)
                 .unwrap_or_else(|e| json!({"ok": false, "error": e.to_string()}));
@@ -130,30 +68,20 @@ pub async fn run_pipe(cli: &Cli) -> Result<(), crate::BoxError> {
             continue;
         }
 
-        let mut response = if let Some(response) = emulation_recovery.refusal_for(&cmd) {
-            response
-        } else {
-            dispatch(
-                &client, &browser_client, &mut store,
-                &cli.browser, &cli.page, &target_id, cli.timeout, cli.max_depth,
-                policy,
-                &cmd,
-                &mut emulation_recovery,
-            ).await
-        };
-        emulation_recovery.update_after(&cmd, &response);
+        let mut response = dispatch_on(&mut session, cli, &cmd, &mut emulation_recovery).await;
 
         if let Some(ref path) = record_path
-            && let Err(e) = commands::record::log_entry(path, &cmd, &response) {
-                // The command itself ran; only the record of it was lost. Say so on the
-                // response rather than failing an action that already happened.
-                response["recording_error"] = json!(format!("{e}"));
-            }
+            && let Err(e) = commands::record::log_entry(path, &cmd, &response)
+        {
+            // The command ran; only the record of it was lost. Failing here would
+            // invite a retry of real work.
+            response["recording_error"] = json!(format!("{e}"));
+        }
 
-        // Slim on purpose (`macros_record::Observed`): a session keeps this for its whole life
-        // and a full response carries snapshots. What is retained is what the whitelist and the
-        // filter read, which is also why a session's history cannot leak a page's text.
-        let snapshot = store
+        // Slim on purpose (`macros_record::Observed`): kept for the session's whole life, and
+        // retains only what the whitelist reads, so it cannot leak the page's text.
+        let snapshot = session
+            .store
             .browsers
             .get(&cli.browser)
             .and_then(|b| b.pages.get(&cli.page))
@@ -167,15 +95,16 @@ pub async fn run_pipe(cli: &Cli) -> Result<(), crate::BoxError> {
         emit(&response);
     }
 
-    let _ = session::save_session(&mut store);
+    let _ = session::save_session(&mut session.store);
     Ok(())
 }
 
-/// Replay a recorded session file, optionally substituting variables.
 /// Everything a session needs to dispatch commands: the two clients, the store, the page.
 ///
-/// `run_pipe`, `run_replay` and `macros_run` opened this identically, sixty lines each. One
-/// copy, because a fourth entry point is a fourth chance for them to drift.
+/// One copy of the sixty lines `run_pipe`, `run_replay` and `macros_run` each need. The claim
+/// used to be false — the first two carried their own copy and had drifted (a different "no
+/// HTTP endpoint" message) — which is the shape of comment that survives precisely because
+/// nothing reads it.
 pub struct Session {
     pub store: SessionStore,
     pub browser_client: CdpClient,
@@ -191,8 +120,12 @@ pub async fn open_session(cli: &Cli) -> Result<Session, crate::BoxError> {
         browser::normalized_proxy_option(cli.connect.as_deref(), cli.proxy_server.as_deref())?;
     let requested_chrome_args =
         browser::normalized_chrome_args_option(cli.connect.as_deref(), &cli.chrome_args)?;
-    let effective_proxy = requested_proxy
-        .or_else(|| store.browsers.get(&cli.browser).and_then(|b| b.proxy_server.clone()));
+    let effective_proxy = requested_proxy.or_else(|| {
+        store
+            .browsers
+            .get(&cli.browser)
+            .and_then(|b| b.proxy_server.clone())
+    });
     let effective_chrome_args =
         crate::chrome_args::effective_chrome_args(&store, &cli.browser, &requested_chrome_args);
 
@@ -236,11 +169,17 @@ pub async fn open_session(cli: &Cli) -> Result<Session, crate::BoxError> {
     let dialog_policy = crate::setup::DialogPolicy::parse(&cli.dialog)?;
     client.spawn_dialog_handler(dialog_policy, cli.dialog_text.clone());
     let policy = report_policy(cli)?;
-    Ok(Session { store, browser_client, client, target_id, policy })
+    Ok(Session {
+        store,
+        browser_client,
+        client,
+        target_id,
+        policy,
+    })
 }
 
-/// Dispatch one command on an open session. `pub` for `macros_run`, which needs exactly the
-/// same execution semantics as pipe and batch — a macro step IS a pipe command.
+/// Dispatch one command on an open session. `pub` for `macros_run`: a macro step IS a pipe
+/// command and must execute identically.
 pub async fn dispatch_on(
     session: &mut Session,
     cli: &Cli,
@@ -250,245 +189,91 @@ pub async fn dispatch_on(
     if let Some(response) = emulation_recovery.refusal_for(cmd) {
         return response;
     }
-    let response = dispatch(
-        &session.client,
-        &session.browser_client,
-        &mut session.store,
-        &cli.browser,
-        &cli.page,
-        &session.target_id,
-        cli.timeout,
-        cli.max_depth,
-        session.policy,
-        cmd,
-        emulation_recovery,
-    )
-    .await;
+    let mut ctx = crate::page_ctx::PageCtx {
+        client: &session.client,
+        browser_client: &session.browser_client,
+        store: &mut session.store,
+        browser: &cli.browser,
+        page: &cli.page,
+        target_id: &session.target_id,
+        timeout: cli.timeout,
+        max_depth: cli.max_depth,
+        report: session.policy,
+    };
+    let response = crate::pipe_dispatch::dispatch_single(&mut ctx, cmd, emulation_recovery).await;
     emulation_recovery.update_after(cmd, &response);
     response
 }
 
 pub async fn run_replay(
-    cli: &Cli, file: &str, vars: Option<&[String]>,
+    cli: &Cli,
+    file: &str,
+    vars: Option<&[String]>,
 ) -> Result<(), crate::BoxError> {
     let content = std::fs::read_to_string(file)
         .map_err(|e| format!("Cannot read replay file '{file}': {e}"))?;
 
     let replacements: Vec<(&str, &str)> = vars
-        .unwrap_or(&[]).iter().filter_map(|pair| pair.split_once('=')).collect();
+        .unwrap_or(&[])
+        .iter()
+        .filter_map(|pair| pair.split_once('='))
+        .collect();
 
-    let mut store = session::load_session()?;
-    let want_headless = !cli.headed;
-    let requested_proxy = browser::normalized_proxy_option(
-        cli.connect.as_deref(),
-        cli.proxy_server.as_deref(),
-    )?;
-    let requested_chrome_args = browser::normalized_chrome_args_option(
-        cli.connect.as_deref(),
-        &cli.chrome_args,
-    )?;
-    let effective_proxy = requested_proxy
-        .or_else(|| store.browsers.get(&cli.browser).and_then(|b| b.proxy_server.clone()));
-    let effective_chrome_args =
-        crate::chrome_args::effective_chrome_args(&store, &cli.browser, &requested_chrome_args);
-    let (conn, browser_client) = connect_browser(
-        &mut store,
-        cli,
-        want_headless,
-        effective_proxy.clone(),
-        effective_chrome_args.clone(),
-    )
-    .await?;
-
-    let http_endpoint = conn.http_endpoint.as_deref().ok_or("No HTTP endpoint available.")?;
-    let target_id = {
-        let browser_session = session::ensure_browser(
-            &mut store,
-            &cli.browser,
-            &conn.ws_endpoint,
-            conn.pid,
-            want_headless,
-            effective_proxy,
-            effective_chrome_args,
-        );
-        crate::run_helpers::resolve_page_target(&browser_client, browser_session, &cli.page).await?
-    };
-    let _ = session::save_session(&mut store);
-
-    let page_ws = browser::get_page_ws_url(http_endpoint, &target_id).await?;
-    let client = CdpClient::connect(&page_ws).await?;
-    // The caller's own answer to "how long am I willing to wait" also bounds every CDP
-    // response, so a page promise that never settles fails instead of hanging forever.
-    client.set_call_timeout(std::time::Duration::from_secs(cli.timeout));
-    client.enable("Page").await?;
-    commands::console::inject(&client).await;
-    if cli.stealth { crate::setup::apply_stealth(&client).await; }
-    else { client.enable("Runtime").await?; }
-    let dialog_policy = crate::setup::DialogPolicy::parse(&cli.dialog)?;
-    client.spawn_dialog_handler(dialog_policy, cli.dialog_text.clone());
-    // A recording may begin with the device/reset command that repairs its stored configuration.
-    // Replay therefore uses the same recovery state as a live pipe.
+    let mut session = open_session(cli).await?;
+    // Same recovery state as a live pipe: a recording may begin with the `emulate`
+    // device/reset command that repairs its stored configuration.
     let mut emulation_recovery =
-        EmulationRecovery::new(&client, &store, &cli.browser, &cli.page).await;
-    let policy = report_policy(cli)?;
+        EmulationRecovery::new(&session.client, &session.store, &cli.browser, &cli.page).await;
 
     for line in content.lines() {
         let line = line.trim();
-        if line.is_empty() || line.starts_with('#') { continue; }
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
         let mut resolved = line.to_string();
         for (key, val) in &replacements {
             resolved = resolved.replace(&format!("{{{{{key}}}}}"), val);
         }
 
-        let parsed: Value = serde_json::from_str(&resolved)
-            .map_err(|e| format!("Invalid JSON in replay: {e}"))?;
+        let parsed: Value =
+            serde_json::from_str(&resolved).map_err(|e| format!("Invalid JSON in replay: {e}"))?;
 
-        let cmd = if parsed.get("cmd").is_some_and(Value::is_object) && parsed.get("response").is_some() {
+        let mut cmd = if parsed.get("cmd").is_some_and(Value::is_object)
+            && parsed.get("response").is_some()
+        {
             parsed.get("cmd").cloned().unwrap_or_default()
-        } else { parsed };
-
-        let response = if let Some(response) = emulation_recovery.refusal_for(&cmd) {
-            response
         } else {
-            dispatch(
-                &client, &browser_client, &mut store,
-                &cli.browser, &cli.page, &target_id, cli.timeout, cli.max_depth,
-                policy,
-                &cmd,
-                &mut emulation_recovery,
-            ).await
+            parsed
         };
-        emulation_recovery.update_after(&cmd, &response);
+        // A recording made before `_record` was stripped still carries it; replay never records,
+        // so drop it rather than let the protocol refuse the line.
+        let _ = take_record_path(&mut cmd);
 
+        let response = dispatch_on(&mut session, cli, &cmd, &mut emulation_recovery).await;
         emit(&response);
     }
 
-    let _ = session::save_session(&mut store);
+    let _ = session::save_session(&mut session.store);
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Dispatch
-// ---------------------------------------------------------------------------
+// --- Helpers ---
 
-#[allow(clippy::too_many_arguments)]
-async fn dispatch(
-    client: &CdpClient, browser_client: &CdpClient, store: &mut SessionStore,
-    browser_name: &str, page_name: &str, target_id: &str,
-    timeout: u64, global_max_depth: Option<usize>,
-    report: crate::run_helpers::ReportPolicy, cmd: &Value,
-    emulation_recovery: &mut EmulationRecovery,
-) -> Value {
-    let cmd_name = cmd.get("cmd").and_then(Value::as_str).unwrap_or("");
-    // Same contract as the CLI: an action says what it changed. Capture the baseline first,
-    // because a command run with `inspect` refreshes it itself.
-    let baseline = if report.changes && crate::pipe_dispatch::mutates_page(cmd_name) {
-        store
-            .browsers
-            .get(browser_name)
-            .and_then(|b| b.pages.get(page_name))
-            .map(|p| {
-                (
-                    p.last_snapshot.clone(),
-                    p.last_snapshot_frame.clone().zip(p.last_snapshot_loader.clone()),
-                )
-            })
-    } else {
-        None
+/// Take `_record` off the command before the protocol sees it.
+///
+/// It is a directive to the SESSION, not an argument to any verb, and the protocol's structs
+/// declare only what a verb takes. Removing it here also keeps it out of the recorded command,
+/// so replaying a recording does not silently try to record itself.
+fn take_record_path(cmd: &mut Value) -> Result<Option<String>, String> {
+    let Some(value) = cmd.as_object_mut().and_then(|map| map.remove("_record")) else {
+        return Ok(None);
     };
-
-    let mut value = {
-    let result: Result<Value, crate::BoxError> = match cmd_name {
-        "goto" => dispatch_goto(client, store, browser_name, page_name, target_id, timeout, global_max_depth, cmd).await,
-        "click" => dispatch_click(client, store, browser_name, page_name, target_id, global_max_depth, report, cmd).await,
-        "fill" => dispatch_fill(client, store, browser_name, page_name, target_id, global_max_depth, cmd).await,
-        "inspect" => dispatch_inspect(client, store, browser_name, page_name, target_id, cmd).await,
-        "eval" => dispatch_eval(client, cmd).await,
-        "read" => dispatch_read(client, cmd).await,
-        "text" => dispatch_text(client, store, browser_name, page_name, cmd).await,
-        "screenshot" => dispatch_screenshot(client, store, browser_name, page_name, cmd).await,
-        "pdf" => dispatch_pdf(client, cmd).await,
-        "download" => dispatch_download(client, store, browser_name, page_name, timeout, report, cmd).await,
-        "wait" => dispatch_wait(client, timeout, cmd).await,
-        "back" => dispatch_back(client).await,
-        "forward" => dispatch_forward(client).await,
-        "scroll" => dispatch_scroll(client, store, browser_name, page_name, cmd).await,
-        "type" => dispatch_type(client, cmd).await,
-        "press" => dispatch_press(client, cmd).await,
-        "fill-form" | "fill_form" | "fillform" => dispatch_fill_form(client, store, browser_name, page_name, target_id, global_max_depth, cmd).await,
-        "dblclick" => dispatch_dblclick(client, store, browser_name, page_name, target_id, global_max_depth, report, cmd).await,
-        "select" => dispatch_select(client, store, browser_name, page_name, target_id, global_max_depth, cmd).await,
-        "check" => dispatch_check(client, store, browser_name, page_name, report, cmd).await,
-        "uncheck" => {
-            let mut cmd_with_desired = cmd.clone();
-            if let Some(m) = cmd_with_desired.as_object_mut() {
-                m.insert("desired".into(), Value::Bool(false));
-            }
-            dispatch_check(client, store, browser_name, page_name, report, &cmd_with_desired).await
-        }
-        "upload" => dispatch_upload(client, store, browser_name, page_name, cmd).await,
-        "drag" => dispatch_drag(client, store, browser_name, page_name, cmd).await,
-        "hover" => dispatch_hover(client, store, browser_name, page_name, cmd).await,
-        "tabs" => dispatch_tabs(browser_client, store).await,
-        "network" => dispatch_network(client, cmd).await,
-        "console" => dispatch_console(client, cmd).await,
-        "diff" => dispatch_diff(client, store, browser_name, page_name, target_id).await,
-        "extract" => dispatch_extract(client, cmd).await,
-        "navigate_and_read" | "navigate-and-read" => dispatch_navigate_and_read(client, store, browser_name, page_name, target_id, timeout, cmd).await,
-        "fill_and_submit" | "fill-and-submit" => dispatch_fill_and_submit(client, timeout, cmd).await,
-        "history" => dispatch_history(cmd),
-        "frame" => dispatch_frame(client, cmd).await,
-        "emulate" => dispatch_emulate(client, store, browser_name, page_name, cmd).await,
-        "assert" => dispatch_assert(client, store, browser_name, page_name, cmd).await,
-        "webmcp_list" | "webmcp-list" => dispatch_webmcp_list(client).await,
-        "webmcp_call" | "webmcp-call" => dispatch_webmcp_call(client, cmd).await,
-        "batch" => dispatch_batch(client, browser_client, store, browser_name, page_name, target_id, timeout, global_max_depth, report, cmd, emulation_recovery).await,
-        "" => Err("Missing \"cmd\" field".into()),
-        other => Err(format!("Unknown command: {other}").into()),
-    };
-
-    // `result` must not outlive this block: BoxError is not Send, and an await with it
-    // still in scope would make every caller's future non-Send.
-    match result {
-        Ok(v) => v,
-        Err(e) => {
-            // A refusal carries what it measured — the receiver, the aim point, the branch —
-            // and flattening it to its Display would drop all of it on the one path where
-            // nothing was dispatched and the caller has to re-plan.
-            if let Some(refused) = crate::hit_test::refusal_in(&e) {
-                return refused.to_json(browser_name);
-            }
-            let msg = e.to_string();
-            let mut obj = json!({"ok": false, "error": msg});
-            if let Some(h) = error_hint(&msg, browser_name) { obj["hint"] = json!(h); }
-            return obj;
-        }
+    match value {
+        Value::String(path) => Ok(Some(path)),
+        Value::Null => Ok(None),
+        other => Err(format!("\"_record\" must be a file path, got {other}")),
     }
-    };
-    // `--verdict off` is a decision, not an observation. Saying so costs two fields and no
-    // page read, and it is the difference between "I did not look" and "nothing moved".
-    if !report.changes && crate::pipe_dispatch::mutates_page(cmd_name) {
-        // The hit test still ran: it is part of aiming the action, not part of the report.
-        // An intercepted click says so even here, where the page was never re-read.
-        crate::pipe_report::attach_verdict_for(
-            client,
-            &mut value,
-            crate::verdict::Observation::ReportingDisabled,
-        );
-    }
-    if let Some((old_text, old_url)) = baseline {
-        crate::pipe_dispatch::attach_change_report(
-            client, store, browser_name, page_name, target_id, report, old_text.as_deref(),
-            old_url, &mut value,
-        )
-        .await;
-    }
-    value
 }
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
 
 /// The global reporting flags, parsed once for the session rather than per command.
 fn report_policy(cli: &Cli) -> Result<crate::run_helpers::ReportPolicy, crate::BoxError> {
@@ -524,28 +309,30 @@ async fn connect_browser(
                 session::ensure_proxy_compatible(existing, effective_proxy.as_deref())?;
                 session::ensure_chrome_args_compatible(existing, &effective_chrome_args)?;
                 let conn = browser::BrowserConnection {
-                    ws_endpoint: ws.clone(), http_endpoint: Some(http), pid: existing.pid,
+                    ws_endpoint: ws.clone(),
+                    http_endpoint: Some(http),
+                    pid: existing.pid,
                 };
                 client.set_call_timeout(std::time::Duration::from_secs(cli.timeout));
                 return Ok((conn, client));
             }
         } else if let Some(pid) = existing.pid {
-            #[cfg(unix)]
-            {
-                let _ = std::process::Command::new("kill")
-                    .arg(pid.to_string())
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .status();
-            }
+            // The mode changed, so this browser is replaced. Through the same guarded helper
+            // every other kill site uses: `kill_pid` refuses a pid that is no longer a
+            // browser (a recycled one belongs to something else), and the wait is what stops
+            // the relaunch reconnecting to the Chrome it just signalled.
+            browser::kill_and_await_exit(&cli.browser, pid)?;
         }
         store.browsers.remove(&cli.browser);
     }
 
     let opts = BrowserOptions {
-        name: cli.browser.clone(), headless: want_headless,
-        ignore_https_errors: cli.ignore_https_errors, stealth: cli.stealth,
-        connect: cli.connect.clone(), proxy_server: effective_proxy,
+        name: cli.browser.clone(),
+        headless: want_headless,
+        ignore_https_errors: cli.ignore_https_errors,
+        stealth: cli.stealth,
+        connect: cli.connect.clone(),
+        proxy_server: effective_proxy,
         copy_cookies: cli.copy_cookies,
         chrome_args: effective_chrome_args,
     };

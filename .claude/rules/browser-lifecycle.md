@@ -2,6 +2,8 @@
 paths:
   - "src/browser.rs"
   - "src/session.rs"
+  - "src/session_load.rs"
+  - "src/session_save.rs"
   - "src/profiles.rs"
   - "src/orphans.rs"
   - "src/kill.rs"
@@ -17,18 +19,213 @@ paths:
 
 # Launching, naming, reconnecting to and killing a browser
 
-Moved out of `CLAUDE.md`'s **Key Design Decisions** — not rewritten and not summarised. The
-words are the ones that were there, minus the factual corrections made in the same change (a
-path that had stopped resolving, a count that had gone stale). What changed is *when* they
-load: this file is pulled in when you read a file its `paths:` block names, and costs nothing
-in a session that touches none of them.
+## `--chrome-arg`
 
-- **`--chrome-arg` passes extra flags straight to the Chrome chrome-agent launches** (`src/chrome_args.rs`) — the gap it closes: testing an experimental CDP/feature flag (`--enable-features=WebMCP,WebMCPTesting`) had no route through this tool at all; the only way to reach it was a hand-launched Chrome plus `--connect`, which gives up session, profile and lifecycle management for the one flag that needed changing. A repeatable `global = true` flag, the same shape `goto --header` already uses for its own repeatable, launch/request-scoped value — no id collision with `BEFORE_VERB_ONLY` or any subcommand flag, so it parses on either side of the verb like every other global. No env var: nothing else in this project is env-configured (the two `std::env::var` reads elsewhere are a Windows PATH lookup and a test-only escape hatch), so one would be a new, unprecedented input path for a single flag. Five flags are refused outright rather than merely warned about, because chrome-agent depends on its OWN values for them to find and reconnect to the browser it just launched: `--user-data-dir` (DevToolsActivePort is read from the profile directory chrome-agent tracks per `--browser` name), `--remote-debugging-port` and `--remote-debugging-pipe` (chrome-agent launches with `--remote-debugging-port=0` and reads the OS-assigned port back from that same file — a fixed port or a pipe transport breaks that), `--proxy-server` (the dedicated flag above already validates and persists it; a second route in through `--chrome-arg` bypasses both), and `--headless` (the stored `headless` mode that detects a mismatch on reconnect would disagree with Chrome's actual mode without chrome-agent ever seeing it). Each refusal names the fact and the real value the caller passed — never a placeholder — and forbids nothing it could instead repair, because there is no safe rewrite to suggest for "don't send this flag", only "drop it": the same shape `hints.rs` holds every action-recovery hint to, applied where there is no command to hand back. Under `--connect` it is refused rather than silently ignored — that Chrome is already running and reads no command line from this invocation — mirroring the existing `--proxy-server` + `--connect` refusal exactly. Fixed for the life of a named browser like `--proxy-server`: a follow-up command that omits it inherits whatever the browser already runs with (`chrome_args::effective_chrome_args`, the same `Option::or` idea spelled out for a `Vec`), and one naming *different* flags is refused (`ensure_chrome_args_compatible`) rather than relaunched out from under a session that may hold state the caller never asked to discard — the same tradeoff `ensure_proxy_compatible` already makes, and not the auto-relaunch a headless/headed mismatch gets, because a proxy or a feature flag is a security- or correctness-relevant configuration a caller explicitly chose, not a display preference. `src/connect_cli.rs` (the CLI's load-store/connect-or-launch/resolve-target/connect-page sequence, split out of `run::run` for the 1000-line cap) is the one place that reads the resolved value; `pipe.rs` keeps its own equivalent since it reads commands from stdin rather than dispatching on `cli.command`, and unifying the two was out of scope for a flag addition.
-- **`--copy-cookies`** — copies Cookies SQLite + Local State from user's real Chrome profile. Enables access to logged-in sites (X.com, Gmail) without `--connect`. macOS Keychain decrypts the cookies.
-- **A profile directory is deleted only when three conditions agree** (`src/profiles.rs`) — a profile is created by `launch_browser` and removed only by `close --purge`, so an agent that omits the flag, or crashes, leaves ~14 MB behind for good. Measured on a developer machine: `browsers/` held 1204 directories totalling 24.98 GB against 3 entries in the store — and the dead-entry prune makes that worse rather than better, because it drops the entry as soon as the pid is gone and the directory then loses the only name anything knew it by. "Delete every profile the store does not reference" is nevertheless the wrong predicate: a concurrent agent may have created its directory and not yet written its entry. A profile is removable only when (a) no entry references it, read under the same exclusive `flock` the save path already takes; (b) no artefact in it names a live holder — `SingletonLock` is a symlink whose target is `hostname-pid`, the only place a profile states its owner, resolved through `session::liveness`, while `DevToolsActivePort` names a port and is answered by asking whether anything still listens on it; and (c) nothing has touched it for 24 h. The window is what closes the create-then-write race without any new coordination, so it is not optional — the launch path takes up to 10 s before the first save and a day is ~8600x that. Every condition fails towards keeping, because the two outcomes are not comparable: an abandoned profile costs bytes, a deleted live one costs whatever it was logged into. Validated against the real store: 333 of the 1204 were removable (5.56 GB), and among those it refused was `test-tabs`, which had a four-day-old headless Chrome still running in it and no store entry at all. What the window deliberately sacrifices is a named browser someone logged into by hand and expects to still be logged in next week; the documented mechanisms do not work that way (`--copy-cookies` re-imports on every fresh launch, `--connect` drives the real Chrome). The sweep rides on the save path's existing lock, capped at 32 examinations and **one** removal per invocation so a read-only command never pays for the backlog (measured 0–80 ms, the spread being the size of the single profile removed); `close --purge-orphans` applies the same predicate uncapped for a store that accumulated before any of this existed. `default` is exempt from the automatic sweep — it is the profile every flagless invocation lands on. Relatedly, `close --purge` used to *claim* the purge: it broke out of its retry loop on the first `remove_dir_all` that returned `Ok`, and a Chrome that had been signalled but not yet exited wrote its state back on the way down — measured 235 files before the close, none immediately after, 22 a third of a second later, which is what 946 of those 1204 directories were. The loop now ends when the directory is absent, and a purge that never converges says so instead of reporting success.
-- **A browser is not gone because the registry forgot it, and `close` said otherwise** (`src/kill.rs`, `src/orphans.rs`) — `sessions.json` was the only list this tool consulted, and an entry leaves it for reasons unrelated to whether the process is running: `close` removes it whether or not the kill landed, the relaunch path removes it before spawning a replacement, the dead-entry prune drops it as soon as the pid reads dead. Each leaves a Chrome that `status` cannot show and `close` cannot reach. Measured on a developer machine: two of them 19 days old — the same `test-tabs` the profile sweep had already refused to delete *because* a headless Chrome was still holding it, which is the disk half seeing the leak and the process half having no way to act on it. `orphans.rs` recognises them by the `--user-data-dir` they were launched with, which is true independently of the registry being right, and rejects helper processes on `--type=` — Chrome hands the same flag to every renderer, so matching the flag alone reported 39 browsers where 5 were running and would have signalled a live browser's renderers one at a time. Matched by pid rather than name, so a relaunch leaves the previous process visible under a name the registry still holds. Related and separate: `kill_pid` returned `()`, so `close` printed `Closed browser=…` in all three outcomes — signalled, pid gone, pid reused. The reused case is not hypothetical and not silent: it reached a user as `Closed browser=s9 (pid=80548)` over a pid that by then belonged to `git fsmonitor--daemon`, which the guard had — correctly — left alone. The guard was right and the sentence was wrong, which is the worse of the two failures, because it is the one nobody investigates. `KillOutcome` makes the act and the wording the same statement, and `--json` carries `signalled` (`ok` has always meant "the command ran").
-- **The window between spawning a browser and persisting its pid leaked one on every exit** (`src/kill.rs`, `src/browser.rs`, `src/session.rs`) — `cmd.spawn()` returns a live Chrome whose pid is in memory only until `run.rs` reaches `save_session`, and in between sit two `?` (`CdpClient::connect`, `resolve_page_target`) and every signal. `Child`'s drop does not kill it and the Ctrl+C handler reads the store, which does not know it yet, so each of those exits left a browser nothing could name afterwards. The port-timeout path had its own `child.kill()`; it was the only one. Measured A/B on the same machine, cold start interrupted at 250 ms, five runs each: HEAD leaked a running Chrome with no session entry 5/5, the fix 0/5. This is the source of the orphans the sweep above can only clean up after the fact, and the reason two of them were test-shaped names — an interrupted test run is exactly this. A pid is armed at spawn and disarmed **inside `save_session`** rather than at the call site: the write that makes a browser reachable is the same event that ends the window, so a save path added later inherits the discipline instead of having to remember it. `reap_unpersisted` then runs on the two exits that would leak — the interrupt handler and the error path out of `run` — and is a no-op once the pid is on disk, which keeps the existing contract that a failed command leaves a usable browser behind. What it still cannot cover is `SIGKILL` of chrome-agent itself; `close --orphans` stays the net for that.
-- **`close` waits for the exit it claims** (`kill::wait_until_gone`) — SIGTERM returns before Chrome exits, and the dying instance keeps answering `/json/version`, so `close` immediately followed by any command on the same name reconnected to the corpse through its stale `DevToolsActivePort` and failed the WebSocket handshake — deterministic on this machine, masked by a 2 s sleep. `close` now polls the signalled pid until it is gone (bounded, 5 s), removes the port file, and on timeout says `still shutting down` instead of `Closed`; `--json` carries `exited` beside `signalled`, only on the signalled case, because a claim about a wait that never happened is noise.
-- **Parallel agent isolation** — `--browser <name>` per agent. Saves are parallel-safe via an exclusive `flock` on `sessions.lock` + read-merge-write: each save re-reads the on-disk store under the lock, deletes only the browsers this process dropped since load, upserts its own, then atomically renames a per-PID temp file into place.
-- **The session store prunes dead browsers, one-sidedly** (`session::prune_dead`, run inside the existing read-merge-write) — nothing ever removed an entry whose Chrome had exited: `close` removes only the browser it is handed a name for. Each entry carries a `uid_map` and a `last_snapshot` per page, so the file grows monotonically with every browser a user or a CI box ever launched. Measured on a developer machine: 5,212,694 bytes, 2131 entries, 2123 of them naming pids the kernel reports as gone — parsed *and* rewritten by every invocation, including read-only ones, because load and save both traverse it. After the prune, 7,827 bytes and 8 entries; `text --selector body` on a warm browser went from 0.38 s to under 0.01 s, and `goto_settle_tests` stopped blowing its 2 s guard. The predicate is deliberately not "is this browser reachable": an entry is dropped only when it carries a pid AND `kill(pid, 0)` answers `ESRCH`. Everything else is kept, because the two error directions are not symmetric — a stale entry costs bytes and the launch path relaunches over it, while a wrongly deleted one costs the caller its browser. So `pid: None` is kept without a probe (both `--connect` and a managed reconnect through `DevToolsActivePort` store no pid, so the absence carries no liveness information, and an HTTP probe per entry would put a round trip on the path of every save); `EPERM` is kept (the process exists under another uid); a pid outside `pid_t` is kept (`kill` would read it as a process group, which is a different question); and a recycled pid reads as alive under a name Chrome no longer holds, which keeps a stale entry — accepted, and the reason `is_process_alive` is now `liveness(pid) != Dead` rather than `== 0`. Non-Unix has no probe wired, so nothing is ever provably dead and the store simply grows as before. This cannot delete another agent's live entry: the prune runs on the map re-read from disk *inside* the exclusive lock and tests the pid that is about to be written, so a concurrent agent's running Chrome answers the probe and survives; the only entries it can reach are ones whose process is gone for that agent too. It runs after the upsert (so it also covers a browser that died mid-command) and the dropped names are removed from the caller's in-memory store, or the next save's "untouched and absent from disk" branch would republish them. No escape hatch was added: the prune is automatic on every save and a manual `prune` command could only reach the cases the predicate deliberately refuses to judge, where it has no better information than the probe does.
-- **connect_page with 8-attempt retry** — page-level CDP connection retries (up to 8 attempts) with 500ms/300ms backoff between tries
+`src/chrome_args.rs`. Passes extra flags to the Chrome chrome-agent launches. Repeatable,
+`global = true`, so it parses on either side of the verb. No env var: nothing else in this
+project is env-configured.
+
+**Eleven flags are refused outright, for two different reasons**, and the reason is in the data
+(`chrome_args::Refusal`) rather than in a comment — a caller told "chrome-agent could not
+reconnect" about a flag that publishes CDP to the network has been told the smaller half. The
+refusal message states the kind first, then the flag's own reason.
+
+`Refusal::BreaksReconnect` — chrome-agent could not find or reconnect to the browser it launches.
+Costs this invocation, nothing outside it:
+
+| Flag | Why |
+|---|---|
+| `--user-data-dir` | `DevToolsActivePort` is read from the profile directory tracked per `--browser` name |
+| `--remote-debugging-port` | chrome-agent launches with `=0` and reads the OS-assigned port back from that file |
+| `--remote-debugging-pipe` | same; a pipe transport breaks the port read |
+| `--proxy-server` | the dedicated flag already validates and persists it |
+| `--headless` | the stored `headless` mode that detects a mismatch on reconnect would silently disagree with Chrome's actual mode |
+
+`Refusal::WidensExposure` — the flag widens what the launched browser exposes, and no chrome-agent
+flag narrows it again. `--chrome-arg` is `global = true` and `managed_launch_args` appends caller
+args **last**, so they win over everything above them; a value composed by an agent reading a page
+is not the caller's own judgement the way a hand-typed launch flag is:
+
+| Flag | Why |
+|---|---|
+| `--remote-debugging-address` | with the mandated `--remote-debugging-port=0` this decides only which interfaces the CDP endpoint answers on. CDP has no permissions: whoever reaches the port reads any file through `file://`, reads every cookie in the profile, evaluates JS in any page |
+| `--disable-web-security` | same-origin policy off for every page in the browser, so a page reached on a link this tool followed can read any other origin's credentialed responses |
+| `--load-extension` | code that is not this tool's, with the browser's privileges, on every page it matches, for the life of the profile |
+| `--host-resolver-rules` | silently remaps hostnames, so `landed.final`, a screenshot and an extracted price all name a host that is not what answered |
+| `--remote-allow-origins` | lets a web page's own JS open the CDP WebSocket that drives this browser; with `*`, any page in any browser on the machine |
+| `--auth-server-allowlist` | Chrome hands the OS user's Kerberos/NTLM credentials to a listed server with no prompt |
+
+Each refusal names the fact and the real value the caller passed, never a placeholder, and
+suggests no rewrite — there is none for "don't send this flag" except dropping it.
+
+**A deny-list is not a boundary.** It names the flags measured to be dangerous, not every flag
+that is. `--chrome-arg` is still a way to change how Chrome behaves, and an invocation that
+composes it from page content is trusting that page with the browser.
+
+Under `--connect` it is refused rather than silently ignored: that Chrome is already running and
+reads no command line from this invocation. Mirrors the `--proxy-server` + `--connect` refusal.
+
+Fixed for the life of a named browser, like `--proxy-server`. A follow-up command that omits it
+inherits what the browser already runs with (`chrome_args::effective_chrome_args`). One naming
+*different* flags is refused (`ensure_chrome_args_compatible`) rather than relaunched out from
+under a session that may hold state — same tradeoff as `ensure_proxy_compatible`, and not the
+auto-relaunch a headless/headed mismatch gets, because a proxy or a feature flag is a
+security-relevant choice, not a display preference.
+
+`src/connect_cli.rs` reads the resolved value for the CLI. `pipe.rs` keeps its own equivalent,
+since it reads commands from stdin rather than dispatching on `cli.command`.
+
+## `--copy-cookies`
+
+Copies Cookies SQLite + Local State from the user's real Chrome profile, so logged-in sites
+(X.com, Gmail) work without `--connect`. macOS Keychain decrypts the cookies.
+
+## A profile directory is deleted only when three conditions agree
+
+`src/profiles.rs`. A profile is created by `launch_browser` and removed only by `close --purge`,
+so an agent that omits the flag or crashes leaves ~14 MB behind. Measured: `browsers/` held 1204
+directories totalling 24.98 GB against 3 entries in the store.
+
+"Delete every profile the store does not reference" is the wrong predicate — a concurrent agent
+may have created its directory and not yet written its entry. A profile is removable only when:
+
+1. No entry references it, read under the same exclusive `flock` the save path takes.
+2. No artefact in it names a live holder. `SingletonLock` is a symlink whose target is `hostname-pid`, the only place a profile states its owner, resolved through `session::liveness`; `DevToolsActivePort` names a port, answered by asking whether anything still listens on it.
+3. Nothing has touched it for 24 h. This window is what closes the create-then-write race without new coordination, so it is not optional: the launch path takes up to 10 s before the first save, and a day is ~8600x that.
+
+Every condition fails towards keeping. An abandoned profile costs bytes; a deleted live one costs
+whatever it was logged into. Validated against the real store: 333 of 1204 were removable
+(5.56 GB), and it refused `test-tabs`, which had a four-day-old headless Chrome running in it and
+no store entry.
+
+Deliberately sacrificed: a named browser someone logged into by hand and expects to still be
+logged in next week. The documented mechanisms do not work that way (`--copy-cookies` re-imports
+on every fresh launch, `--connect` drives the real Chrome).
+
+The sweep rides on the save path's existing lock, capped at 32 examinations and **one** removal
+per invocation, so a read-only command never pays for the backlog (measured 0–80 ms).
+`close --purge-orphans` applies the same predicate uncapped. `default` is exempt from the
+automatic sweep — it is the profile every flagless invocation lands on.
+
+`close --purge` used to claim the purge: it broke out of its retry loop on the first
+`remove_dir_all` returning `Ok`, and a signalled-but-not-yet-exited Chrome wrote its state back
+on the way down (measured: 235 files before the close, none immediately after, 22 a third of a
+second later — 946 of those 1204 directories). The loop now ends when the directory is absent,
+and a purge that never converges says so.
+
+## A browser is not gone because the registry forgot it
+
+`src/kill.rs`, `src/orphans.rs`. An entry leaves `sessions.json` for reasons unrelated to whether
+the process is running: `close` removes it whether or not the kill landed, the relaunch path
+removes it before spawning a replacement, the dead-entry prune drops it as soon as the pid reads
+dead. Each leaves a Chrome that `status` cannot show and `close` cannot reach. Measured: two of
+them 19 days old.
+
+`orphans.rs` recognises them by the `--user-data-dir` they were launched with, which is true
+independently of the registry. It rejects helper processes on `--type=` — Chrome hands the same
+flag to every renderer, and matching the dir alone reported 39 browsers where 5 were running.
+Matched by pid rather than name, so a relaunch leaves the previous process visible under a name
+the registry still holds.
+
+**The guard reaches its tools by absolute path, never through `PATH`.** `kill::process_name` is
+what stops chrome-agent signalling a recycled pid, and it resolved `ps` through the inherited
+`PATH` — a safety guard only as trustworthy as whoever set an environment variable. On Linux it
+now reads `/proc/<pid>/comm` and spawns nothing at all; elsewhere `ps` and `kill` come from
+`kill::PS_PATHS`/`KILL_PATHS` (`/bin`, then `/usr/bin`), and `orphans::process_table` takes the
+same list. `browser.rs`'s Chrome lookup dropped `which`/`where` entirely — both are themselves
+resolved through `PATH`, and reading the variable and joining it is the whole of what they did.
+A unit test scans the three sources for a `Command::new("…")` naming a bare binary.
+
+Where nothing resolves, `kill_pid` answers `Unverified` rather than claiming a signal it could
+not send — the status of the `kill` is now read instead of discarded, so "Closed" is never
+printed over a kill that did not happen.
+
+`kill_pid` used to return `()`, so `close` printed `Closed browser=…` in all three outcomes:
+signalled, pid gone, pid reused. The reused case reached a user as `Closed browser=s9 (pid=80548)`
+over a pid that by then belonged to `git fsmonitor--daemon`, which the guard had correctly left
+alone. `KillOutcome` makes the act and the wording the same statement; `--json` carries
+`signalled` (`ok` has always meant "the command ran").
+
+## The spawn-to-persist window
+
+`src/kill.rs`, `src/browser.rs`, `src/session.rs`. `cmd.spawn()` returns a live Chrome whose pid
+is in memory only until `run.rs` reaches `save_session`, and in between sit two `?`
+(`CdpClient::connect`, `resolve_page_target`) and every signal. `Child`'s drop does not kill it,
+and the Ctrl+C handler reads the store, which does not know it yet. Measured A/B, cold start
+interrupted at 250 ms, five runs each: HEAD leaked a running Chrome with no session entry 5/5,
+the fix 0/5.
+
+A pid is armed at spawn and disarmed **inside `save_session`** rather than at the call site: the
+write that makes a browser reachable is the same event that ends the window, so a save path added
+later inherits the discipline. `reap_unpersisted` runs on the two exits that would leak — the
+interrupt handler and the error path out of `run` — and is a no-op once the pid is on disk, which
+keeps the contract that a failed command leaves a usable browser behind. `SIGKILL` of
+chrome-agent itself is still uncovered; `close --orphans` is the net.
+
+## Every kill that precedes a relaunch waits for the exit it claims
+
+`browser::kill_and_await_exit`. SIGTERM returns before Chrome exits and the dying instance keeps
+answering `/json/version`, so a kill followed by any command on the same name reconnected to the
+corpse through its stale `DevToolsActivePort` and failed the WebSocket handshake.
+
+One helper for all of it: guarded kill through `kill::kill_pid` (liveness, then
+`is_browser_process`, so a recycled pid is never signalled), then `kill::wait_until_gone`
+(bounded, 5 s), then removal of the port file at `browsers_dir()/<name>/chromium-profile/`.
+`close` uses it, and so do the headless/headed relaunch paths in both front ends — those killed
+and relaunched immediately, which is how a store entry came to hold a dead ws endpoint with
+`pid: None`. `close` on timeout says `still shutting down` instead of `Closed`; `--json` carries
+`exited` beside `signalled`, only on the signalled case.
+
+The path matters: `cmd_close` removed `browsers_dir()/<name>/DevToolsActivePort`, one directory
+above the file Chrome writes, so the documented removal had never removed anything.
+
+## `--headed` is read as intent, on both front ends
+
+`connect_cli::want_headless`. `--headed` is a bare `SetTrue` flag, so `cli.headed == true` is
+already "written on this command line": an explicit `--headed` overrules the stored mode and
+relaunches, an omitted one lets the stored mode win. The CLI used to let the stored mode win in
+both cases, which made the relaunch branch unreachable and dropped the flag in silence. The
+converse regression is the one cf1e8a8 fixed and it stays fixed — a plain command must not kill
+an existing headed browser.
+
+Pipe still reads an omitted `--headed` as "I want headless" and kills a headed browser. That is
+deliberate for now: with no `--headless` flag on the CLI, pipe's omission is the only way to move
+a named browser back to headless. Adding `--headless` is what would let both sides read intent
+symmetrically.
+
+## Parallel agent isolation
+
+`--browser <name>` per agent. Saves are parallel-safe via an exclusive `flock` on `sessions.lock`
+plus read-merge-write: each save re-reads the on-disk store under the lock, deletes only the
+browsers this process dropped since load, upserts its own, then atomically renames a per-PID temp
+file into place.
+
+## The store prunes dead browsers, one-sidedly
+
+`session::prune_dead`, inside the existing read-merge-write. Nothing used to remove an entry
+whose Chrome had exited, and each entry carries a `uid_map` and a `last_snapshot` per page.
+Measured: 5,212,694 bytes, 2131 entries, 2123 naming pids the kernel reports as gone — parsed
+*and* rewritten by every invocation, including read-only ones. After the prune: 7,827 bytes, 8
+entries; `text --selector body` on a warm browser went from 0.38 s to under 0.01 s, and
+`goto_settle_tests` stopped blowing its 2 s guard.
+
+The predicate is not "is this browser reachable". An entry is dropped only when it carries a pid
+AND `kill(pid, 0)` answers `ESRCH`. Everything else is kept, because a stale entry costs bytes
+while a wrongly deleted one costs the caller its browser:
+
+- `pid: None` is kept without a probe. Both `--connect` and a managed reconnect through `DevToolsActivePort` store no pid, so the absence carries no liveness information, and an HTTP probe per entry would put a round trip on every save.
+- `EPERM` is kept: the process exists under another uid.
+- A pid outside `pid_t` is kept: `kill` would read it as a process group.
+- A recycled pid reads as alive under a name Chrome no longer holds, keeping a stale entry. Accepted, and the reason `is_process_alive` is now `liveness(pid) != Dead` rather than `== 0`.
+- Non-Unix has no probe wired, so nothing is provably dead and the store grows as before.
+
+It cannot delete another agent's live entry: the prune runs on the map re-read from disk *inside*
+the exclusive lock and tests the pid about to be written. It runs after the upsert, so it also
+covers a browser that died mid-command, and the dropped names are removed from the caller's
+in-memory store or the next save's "untouched and absent from disk" branch would republish them.
+No manual `prune` command: it could only reach the cases the predicate deliberately refuses to
+judge.
+
+## `connect_page` retry
+
+Page-level CDP connection retries, up to 8 attempts, 500 ms / 300 ms backoff between tries.

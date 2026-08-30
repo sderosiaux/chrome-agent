@@ -1,9 +1,6 @@
 //! What a click can claim about where it landed.
 //!
-//! Every case here was a false success before the hit test: the response said the named
-//! element had been clicked, and the page said otherwise. The assertions are always in two
-//! parts — what we report, and what the page actually recorded — because the failure mode
-//! being fixed is precisely the two disagreeing while only one is visible.
+//! Each test asserts both what the response reports and what the page actually recorded.
 
 use std::process::Command;
 
@@ -12,22 +9,18 @@ use serde_json::Value;
 mod common;
 use common::TestBrowser;
 
-fn binary() -> String {
-    let mut path = std::env::current_exe().unwrap().parent().unwrap().parent().unwrap().to_path_buf();
-    path.push("chrome-agent");
-    path.to_string_lossy().into_owned()
-}
-
 fn run_cli(args: &[&str]) -> (String, i32) {
-    let output = Command::new(binary()).args(args).output().expect("Failed to run chrome-agent");
+    let output = Command::new(common::binary())
+        .args(args)
+        .output()
+        .expect("Failed to run chrome-agent");
     (
         String::from_utf8_lossy(&output.stdout).to_string(),
         output.status.code().unwrap_or(-1),
     )
 }
 
-/// Open a fixture and take the first snapshot, so every click below has a baseline and a
-/// verdict that is about the page rather than about a missing baseline.
+/// Open a fixture and take the first snapshot, so every click below has a verdict baseline.
 fn open(browser: &str, fixture: &str) -> bool {
     if !common::browser_ready() {
         return false;
@@ -56,7 +49,10 @@ fn uid_for(browser: &str, needles: &[&str]) -> String {
     let (stdout, code) = run_cli(&["--browser", browser, "--json", "inspect"]);
     assert_eq!(code, 0, "{stdout}");
     let snapshot: Value = serde_json::from_str(&stdout).expect("JSON inspect");
-    let text = snapshot["snapshot"].as_str().unwrap_or_default().to_string();
+    let text = snapshot["snapshot"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
     text.lines()
         .find(|line| needles.iter().all(|n| line.contains(n)))
         .and_then(|line| line.trim_start().strip_prefix("uid="))
@@ -73,19 +69,17 @@ fn click(browser: &str, args: &[&str]) -> Value {
     serde_json::from_str(&stdout).expect("JSON click response")
 }
 
-/// Nothing was focused when the page loaded, and a click focuses what it hits. Comparing two
-/// clicks means comparing them from the same starting state, or the second one has no focus
-/// left to move and the two verdicts differ for a reason that is not the one under test.
+/// Reset focus, so two clicks are compared from the same starting state.
 fn blur(browser: &str) {
-    let _ = eval(browser, "document.activeElement && document.activeElement.blur(); 1");
+    let _ = eval(
+        browser,
+        "document.activeElement && document.activeElement.blur(); 1",
+    );
 }
 
-// ---------------------------------------------------------------------------
-// The overlay: the case that was reported as a success
-// ---------------------------------------------------------------------------
+// --- The overlay -----------------------------------------------------------
 
-/// Both spellings of `click` must name the scrim, and the page must agree that the scrim is
-/// what received the event.
+/// Both spellings of `click` must name the scrim, and the page must agree it got the event.
 #[test]
 fn a_covered_button_reports_the_element_that_took_the_click() {
     let b = TestBrowser::new("hit-overlay");
@@ -98,8 +92,15 @@ fn a_covered_button_reports_the_element_that_took_the_click() {
         let _ = eval(b.name(), "window.receiver = null; 1");
         let response = click(b.name(), &aim);
 
-        assert_eq!(response["ok"], Value::Bool(true), "the click is still delivered: {response}");
-        assert_eq!(response["verdict"], "intercepted", "aimed via {aim:?}: {response}");
+        assert_eq!(
+            response["ok"],
+            Value::Bool(true),
+            "the click is still delivered: {response}"
+        );
+        assert_eq!(
+            response["verdict"], "intercepted",
+            "aimed via {aim:?}: {response}"
+        );
         assert_eq!(response["verdict_reason"], "hit_test_receiver");
         assert_eq!(response["delivery"], "intercepted");
         assert_eq!(
@@ -112,10 +113,12 @@ fn a_covered_button_reports_the_element_that_took_the_click() {
             "the response still names the node that was aimed at: {response}"
         );
         assert!(
-            response["verdict_hint"].as_str().unwrap_or_default().contains("div#scrim"),
+            response["verdict_hint"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("div#scrim"),
             "the hint has to say which element to deal with: {response}"
         );
-        // The claim, checked against the page: the scrim's handler ran and the button's did not.
         assert_eq!(
             eval(b.name(), "window.receiver"),
             Value::String("scrim".into()),
@@ -124,8 +127,7 @@ fn a_covered_button_reports_the_element_that_took_the_click() {
     }
 }
 
-/// `--on-intercept refuse` is the only mode that changes behaviour rather than reporting: the
-/// event is not sent at all.
+/// `--on-intercept refuse` sends no event at all.
 #[test]
 fn refusing_an_interception_dispatches_nothing() {
     let b = TestBrowser::new("hit-overlay-refuse");
@@ -134,14 +136,26 @@ fn refusing_an_interception_dispatches_nothing() {
     }
     let _ = eval(b.name(), "window.receiver = null; 1");
     let (stdout, code) = run_cli(&[
-        "--browser", b.name(), "--json", "--on-intercept", "refuse",
-        "click", "--selector", "#target",
+        "--browser",
+        b.name(),
+        "--json",
+        "--on-intercept",
+        "refuse",
+        "click",
+        "--selector",
+        "#target",
     ]);
-    assert_ne!(code, 0, "a refusal is a failure the caller has to handle: {stdout}");
+    assert_ne!(
+        code, 0,
+        "a refusal is a failure the caller has to handle: {stdout}"
+    );
     let response: Value = serde_json::from_str(&stdout).expect("JSON error response");
     assert_eq!(response["ok"], Value::Bool(false));
     let error = response["error"].as_str().unwrap_or_default();
-    assert!(error.contains("div#scrim"), "the refusal names the receiver: {error}");
+    assert!(
+        error.contains("div#scrim"),
+        "the refusal names the receiver: {error}"
+    );
     assert_eq!(
         eval(b.name(), "window.receiver"),
         Value::Null,
@@ -149,7 +163,50 @@ fn refusing_an_interception_dispatches_nothing() {
     );
 }
 
-/// The second failure the same silence covered: an aim point read mid-animation.
+/// `dblclick` aims through the SAME path as `click` (`element::aim_and_dispatch`), so it must
+/// refuse on the same measurement — and say so in its own word. The two verbs were two copies of
+/// the aim path, which is how one of them could have kept a rule the other lost.
+#[test]
+fn a_double_click_refuses_on_the_same_interception_and_in_its_own_word() {
+    let b = TestBrowser::new("hit-overlay-refuse-dblclick");
+    if !open(b.name(), "click_overlay.html") {
+        return;
+    }
+    let _ = eval(b.name(), "window.receiver = null; 1");
+    let (stdout, code) = run_cli(&[
+        "--browser",
+        b.name(),
+        "--json",
+        "--on-intercept",
+        "refuse",
+        "dblclick",
+        "--selector",
+        "#target",
+    ]);
+    assert_ne!(
+        code, 0,
+        "a refusal is a failure the caller has to handle: {stdout}"
+    );
+    let response: Value = serde_json::from_str(&stdout).expect("JSON error response");
+    assert_eq!(response["ok"], Value::Bool(false));
+    let error = response["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("div#scrim"),
+        "the refusal names the receiver: {error}"
+    );
+    assert!(
+        error.contains("double-click"),
+        "the refusal is written in the verb that was refused: {error}"
+    );
+    assert_eq!(response["delivery"], "intercepted", "{response}");
+    assert_eq!(response["dispatched"], Value::Bool(false), "{response}");
+    assert_eq!(
+        eval(b.name(), "window.receiver"),
+        Value::Null,
+        "refuse means nothing was dispatched — not even to the overlay"
+    );
+}
+
 #[test]
 fn a_smooth_scrolling_page_lands_or_says_it_could_not_aim() {
     let b = TestBrowser::new("hit-smooth");
@@ -169,24 +226,22 @@ fn a_smooth_scrolling_page_lands_or_says_it_could_not_aim() {
         );
         assert_eq!(response["delivery"], "not_settled");
         assert!(
-            response["message"].as_str().unwrap_or_default().starts_with("Did not click"),
+            response["message"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("Did not click"),
             "an action that dispatched nothing must not answer \"Clicked\": {response}"
         );
     }
-    // The old answer, and the one thing this can never be again: "changed" on the strength of
-    // a focus move, while the button was never touched.
     assert_ne!(
         response["verdict_reason"], "focus_only",
         "focus churn may not stand in for a click that never arrived: {response}"
     );
 }
 
-// ---------------------------------------------------------------------------
-// Shapes a naive hit test gets wrong in the other direction
-// ---------------------------------------------------------------------------
+// --- Shapes a naive hit test gets wrong in the other direction ---------------
 
-/// The visually-hidden checkbox whose visible box is a sibling span. `hit instanceof
-/// HTMLLabelElement` misses this; retargeting through `closest('label').control` catches it.
+/// The visible box is a sibling span, so the hit retargets via `closest('label').control`.
 #[test]
 fn a_label_that_forwards_its_click_is_not_an_interception() {
     let b = TestBrowser::new("hit-label");
@@ -204,8 +259,7 @@ fn a_label_that_forwards_its_click_is_not_an_interception() {
     );
 }
 
-/// `elementFromPoint` returns the HOST and `Node.contains` does not cross the boundary: both
-/// escapes fail at once, and a naive answer calls every design-system button intercepted.
+/// `elementFromPoint` returns the host, so the probe descends into the shadow root.
 #[test]
 fn a_button_inside_an_open_shadow_root_is_hit_not_intercepted() {
     let b = TestBrowser::new("hit-shadow");
@@ -216,20 +270,20 @@ fn a_button_inside_an_open_shadow_root_is_hit_not_intercepted() {
     let response = click(b.name(), &[uid.as_str()]);
     assert_eq!(response["delivery"], "target_hit", "{response}");
     assert_ne!(response["verdict"], "intercepted");
-    assert_eq!(eval(b.name(), "document.title"), Value::String("inner clicked".into()));
+    assert_eq!(
+        eval(b.name(), "document.title"),
+        Value::String("inner clicked".into())
+    );
 }
 
-/// A modal dialog gets its own reason token, because the recovery is to close it rather than
-/// to re-aim. Not `blocked`: that would teach an agent to wait on a button that will never
-/// become clickable while the dialog is open.
+/// A modal gets the `modal_dialog` reason, not `blocked`: the recovery is to close it.
 #[test]
 fn a_modal_dialog_is_named_as_the_receiver_it_is() {
     let b = TestBrowser::new("hit-modal");
     if !open(b.name(), "intercept_modal_backdrop.html") {
         return;
     }
-    // The dialog hides the shell from the accessibility tree, so the button behind it has no
-    // uid to aim at — the selector path is the only way in, which is itself the point.
+    // The dialog hides the shell from the a11y tree, so the button behind it has no uid.
     let response = click(b.name(), &["--selector", "#behind"]);
     assert_eq!(response["verdict"], "intercepted", "{response}");
     assert_eq!(response["verdict_reason"], "modal_dialog", "{response}");
@@ -243,9 +297,7 @@ fn a_modal_dialog_is_named_as_the_receiver_it_is() {
     );
 }
 
-/// The centre of the bounding box of a link wrapped across two lines falls in the gap between
-/// the line boxes — on the paragraph. Aiming at the largest client rect is what avoids
-/// reporting the paragraph as an interceptor.
+/// The bounding-box centre falls on the paragraph in the gap between the two line boxes.
 #[test]
 fn an_inline_link_across_two_lines_is_aimed_at_its_largest_box() {
     let b = TestBrowser::new("hit-wrapped");
@@ -265,8 +317,7 @@ fn an_inline_link_across_two_lines_is_aimed_at_its_largest_box() {
     );
 }
 
-/// A zero-size element has no point to aim at, so the click is synthetic. The absence of a hit
-/// test is encoded as an absence rather than as a clean one.
+/// A zero-size element has no point to aim at, so the click is synthetic and no hit test ran.
 #[test]
 fn a_synthetic_click_reports_that_it_was_synthetic() {
     let b = TestBrowser::new("hit-js");
@@ -283,15 +334,15 @@ fn a_synthetic_click_reports_that_it_was_synthetic() {
         response["verdict"], "no_effect",
         "and it cannot prove delivery either: {response}"
     );
-    assert_eq!(eval(b.name(), "document.title"), Value::String("js clicked".into()));
+    assert_eq!(
+        eval(b.name(), "document.title"),
+        Value::String("js clicked".into())
+    );
 }
 
-// ---------------------------------------------------------------------------
-// The strong word, and the limits on it
-// ---------------------------------------------------------------------------
+// --- `no_effect` and the limits on it ---------------------------------------
 
-/// An uncovered button with nothing wired to it is the only shape `no_effect` describes:
-/// delivery proven, window quiet. Both spellings must reach it from the same starting state.
+/// `no_effect` means delivery proven and observation window quiet, by either spelling.
 #[test]
 fn an_uncovered_listenerless_button_reports_no_effect_by_either_route() {
     let b = TestBrowser::new("hit-inert");
@@ -302,29 +353,34 @@ fn an_uncovered_listenerless_button_reports_no_effect_by_either_route() {
 
     let mut verdicts = Vec::new();
     for aim in [vec![uid.as_str()], vec!["--selector", "#inert-btn"]] {
-        // Focus is state, and a click moves it. Without this the first click reports the focus
-        // it moved and the second has none left to move — a difference that has nothing to do
-        // with how the element was named.
+        // Focus is state and a click moves it: both aims start from none.
         blur(b.name());
         let response = click(b.name(), &aim);
-        assert_eq!(response["delivery"], "target_hit", "aimed via {aim:?}: {response}");
-        assert_eq!(response["verdict"], "no_effect", "aimed via {aim:?}: {response}");
+        assert_eq!(
+            response["delivery"], "target_hit",
+            "aimed via {aim:?}: {response}"
+        );
+        assert_eq!(
+            response["verdict"], "no_effect",
+            "aimed via {aim:?}: {response}"
+        );
         assert!(
             response["observed_after_ms"].as_u64().is_some(),
             "`no_effect` is a claim about a window and must carry it: {response}"
         );
         let hint = response["verdict_hint"].as_str().unwrap_or_default();
         for blind_spot in ["canvas", "CSS-only", "after the window"] {
-            assert!(hint.contains(blind_spot), "the hint omits {blind_spot}: {hint}");
+            assert!(
+                hint.contains(blind_spot),
+                "the hint omits {blind_spot}: {hint}"
+            );
         }
         verdicts.push(response["verdict"].clone());
     }
     assert_eq!(verdicts[0], verdicts[1], "one verb, one verdict");
 }
 
-/// A target inside an iframe gets a correctly mapped aim point and no delivery claim: an
-/// overlay in the PARENT covering the frame is invisible from the frame's own document, so a
-/// clean reading there would prove nothing.
+/// An overlay in the parent covering the frame is invisible from the frame's own document.
 #[test]
 fn a_target_inside_an_iframe_is_clicked_but_not_judged() {
     if !common::browser_ready() {
@@ -332,13 +388,15 @@ fn a_target_inside_an_iframe_is_clicked_but_not_judged() {
     }
     let b = TestBrowser::new("hit-iframe");
     let url = common::fixture_url("intercept_iframe_contains_target.html");
-    // One session, driven line by line: the frame binding lives on the connection, and a uid
-    // resolved in one session names nothing in the next.
+    // One pipe session: the frame binding and the uid map live on the connection.
     let mut session = PipeSession::start(b.name());
     session.send(&serde_json::json!({"cmd": "goto", "url": url}));
     session.send(&serde_json::json!({"cmd": "frame", "target": "#shop"}));
     let snapshot = session.send(&serde_json::json!({"cmd": "inspect"}));
-    let text = snapshot["snapshot"].as_str().unwrap_or_default().to_string();
+    let text = snapshot["snapshot"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
     let uid = text
         .lines()
         .find(|line| line.contains("button"))
@@ -364,9 +422,7 @@ fn a_target_inside_an_iframe_is_clicked_but_not_judged() {
     );
 }
 
-/// Mechanical: no path that dispatches through JS may ever claim an interception, on any
-/// fixture. The two are keyed on the dispatch mechanism, and this is the check that they stay
-/// that way as fixtures are added.
+/// Across every fixture: no JS dispatch claims an interception, and none goes unnamed.
 #[test]
 fn no_js_dispatch_anywhere_claims_an_interception() {
     let b = TestBrowser::new("hit-mechanical");
@@ -391,8 +447,6 @@ fn no_js_dispatch_anywhere_claims_an_interception() {
                 "{fixture} claims an interception on a synthetic click: {response}"
             );
         }
-        // And the converse, which is what keeps the claim meaningful: an interception is only
-        // ever reported alongside the delivery that licenses it.
         if response["verdict"] == "intercepted" {
             assert_eq!(response["delivery"], "intercepted", "{fixture}: {response}");
             assert!(
@@ -413,14 +467,17 @@ impl PipeSession {
     fn start(browser: &str) -> Self {
         use std::io::BufRead as _;
         use std::process::Stdio;
-        let mut child = Command::new(binary())
+        let mut child = Command::new(common::binary())
             .args(["--browser", browser, "pipe"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()
             .expect("spawn pipe");
         let stdout = child.stdout.take().expect("pipe stdout");
-        Self { child, responses: std::io::BufReader::new(stdout).lines() }
+        Self {
+            child,
+            responses: std::io::BufReader::new(stdout).lines(),
+        }
     }
 
     fn send(&mut self, cmd: &Value) -> Value {

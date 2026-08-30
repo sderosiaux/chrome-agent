@@ -1,9 +1,7 @@
-//! E2E tests for the `frame` command: switching execution context into an
-//! iframe must scope subsequent `eval` and `inspect` to that frame (issue #8).
+//! `frame` scopes subsequent `eval` and `inspect` to the bound iframe (issue #8).
 //!
-//! These drive a single `chrome-agent pipe` process (one persistent CDP
-//! connection) so we exercise the real in-process frame-binding state, not
-//! cross-process behavior.
+//! Driven through one `chrome-agent pipe` process: the binding lives on the connection, so a
+//! sequence of CLI invocations would not exercise it.
 
 use std::io::Write as _;
 use std::process::{Command, Stdio};
@@ -13,24 +11,9 @@ use serde_json::Value;
 mod common;
 use common::TestBrowser;
 
-/// Path to the built binary (sibling of the test binary).
-fn binary() -> String {
-    let mut path = std::env::current_exe()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .to_path_buf();
-    path.push("chrome-agent");
-    path.to_string_lossy().into_owned()
-}
-
-/// `file://` URL for a fixture in `tests/fixtures/`.
-/// Run `chrome-agent pipe` feeding the given JSON command lines on stdin,
-/// return one parsed `Value` per output line (in order).
+/// Run `chrome-agent pipe` over the given JSON commands, one parsed `Value` per output line.
 fn run_pipe(browser: &str, commands: &[Value]) -> Vec<Value> {
-    let mut child = Command::new(binary())
+    let mut child = Command::new(common::binary())
         .args(["--browser", browser, "pipe"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -54,11 +37,6 @@ fn run_pipe(browser: &str, commands: &[Value]) -> Vec<Value> {
         .collect()
 }
 
-
-// ---------------------------------------------------------------------------
-// Positive: frame switch binds subsequent commands to the iframe
-// ---------------------------------------------------------------------------
-
 #[test]
 fn frame_switch_scopes_eval_location_to_iframe() {
     if !common::browser_ready() {
@@ -76,7 +54,12 @@ fn frame_switch_scopes_eval_location_to_iframe() {
     );
 
     assert_eq!(responses.len(), 3, "expected 3 responses: {responses:?}");
-    assert_eq!(responses[1]["ok"], Value::Bool(true), "frame switch: {:?}", responses[1]);
+    assert_eq!(
+        responses[1]["ok"],
+        Value::Bool(true),
+        "frame switch: {:?}",
+        responses[1]
+    );
 
     let href = responses[2]["result"].as_str().unwrap_or_default();
     assert!(
@@ -142,10 +125,6 @@ fn frame_switch_scopes_inspect_to_iframe() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Positive: switching back to main restores the top document
-// ---------------------------------------------------------------------------
-
 #[test]
 fn frame_main_switches_back_to_top_document() {
     if !common::browser_ready() {
@@ -171,10 +150,6 @@ fn frame_main_switches_back_to_top_document() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Positive: navigation resets frame binding (no stale context)
-// ---------------------------------------------------------------------------
-
 #[test]
 fn navigation_resets_frame_binding() {
     if !common::browser_ready() {
@@ -193,8 +168,8 @@ fn navigation_resets_frame_binding() {
     );
 
     assert_eq!(responses.len(), 4, "responses: {responses:?}");
-    // After re-navigating the top page, eval must run against the top document
-    // (the iframe context is stale/gone), not error out with a dead context.
+    // The iframe's isolated world died with the navigation, so eval must run against the new
+    // top document rather than error on a dead context.
     assert_eq!(
         responses[3]["ok"],
         Value::Bool(true),
@@ -207,10 +182,6 @@ fn navigation_resets_frame_binding() {
         "eval after navigation targets the newly loaded top document, got: {href:?}"
     );
 }
-
-// ---------------------------------------------------------------------------
-// Negatives: error paths must stay ok:false with clear messages
-// ---------------------------------------------------------------------------
 
 #[test]
 fn frame_on_non_iframe_element_errors() {
@@ -278,12 +249,11 @@ fn frame_missing_target_field_errors() {
     assert_eq!(responses.len(), 2, "responses: {responses:?}");
     assert_eq!(responses[1]["ok"], Value::Bool(false), "{:?}", responses[1]);
     let err = responses[1]["error"].as_str().unwrap_or_default();
-    assert!(err.contains("target"), "expected missing-target error, got: {err:?}");
+    assert!(
+        err.contains("target"),
+        "expected missing-target error, got: {err:?}"
+    );
 }
-
-// ---------------------------------------------------------------------------
-// Control / regression: without a frame switch, eval + inspect target top doc
-// ---------------------------------------------------------------------------
 
 #[test]
 fn without_frame_switch_eval_targets_top_document() {

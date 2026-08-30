@@ -1,15 +1,8 @@
-//! `--chrome-arg` end-to-end: does the flag reach the real Chrome process, not just the
-//! `Vec<String>` `managed_launch_args` builds (that half is a pure unit test in `browser.rs`).
+//! `--chrome-arg` end-to-end: the flag reaches the real Chrome process argv, read back with
+//! `ps`. Building the arg vector is a unit test in `browser.rs`.
 //!
-//! The motivating case — `--enable-features=WebMCP,WebMCPTesting` making
-//! `document.modelContext` observable — is demonstrated manually below rather than pinned as
-//! an assertion: it depends on the installed Chrome shipping that experimental flag at all
-//! (verified against Chrome 152 while building this feature; a CI runner's managed Chromium
-//! is a different, independently-pinned build that may or may not carry it), so asserting on
-//! it would fail for a reason that has nothing to do with whether `--chrome-arg` works. What
-//! this suite pins instead is version-independent: the exact string chrome-agent was asked to
-//! pass showing up in the real OS process's argv, read back with `ps` rather than trusted from
-//! this tool's own output.
+//! Deliberately version-independent: what the flag DOES (e.g. `--enable-features=WebMCP`)
+//! depends on the installed Chrome shipping it, so only its presence in argv is asserted.
 
 use serde_json::Value;
 use std::process::Command;
@@ -17,21 +10,8 @@ use std::process::Command;
 mod common;
 use common::TestBrowser;
 
-fn binary() -> String {
-    let mut path = std::env::current_exe()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .to_path_buf();
-    path.push("chrome-agent");
-    path.to_string_lossy().into_owned()
-}
-
-
 fn status_pid(browser: &str) -> Option<u32> {
-    let output = Command::new(binary())
+    let output = Command::new(common::binary())
         .args(["--browser", browser, "status", "--json"])
         .output()
         .unwrap();
@@ -64,7 +44,7 @@ fn chrome_arg_reaches_the_real_chrome_process() {
     let guard = TestBrowser::new("test-chrome-arg");
     let browser = guard.name();
     let url = common::fixture_url("assert_page.html");
-    let output = Command::new(binary())
+    let output = Command::new(common::binary())
         .args([
             "--browser",
             browser,
@@ -88,16 +68,17 @@ fn chrome_arg_reaches_the_real_chrome_process() {
         "the requested --chrome-arg did not reach the real Chrome process argv: {argv}"
     );
 
-    // A follow-up command that omits --chrome-arg reconnects to the SAME process rather than
-    // relaunching without it — the inherit-when-omitted rule, proven against the live pid
-    // rather than the session file's record of it.
-    let follow_up = Command::new(binary())
+    // Inherit-when-omitted: a follow-up without --chrome-arg reconnects to the same pid.
+    let follow_up = Command::new(common::binary())
         .args(["--browser", browser, "eval", "1+1", "--json"])
         .output()
         .unwrap();
     assert!(follow_up.status.success());
     let follow_up_pid = status_pid(browser).expect("browser still has a pid after a follow-up");
-    assert_eq!(follow_up_pid, pid, "omitting --chrome-arg relaunched the browser");
+    assert_eq!(
+        follow_up_pid, pid,
+        "omitting --chrome-arg relaunched the browser"
+    );
 }
 
 #[cfg(unix)]
@@ -110,7 +91,7 @@ fn a_conflicting_chrome_arg_is_refused_rather_than_relaunching() {
     let guard = TestBrowser::new("test-chrome-arg-conflict");
     let browser = guard.name();
     let url = common::fixture_url("assert_page.html");
-    let first = Command::new(binary())
+    let first = Command::new(common::binary())
         .args([
             "--browser",
             browser,
@@ -121,10 +102,14 @@ fn a_conflicting_chrome_arg_is_refused_rather_than_relaunching() {
         ])
         .output()
         .unwrap();
-    assert!(first.status.success(), "{}", String::from_utf8_lossy(&first.stderr));
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
     let pid = status_pid(browser).expect("launched browser has a pid");
 
-    let conflicting = Command::new(binary())
+    let conflicting = Command::new(common::binary())
         .args([
             "--browser",
             browser,
@@ -136,12 +121,19 @@ fn a_conflicting_chrome_arg_is_refused_rather_than_relaunching() {
         ])
         .output()
         .unwrap();
-    assert!(!conflicting.status.success(), "a different --chrome-arg must be refused, not silently applied");
+    assert!(
+        !conflicting.status.success(),
+        "a different --chrome-arg must be refused, not silently applied"
+    );
     // --json puts the error on stdout (`{"ok":false,...}`), not stderr.
     let stdout = String::from_utf8_lossy(&conflicting.stdout);
     assert!(stdout.contains("different --chrome-arg flags"), "{stdout}");
 
-    // The refusal must not have torn down the running browser to get there.
-    let still_pid = status_pid(browser).expect("the refused command must not have killed the browser");
-    assert_eq!(still_pid, pid, "a refused --chrome-arg relaunched the browser anyway");
+    // The refusal must not tear down the running browser.
+    let still_pid =
+        status_pid(browser).expect("the refused command must not have killed the browser");
+    assert_eq!(
+        still_pid, pid,
+        "a refused --chrome-arg relaunched the browser anyway"
+    );
 }

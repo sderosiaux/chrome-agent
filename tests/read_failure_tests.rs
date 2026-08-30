@@ -1,14 +1,7 @@
-//! A failed post-action read does not turn a landed action into a failure.
+//! A failed post-action read does not turn a landed action into a failure, in either mode.
 //!
-//! The CLI propagated the read error with `?`, so a click that had already been delivered
-//! came back as `ok:false`. The natural response to that is to click again — the one
-//! outcome an agent cannot recover from, since the second click is real. `pipe_dispatch`
-//! stated the opposite policy in a comment and followed it; the two modes disagreed about
-//! the same event.
-//!
-//! The fixture pins the main thread after the click returns, so CDP — which needs that
-//! thread — cannot answer the read inside a short `--timeout`. The action is delivered and
-//! the observation of it is not, on purpose.
+//! The fixtures pin the main thread after the action returns, so CDP cannot answer the read
+//! inside a short `--timeout`: the action is delivered and the observation of it is not.
 
 use std::io::Write as _;
 use std::process::{Command, Stdio};
@@ -18,18 +11,37 @@ use serde_json::Value;
 mod common;
 use common::TestBrowser;
 
-fn binary() -> String {
-    let mut path = std::env::current_exe().unwrap().parent().unwrap().parent().unwrap().to_path_buf();
-    path.push("chrome-agent");
-    path.to_string_lossy().into_owned()
-}
-
 fn run_cli(args: &[&str]) -> (String, i32) {
-    let output = Command::new(binary()).args(args).output().expect("Failed to run chrome-agent");
+    let output = Command::new(common::binary())
+        .args(args)
+        .output()
+        .expect("Failed to run chrome-agent");
     (
         String::from_utf8_lossy(&output.stdout).to_string(),
         output.status.code().unwrap_or(-1),
     )
+}
+
+/// Give the page back to the browser before `TestBrowser::drop` tries to close it.
+///
+/// The fixtures pin the main thread for a fixed six seconds, and this used to be a flat
+/// `sleep(7s)` tuned to that number: too short on a slower runner (the close then races a
+/// wedged page) and pure waste on a faster one. Polling until the page answers is also the
+/// stronger claim — it proves the block ended, which a sleep only assumes.
+fn wait_until_the_page_answers_again(browser: &str) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        let (_, code) = run_cli(&["--browser", browser, "--timeout", "2", "eval", "1"]);
+        if code == 0 {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the page never answered again: the main thread is still pinned 15s after the \
+             action, so the fixture is no longer doing what this suite reads it as doing"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
 }
 
 fn open_busy_page(browser: &str) -> bool {
@@ -46,8 +58,6 @@ fn open_busy_page(browser: &str) -> bool {
     true
 }
 
-/// The click landed. Whether we managed to look afterwards is a different question, and
-/// answering it with `ok:false` invites the agent to do the whole thing again.
 #[test]
 fn a_click_that_landed_is_not_reported_as_failed_because_the_read_timed_out() {
     let b = TestBrowser::new("read-failure-cli");
@@ -55,28 +65,32 @@ fn a_click_that_landed_is_not_reported_as_failed_because_the_read_timed_out() {
         return;
     }
     let (stdout, code) = run_cli(&[
-        "--browser", b.name(), "--timeout", "2", "--json", "click", "--selector", "#block",
+        "--browser",
+        b.name(),
+        "--timeout",
+        "2",
+        "--json",
+        "click",
+        "--selector",
+        "#block",
     ]);
-    let v: Value = serde_json::from_str(&stdout).unwrap_or_else(|e| panic!("not JSON ({e}): {stdout}"));
+    let v: Value =
+        serde_json::from_str(&stdout).unwrap_or_else(|e| panic!("not JSON ({e}): {stdout}"));
 
     assert_eq!(code, 0, "the action succeeded: {v}");
     assert_eq!(v["ok"], true, "{v}");
-    assert_eq!(v["verdict"], "unknown", "and the report says why it cannot say more: {v}");
+    assert_eq!(
+        v["verdict"], "unknown",
+        "and the report says why it cannot say more: {v}"
+    );
     assert_eq!(v["verdict_reason"], "read_failed", "{v}");
     assert!(v["changed"].is_null(), "nothing was compared: {v}");
 
-    // The page is still busy; give it back before the guard tries to close it.
-    std::thread::sleep(std::time::Duration::from_secs(7));
+    wait_until_the_page_answers_again(b.name());
 }
 
-/// The pair where the verdict and the next step have different subjects.
-///
-/// A fill's read-back happens inside the action, on the field, so it survives a failed page read:
-/// the verdict is `changed / value_kept` and it is true. But `proceed` would mean carrying on
-/// against a page nobody has seen, so `next` answers `inspect` instead — the one place `next`
-/// deliberately diverges from what the verdict word implies. The blindness that `read_failed`
-/// used to carry in the verdict is carried by `next` and the hint now that the Group A rung
-/// outranks it.
+/// A fill's read-back is on the field, so it survives a failed page read: `changed /
+/// value_kept`. `next` still answers `inspect`, the one place it diverges from the verdict.
 #[test]
 fn a_confirmed_write_on_a_page_that_could_not_be_read_says_inspect() {
     if !common::browser_ready() {
@@ -92,26 +106,47 @@ fn a_confirmed_write_on_a_page_that_could_not_be_read_says_inspect() {
     let (_, code) = run_cli(&["--browser", b.name(), "inspect"]);
     assert_eq!(code, 0, "baseline");
     let (stdout, code) = run_cli(&[
-        "--browser", b.name(), "--timeout", "2", "--json", "fill", "--selector", "#slow",
+        "--browser",
+        b.name(),
+        "--timeout",
+        "2",
+        "--json",
+        "fill",
+        "--selector",
+        "#slow",
         "ada@example.com",
     ]);
-    let v: Value = serde_json::from_str(&stdout).unwrap_or_else(|e| panic!("not JSON ({e}): {stdout}"));
+    let v: Value =
+        serde_json::from_str(&stdout).unwrap_or_else(|e| panic!("not JSON ({e}): {stdout}"));
 
     assert_eq!(code, 0, "the write landed: {v}");
-    assert_eq!(v["value"]["verbatim"], true, "read back on the field itself: {v}");
-    assert_eq!(v["verdict"], "changed", "so the verdict is not an admission of ignorance: {v}");
+    assert_eq!(
+        v["value"]["verbatim"], true,
+        "read back on the field itself: {v}"
+    );
+    assert_eq!(
+        v["verdict"], "changed",
+        "so the verdict is not an admission of ignorance: {v}"
+    );
     assert_eq!(v["verdict_reason"], "value_kept", "{v}");
     assert!(v["changed"].is_null(), "and yet nothing was compared: {v}");
-    assert_eq!(v["next"], "inspect", "carrying on while blind is the one refusal: {v}");
+    assert_eq!(
+        v["next"], "inspect",
+        "carrying on while blind is the one refusal: {v}"
+    );
     let hint = v["verdict_hint"].as_str().unwrap_or_default();
-    assert!(hint.contains("what else moved"), "the hint names what is unknown: {v}");
-    assert!(hint.contains("inspect"), "and the command that resolves it: {v}");
+    assert!(
+        hint.contains("what else moved"),
+        "the hint names what is unknown: {v}"
+    );
+    assert!(
+        hint.contains("inspect"),
+        "and the command that resolves it: {v}"
+    );
 
-    // The page is still busy; give it back before the guard tries to close it.
-    std::thread::sleep(std::time::Duration::from_secs(7));
+    wait_until_the_page_answers_again(b.name());
 }
 
-/// Both modes describe the same event the same way.
 #[test]
 fn pipe_and_cli_agree_when_the_read_fails() {
     if !common::browser_ready() {
@@ -124,18 +159,22 @@ fn pipe_and_cli_agree_when_the_read_fails() {
         serde_json::json!({"cmd": "inspect"}),
         serde_json::json!({"cmd": "click", "selector": "#block"}),
     );
-    // Unique per process: a fixed name lets a second concurrent run of this suite drive the
-    // same browser and clobber this one's page.
+    // Unique per process: a fixed name would let a concurrent run clobber this one's page.
     let guard = TestBrowser::new("read-failure-pipe");
     let browser = guard.name().to_string();
-    let mut child = Command::new(binary())
+    let mut child = Command::new(common::binary())
         .args(["--browser", &browser, "--timeout", "2", "pipe"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
         .expect("spawn pipe");
-    child.stdin.as_mut().unwrap().write_all(script.as_bytes()).unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(script.as_bytes())
+        .unwrap();
     drop(child.stdin.take());
     let out = child.wait_with_output().expect("pipe output");
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -149,17 +188,24 @@ fn pipe_and_cli_agree_when_the_read_fails() {
     assert_eq!(last["verdict"], "unknown", "{last}");
     assert_eq!(last["verdict_reason"], "read_failed", "{last}");
 
-    std::thread::sleep(std::time::Duration::from_secs(7));
+    wait_until_the_page_answers_again(&browser);
 }
 
-/// A failure in the action itself is still a failure — the policy is about the read only.
+/// The policy covers the read only.
 #[test]
 fn an_action_that_did_not_happen_is_still_an_error() {
     let b = TestBrowser::new("read-failure-real");
     if !open_busy_page(b.name()) {
         return;
     }
-    let (stdout, code) = run_cli(&["--browser", b.name(), "--json", "click", "--selector", "#missing"]);
+    let (stdout, code) = run_cli(&[
+        "--browser",
+        b.name(),
+        "--json",
+        "click",
+        "--selector",
+        "#missing",
+    ]);
     assert_ne!(code, 0, "{stdout}");
     assert!(stdout.contains("\"ok\":false"), "{stdout}");
 }

@@ -1,13 +1,11 @@
-//! Minimal base64 decoder (RFC 4648). Shared by commands that pull binary
-//! payloads out of CDP (screenshots, PDFs, downloads). Avoids the `base64`
-//! crate to keep the dependency graph pure-Rust (static musl builds, issue #3).
+//! Minimal base64 decoder (RFC 4648), used for CDP binary payloads
+//! (screenshots, PDFs, downloads). Hand-rolled rather than the `base64` crate
+//! to keep the dependency graph pure-Rust for static musl builds (issue #3).
 
 /// Decode a standard base64 string into bytes.
 ///
-/// Ignores padding (`=`) and ASCII whitespace. Errors on any other
-/// out-of-alphabet character.
+/// Ignores padding (`=`) and ASCII whitespace; errors on any other character.
 pub fn decode(input: &str) -> Result<Vec<u8>, crate::BoxError> {
-    // Compile-time lookup table (Rust 2024 const block)
     const LOOKUP: [u8; 256] = const {
         let table = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
         let mut lut = [255u8; 256];
@@ -70,7 +68,6 @@ mod tests {
 
     #[test]
     fn roundtrip_all_byte_values() {
-        // Encode 0..=255 with a reference encoder, decode, compare.
         let bytes: Vec<u8> = (0..=255).collect();
         let encoded = reference_encode(&bytes);
         assert_eq!(decode(&encoded).unwrap(), bytes);
@@ -81,7 +78,7 @@ mod tests {
         assert!(decode("aGVsbG8!").is_err());
     }
 
-    // Reference encoder for the roundtrip test only (not shipped in the binary path).
+    // Reference encoder, for the roundtrip test only.
     fn reference_encode(data: &[u8]) -> String {
         const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
         let mut out = String::new();
@@ -94,8 +91,16 @@ mod tests {
             let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
             out.push(ALPHABET[((n >> 18) & 63) as usize] as char);
             out.push(ALPHABET[((n >> 12) & 63) as usize] as char);
-            out.push(if chunk.len() > 1 { ALPHABET[((n >> 6) & 63) as usize] as char } else { '=' });
-            out.push(if chunk.len() > 2 { ALPHABET[(n & 63) as usize] as char } else { '=' });
+            out.push(if chunk.len() > 1 {
+                ALPHABET[((n >> 6) & 63) as usize] as char
+            } else {
+                '='
+            });
+            out.push(if chunk.len() > 2 {
+                ALPHABET[(n & 63) as usize] as char
+            } else {
+                '='
+            });
         }
         out
     }

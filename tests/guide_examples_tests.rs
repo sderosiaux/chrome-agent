@@ -1,31 +1,15 @@
-//! Every command line the documents an agent reads show must actually parse.
+//! Every command line in the six documents an agent reads must parse: the guide, the three
+//! READMEs and the two skill files.
 //!
-//! `llm-guide.txt` is compiled into `--help` as `after_long_help`, and an agent is its
-//! main reader: what it shows is what gets typed. It showed `chrome-agent pdf --out
-//! page.pdf`, and `pdf` has no `--out` (that flag belongs to `download`), so following
-//! the documentation verbatim produced a clap parse error. Nothing checked the text
-//! against the parser.
-//!
-//! The guide was never the only document read that way, and it was the only one checked.
-//! `npm/README.md` is what npmjs.com renders on the package's front page, and it showed
-//! `chrome-agent --connect inspect` — `--connect` takes a value, so clap consumed
-//! `inspect` as that value and the invocation died on a missing subcommand. Same class of
-//! defect, on the more widely read file, for two releases. So the field is now the six
-//! documents together: the guide, the three READMEs and the two skill files.
-//!
-//! Parsing only — no browser is launched: `CHROME_AGENT_PARSE_ONLY` makes the binary
-//! return the moment clap has spoken. Synopsis lines using `[--flag name]` notation are
-//! not invocations and are checked by the second test instead.
+//! Parsing only, no browser: `CHROME_AGENT_PARSE_ONLY` returns as soon as clap has spoken.
+//! Synopsis lines (`[--flag name]`) are not invocations and are covered by the second test.
 
 use std::process::Command;
 
-/// A document whose command lines an agent copies.
-///
-/// `fenced` is the difference between a plain-text guide, every line of which is meant to
-/// be readable as a command, and a markdown file, where only a ```` ```bash ```` block is.
-/// Without that distinction README.md contributed two false failures: line 120 is inside an
-/// unlabelled fence holding an ASCII diagram whose first line is the binary's name, and
-/// line 316 is a sentence of prose that begins `chrome-agent depends on its own values…`.
+mod common;
+
+/// `fenced` separates a plain-text guide, where every line may be a command, from markdown,
+/// where only a ```` ```bash ```` block is.
 struct Doc {
     name: &'static str,
     text: &'static str,
@@ -33,10 +17,26 @@ struct Doc {
 }
 
 const DOCS: &[Doc] = &[
-    Doc { name: "llm-guide.txt", text: include_str!("../llm-guide.txt"), fenced: false },
-    Doc { name: "README.md", text: include_str!("../README.md"), fenced: true },
-    Doc { name: "README.cn.md", text: include_str!("../README.cn.md"), fenced: true },
-    Doc { name: "npm/README.md", text: include_str!("../npm/README.md"), fenced: true },
+    Doc {
+        name: "llm-guide.txt",
+        text: include_str!("../llm-guide.txt"),
+        fenced: false,
+    },
+    Doc {
+        name: "README.md",
+        text: include_str!("../README.md"),
+        fenced: true,
+    },
+    Doc {
+        name: "README.cn.md",
+        text: include_str!("../README.cn.md"),
+        fenced: true,
+    },
+    Doc {
+        name: "npm/README.md",
+        text: include_str!("../npm/README.md"),
+        fenced: true,
+    },
     Doc {
         name: "skills/chrome-agent/SKILL.md",
         text: include_str!("../skills/chrome-agent/SKILL.md"),
@@ -56,20 +56,8 @@ struct Example {
     text: String,
 }
 
-fn binary() -> String {
-    let mut path = std::env::current_exe().unwrap().parent().unwrap().parent().unwrap().to_path_buf();
-    path.push("chrome-agent");
-    path.to_string_lossy().into_owned()
-}
-
-/// Cut a line at the first `needle` that is outside quotes.
-///
-/// Two shapes need it and they are not the same shape. `#` starts a comment — but only
-/// outside quotes: `--selector "#country"` is a CSS id, and cutting there turned a valid
-/// example into a truncated one the parser then rejected for the wrong reason. `;` ends
-/// the command and starts a second one: README.md:230 is
-/// `chrome-agent assert value … --equals "SAVE10"; echo $?`, and `echo $?` is the point
-/// being made about exit codes, not an argument.
+/// Cut at the first `needle` outside quotes: `--selector "#country"` is a CSS id, not a
+/// comment.
 fn cut_outside_quotes(line: &str, needle: char) -> &str {
     let mut quote: Option<char> = None;
     for (i, c) in line.char_indices() {
@@ -88,8 +76,7 @@ fn strip_comment(line: &str) -> &str {
     cut_outside_quotes(line, '#')
 }
 
-/// The comment goes first, then the second command: the `;` this exists for is written
-/// before the `#` on README.md:230, and every `;` in llm-guide.txt is inside a comment.
+/// The comment is stripped first: every `;` in llm-guide.txt is inside one.
 fn command_only(line: &str) -> &str {
     cut_outside_quotes(strip_comment(line), ';')
 }
@@ -123,16 +110,10 @@ fn argv(line: &str) -> Vec<String> {
     args
 }
 
-/// A line the parser cannot be asked about: help output, or a synopsis rather than a real
-/// invocation.
+/// A line the parser cannot be asked about: help output, or a synopsis.
 ///
-/// `|` is in this list and is NOT treated as a shell pipe, which is the reading that would
-/// be convenient: `chrome-agent scroll down|up|<uid>` and `chrome-agent press
-/// Enter|Tab|Escape` are alternations, and cutting them at the bar would hand the parser
-/// `scroll down` and `press Enter`, which parse — a synopsis silently promoted to a
-/// verified invocation is precisely the false green this file exists to remove. No line in
-/// any of the six documents pipes a chrome-agent invocation into another command, so
-/// nothing is lost by reading the bar as alternation everywhere.
+/// `|` counts as alternation, not a shell pipe: `press Enter|Tab|Escape` is a synopsis, and
+/// no line in the six documents pipes a chrome-agent invocation into another command.
 fn is_synopsis(line: &str) -> bool {
     line.contains('[')
         || line.contains(']')
@@ -141,11 +122,7 @@ fn is_synopsis(line: &str) -> bool {
         || line.contains("--help")
 }
 
-/// Every `chrome-agent …` line of one document, with continuations joined.
-///
-/// A `\` at the end of a line continues it (README.md:495 spreads one `emulate device`
-/// over two lines), so the two halves are one command and only the whole thing can be
-/// handed to a parser.
+/// Every `chrome-agent …` line of one document, with `\` continuations joined.
 fn command_lines(doc: &Doc) -> Vec<Example> {
     let mut out: Vec<Example> = Vec::new();
     let mut in_block = !doc.fenced;
@@ -176,21 +153,28 @@ fn command_lines(doc: &Doc) -> Vec<Example> {
         if continues {
             pending = Some((start, text));
         } else {
-            out.push(Example { doc: doc.name, line: start, text });
+            out.push(Example {
+                doc: doc.name,
+                line: start,
+                text,
+            });
         }
     }
     out
 }
 
-/// Every invocation across the six documents: a `chrome-agent …` line that is a command and
-/// not a synopsis.
+/// Every `chrome-agent …` line across the six documents that is a command, not a synopsis.
 fn invocations() -> Vec<Example> {
     let mut out = Vec::new();
     for doc in DOCS {
         for example in command_lines(doc) {
             let text = command_only(&example.text).to_string();
             if text.starts_with("chrome-agent ") && !is_synopsis(&text) {
-                out.push(Example { doc: example.doc, line: example.line, text });
+                out.push(Example {
+                    doc: example.doc,
+                    line: example.line,
+                    text,
+                });
             }
         }
     }
@@ -201,9 +185,8 @@ fn invocations() -> Vec<Example> {
 fn every_command_line_the_documents_show_parses() {
     let examples = invocations();
 
-    // A per-document floor, not one total: a fence that stops being recognised in ONE file
-    // takes that file's whole contribution out of the field, and a total large enough to
-    // pass would hide it. Each number is comfortably below what the file holds today.
+    // A per-document floor, not one total: a fence that stops being recognised in one file
+    // would take that file out of the field, and a total would hide it.
     for doc in DOCS {
         let found = examples.iter().filter(|e| e.doc == doc.name).count();
         assert!(
@@ -216,10 +199,9 @@ fn every_command_line_the_documents_show_parses() {
     let mut broken = Vec::new();
     for example in &examples {
         let args = argv(&example.text);
-        // CHROME_AGENT_PARSE_ONLY returns right after Cli::parse(), so clap's full
-        // verdict is the exit code — including missing required arguments, which
-        // appending `--help` would have short-circuited past.
-        let output = Command::new(binary())
+        // CHROME_AGENT_PARSE_ONLY returns right after `Cli::parse()`, so the exit code is
+        // clap's full verdict, missing arguments included.
+        let output = Command::new(common::binary())
             .args(&args[1..])
             .env("CHROME_AGENT_PARSE_ONLY", "1")
             .output()
@@ -230,7 +212,10 @@ fn every_command_line_the_documents_show_parses() {
                 example.doc,
                 example.line,
                 example.text,
-                String::from_utf8_lossy(&output.stderr).lines().next().unwrap_or("(no stderr)")
+                String::from_utf8_lossy(&output.stderr)
+                    .lines()
+                    .next()
+                    .unwrap_or("(no stderr)")
             ));
         }
     }
@@ -248,25 +233,30 @@ fn every_command_line_the_documents_show_parses() {
 fn help_for(path: &[String]) -> Option<String> {
     let mut args: Vec<&str> = path.iter().map(String::as_str).collect();
     args.push("--help");
-    let out = Command::new(binary()).args(&args).output().expect("run chrome-agent");
-    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).to_string())
+    let out = Command::new(common::binary())
+        .args(&args)
+        .output()
+        .expect("run chrome-agent");
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).to_string())
 }
 
-/// The synopsis lines name flags too; those flag names must exist on that command.
-///
-/// The command is a *path*, not a word: `assert value --equals x` puts the flag on the leaf,
-/// and `assert --help` lists only its subcommands. A following word joins the path only when
-/// its help differs from its parent's — otherwise `goto https://example.com --help`, which
-/// clap happily answers with `goto`'s help, would read the URL as a subcommand.
+/// A flag named in a synopsis must exist on that command. The command is a *path*, not a word
+/// (`assert value --equals`), and a word joins it only when its help differs from its parent's.
 #[test]
 fn every_flag_named_in_a_synopsis_exists_on_its_command() {
     let guide = &DOCS[0];
     let mut broken = Vec::new();
     for example in command_lines(guide) {
-        let Some(rest) = example.text.strip_prefix("chrome-agent ") else { continue };
+        let Some(rest) = example.text.strip_prefix("chrome-agent ") else {
+            continue;
+        };
         let rest = strip_comment(rest);
         let mut words = rest.split_whitespace();
-        let Some(command) = words.next() else { continue };
+        let Some(command) = words.next() else {
+            continue;
+        };
         if command.starts_with('-') || command.starts_with('<') || command.starts_with('[') {
             continue;
         }
@@ -302,24 +292,17 @@ fn every_flag_named_in_a_synopsis_exists_on_its_command() {
             }
         }
     }
-    assert!(broken.is_empty(), "the guide names flags that do not exist:\n{}", broken.join("\n"));
+    assert!(
+        broken.is_empty(),
+        "the guide names flags that do not exist:\n{}",
+        broken.join("\n")
+    );
 }
 
-/// The size of this codebase is published as a competitive argument, in four places, and two
-/// different values of it were in print at once — neither of them the measurement.
+/// The published codebase size matches the measurement, in every document that states it.
 ///
-/// README.md, README.cn.md and npm/README.md all said `~10.2K lines` in their comparison
-/// tables, and npm/README.md's own architecture diagram said `~11.5K lines` eleven lines above
-/// one of them. The measurement was 22.2K, a factor of 2.2 on the number that carries the
-/// argument. A bare number in a table is exactly the shape that drifts: nothing names what it
-/// counts, so nothing can re-count it.
-///
-/// The metric is defined here and the documents state it in those words: lines of Rust
-/// under `src/`, blank lines and comment-only lines excluded, in-source tests included.
-/// The tolerance is deliberately wide — 5%, so ordinary growth does not turn a release into
-/// a documentation edit, while the factor of 2.2 this test was written for cannot survive a
-/// single run. Tightening it would make the guard expensive enough to be disabled, which is
-/// how the last one stopped being true.
+/// The metric: lines of Rust under `src/`, blank and comment-only lines excluded, in-source
+/// tests included. The 5% tolerance is wide so ordinary growth is not a documentation edit.
 #[test]
 fn the_published_size_of_this_codebase_is_the_measured_one() {
     let measured = measure_source_lines();
@@ -331,7 +314,9 @@ fn the_published_size_of_this_codebase_is_the_measured_one() {
     let mut found = 0;
     for (name, text) in published {
         for (index, line) in text.lines().enumerate() {
-            let Some(claim) = published_line_count(line) else { continue };
+            let Some(claim) = published_line_count(line) else {
+                continue;
+            };
             found += 1;
             let drift = claim.abs_diff(measured);
             assert!(
@@ -352,26 +337,24 @@ fn the_published_size_of_this_codebase_is_the_measured_one() {
 
 /// A published `~NN.NK lines of Rust in src/` claim, as a line count.
 ///
-/// The number is read BACKWARDS from the phrase rather than forwards from the first `~` on
-/// the line: both comparison tables put a competitor's figure in the next cell, and taking
-/// the first tilde would let a column reorder silently measure the wrong project. The
-/// metric has to be named against the number it qualifies — a bare `~10.2K lines` is
-/// unverifiable by construction, and matching it here would let this test bless it.
+/// Read BACKWARDS from the phrase, not forwards from the first `~`: the comparison tables put
+/// a competitor's figure in the next cell. A bare `~10.2K lines` is deliberately not matched.
 fn published_line_count(line: &str) -> Option<usize> {
-    // One metric, written once per language. The marker has to appear in the translated file
-    // too: README.cn.md carried a fourth copy of the wrong number (`~10.2K 行`), and a guard
-    // that only reads English would have left it there.
+    // One marker per language: a guard that only reads English leaves the translated file
+    // stale.
     const MARKERS: [&str; 2] = ["K lines of Rust in src/", "K 行 Rust 代码（src/"];
     let line = line.replace('`', "");
     let end = MARKERS.iter().find_map(|marker| line.find(marker))?;
-    let reversed: String =
-        line[..end].chars().rev().take_while(|c| c.is_ascii_digit() || *c == '.').collect();
+    let reversed: String = line[..end]
+        .chars()
+        .rev()
+        .take_while(|c| c.is_ascii_digit() || *c == '.')
+        .collect();
     if !line[..end - reversed.len()].ends_with('~') {
         return None;
     }
     let digits: String = reversed.chars().rev().collect();
-    // Read in integers rather than through an f64: a float here costs two lossy casts to
-    // compare it with a line count, and 22.2K is a fixed-point number written by hand.
+    // Parsed as integers, not an f64: the published figure is fixed-point.
     let (whole, fraction) = digits.split_once('.').unwrap_or((digits.as_str(), ""));
     let mut value: usize = whole.parse::<usize>().ok()? * 1000;
     let mut place = 100;
@@ -400,6 +383,9 @@ fn measure_source_lines() -> usize {
         }
     }
     let mut total = 0;
-    walk(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut total);
+    walk(
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+        &mut total,
+    );
     total
 }

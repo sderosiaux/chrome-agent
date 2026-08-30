@@ -1,58 +1,55 @@
-//! The download a CLICK produces, rather than one the caller already has a URL for.
+//! The download a CLICK produces, for files with no fetchable URL (blob, POST-backed endpoint).
 //!
-//! `download <url>` fetches inside the page, which is the right mechanism when the file has an
-//! address: the request inherits the session's cookies and the bytes come back through the
-//! evaluation. It cannot reach the other half of the web, where the file is built client-side
-//! (`URL.createObjectURL`) or handed out by a POST-backed endpoint the anchor never names. There
-//! the only way to the bytes is to click, and Chrome writes the file itself.
+//! `Browser.setDownloadBehavior` and the `Browser.download*` events work on the page websocket,
+//! but the override dies with the CDP session — so arming must happen on the connection that
+//! clicks, which is why this is a flag on `download` and not a separate verb.
 //!
-//! # What was measured before this was written
-//!
-//! - `Browser.setDownloadBehavior` is accepted on the PAGE websocket this tool already holds, and
-//!   `Browser.downloadWillBegin` / `Browser.downloadProgress` are delivered on it. No second
-//!   browser-level connection is needed.
-//! - The override does NOT outlive the CDP session that set it: a fresh connection to the same
-//!   page, clicking the same link with nothing armed, produced no file at the armed path. That is
-//!   the same rule `emulation.rs` documents for `Emulation.*`, and it decides the shape of this
-//!   module — the arming has to happen on the connection that clicks, which is why this is a flag
-//!   on `download` and not a separate `wait --download` verb. A separate verb would work in pipe
-//!   mode, where one connection spans both commands, and silently capture nothing from the CLI,
-//!   where each invocation opens its own.
-//! - `Browser.cancelDownload` is implemented (a bogus guid answers `-32602 No download item found
-//!   for the given GUID`), so `--max-bytes` can be enforced on this path rather than declared
-//!   inapplicable to it.
-//!
-//! # Why the subscription is taken before anything else
-//!
-//! `CdpClient::events()` only delivers messages that arrive after the subscribe. A blob download
-//! begins within ~100 ms of the click, so subscribing afterwards is a race that loses the
-//! `downloadWillBegin` — and with it the server's suggested filename, which is the one piece of
-//! the report that exists nowhere else.
+//! Subscribe BEFORE the CDP call: `CdpClient::events()` only delivers messages that arrive
+//! after the subscribe, and a blob download begins ~100 ms after the click.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::sync::broadcast;
 
 use crate::cdp::client::CdpClient;
 use crate::cdp::types::CdpEvent;
-use crate::session::{liveness, Liveness};
+use crate::session::{Liveness, liveness};
 
 /// What Chrome said about the download this action armed for.
 pub enum Transfer {
-    /// Nothing began in the window. The click still happened — that is the whole reason this is
-    /// not an error.
+    /// Nothing began in the window. The click still happened, so this is not an error.
     NeverBegan { waited_ms: u64 },
+    /// Events were dropped before this command could read them, and no terminal state was seen.
+    ///
+    /// Not an outcome of the download — an outcome of the OBSERVATION. `downloadWillBegin` fires
+    /// once, so a drop that eats it leaves every later progress event unmatched and the tail
+    /// would otherwise read as "nothing began" over a file Chrome is writing. `kept` names the
+    /// transfer directory when it holds anything, taken out of the sweep's reach.
+    EvidenceLost {
+        began: Option<Began>,
+        dropped: u64,
+        kept: Option<PathBuf>,
+        waited_ms: u64,
+    },
     /// Chrome reported `completed` and named the file it wrote.
-    Completed { began: Began, bytes: u64, temp_path: PathBuf },
-    /// Chrome reported `canceled`. `why` names who cancelled it, because the two cases have
-    /// opposite recoveries: our own size cap is a flag the caller can raise, the page's or the
-    /// browser's is not.
+    Completed {
+        began: Began,
+        bytes: u64,
+        temp_path: PathBuf,
+    },
+    /// Chrome reported `canceled`. `why` separates our own size cap (the caller can raise it)
+    /// from the browser's or the page's (they cannot).
     Canceled { began: Began, why: Cancelled },
-    /// It began and had not finished when the window closed. The bytes on disk are a prefix of
-    /// the file, so nothing is moved into place and no path is claimed.
-    Unfinished { began: Began, received: u64, total: u64, waited_ms: u64 },
+    /// Began and unfinished when the window closed. The bytes on disk are a prefix, so nothing
+    /// is moved into place and no path is claimed.
+    Unfinished {
+        began: Began,
+        received: u64,
+        total: u64,
+        waited_ms: u64,
+    },
 }
 
 /// Who ended a download that started.
@@ -60,15 +57,14 @@ pub enum Transfer {
 pub enum Cancelled {
     /// `--max-bytes`: this tool asked Chrome to stop.
     ExceededCap,
-    /// Chrome or the page stopped it. We only know that it stopped.
+    /// Chrome or the page stopped it.
     ByBrowser,
 }
 
-/// What `Browser.downloadWillBegin` said. Present for every outcome except `NeverBegan`, so the
-/// report can name the file even when the transfer did not finish.
+/// What `Browser.downloadWillBegin` said. Present for every outcome except `NeverBegan`.
 pub struct Began {
     pub guid: String,
-    /// The name the server (or the `download` attribute) proposed. Never used as a path without
+    /// Proposed by the server or the `download` attribute. Never used as a path without
     /// `download::sanitize_name` first.
     pub suggested_filename: String,
     pub url: String,
@@ -78,41 +74,67 @@ pub struct Began {
 pub struct Armed {
     events: broadcast::Receiver<CdpEvent>,
     dir: PathBuf,
+    /// Set by [`Armed::preserve`]: the directory may hold a completed file this action lost the
+    /// evidence for, so no sweep may take it.
+    preserved: bool,
 }
 
-/// How hard the sweep tries before giving the directory up, and how long it waits between tries.
-///
-/// 5 × 30 ms, and only paid when Chrome is still writing: the first attempt succeeds on every
-/// download that completed. It is the fast path, not the guarantee — see [`collect_abandoned`].
+impl Armed {
+    /// Take the transfer directory out of the sweep's namespace when it holds anything, and say
+    /// where it went. `None` when the directory is empty — there is nothing to keep.
+    ///
+    /// A rename, not a flag alone: [`collect_abandoned`] recognises a directory by its
+    /// `.incoming-` prefix and by a pid, and this process's pid dies long before anyone can look
+    /// at the file. A flag only survives until this invocation returns.
+    fn preserve(&mut self) -> Option<PathBuf> {
+        if !self.holds_anything() {
+            return None;
+        }
+        // Whatever the rename does, `clean_up` must not remove this.
+        self.preserved = true;
+        let kept =
+            self.dir
+                .with_file_name(format!("{KEPT_PREFIX}{}-{}", std::process::id(), nanos()));
+        if std::fs::rename(&self.dir, &kept).is_ok() {
+            self.dir.clone_from(&kept);
+            return Some(kept);
+        }
+        // The rename is the durable half; without it the file is still there for now, and the
+        // response points at where it actually is rather than where it was meant to go.
+        Some(self.dir.clone())
+    }
+
+    fn holds_anything(&self) -> bool {
+        std::fs::read_dir(&self.dir).is_ok_and(|mut entries| entries.next().is_some())
+    }
+}
+
+/// Sweep budget: 5 × 30 ms, only paid while Chrome is still writing. The fast path, not the
+/// guarantee — see [`collect_abandoned`].
 const SWEEP_ATTEMPTS: u32 = 5;
 const SWEEP_GAP_MS: u64 = 30;
 
-/// What names a transfer directory, and the reason the filter on it is load-bearing rather than
-/// decorative: `~/.chrome-agent/tmp` is also where `screenshot`, `pdf` and `download <url>` put a
-/// file the caller did not name, and none of those are ours to remove.
+/// Transfer-directory prefix. The filter is load-bearing: `~/.chrome-agent/tmp` also holds
+/// unnamed `screenshot`/`pdf`/`download <url>` output, which is not ours to remove.
 const INCOMING_PREFIX: &str = ".incoming-";
 
-/// How many transfer directories one arming looks at.
-///
-/// Far looser than `profiles.rs`'s 32, and deliberately so: examining one profile there is a
-/// recursive scan for holder artefacts and a modification time, while examining one of these is a
-/// string split and a `kill(pid, 0)`. What the cap actually bounds is the readdir of a directory
-/// somebody let grow. Removal is uncapped for the same asymmetry read the other way — a transfer
-/// directory holds one file, so unlinking it is a handful of syscalls whatever that file weighs,
-/// where removing one 14 MB profile is thousands of them.
+/// Where a transfer directory goes when the evidence about it was lost. Deliberately outside
+/// [`INCOMING_PREFIX`], so neither `clean_up` nor a later `collect_abandoned` can delete a file
+/// that may be complete, and deliberately visible, since the response names the path and nothing
+/// else will ever remove it.
+const KEPT_PREFIX: &str = "kept-";
+
+/// How many transfer directories one arming examines. Bounds the readdir only; removal is
+/// uncapped, since a transfer directory holds one file.
 const COLLECT_CAP: usize = 64;
 
 /// Point Chrome's downloads at a directory this invocation owns, and start listening.
 ///
-/// Fails the command rather than clicking unarmed: a click that has been delivered cannot be
-/// taken back, and dispatching one whose product we cannot capture is the one outcome worse than
-/// refusing — the caller would have to click a second time to get the file, and the page cannot
-/// tell that from a second deliberate action.
+/// Fails the command rather than clicking unarmed: a delivered click cannot be taken back, and
+/// the caller would have to click twice to get the file.
 pub async fn arm(client: &CdpClient) -> Result<Armed, crate::BoxError> {
     let tmp = tmp_root()?;
-    // Before this invocation's own directory exists, so the collector never has to reason about a
-    // half-created one. Ours would survive it either way — our pid is alive, and that is the whole
-    // predicate — but a sweep that cannot see its own caller is one fewer thing to argue about.
+    // Before creating our own directory, so the collector never sees a half-created one.
     let _ = collect_abandoned(&tmp, COLLECT_CAP);
     let dir = incoming_dir(&tmp);
     std::fs::create_dir_all(&dir)?;
@@ -121,8 +143,7 @@ pub async fn arm(client: &CdpClient) -> Result<Armed, crate::BoxError> {
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
     }
-    // Before the CDP call, not after: the subscription has to predate anything that could
-    // produce an event, and `setDownloadBehavior` is the first thing that can.
+    // Before the CDP call: the subscription must predate anything that can produce an event.
     let events = client.events();
     let path = dir.display().to_string();
     if let Err(error) = client
@@ -139,28 +160,29 @@ pub async fn arm(client: &CdpClient) -> Result<Armed, crate::BoxError> {
         )
         .into());
     }
-    Ok(Armed { events, dir })
+    Ok(Armed {
+        events,
+        dir,
+        preserved: false,
+    })
 }
 
-/// Give downloads back to Chrome's own setting.
-///
-/// Best effort and deliberately not checked: the override dies with this CDP session anyway (see
-/// the module docs), so the only window this closes is the rest of a `pipe` session, where a
-/// later command's download would otherwise land in this invocation's private directory under a
-/// guid instead of wherever the browser normally puts it.
+/// Give downloads back to Chrome's own setting. Best effort, unchecked: the override dies with
+/// the CDP session anyway, so this only matters for the rest of a `pipe` session.
 pub async fn disarm(client: &CdpClient) {
     let _ = client
-        .call::<_, Value>("Browser.setDownloadBehavior", json!({"behavior": "default"}))
+        .call::<_, Value>(
+            "Browser.setDownloadBehavior",
+            json!({"behavior": "default"}),
+        )
         .await;
 }
 
 /// Wait for the download the click was supposed to produce, bounded by `timeout`.
 ///
-/// One bound for both questions this asks — "did anything start" and "did it finish" — because
-/// the natural scale of the first is not knowable in advance: a blob begins in a hundred
-/// milliseconds, an attachment begins when the server's response headers arrive. A caller who
-/// expects no download, or a fast one, passes a smaller `--timeout`; a fixed short window for
-/// the beginning would report "nothing began" for every slow server.
+/// One bound covers both "did anything start" and "did it finish": a blob begins in ~100 ms, an
+/// attachment begins when the server's headers arrive, so a fixed short start window would
+/// report "nothing began" for every slow server.
 pub async fn collect(
     client: &CdpClient,
     armed: &mut Armed,
@@ -172,14 +194,19 @@ pub async fn collect(
     let mut last_received = 0_u64;
     let mut last_total = 0_u64;
     let mut cancelled_by_us = false;
+    let mut dropped = 0_u64;
 
     while let Some(left) = timeout.checked_sub(started.elapsed()) {
         let event = match tokio::time::timeout(left, armed.events.recv()).await {
-            // A dropped event on this channel is not recoverable by waiting harder, but the
-            // states we care about are re-sent on every progress tick, so keep listening.
-            Ok(Err(broadcast::error::RecvError::Lagged(_))) => continue,
-            // The window closed, or the connection went away. Both leave the caller with
-            // whatever was learnt so far, which the tail below turns into an outcome.
+            // A dropped event is not an absent one. This used to `continue` on the grounds that
+            // the states we care about repeat on every progress tick — true of
+            // `downloadProgress`, false of `Browser.downloadWillBegin`, which fires ONCE. The
+            // count is carried to the tail, where it forbids a confident answer.
+            Ok(Err(broadcast::error::RecvError::Lagged(n))) => {
+                dropped = dropped.saturating_add(n);
+                continue;
+            }
+            // Window closed or connection gone; the tail below turns what we know into an outcome.
             Err(_) | Ok(Err(broadcast::error::RecvError::Closed)) => break,
             Ok(Ok(event)) => event,
         };
@@ -193,7 +220,9 @@ pub async fn collect(
             }
             "Browser.downloadProgress" => {
                 // A second, concurrent download is not this action's answer. First guid wins.
-                let Some(current) = began.as_ref() else { continue };
+                let Some(current) = began.as_ref() else {
+                    continue;
+                };
                 if string_field(&event.params, "guid") != current.guid {
                     continue;
                 }
@@ -203,33 +232,35 @@ pub async fn collect(
                 if !cancelled_by_us && last_received.max(last_total) > max_bytes {
                     cancelled_by_us = true;
                     let _ = client
-                        .call::<_, Value>(
-                            "Browser.cancelDownload",
-                            json!({"guid": current.guid}),
-                        )
+                        .call::<_, Value>("Browser.cancelDownload", json!({"guid": current.guid}))
                         .await;
-                    // Do not return yet: Chrome answers with a `canceled` progress event, and
-                    // the file it had already written is deleted on that transition.
+                    // Do not return yet: Chrome answers with a `canceled` progress event and
+                    // deletes the partial file on that transition.
                     continue;
                 }
                 match state.as_str() {
                     "completed" => {
                         let began = began.take().expect("guarded above");
-                        // `allowAndName` names the file after the guid; `filePath` is what
-                        // Chrome reported, and is preferred when present so a future naming
-                        // change does not silently break the move.
+                        // `allowAndName` names the file after the guid; prefer Chrome's own
+                        // `filePath` when present.
                         let temp_path = event
                             .params
                             .get("filePath")
                             .and_then(Value::as_str)
                             .map_or_else(|| armed.dir.join(&began.guid), PathBuf::from);
                         if cancelled_by_us {
-                            // It finished before the cancel landed. The bytes are over the cap
-                            // the caller set, so they are removed rather than handed back.
+                            // Finished before the cancel landed, and over the cap: remove it.
                             let _ = std::fs::remove_file(&temp_path);
-                            return Transfer::Canceled { began, why: Cancelled::ExceededCap };
+                            return Transfer::Canceled {
+                                began,
+                                why: Cancelled::ExceededCap,
+                            };
                         }
-                        return Transfer::Completed { began, bytes: last_received, temp_path };
+                        return Transfer::Completed {
+                            began,
+                            bytes: last_received,
+                            temp_path,
+                        };
                     }
                     "canceled" => {
                         let began = began.take().expect("guarded above");
@@ -247,20 +278,51 @@ pub async fn collect(
         }
     }
 
-    let waited_ms = elapsed_ms(started);
+    // Only the tail is unproven: `completed` and `canceled` return above, carrying the fact
+    // itself. Anything Chrome wrote is taken out of the sweep's reach BEFORE the outcome is
+    // built, so the two cannot disagree.
+    let kept = if dropped > 0 { armed.preserve() } else { None };
+    conclude(
+        dropped,
+        began,
+        kept,
+        last_received,
+        last_total,
+        elapsed_ms(started),
+    )
+}
+
+/// What the end of the wait means. Pure, so the rule "a dropped event never produces a confident
+/// answer" is testable without a browser.
+fn conclude(
+    dropped: u64,
+    began: Option<Began>,
+    kept: Option<PathBuf>,
+    received: u64,
+    total: u64,
+    waited_ms: u64,
+) -> Transfer {
+    if dropped > 0 {
+        return Transfer::EvidenceLost {
+            began,
+            dropped,
+            kept,
+            waited_ms,
+        };
+    }
     match began {
         None => Transfer::NeverBegan { waited_ms },
-        Some(began) => {
-            Transfer::Unfinished { began, received: last_received, total: last_total, waited_ms }
-        }
+        Some(began) => Transfer::Unfinished {
+            began,
+            received,
+            total,
+            waited_ms,
+        },
     }
 }
 
-/// Move a completed download to where the caller asked for it, at 0600.
-///
-/// The bytes reached disk through Chrome with whatever the umask allowed; every other file this
-/// tool writes (screenshot, pdf, `download <url>`, the session store, a recording) is 0600, and a
-/// downloaded file is at least as likely to be the thing worth protecting.
+/// Move a completed download to where the caller asked for it, at 0600 like every other file
+/// this tool writes (Chrome writes it with whatever the umask allowed).
 pub fn place(
     completed_path: &std::path::Path,
     suggested: &str,
@@ -270,11 +332,9 @@ pub fn place(
     if let Some(parent) = destination.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    // `rename` is the cheap path and works whenever the private directory and the destination
-    // share a filesystem, which is the default (both under ~/.chrome-agent/tmp). An explicit
-    // `--out` on another volume falls back to a copy.
+    // `rename` works when both sides share a filesystem; an `--out` on another volume copies.
     if std::fs::rename(completed_path, &destination).is_err() {
-        std::fs::copy(completed_path, &destination)?;
+        copy_without_following(completed_path, &destination)?;
         let _ = std::fs::remove_file(completed_path);
     }
     #[cfg(unix)]
@@ -286,22 +346,46 @@ pub fn place(
     Ok((destination.display().to_string(), bytes))
 }
 
-/// Drop the private directory, and keep trying while Chrome is still writing into it.
+/// The cross-device half of [`place`], with `rename`'s semantics rather than `copy`'s.
 ///
-/// Separate from `place` so every outcome pays it, including the ones that wrote nothing. The
-/// retry is not decoration: measured on the `--max-bytes` path, Chrome answers `canceled`, we
-/// return, and it then finalises — recreating the directory and a zero-byte stub AFTER the
-/// removal. It is the same lesson `close --purge` learnt about a Chrome that has been told to
-/// stop and has not finished stopping: a removal that reports success on its first `Ok` is
-/// claiming a convergence that has not happened.
+/// `fs::rename` REPLACES a symlink at the destination; `fs::copy` FOLLOWS it and writes through
+/// to wherever it points. The destination name is server-supplied (`sanitize_name` keeps it
+/// inside the directory, and says nothing about what is already there), so the two halves of one
+/// verb disagreed about whether a planted `~/.chrome-agent/tmp/report.csv -> ~/.ssh/authorized_keys`
+/// gets replaced or written through.
 ///
-/// What it is NOT is the guarantee. This runs before the process ends, and on the paths where
-/// Chrome is not finished with the directory it is racing something no budget can bound — see
-/// [`collect_abandoned`] for the measurement and for what actually converges. Keeping it is still
-/// worth it, and that is the whole of its case: a download that completed clears on the first
-/// attempt and never reaches the collector, so nothing routinely accumulates for a later
-/// invocation to find.
+/// Unlink first, then `create_new`: the unlink removes the LINK, and `create_new` refuses
+/// anything that appears in between rather than opening it.
+fn copy_without_following(
+    from: &std::path::Path,
+    to: &std::path::Path,
+) -> Result<(), crate::BoxError> {
+    let _ = std::fs::remove_file(to);
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut target = options.open(to)?;
+    let mut source = std::fs::File::open(from)?;
+    std::io::copy(&mut source, &mut target)?;
+    Ok(())
+}
+
+/// Drop the private directory, retrying while Chrome is still writing into it.
+///
+/// The retry matters on the `--max-bytes` path: Chrome answers `canceled`, we return, and it
+/// then finalises, recreating the directory and a zero-byte stub after the removal. This is the
+/// fast path only — a still-running transfer outlives the process; [`collect_abandoned`] is what
+/// converges.
 pub async fn clean_up(armed: &Armed) {
+    // What `preserve` kept may be the caller's file. Deleting it is the one thing this must not
+    // do; the response names the path instead.
+    if armed.preserved {
+        return;
+    }
     for attempt in 0..SWEEP_ATTEMPTS {
         let _ = std::fs::remove_dir_all(&armed.dir);
         if !armed.dir.exists() {
@@ -315,56 +399,13 @@ pub async fn clean_up(armed: &Armed) {
 
 /// Remove the transfer directories of processes that are provably gone. Returns their names.
 ///
-/// # What no sweep budget can cover
+/// The pid in `.incoming-<pid>-<nanos>` is the whole predicate: nothing but Chrome acting for
+/// that invocation writes there, and the override dies with its CDP session. Every unresolved
+/// case keeps the directory — [`Liveness::Unknown`] (another uid, and every non-Unix platform,
+/// where this is a no-op), an unparseable pid, a directory that is not one of ours, and a
+/// recycled pid. Known gap: a `HOME` shared across pid namespaces.
 ///
-/// [`clean_up`] runs before this process ends, and on the paths where Chrome is not finished with
-/// the directory it is chasing something it cannot bound. Measured here with the shipped 5 × 30 ms
-/// budget, over eight downloads whose transfer was still running when `--timeout` expired: three
-/// directories were back on disk the moment the last invocation returned, and **all eight** were
-/// there fifteen seconds later, each holding the zero-byte stub `allowAndName` names after the
-/// guid. The transfer does not stop when chrome-agent does — Chrome keeps the download it was
-/// handed — so the only window wide enough is the length of the download, which is exactly the
-/// bound `--timeout` already declined to be. Widening it would move the failure onto a slower
-/// runner, which is where it was found in the first place.
-///
-/// # Why the pid is the whole predicate
-///
-/// The name is `.incoming-<pid>-<nanos>` and the pid is the process that armed it. Only Chrome,
-/// acting on that invocation's `setDownloadBehavior`, ever writes there, and the override dies
-/// with the CDP session (module docs); so once the OS no longer knows that pid, the directory
-/// cannot gain another byte from anyone and any later invocation may take it. That is
-/// `profiles.rs`'s shape — a removal predicated on "no live holder" rather than on a delay — and
-/// it converges without inventing a number.
-///
-/// This is also why a concurrent agent is safe rather than merely unlikely to be hit: its
-/// directory carries ITS pid, [`liveness`] answers `Alive`, and it is kept. A recycled pid answers
-/// `Alive` too, which keeps a directory that could have gone — the harmless direction.
-///
-/// # Why arming, and what it costs there
-///
-/// It is the only moment anyone has a reason to care about this directory, and it is already a
-/// filesystem operation on a command that is about to spend a CDP round trip, a click and up to
-/// `--timeout` seconds waiting. Measured: 227 µs with nothing to collect, which is the shape of
-/// every invocation after the first; 241 µs with 500 unrelated files beside it, since the prefix
-/// filter answers before any pid is probed; 6.1 ms to examine and remove a full window of 64,
-/// which is a backlog being drained rather than a recurring cost. The session store's save path —
-/// where `profiles.rs` sweeps — was the alternative and was rejected: it runs on every command
-/// including read-only ones, and this directory is created by exactly one verb.
-///
-/// The price of that choice, stated: a caller who abandons a download and never runs another
-/// leaves the crumbs there. `close --purge-orphans` does not cover them either. What bounds the
-/// damage is that a transfer directory holds one partial file, and the next `download` takes 64.
-///
-/// Every case that does not resolve keeps the directory: [`Liveness::Unknown`] (a pid under
-/// another uid, and every non-Unix platform, where no probe is wired and this is therefore a
-/// no-op), a name whose pid does not parse, and anything here that is not a transfer directory at
-/// all.
-///
-/// The known gap, stated rather than guarded: a `HOME` shared between machines or containers puts
-/// two pid namespaces over one directory, and a pid dead here may be alive there. `profiles.rs`
-/// guards that case with the hostname in Chrome's `SingletonLock`; this does not, because what is
-/// at risk is a partial download of the current second rather than a profile something is logged
-/// into, and the session store beside it already assumes one machine.
+/// Runs at arming: 227 µs with nothing to collect, 6.1 ms to drain a full 64-entry window.
 pub fn collect_abandoned(tmp: &Path, cap: usize) -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(tmp) else {
         return Vec::new();
@@ -373,11 +414,8 @@ pub fn collect_abandoned(tmp: &Path, cap: usize) -> Vec<String> {
         .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
         .filter(|name| name.starts_with(INCOMING_PREFIX))
         .collect();
-    // Sorted only so the window is the same set on two successive invocations rather than whatever
-    // order the filesystem answered in — a backlog behind the cap drains deterministically instead
-    // of depending on readdir. It is lexicographic over the whole name, so it is not any
-    // meaningful age order, and nothing here needs one: the predicate is about the owner, not the
-    // clock, which is the difference from `profiles.rs` and the reason no rotation is needed.
+    // Sorted so a backlog behind the cap drains deterministically instead of following readdir
+    // order. Lexicographic, not age order — the predicate is the owner, not the clock.
     names.sort_unstable();
     names.truncate(cap);
 
@@ -401,7 +439,8 @@ fn is_abandoned(name: &str) -> bool {
     let Some((pid, _nanos)) = rest.split_once('-') else {
         return false;
     };
-    pid.parse::<u32>().is_ok_and(|pid| liveness(pid) == Liveness::Dead)
+    pid.parse::<u32>()
+        .is_ok_and(|pid| liveness(pid) == Liveness::Dead)
 }
 
 /// Where every file this tool writes without being told a path goes.
@@ -411,25 +450,38 @@ fn tmp_root() -> Result<PathBuf, crate::BoxError> {
 }
 
 /// A directory only this invocation writes to, so `allowAndName`'s guid-named files cannot
-/// collide with a concurrent agent's and the sweep cannot delete one.
+/// collide with a concurrent agent's.
 fn incoming_dir(tmp: &Path) -> PathBuf {
-    let nanos = SystemTime::now()
+    tmp.join(format!(
+        "{INCOMING_PREFIX}{}-{}",
+        std::process::id(),
+        nanos()
+    ))
+}
+
+/// Wall clock since the epoch, in nanoseconds: what separates two directories one process opens.
+fn nanos() -> u128 {
+    SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .map(|d| d.as_nanos())
-        .unwrap_or_default();
-    tmp.join(format!("{INCOMING_PREFIX}{}-{nanos}", std::process::id()))
+        .unwrap_or_default()
 }
 
 fn string_field(params: &Value, key: &str) -> String {
-    params.get(key).and_then(Value::as_str).unwrap_or_default().to_string()
+    params
+        .get(key)
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string()
 }
 
-/// Byte counters arrive as JSON numbers and Chrome sends them as integers, but the protocol types
-/// them as `number`. Reading only `as_u64` would silently report 0 for a float, and reading the
-/// float straight into `u64` would turn Chrome's `-1` for "size not known yet" into 18 exabytes —
-/// which the `--max-bytes` check would then cancel the download over.
+/// Byte counters are CDP `number`s. `as_u64` alone reports 0 for a float; casting the float
+/// directly turns Chrome's `-1` ("size unknown") into 18 exabytes, which `--max-bytes` would
+/// then cancel over.
 fn number_field(params: &Value, key: &str) -> u64 {
-    let Some(value) = params.get(key) else { return 0 };
+    let Some(value) = params.get(key) else {
+        return 0;
+    };
     if let Some(exact) = value.as_u64() {
         return exact;
     }
@@ -460,8 +512,8 @@ mod tests {
         assert_eq!(string_field(&json!({"guid": "abc"}), "guid"), "abc");
     }
 
-    /// Two invocations must not share the directory Chrome writes guid-named files into: the
-    /// sweep at the end of one would take the other's file with it.
+    /// Two invocations must not share a transfer directory: one's sweep would take the other's
+    /// file.
     #[test]
     fn each_invocation_gets_its_own_incoming_directory() {
         let tmp = scratch("incoming-names");
@@ -473,15 +525,202 @@ mod tests {
         std::fs::remove_dir_all(&tmp).ok();
     }
 
-    /// A scratch directory no second process can guess, since these run on parallel threads and
-    /// alongside other `cargo test` processes.
+    /// An `Armed` over a directory, with a subscription nothing sends on: `preserve` and
+    /// `clean_up` never read the events.
+    fn armed_over(dir: PathBuf) -> Armed {
+        let (_tx, events) = broadcast::channel(1);
+        Armed {
+            events,
+            dir,
+            preserved: false,
+        }
+    }
+
+    /// The bug this guards: a lost `Browser.downloadWillBegin` (it fires once, and the channel
+    /// holds 256 messages) left `began` at `None`, which read as `NeverBegan` — "no download
+    /// began, nothing was written" — over a file Chrome had finished writing.
+    #[test]
+    fn a_dropped_event_never_produces_a_confident_answer() {
+        let began = || Began {
+            guid: "g".into(),
+            suggested_filename: "report.csv".into(),
+            url: "blob:null/x".into(),
+        };
+
+        assert!(
+            matches!(
+                conclude(0, None, None, 0, 0, 12),
+                Transfer::NeverBegan { .. }
+            ),
+            "with nothing dropped, an empty wait is still an answer"
+        );
+        assert!(
+            matches!(
+                conclude(0, Some(began()), None, 3, 9, 12),
+                Transfer::Unfinished { .. }
+            ),
+            "with nothing dropped, a started-and-unfinished transfer is still an answer"
+        );
+
+        let kept = PathBuf::from("/tmp/kept-1-2");
+        let lost = conclude(1, None, Some(kept.clone()), 0, 0, 12);
+        let Transfer::EvidenceLost {
+            began: none,
+            dropped,
+            kept: where_,
+            waited_ms,
+        } = lost
+        else {
+            panic!("a drop with no terminal state cannot claim that nothing began");
+        };
+        assert!(none.is_none());
+        assert_eq!(dropped, 1);
+        assert_eq!(where_, Some(kept));
+        assert_eq!(waited_ms, 12);
+
+        assert!(
+            matches!(
+                conclude(7, Some(began()), None, 3, 9, 12),
+                Transfer::EvidenceLost { .. }
+            ),
+            "a drop after the download began may have eaten `completed`, so `incomplete` is a \
+             claim this cannot make either"
+        );
+    }
+
+    /// What a lost-evidence directory holds may be the caller's whole file, so neither sweep may
+    /// take it: `clean_up` skips it and `collect_abandoned` cannot even see it.
+    #[test]
+    fn a_directory_whose_evidence_was_lost_survives_both_sweeps() {
+        let tmp = scratch("kept-dir");
+        let dir = transfer_dir(
+            &tmp,
+            &format!(
+                "{INCOMING_PREFIX}{}-1788086042802162000",
+                std::process::id()
+            ),
+        );
+        let mut armed = armed_over(dir.clone());
+
+        let kept = armed
+            .preserve()
+            .expect("a directory holding a file is kept");
+        assert!(
+            !dir.exists(),
+            "the transfer directory was left where a sweep can find it"
+        );
+        assert!(kept.exists(), "the file was not moved anywhere");
+        assert_eq!(
+            std::fs::read(kept.join("6f1c1f0e-guid")).unwrap(),
+            b"partial"
+        );
+        let name = kept.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(
+            !name.starts_with(INCOMING_PREFIX),
+            "still in the collector's namespace, so the next arming takes it: {name}"
+        );
+
+        assert!(collect_abandoned(&tmp, COLLECT_CAP).is_empty());
+        block_on(clean_up(&armed));
+        assert!(
+            kept.exists(),
+            "clean_up deleted a directory that may hold a completed file"
+        );
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// An empty directory holds no file to lose, so it stays collectible: the exception exists
+    /// for bytes on disk, not for every lag.
+    #[test]
+    fn an_empty_transfer_directory_is_not_kept() {
+        let tmp = scratch("kept-empty");
+        let dir = tmp.join(format!(
+            "{INCOMING_PREFIX}{}-1788086042802162001",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut armed = armed_over(dir.clone());
+
+        assert!(armed.preserve().is_none(), "there was nothing to keep");
+        assert!(!armed.preserved);
+        block_on(clean_up(&armed));
+        assert!(!dir.exists(), "an empty directory is still swept");
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// The destination name comes from the server. `fs::copy` follows a symlink sitting there
+    /// and writes through it; the file this verb produces must land where it says it did.
+    #[cfg(unix)]
+    #[test]
+    fn the_cross_device_copy_replaces_a_symlink_instead_of_writing_through_it() {
+        let tmp = scratch("copy-symlink");
+        let source = tmp.join("completed");
+        std::fs::write(&source, b"the download").unwrap();
+        let elsewhere = tmp.join("private-key");
+        std::fs::write(&elsewhere, b"untouched").unwrap();
+        let destination = tmp.join("report.csv");
+        std::os::unix::fs::symlink(&elsewhere, &destination).unwrap();
+
+        copy_without_following(&source, &destination).expect("the copy still lands");
+
+        assert_eq!(
+            std::fs::read(&elsewhere).unwrap(),
+            b"untouched",
+            "written through the link"
+        );
+        assert_eq!(std::fs::read(&destination).unwrap(), b"the download");
+        assert!(
+            !std::fs::symlink_metadata(&destination)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the link was replaced, not followed"
+        );
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// 0600 at creation, not after: a `--out` on another volume is the same file the rename
+    /// path narrows, and a window where it is world-readable is a window.
+    #[cfg(unix)]
+    #[test]
+    fn the_cross_device_copy_creates_the_file_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = scratch("copy-perms");
+        let source = tmp.join("completed");
+        std::fs::write(&source, b"bytes").unwrap();
+        let destination = tmp.join("out.bin");
+
+        copy_without_following(&source, &destination).expect("copy");
+
+        let mode = std::fs::metadata(&destination)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        std::fs::remove_dir_all(&tmp).ok();
+        assert_eq!(mode, 0o600, "got {mode:o}");
+    }
+
+    /// Run one future to completion on a current-thread runtime: `clean_up` is `async` only for
+    /// its retry sleep, and these tests plant the state rather than race it.
+    fn block_on<F: std::future::Future>(future: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("a test runtime")
+            .block_on(future)
+    }
+
+    /// A scratch directory no concurrent test thread or process can collide with.
     fn scratch(tag: &str) -> PathBuf {
         let nanos = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or_default();
-        let dir = std::env::temp_dir()
-            .join(format!("chrome-agent-{tag}-{}-{nanos}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("chrome-agent-{tag}-{}-{nanos}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -489,8 +728,8 @@ mod tests {
     fn transfer_dir(tmp: &Path, name: &str) -> PathBuf {
         let dir = tmp.join(name);
         std::fs::create_dir_all(&dir).unwrap();
-        // `allowAndName` leaves a guid-named file; an empty directory is not the shape found on
-        // disk and would let a `remove_dir` that cannot handle contents pass by accident.
+        // Non-empty, since `allowAndName` leaves a guid-named file: an empty directory would let
+        // a `remove_dir` that cannot handle contents pass by accident.
         std::fs::write(dir.join("6f1c1f0e-guid"), b"partial").unwrap();
         dir
     }
@@ -498,19 +737,17 @@ mod tests {
     /// A pid nothing holds any more: spawned, waited on, and therefore reaped.
     #[cfg(unix)]
     fn a_reaped_pid() -> u32 {
-        let mut child =
-            std::process::Command::new("/bin/sh").args(["-c", "exit 0"]).spawn().expect("spawn");
+        let mut child = std::process::Command::new("/bin/sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .expect("spawn");
         let pid = child.id();
         child.wait().expect("wait");
         pid
     }
 
-    /// The defect, without waiting for a real race: a directory whose owner has exited is
-    /// collected by the next arming, and one whose owner is alive is not.
-    ///
-    /// Before the collector existed, `clean_up`'s 5 × 30 ms was the only thing that ever removed
-    /// one of these, so the abandoned directory here survived for good — measured on the path
-    /// where the transfer is still running at eight invocations out of eight.
+    /// A directory whose owner has exited is collected by the next arming; one whose owner is
+    /// alive is not. The race state is planted rather than reproduced.
     #[cfg(unix)]
     #[test]
     fn a_transfer_directory_is_collected_once_its_process_is_gone() {
@@ -522,15 +759,24 @@ mod tests {
             "the pid was recycled between the wait and the probe, so this proves nothing"
         );
 
-        let abandoned = transfer_dir(&tmp, &format!("{INCOMING_PREFIX}{dead}-1788086042802162000"));
+        let abandoned = transfer_dir(
+            &tmp,
+            &format!("{INCOMING_PREFIX}{dead}-1788086042802162000"),
+        );
         let live = transfer_dir(
             &tmp,
-            &format!("{INCOMING_PREFIX}{}-1788086042802162001", std::process::id()),
+            &format!(
+                "{INCOMING_PREFIX}{}-1788086042802162001",
+                std::process::id()
+            ),
         );
 
         let removed = collect_abandoned(&tmp, COLLECT_CAP);
 
-        assert!(!abandoned.exists(), "a directory nothing can write to any more was kept");
+        assert!(
+            !abandoned.exists(),
+            "a directory nothing can write to any more was kept"
+        );
         assert_eq!(removed.len(), 1, "{removed:?}");
         assert!(
             live.exists(),
@@ -540,8 +786,8 @@ mod tests {
         std::fs::remove_dir_all(&tmp).ok();
     }
 
-    /// Everything the predicate cannot resolve keeps the directory, and everything else in
-    /// `~/.chrome-agent/tmp` is not the predicate's business at all.
+    /// Everything the predicate cannot resolve keeps the directory, and other commands' output
+    /// in `~/.chrome-agent/tmp` is never touched.
     #[test]
     fn an_unreadable_owner_or_another_command_s_file_is_left_alone() {
         let tmp = scratch("collect-keeps");
@@ -558,8 +804,7 @@ mod tests {
         std::fs::remove_dir_all(&tmp).ok();
     }
 
-    /// The cap bounds the readdir of a directory somebody let grow, and the rest is drained by
-    /// the invocations that follow rather than dropped.
+    /// The cap bounds one arming; the rest drains over the invocations that follow.
     #[cfg(unix)]
     #[test]
     fn the_cap_bounds_one_arming_and_the_backlog_still_converges() {
@@ -567,13 +812,23 @@ mod tests {
         let dead = a_reaped_pid();
         assert_eq!(liveness(dead), Liveness::Dead, "the pid was recycled");
         for n in 0..5 {
-            transfer_dir(&tmp, &format!("{INCOMING_PREFIX}{dead}-178808604280216200{n}"));
+            transfer_dir(
+                &tmp,
+                &format!("{INCOMING_PREFIX}{dead}-178808604280216200{n}"),
+            );
         }
 
-        assert_eq!(collect_abandoned(&tmp, 2).len(), 2, "the cap is not applied");
+        assert_eq!(
+            collect_abandoned(&tmp, 2).len(),
+            2,
+            "the cap is not applied"
+        );
         assert_eq!(collect_abandoned(&tmp, 2).len(), 2);
         assert_eq!(collect_abandoned(&tmp, 2).len(), 1);
-        assert!(collect_abandoned(&tmp, 2).is_empty(), "the backlog did not drain");
+        assert!(
+            collect_abandoned(&tmp, 2).is_empty(),
+            "the backlog did not drain"
+        );
         std::fs::remove_dir_all(&tmp).ok();
     }
 }

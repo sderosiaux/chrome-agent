@@ -3,12 +3,11 @@ use serde_json::{Value, json};
 use crate::cdp::client::CdpClient;
 use crate::session::SessionStore;
 
-/// Tracks command recovery after a stored device configuration fails to reapply.
+/// Tracks recovery after a stored device configuration fails to reapply.
 ///
-/// A pipe must stay alive long enough to accept `emulate device` or `emulate reset`; failing the
-/// process during startup would make the invalid configuration impossible to repair through it.
-/// Until repair succeeds, all commands that could observe or mutate the misconfigured page are
-/// answered with the original reapply error instead of being dispatched.
+/// The pipe must stay alive to accept `emulate device` or `emulate reset`, or the invalid
+/// configuration is unrepairable through it. Until repair succeeds, every command that could
+/// observe or mutate the misconfigured page is answered with the original reapply error.
 pub struct EmulationRecovery {
     reapply_error: Option<String>,
 }
@@ -45,12 +44,9 @@ impl EmulationRecovery {
             })
     }
 
-    /// Clear an existing failure after a recovery command completes successfully.
-    ///
-    /// `emulate device` has already applied and persisted its replacement configuration when it
-    /// returns `ok: true`; `emulate reset` has already cleared both. Reapplying here would issue the
-    /// same CDP commands twice and could turn a successful response into a failure for the next
-    /// command.
+    /// Clear an existing failure after a recovery command succeeds. It does not reapply:
+    /// `emulate device` has already applied and persisted its replacement on `ok: true` and
+    /// `emulate reset` has cleared both, so reapplying would issue the CDP commands twice.
     pub fn update_after(&mut self, cmd: &Value, response: &Value) {
         if self.reapply_error.is_some()
             && repairs_reapply_failure(cmd)
@@ -61,11 +57,9 @@ impl EmulationRecovery {
     }
 }
 
-/// Return whether the outer dispatcher must defer reapply handling to this command.
-///
-/// Device and reset replace the stored state directly. A batch is admitted as a container, then
-/// the shared `EmulationRecovery` evaluates each nested command in order; commands preceding the
-/// repair remain blocked rather than being silently skipped.
+/// Whether the outer dispatcher must defer reapply handling to this command. `device` and
+/// `reset` replace the stored state directly. A batch is admitted as a container and its
+/// nested commands are each evaluated in order, so those preceding the repair stay blocked.
 fn handles_reapply_failure(cmd: &Value) -> bool {
     repairs_reapply_failure(cmd) || cmd.get("cmd").and_then(Value::as_str) == Some("batch")
 }
@@ -93,48 +87,53 @@ async fn try_reapply(
 
 /// Execute the JSON form of `emulate`, preserving the same defaults and validation as the CLI.
 pub async fn dispatch_emulate(
-    client: &CdpClient,
-    store: &mut SessionStore,
-    browser_name: &str,
-    page_name: &str,
-    cmd: &Value,
+    ctx: &mut crate::page_ctx::PageCtx<'_>,
+    args: &crate::pipe_command::EmulateArgs,
 ) -> Result<Value, crate::BoxError> {
-    let action = cmd
-        .get("action")
-        .and_then(Value::as_str)
+    let action = args
+        .action
+        .as_deref()
         .ok_or("emulate: missing \"action\" (device, status, or reset)")?;
+    let (client, browser_name, page_name) = (ctx.client, ctx.browser, ctx.page);
 
     let response = match action {
         "device" => {
-            let config = parse_device_config(cmd)?;
-            crate::emulation::apply_and_store(client, store, browser_name, page_name, config).await
+            let config = parse_device_config(args)?;
+            crate::emulation::apply_and_store(client, ctx.store, browser_name, page_name, config)
+                .await
         }
-        "status" => crate::emulation::status(client, store, browser_name, page_name).await,
-        "reset" => crate::emulation::clear(client, store, browser_name, page_name).await,
+        "status" => crate::emulation::status(client, ctx.store, browser_name, page_name).await,
+        "reset" => crate::emulation::clear(client, ctx.store, browser_name, page_name).await,
         other => Err(format!(
             "emulate: unknown action {other:?}; use \"device\", \"status\", or \"reset\""
         )
         .into()),
     }?;
 
-    // Pipe state otherwise reaches disk only when stdin closes. Commit configuration changes here
-    // so a concurrent CLI invocation sees them while this long-lived connection is still open.
+    // Pipe state otherwise reaches disk only when stdin closes. Commit here so a concurrent
+    // CLI invocation sees the change while this connection is still open.
     if matches!(action, "device" | "reset") {
-        crate::session::save_session(store)?;
+        crate::session::save_session(ctx.store)?;
     }
     Ok(response)
 }
 
-/// Parse optional JSON fields without coercion. Missing and null mean "use the CLI default";
-/// a present value of the wrong type is a caller error rather than an invitation to guess.
-fn parse_device_config(cmd: &Value) -> Result<crate::emulation::DeviceEmulation, crate::BoxError> {
-    let label = optional_string(cmd, "label")?;
-    let width = required_u32(cmd, "width")?;
-    let height = required_u32(cmd, "height")?;
-    let dpr = optional_f64(cmd, "dpr")?.unwrap_or(1.0);
-    let mobile = optional_bool(cmd, "mobile")?.unwrap_or(false);
-    let touch = optional_bool(cmd, "touch")?.unwrap_or(false);
-    let orientation = optional_string(cmd, "orientation")?
+/// Validate `emulate device`'s values without coercion. Missing and null mean "use the CLI
+/// default"; a present value of the wrong type is a caller error, never a guess.
+///
+/// The KEYS were already checked by `pipe_command::EmulateArgs` (`deny_unknown_fields`, so a
+/// typo is refused by name); the values stay `Value` here because these messages name the field
+/// and the type it wanted, which serde's `invalid type` does not.
+fn parse_device_config(
+    args: &crate::pipe_command::EmulateArgs,
+) -> Result<crate::emulation::DeviceEmulation, crate::BoxError> {
+    let label = optional_string(args.label.as_ref(), "label")?;
+    let width = required_u32(args.width.as_ref(), "width")?;
+    let height = required_u32(args.height.as_ref(), "height")?;
+    let dpr = optional_f64(args.dpr.as_ref(), "dpr")?.unwrap_or(1.0);
+    let mobile = optional_bool(args.mobile.as_ref(), "mobile")?.unwrap_or(false);
+    let touch = optional_bool(args.touch.as_ref(), "touch")?.unwrap_or(false);
+    let orientation = optional_string(args.orientation.as_ref(), "orientation")?
         .as_deref()
         .map(crate::emulation::DeviceOrientation::parse)
         .transpose()?;
@@ -142,16 +141,16 @@ fn parse_device_config(cmd: &Value) -> Result<crate::emulation::DeviceEmulation,
         .map_err(Into::into)
 }
 
-fn optional_string(cmd: &Value, key: &str) -> Result<Option<String>, crate::BoxError> {
-    match cmd.get(key) {
+fn optional_string(value: Option<&Value>, key: &str) -> Result<Option<String>, crate::BoxError> {
+    match value {
         None | Some(Value::Null) => Ok(None),
         Some(Value::String(value)) => Ok(Some(value.clone())),
         Some(_) => Err(format!("emulate device: \"{key}\" must be a string").into()),
     }
 }
 
-fn optional_f64(cmd: &Value, key: &str) -> Result<Option<f64>, crate::BoxError> {
-    match cmd.get(key) {
+fn optional_f64(value: Option<&Value>, key: &str) -> Result<Option<f64>, crate::BoxError> {
+    match value {
         None | Some(Value::Null) => Ok(None),
         Some(value) => value
             .as_f64()
@@ -160,17 +159,16 @@ fn optional_f64(cmd: &Value, key: &str) -> Result<Option<f64>, crate::BoxError> 
     }
 }
 
-fn optional_bool(cmd: &Value, key: &str) -> Result<Option<bool>, crate::BoxError> {
-    match cmd.get(key) {
+fn optional_bool(value: Option<&Value>, key: &str) -> Result<Option<bool>, crate::BoxError> {
+    match value {
         None | Some(Value::Null) => Ok(None),
         Some(Value::Bool(value)) => Ok(Some(*value)),
         Some(_) => Err(format!("emulate device: \"{key}\" must be a boolean").into()),
     }
 }
 
-fn required_u32(cmd: &Value, key: &str) -> Result<u32, crate::BoxError> {
-    let value = cmd
-        .get(key)
+fn required_u32(value: Option<&Value>, key: &str) -> Result<u32, crate::BoxError> {
+    let value = value
         .and_then(Value::as_u64)
         .ok_or_else(|| format!("emulate device: missing or invalid \"{key}\""))?;
     u32::try_from(value).map_err(|_| format!("emulate device: \"{key}\" is too large").into())
@@ -243,9 +241,19 @@ mod tests {
         );
     }
 
+    /// Through the protocol, so these also pin that `emulate` accepts exactly these keys.
+    fn device_config(mut cmd: Value) -> Result<crate::emulation::DeviceEmulation, crate::BoxError> {
+        cmd["cmd"] = json!("emulate");
+        cmd["action"] = json!("device");
+        match crate::pipe_command::parse(&cmd)? {
+            crate::pipe_command::PipeCommand::Emulate(args) => parse_device_config(&args),
+            other => panic!("not an emulate: {}", other.name()),
+        }
+    }
+
     #[test]
     fn defaults_only_absent_or_null_optional_fields() {
-        let config = parse_device_config(&json!({
+        let config = device_config(json!({
             "width": 1024,
             "height": 768,
             "label": null,
@@ -277,11 +285,9 @@ mod tests {
             None,
         )
         .unwrap();
-        let mut command = serde_json::to_value(&expected).unwrap();
-        command["cmd"] = json!("emulate");
-        command["action"] = json!("device");
+        let command = serde_json::to_value(&expected).unwrap();
 
-        assert_eq!(parse_device_config(&command).unwrap(), expected);
+        assert_eq!(device_config(command).unwrap(), expected);
     }
 
     #[test]
@@ -295,11 +301,20 @@ mod tests {
         ] {
             let mut cmd = json!({"width": 390, "height": 844});
             cmd[field] = value;
-            let error = parse_device_config(&cmd).unwrap_err().to_string();
+            let error = device_config(cmd).unwrap_err().to_string();
             assert!(
                 error.contains(field) && error.contains(expected),
                 "unexpected error for {field}: {error}"
             );
         }
+    }
+
+    /// A key `emulate` does not take is refused by name, not silently defaulted.
+    #[test]
+    fn an_unknown_emulate_key_is_refused_by_name() {
+        let error = device_config(json!({"width": 390, "height": 844, "deviceScaleFactor": 3}))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("deviceScaleFactor"), "{error}");
     }
 }

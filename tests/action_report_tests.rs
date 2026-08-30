@@ -5,14 +5,11 @@ use serde_json::Value;
 mod common;
 use common::TestBrowser;
 
-fn binary() -> String {
-    let mut path = std::env::current_exe().unwrap().parent().unwrap().parent().unwrap().to_path_buf();
-    path.push("chrome-agent");
-    path.to_string_lossy().into_owned()
-}
-
 fn run_cli(args: &[&str]) -> (String, i32) {
-    let output = Command::new(binary()).args(args).output().expect("Failed to run chrome-agent");
+    let output = Command::new(common::binary())
+        .args(args)
+        .output()
+        .expect("Failed to run chrome-agent");
     (
         String::from_utf8_lossy(&output.stdout).to_string(),
         output.status.code().unwrap_or(-1),
@@ -39,28 +36,45 @@ fn setup(browser: &str) -> bool {
     true
 }
 
-/// The point of the default: after an action the agent should already know what the page
-/// did, without spending a second call to find out.
 #[test]
 fn an_action_reports_what_changed_without_being_asked() {
     let b = TestBrowser::new("report-default");
     if !setup(b.name()) {
         return;
     }
-    let (stdout, code) = run_cli(&["--browser", b.name(), "--json", "click", "--selector", "#go"]);
+    let (stdout, code) = run_cli(&[
+        "--browser",
+        b.name(),
+        "--json",
+        "click",
+        "--selector",
+        "#go",
+    ]);
     assert_eq!(code, 0, "click should succeed: {stdout}");
     let v: Value = serde_json::from_str(&stdout).expect("JSON response");
 
-    assert_eq!(v["changed"]["added"], 1, "the injected heading should be reported: {v}");
-    assert_eq!(v["changed"]["document_changed"], false, "same document: {v}");
+    assert_eq!(
+        v["changed"]["added"], 1,
+        "the injected heading should be reported: {v}"
+    );
+    assert_eq!(
+        v["changed"]["document_changed"], false,
+        "same document: {v}"
+    );
     assert!(
-        v["delta"].as_str().unwrap_or_default().contains("added by the click"),
+        v["delta"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("added by the click"),
         "the delta should name what appeared: {v}"
     );
-    assert!(v["snapshot"].is_null(), "the whole tree is only for --inspect: {v}");
+    assert!(
+        v["snapshot"].is_null(),
+        "the whole tree is only for --inspect: {v}"
+    );
 }
 
-/// The kill switch has to actually switch it off, including the page read behind it.
+/// `--verdict off` suppresses the report and the page read behind it.
 #[test]
 fn verdict_off_reports_only_the_action() {
     let b = TestBrowser::new("report-off");
@@ -68,18 +82,27 @@ fn verdict_off_reports_only_the_action() {
         return;
     }
     let (stdout, code) = run_cli(&[
-        "--browser", b.name(), "--verdict", "off", "--json", "click", "--selector", "#go",
+        "--browser",
+        b.name(),
+        "--verdict",
+        "off",
+        "--json",
+        "click",
+        "--selector",
+        "#go",
     ]);
     assert_eq!(code, 0, "click should succeed: {stdout}");
     let v: Value = serde_json::from_str(&stdout).expect("JSON response");
 
     assert_eq!(v["ok"], true);
-    assert!(v["changed"].is_null(), "no change report was asked for: {v}");
+    assert!(
+        v["changed"].is_null(),
+        "no change report was asked for: {v}"
+    );
     assert!(v["delta"].is_null(), "no delta was asked for: {v}");
 }
 
-/// Pipe has to answer the same way the CLI does. Two modes of the same tool disagreeing
-/// about what an action returns is the kind of thing an agent discovers the hard way.
+/// Pipe reports the same `changed`/`delta` as the CLI, and honours `--verdict off`.
 #[test]
 fn pipe_reports_changes_like_the_cli() {
     if !common::browser_ready() {
@@ -98,20 +121,31 @@ fn pipe_reports_changes_like_the_cli() {
     );
 
     let last = run_pipe("pipe-report", &[], &script);
-    assert_eq!(last["changed"]["added"], 1, "pipe should report the added node: {last}");
+    assert_eq!(
+        last["changed"]["added"], 1,
+        "pipe should report the added node: {last}"
+    );
     assert!(
-        last["delta"].as_str().unwrap_or_default().contains("added by the click"),
+        last["delta"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("added by the click"),
         "pipe delta should name what appeared: {last}"
     );
 
     let last = run_pipe("pipe-report-off", &["--verdict", "off"], &script);
-    assert!(last["changed"].is_null(), "--verdict off must reach pipe too: {last}");
-    assert!(last["delta"].is_null(), "--verdict off must reach pipe too: {last}");
+    assert!(
+        last["changed"].is_null(),
+        "--verdict off must reach pipe too: {last}"
+    );
+    assert!(
+        last["delta"].is_null(),
+        "--verdict off must reach pipe too: {last}"
+    );
 }
 
-/// Run a pipe script and return the last JSON response.
-/// The label names the browser; the name itself is unique and the session is closed
-/// when this returns, panic included — see `common::TestBrowser`.
+/// Run a pipe script and return the last JSON response. The browser is owned by a
+/// `common::TestBrowser`, so it is closed when this returns, panic included.
 fn run_pipe(label: &str, extra: &[&str], script: &str) -> Value {
     use std::io::Write as _;
     use std::process::Stdio;
@@ -120,22 +154,31 @@ fn run_pipe(label: &str, extra: &[&str], script: &str) -> Value {
     let mut args: Vec<&str> = vec!["--browser", guard.name()];
     args.extend_from_slice(extra);
     args.push("pipe");
-    let mut child = Command::new(binary())
+    let mut child = Command::new(common::binary())
         .args(&args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
         .expect("spawn pipe");
-    child.stdin.as_mut().unwrap().write_all(script.as_bytes()).unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(script.as_bytes())
+        .unwrap();
     drop(child.stdin.take());
     let out = child.wait_with_output().expect("pipe output");
     let stdout = String::from_utf8_lossy(&out.stdout);
-    let last = stdout.lines().rfind(|l| !l.trim().is_empty()).unwrap_or("{}");
-    serde_json::from_str(last).unwrap_or_else(|e| panic!("last pipe line was not JSON ({e}): {last}"))
+    let last = stdout
+        .lines()
+        .rfind(|l| !l.trim().is_empty())
+        .unwrap_or("{}");
+    serde_json::from_str(last)
+        .unwrap_or_else(|e| panic!("last pipe line was not JSON ({e}): {last}"))
 }
 
-/// A page can change more than an agent wants to read in one go, so the report is capped.
+/// `--budget` caps the delta text; the `changed` counts still describe the whole change.
 #[test]
 fn the_change_report_respects_the_budget() {
     let b = TestBrowser::new("report-budget");
@@ -152,7 +195,14 @@ fn the_change_report_respects_the_budget() {
     assert_eq!(code, 0);
 
     let (stdout, code) = run_cli(&[
-        "--browser", b.name(), "--budget", "300", "--json", "click", "--selector", "#go",
+        "--browser",
+        b.name(),
+        "--budget",
+        "300",
+        "--json",
+        "click",
+        "--selector",
+        "#go",
     ]);
     assert_eq!(code, 0, "click should succeed: {stdout}");
     let v: Value = serde_json::from_str(&stdout).expect("JSON response");
@@ -163,16 +213,17 @@ fn the_change_report_respects_the_budget() {
         "delta is {} chars, budget was 300: {delta}",
         delta.chars().count()
     );
-    assert!(delta.contains("truncated"), "a capped delta should say so: {delta}");
+    assert!(
+        delta.contains("truncated"),
+        "a capped delta should say so: {delta}"
+    );
     assert!(
         v["changed"]["added"].as_u64().unwrap_or(0) > 10,
         "the counts describe the whole change, not the truncated view: {v}"
     );
 }
 
-/// The first action of a pipe session had nothing to compare against, so it stored no
-/// baseline either — and the change report then stayed off for the whole session. Both
-/// existing parity tests ran an explicit `inspect` first, which is why it shipped.
+/// A pipe session with no explicit `inspect` still stores a baseline on its first action.
 #[test]
 fn a_pipe_session_bootstraps_its_own_baseline() {
     if !common::browser_ready() {
@@ -180,7 +231,7 @@ fn a_pipe_session_bootstraps_its_own_baseline() {
     }
     let url = common::fixture_url("extract_cards.html");
     let add = "document.body.insertAdjacentHTML('beforeend','<h4>added</h4>');1";
-    // No `inspect` anywhere: the session has to acquire a baseline on its own.
+    // No `inspect` anywhere.
     let script = format!(
         "{}\n{}\n{}\n",
         serde_json::json!({"cmd": "goto", "url": url}),
@@ -190,7 +241,7 @@ fn a_pipe_session_bootstraps_its_own_baseline() {
     let last = run_pipe("pipe-bootstrap", &[], &script);
     assert_eq!(last["ok"], true, "{last}");
 
-    // The action after the first one must report, because the first stored a baseline.
+    // The second action reports, because the first stored a baseline.
     let script = format!(
         "{}\n{}\n{}\n",
         serde_json::json!({"cmd": "goto", "url": common::fixture_url("press_keys.html")}),

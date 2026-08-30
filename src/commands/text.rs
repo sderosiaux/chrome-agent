@@ -14,8 +14,7 @@ pub async fn run(
     uid_map: &HashMap<String, ElementRef>,
 ) -> Result<String, crate::BoxError> {
     let raw = if let Some(sel) = selector {
-        // Selector-based extraction with role-attribute fallback
-        // "main" also matches [role=main], "nav" also matches [role=navigation], etc.
+        // Falls back to `[role=<sel>]`, so "main" also matches `[role=main]`.
         let safe_sel = serde_json::to_string(sel).unwrap_or_default();
         let expr = format!(
             "(() => {{ let el = document.querySelector({safe_sel}); if (!el) {{ el = document.querySelector('[role=' + {safe_sel} + ']'); }} return el ? el.innerText || '' : ''; }})()"
@@ -37,57 +36,58 @@ pub async fn run(
             .unwrap_or("")
             .to_string();
         if text.is_empty() {
-            return Err(format!("No element matches selector '{sel}' or element has no text.").into());
+            return Err(
+                format!("No element matches selector '{sel}' or element has no text.").into(),
+            );
         }
         text
     } else {
         match uid {
-        None => {
-            // Whole page text
-            let result: EvaluateResult = client
-                .call(
-                    "Runtime.evaluate",
-                    json!({
-                        "expression": "document.body.innerText",
-                        "returnByValue": true,
-                    }),
-                )
-                .await?;
-            result
-                .result
-                .value
-                .as_ref()
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string()
-        }
-        Some(uid) => {
-            let element_ref = uid_map.get(uid).ok_or_else(|| {
-                format!(
-                    "Element uid={uid} not found. Run 'chrome-agent inspect' to get fresh uids."
-                )
-            })?;
-            let backend_node_id = element_ref.backend_node_id().ok_or_else(|| {
-                format!("Element uid={uid} has no resolvable backend node.")
-            })?;
+            None => {
+                let result: EvaluateResult = client
+                    .call(
+                        "Runtime.evaluate",
+                        json!({
+                            "expression": "document.body.innerText",
+                            "returnByValue": true,
+                        }),
+                    )
+                    .await?;
+                result
+                    .result
+                    .value
+                    .as_ref()
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string()
+            }
+            Some(uid) => {
+                let element_ref = uid_map.get(uid).ok_or_else(|| {
+                    format!(
+                        "Element uid={uid} not found. Run 'chrome-agent inspect' to get fresh uids."
+                    )
+                })?;
+                let backend_node_id = element_ref
+                    .backend_node_id()
+                    .ok_or_else(|| format!("Element uid={uid} has no resolvable backend node."))?;
 
-            let resolve_result: ResolveNodeResult = client
-                .call(
-                    "DOM.resolveNode",
-                    ResolveNodeParams {
-                        node_id: None,
-                        backend_node_id: Some(backend_node_id),
-                        object_group: Some("chrome-agent".into()),
-                        execution_context_id: None,
-                    },
-                )
-                .await?;
+                let resolve_result: ResolveNodeResult = client
+                    .call(
+                        "DOM.resolveNode",
+                        ResolveNodeParams {
+                            node_id: None,
+                            backend_node_id: Some(backend_node_id),
+                            object_group: Some("chrome-agent".into()),
+                            execution_context_id: None,
+                        },
+                    )
+                    .await?;
 
-            let object_id = resolve_result.object.object_id.ok_or_else(|| {
-                format!("Element uid={uid} could not be resolved to a JS object.")
-            })?;
+                let object_id = resolve_result.object.object_id.ok_or_else(|| {
+                    format!("Element uid={uid} could not be resolved to a JS object.")
+                })?;
 
-            let result: serde_json::Value = client
+                let result: serde_json::Value = client
                 .call(
                     "Runtime.callFunctionOn",
                     json!({
@@ -98,19 +98,18 @@ pub async fn run(
                 )
                 .await?;
 
-            // A throwing getter is an error, not an empty element — without this
-            // check the exception read as "" with ok:true, indistinguishable from
-            // a genuinely textless node.
-            crate::element::check_js_exception(&result)?;
+                // A throwing getter is an error, not an empty element: unchecked it reads as
+                // `""` with `ok:true`, indistinguishable from a textless node.
+                crate::element::check_js_exception(&result)?;
 
-            result
-                .get("result")
-                .and_then(|r| r.get("value"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string()
+                result
+                    .get("result")
+                    .and_then(|r| r.get("value"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string()
+            }
         }
-    }
     };
 
     Ok(collapse_blank_lines(&raw))
@@ -134,7 +133,6 @@ fn collapse_blank_lines(s: &str) -> String {
         result.push_str(line);
         result.push('\n');
     }
-    // Remove trailing newline
     if result.ends_with('\n') {
         result.pop();
     }
@@ -159,11 +157,8 @@ mod tests {
 
     #[test]
     fn bug_selector_injection_escaped() {
-        // The selector builder embeds `serde_json::to_string(sel)` into a JS
-        // string literal. Assert the exact escaping it produces so a payload
-        // cannot break out of that literal.
-
-        // Single quotes are data inside a double-quoted JS string: kept verbatim.
+        // The selector is embedded into a JS string literal via
+        // `serde_json::to_string`. Single quotes are data there and stay verbatim.
         let single = r"'); alert('xss";
         assert_eq!(
             serde_json::to_string(single).unwrap(),
@@ -171,14 +166,13 @@ mod tests {
             "single quotes must be preserved, not the breakout vector"
         );
 
-        // Double quotes ARE the breakout vector and must be backslash-escaped.
+        // Double quotes are the breakout vector and must be backslash-escaped.
         let double = r#"a"] ); fetch("evil"#;
         let escaped = serde_json::to_string(double).unwrap();
         assert_eq!(escaped, r#""a\"] ); fetch(\"evil""#);
-        // Every embedded double-quote is escaped: the payload stays inert data.
         assert_eq!(escaped.matches(r#"\""#).count(), 2);
 
-        // Backslashes and newlines can't smuggle in an unescaped quote either.
+        // Backslashes and newlines cannot smuggle in an unescaped quote either.
         assert_eq!(serde_json::to_string("x\\\"y").unwrap(), r#""x\\\"y""#);
         assert_eq!(serde_json::to_string("a\nb").unwrap(), r#""a\nb""#);
     }

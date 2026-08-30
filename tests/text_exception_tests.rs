@@ -1,9 +1,7 @@
 //! A throwing page getter must not read as "this element has no text".
 //!
-//! The uid branch of `text` was the one `Runtime.callFunctionOn` site in the codebase
-//! that never checked `exceptionDetails`: a JS exception during the read came back as
-//! `""` with `ok:true` — indistinguishable from a genuinely empty element. Every other
-//! call site (element.rs) refuses on exception.
+//! The uid branch of `text` must check `exceptionDetails`, like every other
+//! `Runtime.callFunctionOn` site, so a JS exception is not returned as `""` with `ok:true`.
 
 use std::process::Command;
 
@@ -12,14 +10,11 @@ use serde_json::Value;
 mod common;
 use common::TestBrowser;
 
-fn binary() -> String {
-    let mut path = std::env::current_exe().unwrap().parent().unwrap().parent().unwrap().to_path_buf();
-    path.push("chrome-agent");
-    path.to_string_lossy().into_owned()
-}
-
 fn run_cli(args: &[&str]) -> (String, i32) {
-    let output = Command::new(binary()).args(args).output().expect("Failed to run chrome-agent");
+    let output = Command::new(common::binary())
+        .args(args)
+        .output()
+        .expect("Failed to run chrome-agent");
     (
         String::from_utf8_lossy(&output.stdout).to_string(),
         output.status.code().unwrap_or(-1),
@@ -52,7 +47,7 @@ fn a_throwing_text_read_is_an_error_not_an_empty_string() {
         })
         .expect("the target button's uid");
 
-    // Make the element's text read throw, the way a hostile or broken page can.
+    // Make the element's text read throw.
     let sabotage = "Object.defineProperty(document.getElementById('target'), 'innerText', \
                     {get() { throw new Error('boom'); }}); 1";
     let (stdout, code) = run_cli(&["--browser", b.name(), "eval", sabotage]);

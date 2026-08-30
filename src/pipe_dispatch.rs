@@ -1,102 +1,88 @@
-use std::collections::HashMap;
-
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::cdp::client::CdpClient;
-use crate::element_ref::ElementRef;
-use crate::session::{self, SessionStore};
 use crate::commands;
+use crate::page_ctx::PageCtx;
+// One definition each, in the module the CLI already reads them from: both used to exist here
+// too, and `pipe_dispatch_actions` called BOTH spellings of `get_uid_map`.
+use crate::pipe_command::{
+    ConsoleArgs, DownloadArgs, EvalArgs, ExtractArgs, FillArgs, FrameArgs, GotoArgs, InspectArgs,
+    NetworkArgs, PdfArgs, PipeCommand, PointerArgs, PressArgs, ReadArgs, ScreenshotArgs,
+    ScrollArgs, TextArgs, TypeArgs, WaitArgs,
+};
 pub use crate::pipe_emulation::{EmulationRecovery, dispatch_emulate};
 pub use crate::pipe_report::{attach_change_report, mutates_page};
+use crate::run_helpers::merge_into;
 
-// Split out to stay under the 1000-line file cap; callers keep using `pipe_dispatch::*`.
 pub use crate::pipe_dispatch_actions::{
     dispatch_assert, dispatch_check, dispatch_dblclick, dispatch_drag, dispatch_fill_and_submit,
     dispatch_fill_form, dispatch_history, dispatch_hover, dispatch_navigate_and_read,
     dispatch_select, dispatch_upload, dispatch_webmcp_call, dispatch_webmcp_list, run_batch,
 };
 
-// ---------------------------------------------------------------------------
-// Per-command dispatchers
-// ---------------------------------------------------------------------------
+// --- Per-command dispatchers ---
 
 pub async fn dispatch_goto(
-    client: &CdpClient,
-    store: &mut SessionStore,
-    browser_name: &str,
-    page_name: &str,
-    target_id: &str,
-    timeout: u64,
-    global_max_depth: Option<usize>,
-    cmd: &Value,
+    ctx: &mut PageCtx<'_>,
+    args: &GotoArgs,
 ) -> Result<Value, crate::BoxError> {
-    let url = cmd.get("url").and_then(Value::as_str).ok_or("goto: missing \"url\"")?;
-    let inspect = cmd.get("inspect").and_then(Value::as_bool).unwrap_or(false);
-    let max_depth = cmd_max_depth(cmd).or(global_max_depth);
-    let parsed_headers = cmd
-        .get("headers")
-        .and_then(Value::as_array)
-        .map(|arr| {
-            arr.iter()
-                .filter_map(Value::as_str)
-                .map(commands::goto::parse_header)
-                .collect::<Result<Vec<_>, _>>()
-        })
-        .transpose()?
-        .unwrap_or_default();
+    let max_depth = args.max_depth.map(as_usize).or(ctx.max_depth);
+    let parsed_headers = args
+        .headers
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .map(|h| commands::goto::parse_header(h.as_str()))
+        .collect::<Result<Vec<_>, _>>()?;
 
-    let result = commands::goto::run(client, url, timeout, &parsed_headers).await?;
+    let result = commands::goto::run(ctx.client, &args.url, ctx.timeout, &parsed_headers).await?;
     // Mirror the CLI: after navigation, optionally wait for a CSS selector.
-    if let Some(selector) = cmd.get("wait_for").and_then(Value::as_str) {
-        commands::wait::run(client, "selector", selector, timeout, 500).await?;
+    if let Some(selector) = &args.wait_for {
+        commands::wait::run(ctx.client, "selector", selector, ctx.timeout, 500).await?;
     }
-    // Navigation destroys any bound frame's isolated world — clear it so
-    // subsequent eval/inspect target the freshly loaded top document (issue #8).
-    client.set_frame_context(None);
-    let _ = commands::history::append(&result.url, &result.title, page_name);
+    // Navigation destroys any bound frame's isolated world, so eval/inspect must fall back
+    // to the freshly loaded top document (issue #8).
+    ctx.client.set_frame_context(None);
+    // `backendNodeId` counters overlap between documents, so a uid from the previous page can
+    // resolve to an unrelated node on this one. `last_snapshot` deliberately survives, so `diff`
+    // answers `document_changed` instead of erroring. The CLI arm had always done this and the
+    // dispatcher never had, so pipe and batch carried stale uids across every `goto`.
+    ctx.clear_uid_map();
+    let _ = commands::history::append(&result.url, &result.title, ctx.page);
 
     let mut obj = json!({"ok": true, "url": result.url, "title": result.title});
-    // `goto` stays out of `mutates_page`, so nothing else will speak for it: `landed` rides
-    // on its own response, in the one dispatcher pipe and batch share. The browser name goes
-    // with it because every command inside a hint has to reach the session that produced it.
-    result.landed.attach(&mut obj, browser_name);
-    if inspect {
-        let snapshot = attach_snapshot(client, store, browser_name, page_name, target_id, max_depth).await?;
+    // `goto` is outside `mutates_page`, so nothing else speaks for it: `landed` rides on its
+    // own response. The browser name goes with it so hints name a reachable session.
+    result.landed.attach(&mut obj, ctx.browser);
+    if args.inspect.unwrap_or(false) {
+        let snapshot = attach_snapshot(ctx, max_depth).await?;
         obj["snapshot"] = json!(snapshot);
     }
     Ok(obj)
 }
 
 pub async fn dispatch_click(
-    client: &CdpClient,
-    store: &mut SessionStore,
-    browser_name: &str,
-    page_name: &str,
-    target_id: &str,
-    global_max_depth: Option<usize>,
-    report: crate::run_helpers::ReportPolicy,
-    cmd: &Value,
+    ctx: &mut PageCtx<'_>,
+    args: &PointerArgs,
 ) -> Result<Value, crate::BoxError> {
-    let inspect = cmd.get("inspect").and_then(Value::as_bool).unwrap_or(false);
-    let max_depth = cmd_max_depth(cmd).or(global_max_depth);
-    // Hoist the `?` out of the `else if let` so the non-Send ControlFlow residual
-    // isn't held across the awaits below (keeps the future Send).
-    let xy = parse_xy(cmd)?;
-    let on_intercept = crate::hit_test::OnIntercept::from_cmd(cmd, report.on_intercept);
+    let max_depth = args.max_depth.map(as_usize).or(ctx.max_depth);
+    let on_intercept = on_intercept(args.on_intercept.as_deref(), ctx.report.on_intercept);
 
-    let (msg, details) = if let Some(sel) = cmd.get("selector").and_then(Value::as_str) {
-        let outcome = crate::element::click_selector(client, sel, on_intercept).await?;
+    let (msg, details) = if let Some(sel) = &args.selector {
+        let outcome = crate::element::click_selector(ctx.client, sel, on_intercept).await?;
         let target = format!("selector '{sel}'");
         (
-            outcome.refusal_message("click", &target).unwrap_or_else(|| format!("Clicked {target}")),
+            outcome
+                .refusal_message("click", &target)
+                .unwrap_or_else(|| format!("Clicked {target}")),
             Some(outcome.report()),
         )
-    } else if let Some((x, y)) = xy {
-        crate::element::click_at_coords(client, x, y).await?;
+    } else if let Some([x, y]) = args.xy {
+        crate::element::click_at_coords(ctx.client, x, y).await?;
         (format!("Clicked at ({x}, {y})"), None)
-    } else if let Some(uid) = cmd.get("uid").and_then(Value::as_str) {
-        let uid_map = get_uid_map(store, browser_name, page_name);
-        let (msg, outcome) = commands::click::run(client, &uid_map, uid, on_intercept).await?;
+    } else if let Some(uid) = &args.uid {
+        let uid_map = ctx.uid_map();
+        let (msg, outcome) = commands::click::run(ctx.client, &uid_map, uid, on_intercept).await?;
         (msg, Some(outcome.report()))
     } else {
         return Err("click: provide \"uid\", \"selector\", or \"xy\"".into());
@@ -104,38 +90,33 @@ pub async fn dispatch_click(
 
     let mut obj = json!({"ok": true, "message": msg});
     merge_into(&mut obj, details.as_ref());
-    if inspect {
-        let snapshot = attach_snapshot(client, store, browser_name, page_name, target_id, max_depth).await?;
+    if args.inspect.unwrap_or(false) {
+        let snapshot = attach_snapshot(ctx, max_depth).await?;
         obj["snapshot"] = json!(snapshot);
     }
     Ok(obj)
 }
 
 pub async fn dispatch_fill(
-    client: &CdpClient,
-    store: &mut SessionStore,
-    browser_name: &str,
-    page_name: &str,
-    target_id: &str,
-    global_max_depth: Option<usize>,
-    cmd: &Value,
+    ctx: &mut PageCtx<'_>,
+    args: &FillArgs,
 ) -> Result<Value, crate::BoxError> {
-    let value = cmd.get("value").and_then(Value::as_str).ok_or("fill: missing \"value\"")?;
-    let inspect = cmd.get("inspect").and_then(Value::as_bool).unwrap_or(false);
-    let max_depth = cmd_max_depth(cmd).or(global_max_depth);
+    let max_depth = args.max_depth.map(as_usize).or(ctx.max_depth);
+    let secret = args.secret.unwrap_or(false);
 
     let target = crate::run_helpers::target_details(
-        client,
-        cmd.get("selector").and_then(Value::as_str),
-        cmd.get("uid").and_then(Value::as_str),
+        ctx.client,
+        args.selector.as_deref(),
+        args.uid.as_deref(),
     )
     .await;
-    let (msg, outcome) = if let Some(sel) = cmd.get("selector").and_then(Value::as_str) {
-        let outcome = crate::element::fill_selector(client, sel, value).await?;
+    let (msg, outcome) = if let Some(sel) = &args.selector {
+        let outcome =
+            crate::element::fill_selector_with(ctx.client, sel, &args.value, secret).await?;
         (format!("Filled selector '{sel}'"), outcome)
-    } else if let Some(uid) = cmd.get("uid").and_then(Value::as_str) {
-        let uid_map = get_uid_map(store, browser_name, page_name);
-        commands::fill::run(client, &uid_map, uid, value).await?
+    } else if let Some(uid) = &args.uid {
+        let uid_map = ctx.uid_map();
+        commands::fill::run(ctx.client, &uid_map, uid, &args.value, secret).await?
     } else {
         return Err("fill: provide \"uid\" or \"selector\"".into());
     };
@@ -143,61 +124,49 @@ pub async fn dispatch_fill(
     let mut obj = json!({"ok": true, "message": msg});
     merge_into(&mut obj, target.as_ref());
     obj["value"] = crate::run_helpers::fill_value_report(&outcome);
-    if inspect {
-        let snapshot = attach_snapshot(client, store, browser_name, page_name, target_id, max_depth).await?;
+    if args.inspect.unwrap_or(false) {
+        let snapshot = attach_snapshot(ctx, max_depth).await?;
         obj["snapshot"] = json!(snapshot);
     }
     Ok(obj)
 }
 
 pub async fn dispatch_inspect(
-    client: &CdpClient,
-    store: &mut SessionStore,
-    browser_name: &str,
-    page_name: &str,
-    target_id: &str,
-    cmd: &Value,
+    ctx: &mut PageCtx<'_>,
+    args: &InspectArgs,
 ) -> Result<Value, crate::BoxError> {
-    let verbose = cmd.get("verbose").and_then(Value::as_bool).unwrap_or(false);
-    let max_depth = cmd_max_depth(cmd);
-    let uid = cmd.get("uid").and_then(Value::as_str);
-    let scroll = cmd.get("scroll").and_then(Value::as_bool).unwrap_or(false);
-    let limit = cmd.get("limit").and_then(Value::as_u64).map(|v| v as usize);
-    let urls = cmd.get("urls").and_then(Value::as_bool).unwrap_or(false);
-    let filter_str = cmd.get("filter").and_then(Value::as_str);
-    let role_filter: Option<Vec<&str>> = filter_str.map(|f| f.split(',').map(str::trim).collect());
+    let verbose = args.verbose.unwrap_or(false);
+    let max_depth = args.max_depth.map(as_usize);
+    let uid = args.uid.as_deref();
+    let role_filter: Option<Vec<&str>> = args
+        .filter
+        .as_deref()
+        .map(|f| f.split(',').map(str::trim).collect());
 
-    if scroll {
-        commands::extract::scroll_to_load(client).await?;
+    if args.scroll.unwrap_or(false) {
+        commands::extract::scroll_to_load(ctx.client).await?;
     }
-    let views = if let Some(max) = limit {
-        commands::inspect::scroll_collect(client, verbose, uid, role_filter.as_deref(), max).await?
+    let views = if let Some(max) = args.limit.map(as_usize) {
+        commands::inspect::scroll_collect(ctx.client, verbose, uid, role_filter.as_deref(), max)
+            .await?
     } else {
-        commands::inspect::views(client, verbose, max_depth, uid, role_filter.as_deref()).await?
+        commands::inspect::views(ctx.client, verbose, max_depth, uid, role_filter.as_deref())
+            .await?
     };
-    // `--urls` annotates the lines it returns. Applied to the baseline it would make every
-    // link read as changed on the next diff, which reads no url= token.
-    let shown = if urls {
-        commands::inspect::resolve_urls(client, views.shown(), &views.full.uid_map).await
+    // `--urls` annotates only the lines it returns: applied to the baseline it would make
+    // every link read as changed on the next diff, which reads no url= token.
+    let shown = if args.urls.unwrap_or(false) {
+        commands::inspect::resolve_urls(ctx.client, views.shown(), &views.full.uid_map).await
     } else {
         views.shown().to_string()
     };
 
-    // Persist the FULL snapshot so diff and uid lookups stay complete;
-    // filter/max_depth/uid/urls and paging only affect what we return.
-    if let Some(browser_s) = store.browsers.get_mut(browser_name) {
-        let page = session::ensure_page(browser_s, page_name, target_id);
-        let full = views.full;
-        page.uid_map = full.uid_map;
-        page.last_snapshot = Some(full.text);
-        let (f, l) = full.identity.map_or((None, None), |(f, l)| (Some(f), Some(l)));
-        page.last_snapshot_frame = f;
-        page.last_snapshot_loader = l;
-    }
+    // Persist the FULL snapshot so diff and uid lookups stay complete: display flags and
+    // paging affect only what is returned.
+    ctx.store_snapshot(views.full);
 
-    let offset = cmd.get("offset").and_then(Value::as_u64).unwrap_or(0) as usize;
-    let max_chars = cmd.get("max_chars").and_then(Value::as_u64).map(|n| n as usize);
-    let paged = commands::inspect::paginate(&shown, offset, max_chars);
+    let offset = args.offset.map_or(0, as_usize);
+    let paged = commands::inspect::paginate(&shown, offset, args.max_chars.map(as_usize));
     Ok(json!({
         "ok": true,
         "snapshot": paged.text,
@@ -207,37 +176,27 @@ pub async fn dispatch_inspect(
     }))
 }
 
-pub async fn dispatch_diff(
-    client: &CdpClient,
-    store: &mut SessionStore,
-    browser_name: &str,
-    page_name: &str,
-    target_id: &str,
-) -> Result<Value, crate::BoxError> {
-    let page_state = store
-        .browsers.get(browser_name)
-        .and_then(|b| b.pages.get(page_name));
+pub async fn dispatch_diff(ctx: &mut PageCtx<'_>) -> Result<Value, crate::BoxError> {
+    let page_state = ctx.page_state();
     let old_text = page_state
         .and_then(|p| p.last_snapshot.clone())
         .ok_or("No previous snapshot. Run inspect first.")?;
-    let stored = page_state
-        .and_then(|p| p.last_snapshot_frame.clone().zip(p.last_snapshot_loader.clone()));
+    let stored = page_state.and_then(|p| {
+        p.last_snapshot_frame
+            .clone()
+            .zip(p.last_snapshot_loader.clone())
+    });
 
-    let snapshot = commands::inspect::run(client, false, None, None, None).await?;
+    let snapshot = commands::inspect::run(ctx.client, false, None, None, None).await?;
     let identity = commands::diff::Identity::from_loader(
         stored.as_ref().map(|(f, l)| (f.as_str(), l.as_str())),
-        snapshot.identity.as_ref().map(|(f, l)| (f.as_str(), l.as_str())),
+        snapshot
+            .identity
+            .as_ref()
+            .map(|(f, l)| (f.as_str(), l.as_str())),
     );
     let result = commands::diff::compare(identity, &old_text, &snapshot.text);
-
-    if let Some(browser_s) = store.browsers.get_mut(browser_name) {
-        let page = session::ensure_page(browser_s, page_name, target_id);
-        page.uid_map = snapshot.uid_map;
-        page.last_snapshot = Some(snapshot.text);
-            let (f, l) = snapshot.identity.map_or((None, None), |(f, l)| (Some(f), Some(l)));
-            page.last_snapshot_frame = f;
-            page.last_snapshot_loader = l;
-    }
+    ctx.store_snapshot(snapshot);
 
     let mut out = json!({
         "ok": true,
@@ -247,8 +206,8 @@ pub async fn dispatch_diff(
         "removed": result.removed,
         "changed": result.changed,
         "unchanged": result.unchanged,
-                    "moved": result.moved,
-                    "anonymous": result.anonymous,
+        "moved": result.moved,
+        "anonymous": result.anonymous,
         "diff": result.text.trim_end(),
     });
     if result.focus_from.is_some() || result.focus_to.is_some() {
@@ -260,238 +219,250 @@ pub async fn dispatch_diff(
     Ok(out)
 }
 
-pub async fn dispatch_eval(client: &CdpClient, cmd: &Value) -> Result<Value, crate::BoxError> {
-    let expression = cmd.get("expression").and_then(Value::as_str).ok_or("eval: missing \"expression\"")?;
-    let expr = if let Some(sel) = cmd.get("selector").and_then(Value::as_str) {
-        let escaped = serde_json::to_string(sel).unwrap_or_default();
-        format!("((el) => {{ if (!el) throw new Error('No element matches selector ' + {escaped}); return {expression} }})(document.querySelector({escaped}))")
-    } else {
-        expression.to_string()
-    };
+pub async fn dispatch_eval(client: &CdpClient, args: &EvalArgs) -> Result<Value, crate::BoxError> {
+    let expr = commands::eval::scoped_expression(&args.expression, args.selector.as_deref());
     let raw = commands::eval::run_raw(client, &expr).await?;
     Ok(json!({"ok": true, "result": raw}))
 }
 
-pub async fn dispatch_read(client: &CdpClient, cmd: &Value) -> Result<Value, crate::BoxError> {
-    let html = cmd.get("html").and_then(Value::as_bool).unwrap_or(false);
-    let truncate = cmd.get("truncate").and_then(Value::as_u64).map(|v| v as usize);
-    let result = commands::read::run(client, html, truncate).await?;
+pub async fn dispatch_read(client: &CdpClient, args: &ReadArgs) -> Result<Value, crate::BoxError> {
+    let result = commands::read::run(
+        client,
+        args.html.unwrap_or(false),
+        args.truncate.map(as_usize),
+    )
+    .await?;
     let mut obj = json!({"ok": true, "title": result.title, "text": result.text_content});
-    if let Some(excerpt) = &result.excerpt { obj["excerpt"] = json!(excerpt); }
-    if let Some(byline) = &result.byline { obj["byline"] = json!(byline); }
-    // When --html is requested, `read::run` keeps the cleaned HTML; surface it
-    // (pipe/batch is JSON-only, so this is the only place --html can be observed).
-    if let Some(content) = &result.content { obj["content"] = json!(content); }
+    if let Some(excerpt) = &result.excerpt {
+        obj["excerpt"] = json!(excerpt);
+    }
+    if let Some(byline) = &result.byline {
+        obj["byline"] = json!(byline);
+    }
+    // pipe/batch is JSON-only, so this is the only place `--html` can be observed.
+    if let Some(content) = &result.content {
+        obj["content"] = json!(content);
+    }
     Ok(obj)
 }
 
-pub async fn dispatch_text(
-    client: &CdpClient, store: &SessionStore, browser_name: &str, page_name: &str, cmd: &Value,
-) -> Result<Value, crate::BoxError> {
-    let TextArgs { uid, selector, truncate } = parse_text(cmd);
-    let uid_map = get_uid_map(store, browser_name, page_name);
-    let text = commands::text::run(client, uid, selector, &uid_map).await?;
+pub async fn dispatch_text(ctx: &PageCtx<'_>, args: &TextArgs) -> Result<Value, crate::BoxError> {
+    let uid_map = ctx.uid_map();
+    let text = commands::text::run(
+        ctx.client,
+        args.uid.as_deref(),
+        args.selector.as_deref(),
+        &uid_map,
+    )
+    .await?;
     let full_length = text.chars().count();
-    let (text, truncated) = if let Some(n) = truncate {
-        if full_length > n { (crate::truncate::truncate_str(&text, n, "...").into_owned(), true) }
-        else { (text, false) }
-    } else { (text, false) };
+    let (text, truncated) = if let Some(n) = args.truncate.map(as_usize) {
+        if full_length > n {
+            (
+                crate::truncate::truncate_str(&text, n, "...").into_owned(),
+                true,
+            )
+        } else {
+            (text, false)
+        }
+    } else {
+        (text, false)
+    };
     let mut obj = json!({"ok": true, "text": text});
-    if truncated { obj["truncated"] = json!(true); obj["fullLength"] = json!(full_length); }
+    if truncated {
+        obj["truncated"] = json!(true);
+        obj["fullLength"] = json!(full_length);
+    }
     Ok(obj)
 }
 
 pub async fn dispatch_screenshot(
-    client: &CdpClient,
-    store: &SessionStore,
-    browser_name: &str,
-    page_name: &str,
-    cmd: &Value,
+    ctx: &PageCtx<'_>,
+    args: &ScreenshotArgs,
 ) -> Result<Value, crate::BoxError> {
-    let format = commands::screenshot::ImgFormat::parse(
-        cmd.get("format").and_then(Value::as_str).unwrap_or("png"),
-    )?;
-    let quality = cmd.get("quality").and_then(Value::as_u64).map(|q| q as u32);
-    let max_width = cmd.get("max_width").and_then(Value::as_u64).map(|w| w as u32);
-    let uid = cmd.get("uid").and_then(Value::as_str);
-    let selector = cmd.get("selector").and_then(Value::as_str);
+    let format = commands::screenshot::ImgFormat::parse(args.format.as_deref().unwrap_or("png"))?;
 
-    let clip = if let Some(u) = uid {
-        let uid_map = get_uid_map(store, browser_name, page_name);
-        Some(crate::geometry::clip_for_uid(client, &uid_map, u).await?)
-    } else if let Some(sel) = selector {
-        Some(crate::geometry::clip_for_selector(client, sel).await?)
+    let clip = if let Some(u) = &args.uid {
+        let uid_map = ctx.uid_map();
+        Some(crate::geometry::clip_for_uid(ctx.client, &uid_map, u).await?)
+    } else if let Some(sel) = &args.selector {
+        Some(crate::geometry::clip_for_selector(ctx.client, sel).await?)
     } else {
         None
     };
 
     let opts = commands::screenshot::ScreenshotOpts {
-        filename: cmd.get("filename").and_then(Value::as_str),
+        filename: args.filename.as_deref(),
         format,
-        quality,
-        max_width,
+        quality: args.quality.map(|q| q as u32),
+        max_width: args.max_width.map(|w| w as u32),
         clip,
     };
-    let path = commands::screenshot::run(client, &opts).await?;
+    let path = commands::screenshot::run(ctx.client, &opts).await?;
     Ok(json!({"ok": true, "path": path}))
 }
 
-/// `download` in pipe and batch. Same entry point as the CLI (`commands::download::dispatch`),
-/// so the URL and the click paths cannot drift into two response shapes across the three modes.
+/// `download` in pipe and batch, through the CLI's entry point
+/// (`commands::download::dispatch`) so the URL and click paths keep one response shape.
 pub async fn dispatch_download(
-    client: &CdpClient,
-    store: &SessionStore,
-    browser_name: &str,
-    page_name: &str,
-    default_timeout: u64,
-    report: crate::run_helpers::ReportPolicy,
-    cmd: &Value,
+    ctx: &PageCtx<'_>,
+    args: &DownloadArgs,
 ) -> Result<Value, crate::BoxError> {
     let target = commands::download::Target::parse(
-        cmd.get("url").and_then(Value::as_str),
-        cmd.get("uid").and_then(Value::as_str),
-        cmd.get("selector").and_then(Value::as_str),
+        args.url.as_deref(),
+        args.uid.as_deref(),
+        args.selector.as_deref(),
     )?;
-    let out = cmd.get("out").and_then(Value::as_str);
-    let timeout = cmd.get("timeout").and_then(Value::as_u64).unwrap_or(default_timeout);
-    let max_bytes = parse_download_max_bytes(cmd)?;
-    let uid_map = get_uid_map(store, browser_name, page_name);
-    let on_intercept = crate::hit_test::OnIntercept::from_cmd(cmd, report.on_intercept);
-    let outcome = commands::download::dispatch(
-        client, &uid_map, &target, out, timeout, max_bytes, on_intercept, browser_name,
-    )
-    .await?;
+    let uid_map = ctx.uid_map();
+    let req = commands::download::Request {
+        target: &target,
+        out: args.out.as_deref(),
+        timeout_secs: args.timeout.unwrap_or(ctx.timeout),
+        max_bytes: download_max_bytes(args.max_bytes)?,
+        on_intercept: on_intercept(args.on_intercept.as_deref(), ctx.report.on_intercept),
+        browser: ctx.browser,
+    };
+    let outcome = commands::download::dispatch(ctx.client, &uid_map, &req).await?;
     Ok(outcome.to_json())
 }
 
-fn parse_download_max_bytes(cmd: &Value) -> Result<usize, crate::BoxError> {
-    let value = match cmd.get("max_bytes") {
-        Some(value) => value
-            .as_u64()
-            .ok_or("download: max_bytes must be a positive integer")?,
-        None => commands::download::DEFAULT_MAX_BYTES as u64,
-    };
-    let value = usize::try_from(value).map_err(|_| "download: max_bytes exceeds platform limits")?;
+fn download_max_bytes(requested: Option<u64>) -> Result<usize, crate::BoxError> {
+    let value = requested.unwrap_or(commands::download::DEFAULT_MAX_BYTES as u64);
+    let value =
+        usize::try_from(value).map_err(|_| "download: max_bytes exceeds platform limits")?;
     if value == 0 {
         return Err("download: max_bytes must be greater than zero".into());
     }
     Ok(value)
 }
 
-#[cfg(test)]
-mod download_limit_tests {
-    use super::*;
-
-    #[test]
-    fn pipe_download_max_bytes_defaults_and_rejects_zero() {
-        assert_eq!(
-            parse_download_max_bytes(&serde_json::json!({"cmd": "download"})).unwrap(),
-            67_108_864
-        );
-        assert_eq!(
-            parse_download_max_bytes(
-                &serde_json::json!({"cmd": "download", "max_bytes": 10})
-            )
-            .unwrap(),
-            10
-        );
-        assert!(
-            parse_download_max_bytes(
-                &serde_json::json!({"cmd": "download", "max_bytes": 0})
-            )
-            .is_err()
-        );
-        assert!(
-            parse_download_max_bytes(
-                &serde_json::json!({"cmd": "download", "max_bytes": "10"})
-            )
-            .is_err()
-        );
-    }
-}
-
-pub async fn dispatch_pdf(client: &CdpClient, cmd: &Value) -> Result<Value, crate::BoxError> {
+pub async fn dispatch_pdf(client: &CdpClient, args: &PdfArgs) -> Result<Value, crate::BoxError> {
     let opts = commands::pdf::PdfOpts {
-        filename: cmd.get("filename").and_then(Value::as_str),
-        landscape: cmd.get("landscape").and_then(Value::as_bool).unwrap_or(false),
-        background: cmd.get("background").and_then(Value::as_bool).unwrap_or(false),
+        filename: args.filename.as_deref(),
+        landscape: args.landscape.unwrap_or(false),
+        background: args.background.unwrap_or(false),
     };
     let path = commands::pdf::run(client, &opts).await?;
     Ok(json!({"ok": true, "path": path}))
 }
 
-pub async fn dispatch_wait(client: &CdpClient, _default_timeout: u64, cmd: &Value) -> Result<Value, crate::BoxError> {
-    let (what, pattern) = parse_wait(cmd)?;
-    // Match the CLI `wait --timeout` default (10s), not the global page-load
-    // timeout (30s): waits are per-condition and should not inherit --timeout.
-    let timeout = cmd.get("timeout").and_then(Value::as_u64).unwrap_or(WAIT_DEFAULT_TIMEOUT);
-    let idle_ms = cmd.get("idle_ms").and_then(Value::as_u64).unwrap_or(500);
+pub async fn dispatch_wait(client: &CdpClient, args: &WaitArgs) -> Result<Value, crate::BoxError> {
+    let (what, pattern) = wait_condition(args)?;
+    // The CLI `wait --timeout` default (10s), not the global 30s page-load timeout: a wait
+    // is per-condition and does not inherit --timeout.
+    let timeout = args.timeout.unwrap_or(WAIT_DEFAULT_TIMEOUT);
+    let idle_ms = args.idle_ms.unwrap_or(500);
     let msg = commands::wait::run(client, &what, &pattern, timeout, idle_ms).await?;
     Ok(json!({"ok": true, "message": msg}))
 }
 
-pub async fn dispatch_back(client: &CdpClient) -> Result<Value, crate::BoxError> {
+/// One step through the history stack: `-1` is `back`, `+1` is `forward`.
+///
+/// The two verbs were the same twenty lines twice over, differing in the sign and in the
+/// boundary test — which only `forward` had. `back` fired `history.back()` blind and answered
+/// `{"ok":true,"title":…}` whether or not a document changed; at the start of the stack that
+/// cost the full five-second wait for a `loadEventFired` that never comes, and read as a
+/// successful navigation. The boundary is now read from `Page.getNavigationHistory` first, and
+/// both verbs report the `url` they landed on, as `goto` does.
+///
+/// Takes the context rather than the client because a step that lands on another document owes
+/// the store the same uid hygiene `goto` does — see the `clear_uid_map` call below.
+pub async fn history_step(ctx: &mut PageCtx<'_>, delta: i64) -> Result<Value, crate::BoxError> {
+    let client = ctx.client;
     let history: Value = client.call("Page.getNavigationHistory", json!({})).await?;
-    let current_index = history.get("currentIndex").and_then(Value::as_i64).unwrap_or(0);
-    if current_index <= 0 {
-        return Ok(json!({"ok": true, "title": "", "message": "Already at first history entry"}));
-    }
-    let entries = history.get("entries").and_then(Value::as_array);
-    let prev_entry_id = entries
-        .and_then(|e| e.get(usize::try_from(current_index - 1).unwrap_or(0)))
-        .and_then(|e| e.get("id"))
+    let current_index = history
+        .get("currentIndex")
         .and_then(Value::as_i64)
-        .ok_or("Could not find previous history entry")?;
-    // Subscribe BEFORE navigating: a fast (cached) history entry can fire
-    // Page.loadEventFired before a late subscription exists, which would stall
-    // until the timeout (same race the CLI history path has).
-    let mut rx = client.events();
-    client.send("Page.navigateToHistoryEntry", json!({"entryId": prev_entry_id})).await?;
-    client.set_frame_context(None); // history navigation invalidates any bound frame
-    let _ = CdpClient::wait_for_event_on(&mut rx, "Page.loadEventFired", std::time::Duration::from_secs(5)).await;
-    let title: crate::cdp::types::EvaluateResult = client
-        .call("Runtime.evaluate", json!({"expression": "document.title", "returnByValue": true})).await?;
-    let title_str = title.result.value.as_ref().and_then(|v| v.as_str()).unwrap_or("");
-    Ok(json!({"ok": true, "title": title_str}))
-}
-
-pub async fn dispatch_forward(client: &CdpClient) -> Result<Value, crate::BoxError> {
-    let history: Value = client.call("Page.getNavigationHistory", json!({})).await?;
-    let current_index = history.get("currentIndex").and_then(Value::as_i64).unwrap_or(0);
+        .unwrap_or(0);
     let entries = history.get("entries").and_then(Value::as_array);
     let entry_count = entries.map_or(0, Vec::len) as i64;
-    if current_index >= entry_count - 1 {
-        return Ok(json!({"ok": true, "title": "", "message": "Already at last history entry"}));
+    let target_index = current_index + delta;
+    if target_index < 0 || target_index >= entry_count {
+        let edge = if delta < 0 { "first" } else { "last" };
+        return Ok(json!({
+            "ok": true,
+            "title": "",
+            "message": format!("Already at {edge} history entry"),
+        }));
     }
-    let next_entry_id = entries
-        .and_then(|e| e.get(usize::try_from(current_index + 1).unwrap_or(0)))
+    let entry_id = entries
+        .and_then(|e| e.get(usize::try_from(target_index).unwrap_or(0)))
         .and_then(|e| e.get("id"))
         .and_then(Value::as_i64)
-        .ok_or("Could not find next history entry")?;
-    // Subscribe BEFORE navigating to avoid missing a fast loadEventFired (see dispatch_back).
+        .ok_or_else(|| {
+            let which = if delta < 0 { "previous" } else { "next" };
+            format!("Could not find {which} history entry")
+        })?;
+    // Subscribe BEFORE navigating: a cached history entry can fire Page.loadEventFired
+    // before a late subscription exists, stalling until the timeout.
     let mut rx = client.events();
-    client.send("Page.navigateToHistoryEntry", json!({"entryId": next_entry_id})).await?;
+    client
+        .send("Page.navigateToHistoryEntry", json!({"entryId": entry_id}))
+        .await?;
     client.set_frame_context(None); // history navigation invalidates any bound frame
-    let _ = CdpClient::wait_for_event_on(&mut rx, "Page.loadEventFired", std::time::Duration::from_secs(5)).await;
-    let title: crate::cdp::types::EvaluateResult = client
-        .call("Runtime.evaluate", json!({"expression": "document.title", "returnByValue": true})).await?;
-    let title_str = title.result.value.as_ref().and_then(|v| v.as_str()).unwrap_or("");
-    Ok(json!({"ok": true, "title": title_str}))
+    // Same rule as `goto`, and the divergence this lift closed: the CLI arm cleared the map and
+    // the dispatcher never did, so a uid from before the step still resolved in pipe and batch —
+    // to whatever node the new document happens to give that `backendNodeId`.
+    ctx.clear_uid_map();
+    let _ = CdpClient::wait_for_event_on(
+        &mut rx,
+        "Page.loadEventFired",
+        std::time::Duration::from_secs(5),
+    )
+    .await;
+    let dest: crate::cdp::types::EvaluateResult = client
+        .call("Runtime.evaluate", json!({"expression": "({title: document.title, url: location.href})", "returnByValue": true})).await?;
+    let field = |key: &str| {
+        dest.result
+            .value
+            .as_ref()
+            .and_then(|v| v.get(key))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string()
+    };
+    Ok(json!({"ok": true, "title": field("title"), "url": field("url")}))
 }
 
 pub async fn dispatch_scroll(
-    client: &CdpClient, store: &SessionStore, browser_name: &str, page_name: &str, cmd: &Value,
+    ctx: &PageCtx<'_>,
+    args: &ScrollArgs,
 ) -> Result<Value, crate::BoxError> {
-    let ScrollArgs { target, px } = parse_scroll(cmd)?;
-    let msg = match target {
-        "down" => { let _: Value = client.call("Runtime.evaluate", json!({"expression": format!("window.scrollBy(0, {px})"), "returnByValue": true})).await?; format!("Scrolled down {px}px") }
-        "up" => { let _: Value = client.call("Runtime.evaluate", json!({"expression": format!("window.scrollBy(0, -{px})"), "returnByValue": true})).await?; format!("Scrolled up {px}px") }
+    let px = args.px.unwrap_or(500);
+    let client = ctx.client;
+    let msg = match args.target.as_str() {
+        "down" => {
+            let _: Value = client.call("Runtime.evaluate", json!({"expression": format!("window.scrollBy(0, {px})"), "returnByValue": true})).await?;
+            format!("Scrolled down {px}px")
+        }
+        "up" => {
+            let _: Value = client.call("Runtime.evaluate", json!({"expression": format!("window.scrollBy(0, -{px})"), "returnByValue": true})).await?;
+            format!("Scrolled up {px}px")
+        }
         uid => {
-            let uid_map = get_uid_map(store, browser_name, page_name);
-            let element_ref = uid_map.get(uid).ok_or_else(|| format!("Element uid={uid} not found. Run 'chrome-agent inspect' to get fresh uids."))?;
-            let backend_node_id = element_ref.backend_node_id().ok_or_else(|| format!("Element uid={uid} has no resolvable backend node."))?;
-            let resolve_result: crate::cdp::types::ResolveNodeResult = client.call("DOM.resolveNode", crate::cdp::types::ResolveNodeParams { node_id: None, backend_node_id: Some(backend_node_id), object_group: Some("chrome-agent".into()), execution_context_id: None }).await?;
-            let object_id = resolve_result.object.object_id.ok_or_else(|| format!("Element uid={uid} could not be resolved to a JS object."))?;
+            let uid_map = ctx.uid_map();
+            let element_ref = uid_map.get(uid).ok_or_else(|| {
+                format!(
+                    "Element uid={uid} not found. Run 'chrome-agent inspect' to get fresh uids."
+                )
+            })?;
+            let backend_node_id = element_ref
+                .backend_node_id()
+                .ok_or_else(|| format!("Element uid={uid} has no resolvable backend node."))?;
+            let resolve_result: crate::cdp::types::ResolveNodeResult = client
+                .call(
+                    "DOM.resolveNode",
+                    crate::cdp::types::ResolveNodeParams {
+                        node_id: None,
+                        backend_node_id: Some(backend_node_id),
+                        object_group: Some("chrome-agent".into()),
+                        execution_context_id: None,
+                    },
+                )
+                .await?;
+            let object_id = resolve_result.object.object_id.ok_or_else(|| {
+                format!("Element uid={uid} could not be resolved to a JS object.")
+            })?;
             let _: Value = client.call("Runtime.callFunctionOn", json!({"objectId": object_id, "functionDeclaration": "function() { this.scrollIntoView({block: 'center'}); }", "returnByValue": true})).await?;
             format!("Scrolled uid={uid} into view")
         }
@@ -499,484 +470,430 @@ pub async fn dispatch_scroll(
     Ok(json!({"ok": true, "message": msg}))
 }
 
-pub async fn dispatch_type(client: &CdpClient, cmd: &Value) -> Result<Value, crate::BoxError> {
-    let text = cmd.get("text").and_then(Value::as_str).ok_or("type: missing \"text\"")?;
-    let selector = cmd.get("selector").and_then(Value::as_str);
-    if let Some(sel) = selector { crate::element::focus_selector(client, sel).await?; }
+/// `type`, in all three modes. `secret` only ever ADDS redaction — there is deliberately no way
+/// to force a value to be printed.
+///
+/// The message is `type_text_with`'s, not a template built here: it is the one that withholds the
+/// length when the focused element is a secret field. Both front ends used to discard it and
+/// rebuild `Typed {text.len()} chars`, which made that redaction inert (and counted BYTES where
+/// the element module counts characters).
+pub async fn dispatch_type(client: &CdpClient, args: &TypeArgs) -> Result<Value, crate::BoxError> {
+    if let Some(sel) = &args.selector {
+        crate::element::focus_selector(client, sel).await?;
+    }
     crate::element::require_editable_focus(client).await?;
-    crate::element::type_text(client, text).await?;
-    let msg = if let Some(sel) = selector { format!("Typed {} chars into selector '{sel}'", text.len()) }
-    else { format!("Typed {} chars", text.len()) };
+    let typed =
+        crate::element::type_text_with(client, &args.text, args.secret.unwrap_or(false)).await?;
+    let msg = match &args.selector {
+        Some(sel) => format!("{typed} into selector '{sel}'"),
+        None => typed,
+    };
     Ok(json!({"ok": true, "message": msg}))
 }
 
-pub async fn dispatch_press(client: &CdpClient, cmd: &Value) -> Result<Value, crate::BoxError> {
-    let key = cmd.get("key").and_then(Value::as_str).ok_or("press: missing \"key\"")?;
-    crate::element::press_key(client, key).await?;
-    Ok(json!({"ok": true, "message": format!("Pressed {key}")}))
+pub async fn dispatch_press(
+    client: &CdpClient,
+    args: &PressArgs,
+) -> Result<Value, crate::BoxError> {
+    crate::element::press_key(client, &args.key).await?;
+    Ok(json!({"ok": true, "message": format!("Pressed {}", args.key)}))
 }
 
-pub async fn dispatch_tabs(browser_client: &CdpClient, store: &SessionStore) -> Result<Value, crate::BoxError> {
-    let tabs = commands::tabs::run_structured(browser_client, store).await?;
+pub async fn dispatch_tabs(ctx: &PageCtx<'_>) -> Result<Value, crate::BoxError> {
+    let tabs = commands::tabs::run_structured(ctx.browser_client, ctx.store).await?;
     Ok(json!({"ok": true, "tabs": tabs}))
 }
 
-pub async fn dispatch_network(client: &CdpClient, cmd: &Value) -> Result<Value, crate::BoxError> {
-    let filter = cmd.get("filter").and_then(Value::as_str);
-    let limit = cmd.get("limit").and_then(Value::as_u64).unwrap_or(50) as usize;
-    let body = cmd.get("body").and_then(Value::as_bool).unwrap_or(false);
-    let live = cmd.get("live").and_then(Value::as_u64);
-    let abort = cmd.get("abort").and_then(Value::as_str);
-
-    if let Some(pattern) = abort {
-        // Mirror the CLI: --live doubles as the abort window (default 30s).
-        let timeout_secs = live.unwrap_or(30);
-        let blocked = commands::network::run_route_abort(client, pattern, timeout_secs).await?;
-        Ok(json!({"ok": true, "blocked": blocked.len(), "urls": blocked}))
-    } else if let Some(secs) = live {
-        let entries = commands::network::run_live(client, filter, body, limit, secs).await?;
-        Ok(json!({"ok": true, "requests": entries}))
-    } else {
-        let entries = commands::network::run_retroactive(client, filter, limit).await?;
-        Ok(json!({"ok": true, "requests": entries}))
-    }
+pub async fn dispatch_network(
+    client: &CdpClient,
+    args: &NetworkArgs,
+) -> Result<Value, crate::BoxError> {
+    let capture = commands::network::collect(
+        client,
+        args.filter.as_deref(),
+        args.body.unwrap_or(false),
+        args.live,
+        args.limit.map_or(50, as_usize),
+        args.abort.as_deref(),
+    )
+    .await?;
+    Ok(capture.to_json())
 }
 
-pub async fn dispatch_console(client: &CdpClient, cmd: &Value) -> Result<Value, crate::BoxError> {
-    let level = cmd.get("level").and_then(Value::as_str);
-    let clear = cmd.get("clear").and_then(Value::as_bool).unwrap_or(false);
-    let limit = cmd.get("limit").and_then(Value::as_u64).unwrap_or(50) as usize;
-    let entries = commands::console::run(client, level, clear, limit).await?;
-    let messages: Vec<Value> = entries.iter()
-        .map(|e| json!({"level": e.level, "message": e.message, "timestamp": e.timestamp})).collect();
-    Ok(json!({"ok": true, "installed": entries.installed, "messages": messages}))
+pub async fn dispatch_console(
+    client: &CdpClient,
+    args: &ConsoleArgs,
+) -> Result<Value, crate::BoxError> {
+    let reading = commands::console::run(
+        client,
+        args.level.as_deref(),
+        args.clear.unwrap_or(false),
+        args.limit.map_or(50, as_usize),
+    )
+    .await?;
+    Ok(commands::console::to_json(&reading))
 }
 
-pub async fn dispatch_extract(client: &CdpClient, cmd: &Value) -> Result<Value, crate::BoxError> {
-    let selector = cmd.get("selector").and_then(Value::as_str);
-    let limit = cmd.get("limit").and_then(Value::as_u64).unwrap_or(10) as usize;
-    let scroll = cmd.get("scroll").and_then(Value::as_bool).unwrap_or(false);
-    let a11y = cmd.get("a11y").and_then(Value::as_bool).unwrap_or(false);
-    // Match the CLI: `run_a11y` scrolls internally, so only the DOM path needs
-    // an explicit scroll_to_load — otherwise --a11y --scroll would scroll twice.
-    let result = if a11y {
-        commands::extract::run_a11y(client, limit, scroll).await?
-    } else {
-        if scroll { commands::extract::scroll_to_load(client).await?; }
-        commands::extract::run(client, selector, limit).await?
-    };
+pub async fn dispatch_extract(
+    client: &CdpClient,
+    args: &ExtractArgs,
+) -> Result<Value, crate::BoxError> {
+    let result = commands::extract::collect(
+        client,
+        args.selector.as_deref(),
+        args.limit.map_or(10, as_usize),
+        args.scroll.unwrap_or(false),
+        args.a11y.unwrap_or(false),
+    )
+    .await?;
     Ok(commands::extract::to_json(&result))
 }
 
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+// --- Helpers ---
 
 /// Attach the tree a command's `inspect: true` asked for, and store the baseline.
 ///
-/// This is the pipe/batch half of the rule `run_helpers::output_action_with` states for the
-/// CLI: the caller's `max_depth` decides what is RETURNED, never what is stored. It used to
-/// store the truncated rendering, which the change report then overwrote with a full one —
-/// so the bug only surfaced where nothing overwrote it: `goto` (deliberately outside
-/// `mutates_page`) and any action run under `--verdict off`. Measured on
-/// `snapshot_filter_baseline.html`, `{"cmd":"goto","inspect":true,"max_depth":1}` then one
-/// injected button then `diff` answered `added=10` where the truth is 1.
+/// The pipe/batch half of the rule `run_helpers::output_action_with` states for the CLI:
+/// `max_depth` decides what is RETURNED, never what is stored.
 pub async fn attach_snapshot(
-    client: &CdpClient, store: &mut SessionStore, browser_name: &str, page_name: &str,
-    target_id: &str, max_depth: Option<usize>,
+    ctx: &mut PageCtx<'_>,
+    max_depth: Option<usize>,
 ) -> Result<String, crate::BoxError> {
-    let views = commands::inspect::views(client, false, max_depth, None, None).await?;
+    let views = commands::inspect::views(ctx.client, false, max_depth, None, None).await?;
     let shown = views.shown().to_string();
-    if let Some(browser_s) = store.browsers.get_mut(browser_name) {
-        let page = session::ensure_page(browser_s, page_name, target_id);
-        let full = views.full;
-        page.uid_map = full.uid_map;
-        page.last_snapshot = Some(full.text);
-        let (f, l) = full.identity.map_or((None, None), |(f, l)| (Some(f), Some(l)));
-        page.last_snapshot_frame = f;
-        page.last_snapshot_loader = l;
-    }
+    ctx.store_snapshot(views.full);
     Ok(shown)
 }
 
-pub fn get_uid_map(store: &SessionStore, browser_name: &str, page_name: &str) -> HashMap<String, ElementRef> {
-    store.browsers.get(browser_name)
-        .and_then(|b| b.pages.get(page_name))
-        .map(|p| p.uid_map.clone())
-        .unwrap_or_default()
+/// The protocol counts in `u64`; the readers below take `usize`. Used as `opt.map(as_usize)`.
+pub const fn as_usize(value: u64) -> usize {
+    value as usize
 }
 
-pub fn cmd_max_depth(cmd: &Value) -> Option<usize> {
-    cmd.get("max_depth").and_then(Value::as_u64).map(|v| v as usize)
+/// The per-command `on_intercept` override, falling back to the session's policy.
+/// A value that does not parse is not a refusal: the session's policy stands.
+pub fn on_intercept(
+    value: Option<&str>,
+    fallback: crate::hit_test::OnIntercept,
+) -> crate::hit_test::OnIntercept {
+    value.map_or(fallback, |v| {
+        crate::hit_test::OnIntercept::parse(v).unwrap_or(fallback)
+    })
 }
 
 /// Default `wait` timeout in seconds — mirrors the CLI `wait --timeout` default.
 const WAIT_DEFAULT_TIMEOUT: u64 = 10;
 
-/// Parsed `scroll` arguments. `px` defaults to 500 (matches the CLI).
-#[cfg_attr(test, derive(Debug))]
-struct ScrollArgs<'a> {
-    target: &'a str,
-    px: u64,
-}
-
-fn parse_scroll(cmd: &Value) -> Result<ScrollArgs<'_>, crate::BoxError> {
-    let target = cmd.get("target").and_then(Value::as_str).ok_or("scroll: missing \"target\"")?;
-    let px = cmd.get("px").and_then(Value::as_u64).unwrap_or(500);
-    Ok(ScrollArgs { target, px })
-}
-
-/// Parsed `text` arguments.
-struct TextArgs<'a> {
-    uid: Option<&'a str>,
-    selector: Option<&'a str>,
-    truncate: Option<usize>,
-}
-
-fn parse_text(cmd: &Value) -> TextArgs<'_> {
-    TextArgs {
-        uid: cmd.get("uid").and_then(Value::as_str),
-        selector: cmd.get("selector").and_then(Value::as_str),
-        truncate: cmd.get("truncate").and_then(Value::as_u64).map(|v| v as usize),
-    }
-}
-
-/// Parse an optional `xy` coordinate pair (`"xy": [x, y]`) for click/dblclick.
-/// Returns `Ok(None)` when absent/null, an error when malformed.
-pub fn parse_xy(cmd: &Value) -> Result<Option<(f64, f64)>, crate::BoxError> {
-    match cmd.get("xy") {
-        None | Some(Value::Null) => Ok(None),
-        Some(v) => {
-            let arr = v.as_array().ok_or("xy must be an array [x, y]")?;
-            if arr.len() != 2 {
-                return Err("xy requires exactly 2 values: [x, y]".into());
-            }
-            let x = arr[0].as_f64().ok_or("xy values must be numbers")?;
-            let y = arr[1].as_f64().ok_or("xy values must be numbers")?;
-            Ok(Some((x, y)))
-        }
-    }
-}
-
 /// Resolve `wait`'s (what, pattern) from the several accepted shapes.
 /// `network-idle` needs no pattern; every other condition requires one.
-fn parse_wait(cmd: &Value) -> Result<(String, String), crate::BoxError> {
-    if let Some(w) = cmd.get("what").and_then(Value::as_str) {
-        if w == "network-idle" {
-            Ok((w.to_string(), String::new()))
-        } else {
-            let p = cmd.get("pattern").and_then(Value::as_str)
-                .ok_or("wait: missing \"pattern\" (use {\"what\":\"text\",\"pattern\":\"...\"})")?;
-            Ok((w.to_string(), p.to_string()))
+fn wait_condition(args: &WaitArgs) -> Result<(String, String), crate::BoxError> {
+    if let Some(what) = &args.what {
+        if what == "network-idle" {
+            return Ok((what.clone(), String::new()));
         }
-    } else if let Some(p) = cmd.get("text").and_then(Value::as_str) {
-        Ok(("text".into(), p.into()))
-    } else if let Some(p) = cmd.get("url").and_then(Value::as_str) {
-        Ok(("url".into(), p.into()))
-    } else if let Some(p) = cmd.get("selector").and_then(Value::as_str) {
-        Ok(("selector".into(), p.into()))
-    } else {
-        Err("wait: specify {\"what\":\"text\",\"pattern\":\"...\"} or {\"text\":\"...\"} or {\"url\":\"...\"} or {\"selector\":\"...\"} or {\"what\":\"network-idle\"}".into())
+        let pattern = args
+            .pattern
+            .clone()
+            .ok_or("wait: missing \"pattern\" (use {\"what\":\"text\",\"pattern\":\"...\"})")?;
+        return Ok((what.clone(), pattern));
     }
+    for (what, pattern) in [
+        ("text", &args.text),
+        ("url", &args.url),
+        ("selector", &args.selector),
+    ] {
+        if let Some(pattern) = pattern {
+            return Ok((what.to_string(), pattern.clone()));
+        }
+    }
+    Err("wait: specify {\"what\":\"text\",\"pattern\":\"...\"} or {\"text\":\"...\"} or {\"url\":\"...\"} or {\"selector\":\"...\"} or {\"what\":\"network-idle\"}".into())
 }
 
-/// Error for an empty or unrecognized `cmd` name.
-fn unknown_cmd_error(name: &str) -> crate::BoxError {
-    if name.is_empty() {
-        "Missing \"cmd\" field".into()
-    } else {
-        format!("Unknown command: {name}").into()
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Frame
-// ---------------------------------------------------------------------------
+// --- Frame ---
 
 pub async fn dispatch_frame(
     client: &CdpClient,
-    cmd: &Value,
+    args: &FrameArgs,
 ) -> Result<Value, crate::BoxError> {
-    let target = cmd.get("target").and_then(Value::as_str).ok_or("frame: missing \"target\"")?;
-    let msg = commands::frame::run(client, target).await?;
+    let msg = commands::frame::run(client, &args.target).await?;
     Ok(json!({"ok": true, "message": msg}))
 }
 
-// ---------------------------------------------------------------------------
-// Batch
-// ---------------------------------------------------------------------------
+// --- Batch ---
 
-#[allow(clippy::too_many_arguments)]
-pub async fn dispatch_batch(
-    client: &CdpClient,
-    browser_client: &CdpClient,
-    store: &mut SessionStore,
-    browser_name: &str,
-    page_name: &str,
-    target_id: &str,
-    timeout: u64,
-    global_max_depth: Option<usize>,
-    report: crate::run_helpers::ReportPolicy,
+/// One dispatched command's future, type-erased.
+///
+/// `batch` is itself a command, so `dispatch_single` → `run_batch` → `dispatch_single` is a
+/// cycle, and rustc cannot size a future whose type contains itself.
+/// Erasing it here is what lets the two front ends share ONE dispatcher: `pipe.rs` used to keep
+/// a second copy of the whole match purely to own the `batch` arm, and the two had already
+/// drifted — a `batch` nested in a `batch` answered `Unknown command: batch`.
+/// `Send` is part of the contract, not decoration: the clippy nursery enforces it across the
+/// whole crate, and erasing it here would make `run` itself non-`Send`.
+pub type Dispatched<'a> = std::pin::Pin<Box<dyn std::future::Future<Output = Value> + Send + 'a>>;
+
+/// Dispatch one command. The single dispatcher behind pipe, pipe `batch` and CLI `batch`.
+pub fn dispatch_single<'a>(
+    ctx: &'a mut PageCtx<'_>,
+    cmd: &'a Value,
+    emulation_recovery: &'a mut EmulationRecovery,
+) -> Dispatched<'a> {
+    Box::pin(dispatch_one(ctx, cmd, emulation_recovery))
+}
+
+/// What a command that never ran answers with. Shared by the parse refusal and by every
+/// dispatcher's `Err`, so both clear the wait and both get the same hint treatment.
+fn refused(ctx: &PageCtx<'_>, error: &crate::BoxError) -> Value {
+    // The wait this command paid for dies with it. `take_settle_wait_ms` is only
+    // reached from `attach_verdict_for`, which a failed command never gets to, so on a
+    // shared connection the slot survived and the NEXT command reported the wait as
+    // its own. `mark_dispatch` clears it going in; this clears it going out.
+    let _ = ctx.client.take_settle_wait_ms();
+    // A refusal carries what it measured (receiver, aim point, branch); its Display
+    // alone would drop all of it on the one path where nothing was dispatched.
+    if let Some(refusal) = crate::hit_test::refusal_in(error) {
+        return refusal.to_json(ctx.browser);
+    }
+    let msg = error.to_string();
+    let mut obj = json!({"ok": false, "error": msg});
+    if let Some(h) = crate::run_helpers::error_hint(&msg, ctx.browser) {
+        obj["hint"] = json!(h);
+    }
+    obj
+}
+
+async fn dispatch_one(
+    ctx: &mut PageCtx<'_>,
     cmd: &Value,
     emulation_recovery: &mut EmulationRecovery,
-) -> Result<Value, crate::BoxError> {
-    let cmds = cmd.get("commands").and_then(Value::as_array)
-        .ok_or("batch: missing \"commands\" array")?;
-    let stop_on_error = cmd.get("stop_on_error").and_then(Value::as_bool).unwrap_or(false);
-    Ok(run_batch(
-        client, browser_client, store, browser_name, page_name, target_id, timeout,
-        global_max_depth, report, cmds, stop_on_error, emulation_recovery,
-    )
-    .await)
-}
-
-/// Copy an optional field set into a response object.
-pub fn merge_into(obj: &mut Value, details: Option<&Value>) {
-    if let (Some(target), Some(fields)) = (obj.as_object_mut(), details.and_then(Value::as_object)) {
-        for (key, value) in fields {
-            target.insert(key.clone(), value.clone());
-        }
-    }
-}
-
-/// Public entry point for dispatching a single pipe command.
-/// Used by batch mode (both CLI and pipe).
-#[allow(clippy::too_many_arguments)]
-pub async fn dispatch_single(
-    client: &CdpClient,
-    browser_client: &CdpClient,
-    store: &mut SessionStore,
-    browser_name: &str,
-    page_name: &str,
-    target_id: &str,
-    timeout: u64,
-    global_max_depth: Option<usize>,
-    report: crate::run_helpers::ReportPolicy,
-    cmd: &Value,
 ) -> Value {
-    let cmd_name = cmd.get("cmd").and_then(Value::as_str).unwrap_or("");
-    // Capture the baseline before dispatching: a command run with `inspect` refreshes it
-    // itself, and comparing against the refreshed copy would report that nothing moved.
+    // The protocol is decoded once, before anything is dispatched: an unknown key is an error
+    // naming the key rather than a field silently dropped on the way in.
+    let parsed = match crate::pipe_command::parse(cmd) {
+        Ok(parsed) => parsed,
+        Err(e) => return refused(ctx, &e),
+    };
+    // The canonical verb, so an alias cannot fall out of `mutates_page`.
+    let cmd_name = parsed.name();
+    let report = ctx.report;
+    // Capture the baseline before dispatching: a command run with `inspect` refreshes it,
+    // and comparing against the refreshed copy would report that nothing moved.
     let baseline = if report.changes && mutates_page(cmd_name) {
-        store
+        ctx.store
             .browsers
-            .get(browser_name)
-            .and_then(|b| b.pages.get(page_name))
+            .get(ctx.browser)
+            .and_then(|b| b.pages.get(ctx.page))
             .map(|p| {
                 (
                     p.last_snapshot.clone(),
-                    p.last_snapshot_frame.clone().zip(p.last_snapshot_loader.clone()),
+                    p.last_snapshot_frame
+                        .clone()
+                        .zip(p.last_snapshot_loader.clone()),
                 )
             })
     } else {
         None
     };
     let mut value = {
-    let result: Result<Value, crate::BoxError> = match cmd_name {
-        "goto" => dispatch_goto(client, store, browser_name, page_name, target_id, timeout, global_max_depth, cmd).await,
-        "click" => dispatch_click(client, store, browser_name, page_name, target_id, global_max_depth, report, cmd).await,
-        "fill" => dispatch_fill(client, store, browser_name, page_name, target_id, global_max_depth, cmd).await,
-        "inspect" => dispatch_inspect(client, store, browser_name, page_name, target_id, cmd).await,
-        "eval" => dispatch_eval(client, cmd).await,
-        "read" => dispatch_read(client, cmd).await,
-        "text" => dispatch_text(client, store, browser_name, page_name, cmd).await,
-        "screenshot" => dispatch_screenshot(client, store, browser_name, page_name, cmd).await,
-        "pdf" => dispatch_pdf(client, cmd).await,
-        "download" => dispatch_download(client, store, browser_name, page_name, timeout, report, cmd).await,
-        "wait" => dispatch_wait(client, timeout, cmd).await,
-        "back" => dispatch_back(client).await,
-        "forward" => dispatch_forward(client).await,
-        "scroll" => dispatch_scroll(client, store, browser_name, page_name, cmd).await,
-        "type" => dispatch_type(client, cmd).await,
-        "press" => dispatch_press(client, cmd).await,
-        "dblclick" => dispatch_dblclick(client, store, browser_name, page_name, target_id, global_max_depth, report, cmd).await,
-        "select" => dispatch_select(client, store, browser_name, page_name, target_id, global_max_depth, cmd).await,
-        "check" => dispatch_check(client, store, browser_name, page_name, report, cmd).await,
-        "uncheck" => {
-            let mut c = cmd.clone();
-            if let Some(m) = c.as_object_mut() { m.insert("desired".into(), Value::Bool(false)); }
-            dispatch_check(client, store, browser_name, page_name, report, &c).await
-        }
-        "upload" => dispatch_upload(client, store, browser_name, page_name, cmd).await,
-        "drag" => dispatch_drag(client, store, browser_name, page_name, cmd).await,
-        "hover" => dispatch_hover(client, store, browser_name, page_name, cmd).await,
-        "fill-form" | "fill_form" | "fillform" => dispatch_fill_form(client, store, browser_name, page_name, target_id, global_max_depth, cmd).await,
-        "tabs" => dispatch_tabs(browser_client, store).await,
-        "network" => dispatch_network(client, cmd).await,
-        "console" => dispatch_console(client, cmd).await,
-        "diff" => dispatch_diff(client, store, browser_name, page_name, target_id).await,
-        "extract" => dispatch_extract(client, cmd).await,
-        "navigate_and_read" | "navigate-and-read" => dispatch_navigate_and_read(client, store, browser_name, page_name, target_id, timeout, cmd).await,
-        "fill_and_submit" | "fill-and-submit" => dispatch_fill_and_submit(client, timeout, cmd).await,
-        "history" => dispatch_history(cmd),
-        "frame" => dispatch_frame(client, cmd).await,
-        "emulate" => dispatch_emulate(client, store, browser_name, page_name, cmd).await,
-        "assert" => dispatch_assert(client, store, browser_name, page_name, cmd).await,
-        "webmcp_list" | "webmcp-list" => dispatch_webmcp_list(client).await,
-        "webmcp_call" | "webmcp-call" => dispatch_webmcp_call(client, cmd).await,
-        other => Err(unknown_cmd_error(other)),
-    };
-    // `result` must not outlive this block: BoxError is not Send, and an await with it
-    // still in scope would make every caller's future non-Send.
-    match result {
-        Ok(v) => v,
-        Err(e) => {
-            // A refusal carries what it measured — the receiver, the aim point, the branch —
-            // and flattening it to its Display would drop all of it on the one path where
-            // nothing was dispatched and the caller has to re-plan.
-            if let Some(refused) = crate::hit_test::refusal_in(&e) {
-                return refused.to_json(browser_name);
+        let result: Result<Value, crate::BoxError> = match &parsed {
+            PipeCommand::Goto(a) => dispatch_goto(ctx, a).await,
+            PipeCommand::Click(a) => dispatch_click(ctx, a).await,
+            PipeCommand::Fill(a) => dispatch_fill(ctx, a).await,
+            PipeCommand::Inspect(a) => dispatch_inspect(ctx, a).await,
+            PipeCommand::Eval(a) => dispatch_eval(ctx.client, a).await,
+            PipeCommand::Read(a) => dispatch_read(ctx.client, a).await,
+            PipeCommand::Text(a) => dispatch_text(ctx, a).await,
+            PipeCommand::Screenshot(a) => dispatch_screenshot(ctx, a).await,
+            PipeCommand::Pdf(a) => dispatch_pdf(ctx.client, a).await,
+            PipeCommand::Download(a) => dispatch_download(ctx, a).await,
+            PipeCommand::Wait(a) => dispatch_wait(ctx.client, a).await,
+            PipeCommand::Back(_) => history_step(ctx, -1).await,
+            PipeCommand::Forward(_) => history_step(ctx, 1).await,
+            PipeCommand::Scroll(a) => dispatch_scroll(ctx, a).await,
+            PipeCommand::Type(a) => dispatch_type(ctx.client, a).await,
+            PipeCommand::Press(a) => dispatch_press(ctx.client, a).await,
+            PipeCommand::Dblclick(a) => dispatch_dblclick(ctx, a).await,
+            PipeCommand::Select(a) => dispatch_select(ctx, a).await,
+            // The verb decides the desired state; only `check` may be talked out of it by an
+            // explicit `"desired"`, which is why `uncheck` does not declare the field at all.
+            PipeCommand::Check(a) => {
+                dispatch_check(
+                    ctx,
+                    a.desired.unwrap_or(true),
+                    a.uid.as_deref(),
+                    a.selector.as_deref(),
+                    a.on_intercept.as_deref(),
+                )
+                .await
             }
-            let msg = e.to_string();
-            let mut obj = json!({"ok": false, "error": msg});
-            if let Some(h) = crate::run_helpers::error_hint(&msg, browser_name) { obj["hint"] = json!(h); }
-            return obj;
+            PipeCommand::Uncheck(a) => {
+                dispatch_check(
+                    ctx,
+                    false,
+                    a.uid.as_deref(),
+                    a.selector.as_deref(),
+                    a.on_intercept.as_deref(),
+                )
+                .await
+            }
+            PipeCommand::Upload(a) => dispatch_upload(ctx, a).await,
+            PipeCommand::Drag(a) => dispatch_drag(ctx, a).await,
+            PipeCommand::Hover(a) => dispatch_hover(ctx, a).await,
+            PipeCommand::FillForm(a) => dispatch_fill_form(ctx, a).await,
+            PipeCommand::Tabs(_) => dispatch_tabs(ctx).await,
+            PipeCommand::Network(a) => dispatch_network(ctx.client, a).await,
+            PipeCommand::Console(a) => dispatch_console(ctx.client, a).await,
+            PipeCommand::Diff(_) => dispatch_diff(ctx).await,
+            PipeCommand::Extract(a) => dispatch_extract(ctx.client, a).await,
+            PipeCommand::NavigateAndRead(a) => dispatch_navigate_and_read(ctx, a).await,
+            PipeCommand::FillAndSubmit(a) => dispatch_fill_and_submit(ctx, a).await,
+            PipeCommand::History(a) => dispatch_history(a),
+            PipeCommand::Frame(a) => dispatch_frame(ctx.client, a).await,
+            PipeCommand::Emulate(a) => dispatch_emulate(ctx, a).await,
+            PipeCommand::Assert(a) => dispatch_assert(ctx, a).await,
+            PipeCommand::WebmcpList(_) => dispatch_webmcp_list(ctx.client).await,
+            PipeCommand::WebmcpCall(a) => dispatch_webmcp_call(ctx.client, a).await,
+            PipeCommand::Batch(a) => {
+                let commands = a
+                    .commands
+                    .as_deref()
+                    .ok_or("batch: missing \"commands\" array");
+                match commands {
+                    Ok(list) => Ok(run_batch(
+                        ctx,
+                        list,
+                        a.stop_on_error.unwrap_or(false),
+                        emulation_recovery,
+                    )
+                    .await),
+                    Err(e) => Err(e.into()),
+                }
+            }
+        };
+        // `result` must not outlive this block: BoxError is not Send, and an await with it in
+        // scope would make every caller's future non-Send.
+        match result {
+            Ok(v) => v,
+            Err(e) => return refused(ctx, &e),
         }
-    }
     };
-    // Same as pipe: switching the report off must not read like an empty page.
+    // Same as pipe: switching the report off must not read like an empty page. The hit test
+    // still ran, so an intercepted click still reports its receiver here.
     if !report.changes && mutates_page(cmd_name) {
-        // The hit test still ran: it is part of aiming the action, not part of the report.
-        // An intercepted click says so even here, where the page was never re-read.
         crate::pipe_report::attach_verdict_for(
-            client,
+            ctx.client,
             &mut value,
             crate::verdict::Observation::ReportingDisabled,
         );
     }
     if let Some((old_text, old_url)) = baseline {
-        attach_change_report(
-            client, store, browser_name, page_name, target_id, report, old_text.as_deref(),
-            old_url, &mut value,
-        )
-        .await;
+        attach_change_report(ctx, old_text.as_deref(), old_url, &mut value).await;
     }
     value
 }
 
-// ---------------------------------------------------------------------------
-// Tests — pure JSON→typed-args parsing (no live Chrome required)
-// ---------------------------------------------------------------------------
+// --- Tests: pure JSON → typed-args parsing, no live Chrome ---
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pipe_command::parse;
 
-    #[test]
-    fn scroll_honors_px() {
-        let cmd = json!({"target": "down", "px": 1200});
-        let args = parse_scroll(&cmd).unwrap();
-        assert_eq!(args.target, "down");
-        assert_eq!(args.px, 1200);
+    fn args<T>(cmd: &Value, pick: impl Fn(PipeCommand) -> Option<T>) -> T {
+        pick(parse(cmd).expect("parses")).expect("the expected variant")
     }
 
     #[test]
-    fn scroll_px_defaults_to_500() {
-        let cmd = json!({"target": "up"});
-        let args = parse_scroll(&cmd).unwrap();
-        assert_eq!(args.target, "up");
-        assert_eq!(args.px, 500);
-    }
+    fn scroll_honors_px_and_defaults_to_500() {
+        let a = args(
+            &json!({"cmd": "scroll", "target": "down", "px": 1200}),
+            |c| match c {
+                PipeCommand::Scroll(a) => Some(a),
+                _ => None,
+            },
+        );
+        assert_eq!(a.target, "down");
+        assert_eq!(a.px.unwrap_or(500), 1200);
 
-    #[test]
-    fn scroll_missing_target_errors() {
-        let err = parse_scroll(&json!({"px": 300})).unwrap_err().to_string();
-        assert!(err.contains("target"), "unexpected error: {err}");
+        let a = args(&json!({"cmd": "scroll", "target": "up"}), |c| match c {
+            PipeCommand::Scroll(a) => Some(a),
+            _ => None,
+        });
+        assert_eq!(a.px.unwrap_or(500), 500);
     }
 
     #[test]
     fn text_maps_uid_and_selector_and_truncate() {
-        let cmd = json!({"uid": "n47", "selector": "main", "truncate": 80});
-        let args = parse_text(&cmd);
-        assert_eq!(args.uid, Some("n47"));
-        assert_eq!(args.selector, Some("main"));
-        assert_eq!(args.truncate, Some(80));
+        let a = args(
+            &json!({"cmd": "text", "uid": "n47", "selector": "main", "truncate": 80}),
+            |c| match c {
+                PipeCommand::Text(a) => Some(a),
+                _ => None,
+            },
+        );
+        assert_eq!(a.uid.as_deref(), Some("n47"));
+        assert_eq!(a.selector.as_deref(), Some("main"));
+        assert_eq!(a.truncate.map(as_usize), Some(80));
+
+        let a = args(&json!({"cmd": "text"}), |c| match c {
+            PipeCommand::Text(a) => Some(a),
+            _ => None,
+        });
+        assert!(a.uid.is_none() && a.selector.is_none() && a.truncate.is_none());
     }
 
-    #[test]
-    fn text_uid_present_selector_absent() {
-        let cmd = json!({"uid": "n1"});
-        let args = parse_text(&cmd);
-        assert_eq!(args.uid, Some("n1"));
-        assert_eq!(args.selector, None);
-        assert_eq!(args.truncate, None);
-    }
-
-    #[test]
-    fn text_defaults_all_none() {
-        let cmd = json!({});
-        let args = parse_text(&cmd);
-        assert!(args.uid.is_none() && args.selector.is_none() && args.truncate.is_none());
-    }
-
-    #[test]
-    fn xy_parses_valid_pair() {
-        let (x, y) = parse_xy(&json!({"xy": [100, 200]})).unwrap().unwrap();
-        assert!((x - 100.0).abs() < f64::EPSILON && (y - 200.0).abs() < f64::EPSILON);
-        // Fractional coordinates round-trip too.
-        let (x, y) = parse_xy(&json!({"xy": [12.5, 3.0]})).unwrap().unwrap();
-        assert!((x - 12.5).abs() < f64::EPSILON && (y - 3.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn xy_absent_is_none() {
-        assert!(parse_xy(&json!({"uid": "n1"})).unwrap().is_none());
-        assert!(parse_xy(&json!({"xy": null})).unwrap().is_none());
-    }
-
-    #[test]
-    fn xy_wrong_length_errors() {
-        assert!(parse_xy(&json!({"xy": [1, 2, 3]})).is_err());
-        assert!(parse_xy(&json!({"xy": [1]})).is_err());
-    }
-
-    #[test]
-    fn xy_non_array_errors() {
-        assert!(parse_xy(&json!({"xy": "100,200"})).is_err());
+    fn wait_args(cmd: &Value) -> WaitArgs {
+        args(cmd, |c| match c {
+            PipeCommand::Wait(a) => Some(a),
+            _ => None,
+        })
     }
 
     #[test]
     fn wait_network_idle_needs_no_pattern() {
-        let (what, pattern) = parse_wait(&json!({"what": "network-idle"})).unwrap();
+        let (what, pattern) =
+            wait_condition(&wait_args(&json!({"cmd": "wait", "what": "network-idle"}))).unwrap();
         assert_eq!(what, "network-idle");
         assert!(pattern.is_empty());
     }
 
     #[test]
-    fn wait_explicit_what_pattern() {
-        let (what, pattern) = parse_wait(&json!({"what": "text", "pattern": "Welcome"})).unwrap();
-        assert_eq!(what, "text");
-        assert_eq!(pattern, "Welcome");
+    fn wait_explicit_what_pattern_and_shorthands() {
+        let (what, pattern) = wait_condition(&wait_args(
+            &json!({"cmd": "wait", "what": "text", "pattern": "Welcome"}),
+        ))
+        .unwrap();
+        assert_eq!((what.as_str(), pattern.as_str()), ("text", "Welcome"));
+
+        let (what, pattern) =
+            wait_condition(&wait_args(&json!({"cmd": "wait", "selector": ".done"}))).unwrap();
+        assert_eq!((what.as_str(), pattern.as_str()), ("selector", ".done"));
     }
 
     #[test]
-    fn wait_shorthand_fields() {
-        let (what, pattern) = parse_wait(&json!({"selector": ".done"})).unwrap();
-        assert_eq!(what, "selector");
-        assert_eq!(pattern, ".done");
-    }
-
-    #[test]
-    fn wait_missing_pattern_for_text_errors() {
-        assert!(parse_wait(&json!({"what": "text"})).is_err());
-    }
-
-    #[test]
-    fn wait_empty_errors() {
-        assert!(parse_wait(&json!({})).is_err());
+    fn wait_missing_pattern_and_empty_are_refused() {
+        let err = wait_condition(&wait_args(&json!({"cmd": "wait", "what": "text"})))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("missing \"pattern\""), "{err}");
+        assert!(wait_condition(&wait_args(&json!({"cmd": "wait"}))).is_err());
     }
 
     #[test]
     fn wait_default_timeout_is_ten() {
-        // Regression: pipe/batch `wait` must default to the CLI's 10s, not the
-        // global 30s page-load timeout.
+        // pipe/batch `wait` defaults to the CLI's 10s, not the global 30s page-load timeout.
         assert_eq!(WAIT_DEFAULT_TIMEOUT, 10);
     }
 
     #[test]
-    fn unknown_cmd_error_messages() {
-        assert!(unknown_cmd_error("").to_string().contains("Missing"));
-        assert_eq!(unknown_cmd_error("frobnicate").to_string(), "Unknown command: frobnicate");
+    fn download_max_bytes_defaults_and_rejects_zero() {
+        assert_eq!(download_max_bytes(None).unwrap(), 67_108_864);
+        assert_eq!(download_max_bytes(Some(10)).unwrap(), 10);
+        assert!(download_max_bytes(Some(0)).is_err());
+        // A non-integer never reaches here: the protocol refuses it by name.
+        let err = parse(&json!({"cmd": "download", "max_bytes": "10"}))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("\"max_bytes\""), "{err}");
     }
 }

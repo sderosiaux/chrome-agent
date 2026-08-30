@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Console flood</title></head>
+<body>
+<h1>A page that throws in a loop and logs something enormous</h1>
+<script>
+  // 400 uncaught errors: the `error` listener used to push each one with no cap, so the in-page
+  // array grew without bound and `console` pulled the whole thing back in one JSON.stringify.
+  for (let i = 0; i < 400; i++) {
+    setTimeout(() => { throw new Error('flood ' + i); }, 0);
+  }
+  // One entry far larger than any cap on the COUNT: a stack trace, a serialised DOM node or a
+  // data URL is a single message that can be megabytes on its own.
+  setTimeout(() => { console.log('BIGSTART' + 'x'.repeat(50000) + 'BIGEND'); }, 0);
+  // A circular object: JSON.stringify throws on it, which used to break console.log itself.
+  setTimeout(() => {
+    const a = {name: 'circular'};
+    a.self = a;
+    console.log(a);
+  }, 0);
+</script>
+</body>
+</html>

@@ -1,12 +1,10 @@
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::cdp::client::CdpClient;
 use crate::cdp::types::EvaluateResult;
 
-/// Wrap the expression in a block scope `{ ... }` when it contains top-level
-/// `const` or `let` declarations so that repeated `eval` calls don't fail with
-/// "Identifier already declared".  V8's completion-value semantics mean the
-/// block still returns the value of its last expression statement.
+/// Wrap top-level `const`/`let` declarations in a block, so repeated `eval` calls do not fail
+/// with "Identifier already declared". V8 completion values still return the last expression.
 fn maybe_block_scope(expression: &str) -> std::borrow::Cow<'_, str> {
     let t = expression.trim();
     let has_declaration = t.starts_with("const ")
@@ -24,9 +22,8 @@ fn maybe_block_scope(expression: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
-/// Build `Runtime.evaluate` params, scoping to the frame's isolated world
-/// when the `frame` command has bound one (issue #8). Without a binding the
-/// `contextId` is omitted and evaluation targets the top document as before.
+/// Build `Runtime.evaluate` params, scoped to a bound frame's isolated world when there is
+/// one. Without a binding the `contextId` is omitted and the top document is targeted.
 fn evaluate_params(client: &CdpClient, expression: &str) -> Value {
     let mut params = json!({
         "expression": expression,
@@ -39,11 +36,25 @@ fn evaluate_params(client: &CdpClient, expression: &str) -> Value {
     params
 }
 
+/// What `--selector` actually evaluates: the caller's expression with `el` bound to the matched
+/// element, and a throw naming the selector when nothing matches.
+///
+/// One definition. `run::run` and `pipe_dispatch::dispatch_eval` each carried this format string,
+/// character for character.
+#[must_use]
+pub fn scoped_expression(expression: &str, selector: Option<&str>) -> String {
+    let Some(selector) = selector else {
+        return expression.to_string();
+    };
+    let escaped = serde_json::to_string(selector).unwrap_or_default();
+    format!(
+        "((el) => {{ if (!el) throw new Error('No element matches selector ' + {escaped}); \
+         return {expression} }})(document.querySelector({escaped}))"
+    )
+}
+
 /// Evaluate JS and return the raw `serde_json::Value` (for JSON mode).
-pub async fn run_raw(
-    client: &CdpClient,
-    expression: &str,
-) -> Result<Value, crate::BoxError> {
+pub async fn run_raw(client: &CdpClient, expression: &str) -> Result<Value, crate::BoxError> {
     let expression = maybe_block_scope(expression);
     let result: EvaluateResult = client
         .call("Runtime.evaluate", evaluate_params(client, &expression))
@@ -65,16 +76,12 @@ pub async fn run_raw(
 }
 
 /// Evaluate JS and return a display string (for text mode).
-pub async fn run(
-    client: &CdpClient,
-    expression: &str,
-) -> Result<String, crate::BoxError> {
+pub async fn run(client: &CdpClient, expression: &str) -> Result<String, crate::BoxError> {
     let expression = maybe_block_scope(expression);
     let result: EvaluateResult = client
         .call("Runtime.evaluate", evaluate_params(client, &expression))
         .await?;
 
-    // Check for exception
     if let Some(exception) = &result.exception_details {
         return Err(format!(
             "Evaluation error: {}",
@@ -87,11 +94,10 @@ pub async fn run(
         .into());
     }
 
-    // Stringify the result value
     let output = match &result.result.value {
         Some(val) => serde_json::to_string(val)?,
         None => {
-            // No value returned — use description or type
+            // No value: fall back to the description, then the type.
             result
                 .result
                 .description

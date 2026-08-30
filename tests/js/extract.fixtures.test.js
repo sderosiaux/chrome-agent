@@ -1,19 +1,7 @@
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const path = require('node:path');
 
-const { extractFromHTML, extractFromHTMLWithSelector } = require('./helpers.js');
-
-const FIXTURES = path.resolve(__dirname, '..', 'fixtures');
-
-function loadFixture(name) {
-  return fs.readFileSync(path.join(FIXTURES, name), 'utf-8');
-}
-
-// ---------------------------------------------------------------------------
-// Fixture-based tests
-// ---------------------------------------------------------------------------
+const { extractFromHTML, loadFixture } = require('./helpers.js');
 
 describe('fixture: extract_cards.html (blog posts)', () => {
   const html = loadFixture('extract_cards.html');
@@ -46,14 +34,13 @@ describe('fixture: extract_cards.html (blog posts)', () => {
   it('extracts dates from <time> elements', () => {
     const r = extractFromHTML(html);
     const dates = r.items.map(i => i.date).filter(Boolean);
-    assert.ok(dates.length >= 3, `Expected >=3 dates, got ${dates.length}`);
-    assert.ok(dates.includes('2025-03-15'));
+    assert.deepEqual(dates, ['2025-03-15', '2025-03-10', '2025-03-05', '2025-02-28']);
   });
 
   it('extracts images', () => {
     const r = extractFromHTML(html);
     const images = r.items.map(i => i.image).filter(Boolean);
-    assert.ok(images.length >= 3, `Expected >=3 images, got ${images.length}`);
+    assert.equal(images.length, 4);
   });
 });
 
@@ -63,7 +50,6 @@ describe('fixture: extract_ecommerce.html (product cards)', () => {
   it('detects 4 product cards, not nav links', () => {
     const r = extractFromHTML(html);
     assert.equal(r.count, 4);
-    // nav links should NOT dominate
     const titles = r.items.map(i => i.title);
     assert.ok(!titles.includes('Home'));
     assert.ok(!titles.includes('Login'));
@@ -79,8 +65,7 @@ describe('fixture: extract_ecommerce.html (product cards)', () => {
   it('extracts prices', () => {
     const r = extractFromHTML(html);
     const prices = r.items.map(i => i.price).filter(Boolean);
-    assert.ok(prices.length >= 3, `Expected >=3 prices, got ${prices.length}`);
-    assert.ok(prices.includes('$180.00'));
+    assert.deepEqual(prices, ['$180.00', '$95.00', '$65.00', '$249.99']);
   });
 
   it('extracts images', () => {
@@ -121,13 +106,13 @@ describe('fixture: extract_table.html (product table)', () => {
 
   it('detects 5 table rows', () => {
     const r = extractFromHTML(html);
-    assert.ok(r.count >= 5, `Expected >=5, got ${r.count}`);
+    assert.equal(r.count, 5);
   });
 
   it('extracts prices from table cells', () => {
     const r = extractFromHTML(html);
     const prices = r.items.map(i => i.price).filter(Boolean);
-    assert.ok(prices.length >= 3, `Expected >=3 prices, got ${prices.length}`);
+    assert.deepEqual(prices, ['$1299', '$49', '$129', '$599', '$249']);
   });
 
   it('extracts links from table cells', () => {
@@ -141,7 +126,7 @@ describe('fixture: extract_flat_table.html (leaderboard)', () => {
 
   it('detects 7 leaderboard rows', () => {
     const r = extractFromHTML(html);
-    assert.ok(r.count >= 7, `Expected >=7, got ${r.count}`);
+    assert.equal(r.count, 7);
   });
 
   it('extracts user links', () => {
@@ -160,8 +145,8 @@ describe('fixture: extract_hn_like.html (HN-style news)', () => {
 
   it('extracts item rows (not spacer rows)', () => {
     const r = extractFromHTML(html);
-    // There are 4 item-rows and 3 spacer rows. We want item rows.
-    assert.ok(r.count >= 3, `Expected >=3, got ${r.count}`);
+    // The fixture holds 4 item rows and 3 spacer rows; the spacers are dropped.
+    assert.equal(r.count, 4);
   });
 
   it('vote arrows should NOT become the title', () => {
@@ -213,11 +198,8 @@ describe('fixture: extract_nested_nav.html (feature page with nav)', () => {
 
   it('detects feature divs, not nav links', () => {
     const r = extractFromHTML(html);
-    assert.ok(r.count >= 3, `Expected >=3 features, got ${r.count}`);
-    const titles = r.items.map(i => i.title);
-    // Should include feature titles, not nav
-    assert.ok(titles.includes('Fast') || titles.includes('Smart') || titles.includes('Stable'),
-      `Feature titles missing. Got: ${titles.join(', ')}`);
+    assert.equal(r.count, 4);
+    assert.deepEqual(r.items.map(i => i.title), ['Fast', 'Smart', 'Stable', 'Stealthy']);
   });
 
   it('nav links are NOT the main pattern', () => {
@@ -249,19 +231,17 @@ describe('fixture: extract_mixed.html (activity feed with sidebar)', () => {
 
   it('detects activity items, not sidebar stats', () => {
     const r = extractFromHTML(html);
-    assert.ok(r.count >= 3, `Expected >=3 activity items, got ${r.count}`);
+    assert.equal(r.count, 4);
   });
 
   it('extracts dates from activity items', () => {
     const r = extractFromHTML(html);
-    const dates = r.items.map(i => i.date).filter(Boolean);
-    assert.ok(dates.length >= 2, `Expected >=2 dates, got ${dates.length}`);
+    assert.equal(r.items.filter(i => i.date).length, 4);
   });
 
   it('extracts images (avatars)', () => {
     const r = extractFromHTML(html);
-    const images = r.items.map(i => i.image).filter(Boolean);
-    assert.ok(images.length >= 3, `Expected >=3 images, got ${images.length}`);
+    assert.equal(r.items.filter(i => i.image).length, 4);
   });
 });
 
@@ -270,7 +250,7 @@ describe('fixture: extract_link_heavy_nav.html (jobs with heavy nav)', () => {
 
   it('detects job listings, not nav links', () => {
     const r = extractFromHTML(html);
-    assert.ok(r.count >= 3, `Expected >=3, got ${r.count}`);
+    assert.equal(r.count, 4);
     const titles = r.items.map(i => i.title);
     assert.ok(!titles.includes('Page One'), 'nav link should not be a title');
   });
@@ -284,8 +264,7 @@ describe('fixture: extract_link_heavy_nav.html (jobs with heavy nav)', () => {
 
   it('extracts dates', () => {
     const r = extractFromHTML(html);
-    const dates = r.items.map(i => i.date).filter(Boolean);
-    assert.ok(dates.length >= 2);
+    assert.equal(r.items.filter(i => i.date).length, 4);
   });
 
   it('pattern references listing', () => {
@@ -299,13 +278,18 @@ describe('fixture: extract_definition_list.html (FAQ)', () => {
 
   it('detects FAQ items', () => {
     const r = extractFromHTML(html);
-    assert.ok(r.count >= 4, `Expected >=4, got ${r.count}`);
+    assert.equal(r.count, 5);
   });
 
   it('extracts question titles', () => {
     const r = extractFromHTML(html);
-    const titles = r.items.map(i => i.title);
-    assert.ok(titles.some(t => t && t.includes('chrome-agent')));
+    assert.deepEqual(r.items.map(i => i.title), [
+      'What is chrome-agent?',
+      'How does it work?',
+      'What about stealth mode?',
+      'Can I use it with my existing Chrome?',
+      'Is it free?',
+    ]);
   });
 });
 
@@ -331,8 +315,7 @@ describe('fixture: extract_semantic_classes.html (repo list)', () => {
 
   it('extracts dates', () => {
     const r = extractFromHTML(html);
-    const dates = r.items.map(i => i.date).filter(Boolean);
-    assert.ok(dates.length >= 3, `Expected >=3 dates, got ${dates.length}`);
+    assert.equal(r.items.filter(i => i.date).length, 4);
   });
 
   it('pattern mentions repo', () => {
@@ -346,7 +329,7 @@ describe('fixture: extract_ads_interleaved.html (news with ads)', () => {
 
   it('detects news stories, not ad banners', () => {
     const r = extractFromHTML(html);
-    assert.ok(r.count >= 3, `Expected >=3 stories, got ${r.count}`);
+    assert.equal(r.count, 4);
   });
 
   it('ad banners are not extracted as main items', () => {

@@ -10,25 +10,55 @@ use crate::session;
 const IDLE_TIMEOUT: Duration = Duration::from_mins(5);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(2);
 
+/// Set an explicit mode on a path this tool created. Best effort: a daemon that started is more
+/// useful than one that refused over a chmod, and the two callers below both create the file
+/// themselves a moment earlier.
+fn restrict(path: &Path, mode: u32) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode));
+    }
+    #[cfg(not(unix))]
+    let _ = (path, mode);
+}
+
+/// Create `~/.chrome-agent` (or wherever the socket lives) 0700. Only `session::save_to` set
+/// this mode, so a daemon that came up first left the directory at whatever the umask allowed.
+fn prepare_dir(parent: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(parent)?;
+    restrict(parent, 0o700);
+    Ok(())
+}
+
+/// Write the pid file 0600. It names the process any local user could then signal.
+fn write_pid_file(pid_path: &Path) {
+    if std::fs::write(pid_path, format!("{}\n", std::process::id())).is_ok() {
+        restrict(pid_path, 0o600);
+    }
+}
+
 /// Run the micro-daemon. Blocks until idle timeout or explicit stop.
 pub async fn run_daemon(socket_path: &Path) -> Result<(), DaemonError> {
-    // Clean up stale socket
     if socket_path.exists() {
         let _ = std::fs::remove_file(socket_path);
     }
 
     if let Some(parent) = socket_path.parent() {
-        std::fs::create_dir_all(parent)
+        prepare_dir(parent)
             .map_err(|e| DaemonError(format!("Failed to create socket dir: {e}")))?;
     }
 
-    // Write PID file
     if let Ok(pid_path) = session::daemon_pid_path() {
-        let _ = std::fs::write(&pid_path, format!("{}\n", std::process::id()));
+        write_pid_file(&pid_path);
     }
 
     let listener = UnixListener::bind(socket_path)
         .map_err(|e| DaemonError(format!("Failed to bind {}: {e}", socket_path.display())))?;
+    // Right after `bind`, before the first `accept`: `process_command` answers `status`, which
+    // enumerates every browser name, and `stop` to whoever connects. The umask decides the
+    // socket's mode otherwise, and on a typical 022 that is 0755 — every local user.
+    restrict(socket_path, 0o600);
 
     eprintln!("daemon ready on {}", socket_path.display());
 
@@ -36,20 +66,16 @@ pub async fn run_daemon(socket_path: &Path) -> Result<(), DaemonError> {
     let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
     let mut last_activity = Instant::now();
 
-    // Heartbeat task: check Chrome health periodically. It deliberately does NOT
-    // touch `activity_tx` — only real client traffic must reset the idle timer,
-    // otherwise the 2s heartbeat would keep the daemon alive forever and the
-    // IDLE_TIMEOUT would never be reached.
+    // Heartbeat task: check Chrome health periodically. It must NOT touch `activity_tx` —
+    // only client traffic resets the idle timer, or the 2s beat keeps the daemon alive
+    // forever and IDLE_TIMEOUT is never reached.
     let _heartbeat = tokio::spawn(async move {
         let mut interval = tokio::time::interval(HEARTBEAT_INTERVAL);
         loop {
             interval.tick().await;
-            // Heartbeat logic: try to load session and verify browser PIDs.
-            // A store that will not load is reported, not swallowed: this loop's whole job
-            // is to keep the registry honest, and a silent `continue` every two seconds is
-            // a daemon that looks healthy while doing nothing. `eprintln!` is the whole
-            // remedy available — a heartbeat has no client to answer and launches no
-            // browser, so there is nothing to refuse.
+            // Load the session and verify browser pids. A store that will not load is
+            // reported on stderr rather than skipped silently: the beat has no client to
+            // answer, so saying so is the only remedy available.
             let mut store = match session::load_session() {
                 Ok(store) => store,
                 Err(e) => {
@@ -99,7 +125,6 @@ pub async fn run_daemon(socket_path: &Path) -> Result<(), DaemonError> {
         }
     }
 
-    // Cleanup
     let _ = std::fs::remove_file(socket_path);
     if let Ok(pid_path) = session::daemon_pid_path() {
         let _ = std::fs::remove_file(&pid_path);
@@ -111,39 +136,36 @@ pub async fn run_daemon(socket_path: &Path) -> Result<(), DaemonError> {
 /// Handle a single client connection. Protocol: newline-delimited JSON.
 /// Request: `{"command": "...", "args": {...}}`
 /// Response: `{"ok": true, "data": ...}` or `{"ok": false, "error": "..."}`
-async fn handle_client(
-    stream: UnixStream,
-    activity: mpsc::Sender<()>,
-    shutdown: mpsc::Sender<()>,
-) {
+async fn handle_client(stream: UnixStream, activity: mpsc::Sender<()>, shutdown: mpsc::Sender<()>) {
     let (reader, mut writer) = stream.into_split();
     let mut lines = BufReader::new(reader).lines();
 
     while let Ok(Some(line)) = lines.next_line().await {
-        // Real client traffic resets the daemon's idle timer.
+        // Client traffic, and only client traffic, resets the idle timer.
         let _ = activity.send(()).await;
 
         let (response, should_shutdown) = process_command(&line);
-        let json = serde_json::to_string(&response).unwrap_or_else(|_| {
-            r#"{"ok":false,"error":"serialization failed"}"#.to_string()
-        });
+        let json = serde_json::to_string(&response)
+            .unwrap_or_else(|_| r#"{"ok":false,"error":"serialization failed"}"#.to_string());
         // Write the response before triggering shutdown so the client sees it.
-        if writer.write_all(format!("{json}\n").as_bytes()).await.is_err() {
+        if writer
+            .write_all(format!("{json}\n").as_bytes())
+            .await
+            .is_err()
+        {
             break;
         }
         if should_shutdown {
-            // Signal the main loop to break so its cleanup (socket + PID removal)
-            // runs. Do NOT std::process::exit here — that leaks the socket file.
+            // Break the main loop so its cleanup (socket + pid removal) runs. Never
+            // std::process::exit here: that leaks the socket file.
             let _ = shutdown.send(()).await;
             break;
         }
     }
 }
 
-/// Process a daemon command. Thin dispatch layer.
-///
-/// Returns the JSON response plus a flag indicating whether the daemon should
-/// shut down after replying (only set by the `stop` command).
+/// Process a daemon command: the JSON response, plus whether the daemon should shut down
+/// after replying (only `stop` sets it).
 fn process_command(line: &str) -> (serde_json::Value, bool) {
     let request: serde_json::Value = match serde_json::from_str(line) {
         Ok(v) => v,
@@ -164,15 +186,17 @@ fn process_command(line: &str) -> (serde_json::Value, bool) {
         "ping" => (serde_json::json!({"ok": true, "data": "pong"}), false),
 
         "status" => {
-            // A store that would not load answers an empty browser list, which reads as
-            // "this daemon knows of no browser" — a statement about the machine made by a
-            // read that failed. The list stays empty (there is nothing truthful to put in
-            // it) and the reason goes to stderr, where the daemon's other diagnostics go.
+            // A store that will not load answers an empty browser list — there is nothing
+            // truthful to put in it — and the reason goes to stderr.
             let store = session::load_session().unwrap_or_else(|e| {
                 eprintln!("daemon status: could not read the session store: {e}");
                 session::SessionStore::default()
             });
-            let browsers: Vec<&str> = store.browsers.keys().map(std::string::String::as_str).collect();
+            let browsers: Vec<&str> = store
+                .browsers
+                .keys()
+                .map(std::string::String::as_str)
+                .collect();
             (
                 serde_json::json!({
                     "ok": true,
@@ -213,8 +237,8 @@ mod tests {
 
     #[test]
     fn stop_requests_graceful_shutdown() {
-        // Regression for A3b: `stop` must trigger the main-loop break (so socket +
-        // PID cleanup runs), signalled by the shutdown flag — not std::process::exit.
+        // `stop` must set the shutdown flag so the main loop breaks and cleans up,
+        // rather than calling std::process::exit.
         let (resp, shutdown) = process_command(r#"{"command":"stop"}"#);
         assert!(shutdown, "stop must request shutdown");
         assert_eq!(resp["ok"], true);
@@ -237,11 +261,85 @@ mod tests {
         assert!(resp["error"].as_str().unwrap().contains("Unknown command"));
     }
 
+    /// A scratch directory no concurrent test thread or process shares. The real socket path is
+    /// `~/.chrome-agent/daemon.sock`, one per machine, so `run_daemon` itself cannot be started
+    /// from a test without clobbering a real daemon's pid file — these drive the same two
+    /// helpers it calls.
+    #[cfg(unix)]
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "chrome-agent-daemon-{tag}-{}-{n}",
+            std::process::id()
+        ))
+    }
+
+    /// The directory holds the socket, the pid file and the session store; only `session::save_to`
+    /// used to set its mode, so whoever created it first decided.
+    #[cfg(unix)]
+    #[test]
+    fn the_daemon_directory_is_not_readable_by_other_users() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch("dir");
+        prepare_dir(&dir).expect("create it");
+        let mode = std::fs::metadata(&dir).expect("dir").permissions().mode() & 0o777;
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(mode, 0o700, "got {mode:o}");
+    }
+
+    /// The pid file names a process any local user could signal.
+    #[cfg(unix)]
+    #[test]
+    fn the_pid_file_is_not_world_readable() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch("pid");
+        prepare_dir(&dir).expect("create it");
+        let path = dir.join("daemon.pid");
+        write_pid_file(&path);
+        let mode = std::fs::metadata(&path)
+            .expect("pid file")
+            .permissions()
+            .mode()
+            & 0o777;
+        let contents = std::fs::read_to_string(&path).expect("pid file");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(mode, 0o600, "got {mode:o}");
+        assert_eq!(contents.trim(), std::process::id().to_string());
+    }
+
+    /// The socket answers `status` (every browser name) and `stop` to whoever connects, so its
+    /// mode is the whole access control.
+    #[cfg(unix)]
+    #[test]
+    fn the_socket_is_not_connectable_by_other_users() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch("sock");
+        prepare_dir(&dir).expect("create it");
+        let path = dir.join("daemon.sock");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .build()
+            .expect("a test runtime");
+        let listener = runtime.block_on(async { UnixListener::bind(&path).expect("bind") });
+        restrict(&path, 0o600);
+        let mode = std::fs::metadata(&path)
+            .expect("socket")
+            .permissions()
+            .mode()
+            & 0o777;
+        drop(listener);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            mode, 0o600,
+            "a world-writable socket answers stop to anyone; got {mode:o}"
+        );
+    }
+
     #[test]
     fn heartbeat_cannot_reset_idle_timer() {
-        // Regression for A3a: the heartbeat fires far more often than the daemon
-        // idles, so if it ever fed the activity channel the daemon would live
-        // forever. Guard the invariant that keeps the fix meaningful.
+        // The heartbeat fires far more often than the daemon idles, so feeding the
+        // activity channel from it would keep the daemon alive forever.
         assert!(
             HEARTBEAT_INTERVAL < IDLE_TIMEOUT,
             "heartbeat must be shorter than the idle timeout — otherwise resetting \

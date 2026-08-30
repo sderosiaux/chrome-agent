@@ -6,20 +6,8 @@ use serde_json::Value;
 mod common;
 use common::TestBrowser;
 
-fn binary() -> String {
-    let mut path = std::env::current_exe()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .to_path_buf();
-    path.push("chrome-agent");
-    path.to_string_lossy().into_owned()
-}
-
 fn run(args: &[&str]) -> (String, String, i32) {
-    let output = Command::new(binary())
+    let output = Command::new(common::binary())
         .args(args)
         .output()
         .expect("run chrome-agent");
@@ -31,7 +19,7 @@ fn run(args: &[&str]) -> (String, String, i32) {
 }
 
 fn run_with_stdin(args: &[&str], input: &str) -> (String, String, i32) {
-    let mut child = Command::new(binary())
+    let mut child = Command::new(common::binary())
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -66,8 +54,7 @@ struct TempRecording(std::path::PathBuf);
 
 impl TempRecording {
     fn new(name: &str, contents: &str) -> Self {
-        // Unique: two concurrent runs writing one path is the same collision as two runs
-        // sharing one browser, and this file is read back after it is written.
+        // A unique path: this file is read back after it is written.
         let path = common::temp_path(name, "jsonl");
         std::fs::write(&path, contents).unwrap();
         Self(path)
@@ -150,8 +137,8 @@ fn emulation_stays_on_its_page_reapplies_and_cleans_up() {
     assert_eq!(applied["effective"]["coarsePointer"], true);
     assert_eq!(applied["effective"]["orientation"], "portrait");
 
-    // A fresh CLI invocation must reapply `--touch` without making CDP mouse dispatch hang.
-    // chrome-agent synthesizes a tap, and Chromium follows it with compatibility mouse events.
+    // A fresh CLI invocation reapplies `--touch` without making CDP mouse dispatch hang:
+    // chrome-agent synthesizes a tap and Chromium follows it with compatibility mouse events.
     assert_eq!(
         run_json(&[
             "--browser",
@@ -230,8 +217,8 @@ fn emulation_stays_on_its_page_reapplies_and_cleans_up() {
         "{status_text}"
     );
 
-    // Every CLI call opens a new CDP connection. The same observed values therefore prove that
-    // the named page's persisted configuration was reapplied rather than retained in this process.
+    // Every CLI call opens a new CDP connection, so the same observed values prove the
+    // persisted configuration was reapplied.
     let mobile = read_page_metrics(browser.name(), "mobile");
     assert_eq!(mobile["screen"], serde_json::json!([412, 915]));
     assert_eq!(mobile["dpr"], 2.625);
@@ -264,8 +251,8 @@ fn emulation_stays_on_its_page_reapplies_and_cleans_up() {
     assert_eq!(desktop["touch"], 0);
     assert_eq!(desktop["coarse"], false);
 
-    // Creating a sibling makes it Chrome's active target. Reconnecting to the emulated page must
-    // reactivate that target so Screen Orientation does not silently fall back to the sibling's.
+    // A new sibling becomes Chrome's active target, so reconnecting must reactivate the
+    // emulated one or Screen Orientation falls back to the sibling's.
     let mobile_after_sibling = run_json(&[
         "--browser",
         browser.name(),
@@ -308,8 +295,7 @@ fn emulation_stays_on_its_page_reapplies_and_cleans_up() {
     assert_eq!(clean["touch"], 0);
     assert_eq!(clean["coarse"], false);
 
-    // Chromium rejects `maxTouchPoints: 0`; a non-touch configuration must omit that field while
-    // clearing touch capability and coarse-pointer detection.
+    // Chromium rejects `maxTouchPoints: 0`, so a non-touch configuration omits the field.
     let non_touch = run_json(&[
         "--browser",
         browser.name(),
@@ -468,7 +454,7 @@ fn an_open_pipe_publishes_emulation_changes_immediately() {
         true
     );
 
-    let mut child = Command::new(binary())
+    let mut child = Command::new(common::binary())
         .args(["--browser", browser.name(), "--page", "mobile", "pipe"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -489,9 +475,8 @@ fn an_open_pipe_publishes_emulation_changes_immediately() {
     let applied: Value = serde_json::from_str(&line).unwrap();
     assert_eq!(applied["ok"], true);
 
-    // The pipe still owns stdin and has not reached its final save. Visibility here therefore
-    // proves that a successful device command commits its session state immediately — a pipe
-    // that only persisted on exit would leave a crashed session's emulation unrecorded.
+    // The pipe still owns stdin and has not reached its final save, so visibility here means
+    // a successful device command commits its session state immediately.
     let concurrent_status = run_json(&[
         "--browser",
         browser.name(),
@@ -504,9 +489,8 @@ fn an_open_pipe_publishes_emulation_changes_immediately() {
     assert_eq!(concurrent_status["emulation"]["width"], 390);
     assert_eq!(concurrent_status["effective"]["deviceScaleFactor"], 3.0);
 
-    // Reset through the pipe itself (via batch, which shares the recovery state), then confirm
-    // a fresh CLI process reads the cleared configuration. Concurrent WRITES from a second
-    // process are deliberately not exercised: one writer per --browser is the store's contract.
+    // Reset through the pipe (via batch, which shares the recovery state), then read it back
+    // from a fresh CLI process. Concurrent writes are out of scope: one writer per --browser.
     writeln!(
         input,
         r#"{{"cmd":"batch","commands":[{{"cmd":"emulate","action":"reset"}}]}}"#

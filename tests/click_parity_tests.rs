@@ -1,10 +1,5 @@
-//! `click <uid>` and `click --selector` must be the same verb.
-//!
-//! They were not: the uid path dispatches real CDP mouse events, the selector path called
-//! `el.click()`. That fires the handler on the node regardless of what is on top of it, so a
-//! selector click passed straight through a modal scrim and reported success — the same
-//! response shape as a click that a user could actually have made. `dblclick_selector`
-//! already made this exact rewrite; this mirrors it for the single click.
+//! `click <uid>` and `click --selector` are the same verb: both dispatch real CDP mouse
+//! events, so a covered element hands the click to whatever covers it.
 
 use std::process::Command;
 
@@ -13,14 +8,11 @@ use serde_json::Value;
 mod common;
 use common::TestBrowser;
 
-fn binary() -> String {
-    let mut path = std::env::current_exe().unwrap().parent().unwrap().parent().unwrap().to_path_buf();
-    path.push("chrome-agent");
-    path.to_string_lossy().into_owned()
-}
-
 fn run_cli(args: &[&str]) -> (String, i32) {
-    let output = Command::new(binary()).args(args).output().expect("Failed to run chrome-agent");
+    let output = Command::new(common::binary())
+        .args(args)
+        .output()
+        .expect("Failed to run chrome-agent");
     (
         String::from_utf8_lossy(&output.stdout).to_string(),
         output.status.code().unwrap_or(-1),
@@ -46,16 +38,21 @@ fn eval(browser: &str, expression: &str) -> Value {
     v["result"].clone()
 }
 
-/// The defect: a covering element takes the click a user would have made, and the selector
-/// path used to ignore it. Whether hitting the overlay is "right" is the point — it is what
-/// a real pointer does, and what `click <uid>` already did.
+/// A covering scrim receives the selector click, as a real pointer would.
 #[test]
 fn a_selector_click_lands_where_a_real_pointer_would() {
     let b = TestBrowser::new("click-parity-overlay");
     if !open(b.name(), "click_overlay.html") {
         return;
     }
-    let (stdout, code) = run_cli(&["--browser", b.name(), "--json", "click", "--selector", "#target"]);
+    let (stdout, code) = run_cli(&[
+        "--browser",
+        b.name(),
+        "--json",
+        "click",
+        "--selector",
+        "#target",
+    ]);
     assert_eq!(code, 0, "the click itself still succeeds: {stdout}");
 
     assert_eq!(
@@ -65,7 +62,6 @@ fn a_selector_click_lands_where_a_real_pointer_would() {
     );
 }
 
-/// The uid path is the reference behaviour. Both must agree on the same page.
 #[test]
 fn the_uid_path_and_the_selector_path_agree_on_who_receives_the_click() {
     let b = TestBrowser::new("click-parity-uid");
@@ -90,21 +86,37 @@ fn the_uid_path_and_the_selector_path_agree_on_who_receives_the_click() {
 
     let (_, code) = run_cli(&["--browser", b.name(), "eval", "window.receiver = null; 1"]);
     assert_eq!(code, 0);
-    let (stdout, code) = run_cli(&["--browser", b.name(), "--json", "click", "--selector", "#target"]);
+    let (stdout, code) = run_cli(&[
+        "--browser",
+        b.name(),
+        "--json",
+        "click",
+        "--selector",
+        "#target",
+    ]);
     assert_eq!(code, 0, "{stdout}");
     let by_selector = eval(b.name(), "window.receiver");
 
-    assert_eq!(by_uid, by_selector, "two spellings of `click` must not do different things");
+    assert_eq!(
+        by_uid, by_selector,
+        "two spellings of `click` must not do different things"
+    );
 }
 
-/// An ordinary uncovered element must still be clicked — the point is parity, not refusal.
 #[test]
 fn an_uncovered_element_is_still_clicked_by_selector() {
     let b = TestBrowser::new("click-parity-plain");
     if !open(b.name(), "verdict_states.html") {
         return;
     }
-    let (stdout, code) = run_cli(&["--browser", b.name(), "--json", "click", "--selector", "#add"]);
+    let (stdout, code) = run_cli(&[
+        "--browser",
+        b.name(),
+        "--json",
+        "click",
+        "--selector",
+        "#add",
+    ]);
     assert_eq!(code, 0, "{stdout}");
     assert_eq!(
         eval(b.name(), "!!document.querySelector('h4')"),
@@ -113,7 +125,6 @@ fn an_uncovered_element_is_still_clicked_by_selector() {
     );
 }
 
-/// A zero-size element has no point to aim at, and must not silently do nothing.
 #[test]
 fn an_element_with_no_layout_box_still_gets_its_handler() {
     let b = TestBrowser::new("click-parity-zerosize");
@@ -126,7 +137,14 @@ fn an_element_with_no_layout_box_still_gets_its_handler() {
     let (_, code) = run_cli(&["--browser", b.name(), "eval", setup]);
     assert_eq!(code, 0);
 
-    let (stdout, code) = run_cli(&["--browser", b.name(), "--json", "click", "--selector", "#zero"]);
+    let (stdout, code) = run_cli(&[
+        "--browser",
+        b.name(),
+        "--json",
+        "click",
+        "--selector",
+        "#zero",
+    ]);
     assert_eq!(code, 0, "{stdout}");
     assert_eq!(
         eval(b.name(), "window.zeroClicked === true"),
@@ -135,32 +153,40 @@ fn an_element_with_no_layout_box_still_gets_its_handler() {
     );
 }
 
-/// A selector that matches nothing must still be an error, not a silent success.
 #[test]
 fn a_selector_that_matches_nothing_is_an_error() {
     let b = TestBrowser::new("click-parity-missing");
     if !open(b.name(), "verdict_states.html") {
         return;
     }
-    let (stdout, code) = run_cli(&["--browser", b.name(), "--json", "click", "--selector", "#nope"]);
+    let (stdout, code) = run_cli(&[
+        "--browser",
+        b.name(),
+        "--json",
+        "click",
+        "--selector",
+        "#nope",
+    ]);
     assert_ne!(code, 0, "a missing element is a failure: {stdout}");
     assert!(stdout.contains("No element matches selector"), "{stdout}");
 }
 
-/// Smooth scrolling must not make the click land at pre-scroll coordinates.
-///
-/// The selector path scrolls the element into view and reads its rect in the same
-/// synchronous script. Under `scroll-behavior: smooth` the scroll is an animation:
-/// the rect still reports the pre-scroll position (below the fold), and the CDP
-/// mouse event dispatched at those coordinates lands outside the viewport — on
-/// nothing — while the command reports success.
+/// Under `scroll-behavior: smooth` the scroll is an animation, so the aim point must settle
+/// before dispatch or the event lands at pre-scroll coordinates.
 #[test]
 fn a_smooth_scrolling_page_still_gets_its_click() {
     let b = TestBrowser::new("click-parity-smooth");
     if !open(b.name(), "smooth_scroll_click.html") {
         return;
     }
-    let (stdout, code) = run_cli(&["--browser", b.name(), "--json", "click", "--selector", "#target"]);
+    let (stdout, code) = run_cli(&[
+        "--browser",
+        b.name(),
+        "--json",
+        "click",
+        "--selector",
+        "#target",
+    ]);
     assert_eq!(code, 0, "{stdout}");
     assert_eq!(
         eval(b.name(), "document.title"),

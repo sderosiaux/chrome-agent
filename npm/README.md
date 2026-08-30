@@ -1,347 +1,184 @@
 # chrome-agent
 
-Browser automation for AI agents. Single Rust binary, zero runtime dependencies, talks CDP directly to Chrome.
+Browser automation for AI agents. One Rust binary drives Chrome over CDP — no Node runtime, no
+Playwright, no daemon. Every action reports whether the page actually complied, in JSON an agent
+can branch on.
 
-## Why
+chrome-agent v0.15.0 (~28.2K lines of Rust in `src/`, blank and comment-only lines excluded; 3 MB binary)
 
-Existing tools (Playwright, Puppeteer, Selenium) carry heavy runtimes and weren't designed for agents. Agents need:
-- **Minimum tokens** — a11y tree snapshots instead of raw HTML (~50 tokens vs ~2000)
-- **Minimum round-trips** — `--inspect` returns updated page state with every action
-- **Zero setup** — single binary, headless by default, no npm/Node required
-- **Persistent sessions** — login once, stay logged in across invocations
-- **Stable UIDs** — element identifiers based on `backendNodeId`, survive between inspects
-- **3 targeting modes** — uid from accessibility tree, CSS selectors, or coordinates
+Full documentation: [github.com/sderosiaux/chrome-agent](https://github.com/sderosiaux/chrome-agent).
 
 ## Install
 
-### For AI agents (recommended)
-
 ```bash
-# Install the skill — your agent learns chrome-agent automatically
-npx skills add sderosiaux/chrome-agent
+npx skills add sderosiaux/chrome-agent   # skill file + binary, for coding agents
+npm install -g chrome-agent              # prebuilt binary
+npx chrome-agent --help                  # no install
+cargo install chrome-agent               # from source
 ```
 
-This installs a `SKILL.md` that teaches your agent (Claude Code, Cursor, Copilot, etc.) how to use chrome-agent, including the workflow, commands, and best practices.
-
-### CLI binary
+## Quickstart
 
 ```bash
-# npm (downloads prebuilt binary)
-npm install -g chrome-agent
-
-# or with npx (no install needed)
-npx chrome-agent --help
-
-# or with Cargo (builds from source)
-cargo install chrome-agent
-```
-
-## Quick Start
-
-```bash
-# Navigate and inspect the page in one call
+# Navigate and read the page as an accessibility tree with stable uids
 chrome-agent goto https://example.com --inspect
-# → https://example.com — Example Domain
-# → uid=n1 RootWebArea "Example Domain"
-# →   uid=n9 heading "Example Domain" level=1
-# →   uid=n10 paragraph "This domain is for..."
-# →   uid=n12 link "Learn more"
+# uid=n9  heading "Example Domain" level=1
+# uid=n12 link "More information..."
 
-# Click by uid, get updated page state
+# Act by uid, by CSS selector, or by coordinates
 chrome-agent click n12 --inspect
-
-# Fill a form field
-chrome-agent fill --uid n20 "user@test.com"
-
-# Or target by CSS selector (when uids aren't practical)
 chrome-agent click --selector "button.submit"
-chrome-agent fill --selector "input[name=email]" "hello@test.com"
+chrome-agent click --xy 100,200
 
-# Extract article content (Mozilla Readability — reader mode)
+# Fill, then check what the page kept
+chrome-agent fill --uid n20 "user@test.com"
+chrome-agent assert value --uid n20 --equals "user@test.com"
+
+# Content, not markup
 chrome-agent read
-
-# Extract full visible text (use --selector to scope, --truncate to cap)
+chrome-agent extract --limit 30
 chrome-agent text --selector "main" --truncate 500
 
-# Evaluate JavaScript
-chrome-agent eval "document.title"
-
-# Screenshot (returns file path, not binary data)
-chrome-agent screenshot
+# JSON for everything
+chrome-agent --json eval "document.title"
+chrome-agent screenshot --format jpeg --quality 60 --max-width 1024
 ```
 
-## How It Works
-
-```
-chrome-agent v0.15.0 (~22.2K lines of Rust in src/, 3 MB binary)
-    │
-    │ WebSocket (Chrome DevTools Protocol)
-    ▼
-Chrome / Chromium (headless by default)
-```
-
-No Node.js. No Playwright. No daemon required. Headless by default — `--headed` for debugging.
-
-UIDs are stable across inspects (based on Chrome's `backendNodeId`). The agent inspects, picks a uid, acts — even minutes later. When a11y tree isn't practical, CSS selectors and coordinates work as fallbacks. Click auto-falls back to JS `.click()` when the element has no box model.
+Chrome stays alive between invocations, so a command costs a connection, not a browser launch. Give
+each parallel agent its own `--browser <name>`, or they corrupt each other's session state.
 
 ## Commands
 
-| Command | Description |
-|---------|------------|
-| `goto <url> [--inspect] [--max-depth N] [--header "K: V"]` | Navigate to URL. `--header` sends extra HTTP headers (repeatable) |
-| `inspect [--verbose] [--max-depth N] [--uid nN] [--filter "role,role"] [--max-chars N] [--offset K]` | Accessibility tree with stable uids. `--max-chars`/`--offset` cap and page the output |
-| `click <uid> [--inspect] [--max-depth N]` | Click by uid (JS fallback if no box model) |
-| `click --selector "css" [--inspect]` | Click by CSS selector |
-| `click --xy 100,200` | Click by coordinates |
-| `fill --uid <uid> <value> [--inspect]` | Fill input by uid |
-| `fill --selector "css" <value>` | Fill by CSS selector |
-| `fill-form <uid=val>...` | Batch fill multiple fields |
-| `read [--html] [--truncate N]` | Extract main content (Mozilla Readability) |
-| `text [uid] [--selector "css"] [--truncate N]` | Extract visible text (page or element) |
-| `eval <expression> [--selector "css"]` | Run JS in page context (`el` = matched element) |
-| `network [--filter "pattern"] [--body] [--live N]` | Capture network requests / API responses |
-| `console [--level error] [--clear]` | Show captured console.log/warn/error + JS exceptions |
-| `pipe` | Persistent connection: JSON stdin → JSON stdout |
-| `wait <text\|url\|selector> <pattern>` | Wait for condition |
-| `wait network-idle [--idle-ms N] [--timeout N]` | Wait until the network is quiet (SPA/XHR settle) |
-| `type <text> [--selector "css"]` | Type into focused/selected element |
-| `press <key>` | Press Enter, Tab, Escape, etc. |
-| `scroll <down\|up\|uid>` | Scroll page or element into view |
-| `hover <uid>` | Hover over element |
-| `back` | Navigate back in history |
-| `screenshot [--filename name] [--format jpeg\|png] [--quality N] [--max-width N] [--uid nN\|--selector "css"]` | Screenshot → file path. JPEG/max-width shrink it; `--uid`/`--selector` clip to one element |
-| `pdf [--filename name] [--landscape] [--background]` | Print the current page to a PDF file |
-| `download <url> [--out path] [--timeout N]` | Download a URL fetched in-page (cookies/auth preserved) → `{path,bytes,mime}` |
-| `tabs` | List open browser tabs |
-| `close [--purge]` | Close browser (--purge deletes profile/cookies) |
-| `status` | Show session info |
-| `stop` | Stop background daemon |
+| Command | What it does |
+|---|---|
+| `goto <url> [--inspect] [--header "K: V"]` | Navigate. Reports where you landed and what answered. |
+| `inspect [--filter "role,role"] [--uid nN] [--urls] [--max-chars N] [--offset K]` | Accessibility tree with stable uids. |
+| `diff` | What changed since the last inspect. |
+| `click <uid> [--selector "css"] [--xy X,Y] [--inspect]` | Click. JS fallback when there is no box model. |
+| `dblclick <uid>` | Double-click, same targeting modes. |
+| `fill --uid <uid> <value>` | Fill an input. Reports the value the page kept. |
+| `fill-form <uid=val>...` | Fill several fields at once. |
+| `select --uid <uid> <value>` | Pick a `<select>` option by value or visible text. |
+| `check <uid>` / `uncheck <uid>` | Idempotent checkbox and radio control. |
+| `upload --uid <uid> <file>...` | Upload to a file input. |
+| `drag <from-uid> <to-uid>` | Mouse-event drag. |
+| `type <text>` / `press <key>` / `hover <uid>` / `scroll <down\|up\|uid>` | Keyboard and pointer primitives. |
+| `wait <text\|url\|selector> <pattern>` | Wait for a condition. `wait network-idle` for SPA settle. |
+| `assert value\|text\|url\|state\|exists ...` | Check a page fact. Exit 2 when it does not hold. |
+| `read [--html] [--truncate N]` | Article extraction via Mozilla Readability. |
+| `text [--selector "css"] [--truncate N]` | Visible text of the page or one element. |
+| `extract [--limit N] [--scroll] [--a11y]` | Auto-detect repeating records. No selectors needed. |
+| `eval <expression> [--selector "css"]` | JS in page context. |
+| `screenshot [--format jpeg\|png] [--quality N] [--max-width N] [--uid nN]` | Screenshot to a file path. |
+| `pdf [--filename name] [--landscape] [--background]` | Print the page to PDF. |
+| `download <url> [--out path]` | Fetch in-page so cookies and auth carry over. |
+| `network [--filter "pattern"] [--body] [--live N] [--abort "pattern"]` | Requests and API responses. |
+| `console [--level error] [--clear]` | console.log/warn/error and JS exceptions. |
+| `frame <selector\|main>` | Bind `eval`/`inspect` to an iframe, inside a `pipe`/`batch` process. |
+| `emulate device --width W --height H` | Device metrics for one named page. |
+| `pipe` / `batch` | Persistent JSON stdin/stdout, or a JSON array on stdin. |
+| `tabs` / `status` / `history` / `close [--purge]` | Session management. |
 
-## Global Flags
+## Global flags
 
 ```
 --browser <name>         Named browser profile (default: "default")
---page <name>            Named page/tab (default: "default")
---connect <auto|url>     Connect to running Chrome (a value is required: "auto", or a
-                         ws:// or http:// URL)
---headed                 Show browser window (default is headless)
---stealth                Bypass bot detection (Cloudflare, Turnstile)
---timeout <seconds>      Command timeout (default: 30)
---max-depth <N>          Limit inspect tree depth (works with --inspect on any command)
+--page <name>            Named tab (default: "default")
+--connect <auto|url>     Attach to a running Chrome (a value is required)
+--headed                 Show the browser window (default: headless)
+--stealth                Anti-detection CDP patches
 --copy-cookies           Use cookies from your real Chrome profile
+--timeout <seconds>      Command timeout (default: 30)
+--max-depth <N>          Limit inspect depth
+--verdict <mode>         auto (default) reads the page back; off reports the action only
 --dialog <mode>          JS dialog policy: accept (default), dismiss, or manual
---dialog-text <text>     Text submitted for prompt() dialogs under --dialog accept
 --ignore-https-errors    Accept self-signed certificates
---json                   Structured JSON output for all commands
+--json                   Structured JSON output
 ```
 
-JS dialogs (`alert`/`confirm`/`prompt`/`beforeunload`) are auto-answered by default (`--dialog accept`) so the page never hangs on a blocking dialog.
+## What a response tells you
 
-## The Inspect → Act → Inspect Loop
+`ok:true` means the command ran, not that the page complied. Every mutating action carries a
+`verdict`, a `verdict_reason` and a `next` — one token from `proceed`, `inspect`, `retry`,
+`confirm`, `dismiss`, `stop` — so an agent branches without parsing prose.
 
-```bash
-# 1. Navigate and inspect
-chrome-agent goto https://app.com/login --inspect
-# → uid=n47 heading "Login" level=1
-#   uid=n52 textbox "Email" focusable
-#   uid=n58 textbox "Password" focusable
-#   uid=n63 button "Sign In" focusable
+| `verdict` | Means |
+|---|---|
+| `changed` | The page moved; `delta` says how. |
+| `navigated` | New document. Every stored uid is dead. |
+| `intercepted` | Another element received the event; `intercepted_by` names it. |
+| `not_kept` | The write reached the element and it does not hold it. Read `value.actual`. |
+| `no_effect` | Delivery proven by hit test, and the tree stayed still. |
+| `unchanged` | The tree was identical while the tool watched. Delivery not proven. |
+| `unknown` | Nothing could be compared. Never repeat the action — it may already have landed. |
 
-# 2. Act
-chrome-agent fill --uid n52 "user@test.com"
-chrome-agent fill --uid n58 "password123"
+Exit codes: `0` success, `1` error, `2` a claim this tool made did not hold, `130` Ctrl+C. `2` is
+a failed `assert`, or a `macro run` guard that was checked and did not hold — nothing else.
 
-# 3. Click with --inspect to get result + new state in one call
-chrome-agent click n63 --inspect
-# → Clicked uid=n63
-# → uid=n101 heading "Dashboard" level=1
-# → uid=n105 navigation "Main menu"
-```
+## uids
 
-UIDs (n47, n52, etc.) are stable — they won't change between inspects as long as the DOM node exists.
+Element ids come from Chrome's `backendNodeId`, printed as `n82`. They stay valid across inspects
+of the same page. A navigation reassigns them all, so re-inspect after `goto`, `back`, or a click
+that changes route. CSS selectors and coordinates work where a uid is impractical.
 
-## Network Capture
+## Pipe mode
 
-Extract API data directly instead of DOM scraping:
-
-```bash
-# Show resources loaded by the page (stealth-safe, uses Performance API)
-chrome-agent network --filter "api"
-
-# Capture live traffic with response bodies (5 seconds)
-chrome-agent network --live 5 --body --filter "graphql"
-
-# JSON output for structured extraction
-chrome-agent --json network --body --filter "api" --limit 10
-```
-
-## Console Capture
-
-See what the page logs — useful for debugging and error detection:
+One process, one connection, one JSON line per response, and uids stay stable across the whole
+sequence — which is the reason to reach for it. The speed-up is real and small: pipe removes about
+12 ms of per-command overhead, worth 1.5x on a stream of reads (nine commands, 352 ms → 228 ms) and
+1.1x on a stream of fills and clicks (2029 ms → 1908 ms), where the settle window and the tree
+re-read pipe does not touch are most of the cost. Measured on 2026-08-30, M4 Max, Chrome 152,
+median of 9 runs (`scripts/measure-pipe.sh` in the repo).
 
 ```bash
-chrome-agent console                    # all messages
-chrome-agent console --level error      # errors + exceptions only
-chrome-agent console --clear            # read and clear buffer
-```
-
-Stealth-safe: uses injected interceptor, not `Runtime.enable`.
-
-## Pipe Mode
-
-Persistent connection for high-performance agent workflows:
-
-```bash
-# Start pipe (one connection, reads JSON from stdin)
 echo '{"cmd":"goto","url":"https://example.com","inspect":true}
 {"cmd":"click","uid":"n12","inspect":true}
 {"cmd":"read"}' | chrome-agent pipe
 ```
 
-Each command returns one JSON line: `{"ok":true,...}` or `{"ok":false,"error":"..."}`. 10x faster than spawning chrome-agent per command.
+## Bot detection
 
-## Content Extraction
+`--stealth` applies 7 CDP-level patches: `navigator.webdriver`, `chrome.runtime`, the Permissions
+API, the WebGL renderer, the User-Agent, an input coordinate leak, and never calling
+`Runtime.enable`.
 
-```bash
-# Article content (Readability — like Firefox Reader Mode)
-chrome-agent read
-# → # Article Title
-# → Clean article text without nav, footer, sidebar...
-
-# Full page text (scoped by selector)
-chrome-agent text --selector "[role=main]" --truncate 1000
-
-# Structured data via JS
-chrome-agent eval "JSON.stringify([...document.querySelectorAll('h2')].map(e => e.textContent))"
-```
-
-## Stealth Mode
-
-Many sites (Cloudflare, Turnstile) block headless Chrome. `--stealth` patches 7 automation fingerprints via CDP:
-
-```bash
-chrome-agent --stealth goto https://protected-site.com --inspect
-```
-
-What it patches:
-- `navigator.webdriver` → `undefined`
-- `chrome.runtime` → mocked (headless doesn't have it)
-- Permissions API → consistent with real browser
-- WebGL renderer → masks ANGLE/headless fingerprint
-- User-Agent → removes "HeadlessChrome"
-- Input `screenX`/`pageX` leak → random offset added
-- `Runtime.enable` → skipped (the #1 CDP detection vector)
-
-All patches are CDP-level (`Page.addScriptToEvaluateOnNewDocument`). No fake Chrome flags.
-
-### Heavy bot protection (DataDome, Kasada)
-
-Some sites (Leboncoin, etc.) use advanced fingerprinting that detects bundled Chromium regardless of CDP patches. For these, connect to your real installed Chrome instead:
-
-```bash
-# Launch your real Chrome with debugging enabled
-google-chrome --remote-debugging-port=9222 &
-
-# Connect chrome-agent to it
-chrome-agent --connect http://127.0.0.1:9222 goto https://www.leboncoin.fr --inspect
-```
-
-Real Chrome has genuine canvas/audio/codec fingerprints that Chromium lacks.
-
-| Protection Level | Solution |
+| Protection | What works |
 |---|---|
 | None | `chrome-agent goto ...` |
-| Cloudflare/Turnstile | `chrome-agent --stealth goto ...` |
-| DataDome/Kasada | `chrome-agent --connect` to real Chrome |
+| Cloudflare JS challenge | `--stealth` clears it |
+| Cloudflare managed Turnstile, DataDome, Kasada | `--stealth` does not help. Use `--connect`. |
+| Logged-in sites | `--copy-cookies`, optionally with `--stealth` |
 
-## JSON Mode
-
-```bash
-chrome-agent --json goto https://example.com --inspect
-# → {"ok":true,"url":"...","title":"...","snapshot":"uid=n1 heading..."}
-
-chrome-agent --json eval "1+1"
-# → {"ok":true,"result":2}
-
-chrome-agent --json read
-# → {"ok":true,"title":"...","text":"...","excerpt":"...","byline":"..."}
-
-# Errors also structured (exit 1, JSON still on stdout for agent parsing):
-chrome-agent --json click n99
-# → {"ok":false,"error":"Element uid=n99 not found.","hint":"Run 'chrome-agent inspect'"}
-```
-
-## Multi-Tab
+Heavy protection fingerprints the Chromium binary itself, so the only route is a real installed
+Chrome. `--copy-cookies` copies the cookie database from your Chrome profile and leaves your real
+Chrome untouched.
 
 ```bash
-chrome-agent --page main goto https://app.com
-chrome-agent --page docs goto https://docs.app.com
-chrome-agent --page main eval "document.title"   # → "App"
-chrome-agent --page docs eval "document.title"   # → "Docs"
-```
-
-### Parallel Agents
-
-Multiple agents sharing the same browser corrupt each other's sessions. Isolate with `--browser`:
-
-```bash
-# Agent 1
-chrome-agent --browser agent1 goto https://example.com
-
-# Agent 2 (separate Chrome instance)
-chrome-agent --browser agent2 goto https://other.com
-```
-
-## Using with AI Agents
-
-### Skill (recommended)
-
-```bash
-npx skills add sderosiaux/chrome-agent
-```
-
-This installs a SKILL.md that teaches your agent the full chrome-agent workflow, commands, and tips. Works with Claude Code, Cursor, Copilot, and any agent that reads skill files.
-
-### Manual
-
-Tell your agent to run `chrome-agent --help` — the help output includes a complete LLM usage guide.
-
-### Claude Code permissions
-
-```json
-{
-  "permissions": {
-    "allow": ["Bash(chrome-agent *)"]
-  }
-}
-```
-
-### Connect to Your Browser
-
-```bash
-chrome-agent --connect auto inspect    # auto-discover Chrome with debugging
-google-chrome --remote-debugging-port=9222  # or launch manually
+google-chrome --remote-debugging-port=9222 &
+chrome-agent --connect http://127.0.0.1:9222 goto https://www.leboncoin.fr --inspect
+chrome-agent --stealth --copy-cookies goto x.com/home --inspect
 ```
 
 ## Comparison
 
-| | chrome-agent | dev-browser | chrome-devtools-mcp | Playwright MCP |
-|---|---|---|---|---|
-| Language | Rust | Rust + Node.js | TypeScript | TypeScript |
-| Runtime deps | none | Node.js + npm + Playwright + QuickJS | Node.js + Puppeteer | Node.js + Playwright |
-| Binary size | ~3 MB | ~3 MB (CLI) + ~200 MB (daemon + deps) | npm package | npm package |
-| CLI startup (reuse session) | ~10ms | ~500ms (daemon check) | N/A (MCP server) | N/A (MCP server) |
-| Element targeting | uid + CSS selector + coordinates | CSS selectors + snapshotForAI | uid (sequential) | CSS selectors |
-| UID stability | backendNodeId (stable across inspects) | N/A | sequential (reassigned each snapshot) | N/A |
-| Action + observe | `--inspect` flag (1 call) | 1 script (batched) | 1 MCP call per action | 1 MCP call per action |
-| Script batching | No (atomic commands + eval) | Full JS scripts in QuickJS sandbox | No | No |
-| Stealth mode | 7 CDP patches + Runtime.enable skip | No | No | No |
-| Reader mode | `read` (Mozilla Readability) | No | No | No |
-| Sandbox | Chrome sandbox | QuickJS WASM sandbox | Chrome sandbox | No |
-| Network capture | Retroactive + live | No | No | Metadata only (no bodies) |
-| Console capture | Stealth-safe interceptor | No | Console messages | No |
-| Pipe mode | JSON stdin/stdout | No | No | No |
-| Code | ~22.2K lines of Rust in `src/` (blank and comment-only lines excluded; a test re-measures it) | ~76K lines (their figure, unverified here) | ~12K lines (their figure, unverified here) | Playwright |
+| | chrome-agent | agent-browser (Vercel) | Playwright MCP |
+|---|---|---|---|
+| Language | Rust | Rust | TypeScript |
+| Runtime deps | none | none (CLI) | Node + Playwright |
+| Startup | 12 ms measured, one command on a running browser | daemon | cold start |
+| UID stability | `backendNodeId`, stable across inspects | sequential, reassigned per snapshot | N/A |
+| Compliance reporting | `verdict`/`next` on every action | no | no |
+| Stealth | 7 CDP patches | delegated to cloud providers | none |
+| Reader mode | `read` (Readability.js) | none | none |
+| Record extraction | `extract`, structural, no LLM call | none | none |
+| MCP server | none | yes | yes |
+| Code | ~28.2K lines of Rust in `src/` (blank and comment-only lines excluded; a test re-measures it) | ~40K lines (their figure, unverified here) | Playwright |
+
+## Using it from an agent
+
+`npx skills add sderosiaux/chrome-agent` installs a SKILL.md. Otherwise `chrome-agent --help`
+embeds a full LLM usage guide, and every error carries a `hint` naming the next action. Claude Code
+permissions: `{"permissions": {"allow": ["Bash(chrome-agent *)"]}}`.
 
 ## License
 

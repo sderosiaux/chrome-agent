@@ -3,20 +3,8 @@ use std::process::Command;
 mod common;
 use common::TestBrowser;
 
-fn binary() -> String {
-    let mut path = std::env::current_exe()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .to_path_buf();
-    path.push("chrome-agent");
-    path.to_string_lossy().into_owned()
-}
-
 fn run_cli(args: &[&str]) -> (String, String, i32) {
-    let output = Command::new(binary())
+    let output = Command::new(common::binary())
         .args(args)
         .output()
         .expect("Failed to run chrome-agent");
@@ -43,9 +31,10 @@ fn extract_json(browser: &str) -> Option<serde_json::Value> {
     }
     for line in stdout.lines() {
         if line.starts_with('{')
-            && let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
-                return Some(v);
-            }
+            && let Ok(v) = serde_json::from_str::<serde_json::Value>(line)
+        {
+            return Some(v);
+        }
     }
     None
 }
@@ -60,15 +49,13 @@ fn extract_json_with_args(browser: &str, args: &[&str]) -> Option<serde_json::Va
     }
     for line in stdout.lines() {
         if line.starts_with('{')
-            && let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
-                return Some(v);
-            }
+            && let Ok(v) = serde_json::from_str::<serde_json::Value>(line)
+        {
+            return Some(v);
+        }
     }
     None
 }
-
-
-// ─── Product table: should extract TR rows with links and prices ───
 
 #[test]
 fn extract_table_finds_product_rows() {
@@ -76,7 +63,9 @@ fn extract_table_finds_product_rows() {
         return;
     }
     let b = TestBrowser::new("ext-table");
-    if !goto_fixture(b.name(), "extract_table.html") { return; }
+    if !goto_fixture(b.name(), "extract_table.html") {
+        return;
+    }
 
     let json = extract_json(b.name());
 
@@ -88,14 +77,21 @@ fn extract_table_finds_product_rows() {
     assert!(items.len() >= 5, "Should return 5 items");
 
     let first = &items[0];
-    assert!(first.get("title").and_then(|v| v.as_str()).is_some(), "First item should have title: {first}");
-    assert!(first.get("url").and_then(|v| v.as_str()).is_some(), "First item should have URL: {first}");
+    assert!(
+        first.get("title").and_then(|v| v.as_str()).is_some(),
+        "First item should have title: {first}"
+    );
+    assert!(
+        first.get("url").and_then(|v| v.as_str()).is_some(),
+        "First item should have URL: {first}"
+    );
 
     let pattern = json["pattern"].as_str().unwrap_or("");
-    assert!(pattern.contains("TR") || pattern.contains("tr"), "Pattern should be TR-based, got: {pattern}");
+    assert!(
+        pattern.contains("TR") || pattern.contains("tr"),
+        "Pattern should be TR-based, got: {pattern}"
+    );
 }
-
-// ─── Blog cards: should extract article elements ───
 
 #[test]
 fn extract_cards_finds_articles() {
@@ -103,7 +99,9 @@ fn extract_cards_finds_articles() {
         return;
     }
     let b = TestBrowser::new("ext-cards");
-    if !goto_fixture(b.name(), "extract_cards.html") { return; }
+    if !goto_fixture(b.name(), "extract_cards.html") {
+        return;
+    }
 
     let json = extract_json(b.name());
 
@@ -121,13 +119,20 @@ fn extract_cards_finds_articles() {
 
     let first = &items[0];
     let title = first.get("title").and_then(|v| v.as_str()).unwrap_or("");
-    assert!(title.contains("Rust Async"), "First title should mention Rust Async, got: {title}");
+    assert!(
+        title.contains("Rust Async"),
+        "First title should mention Rust Async, got: {title}"
+    );
 
-    assert!(items.iter().any(|item| item.get("date").is_some()), "Should have date fields");
-    assert!(items.iter().any(|item| item.get("image").is_some()), "Should have image fields");
+    assert!(
+        items.iter().any(|item| item.get("date").is_some()),
+        "Should have date fields"
+    );
+    assert!(
+        items.iter().any(|item| item.get("image").is_some()),
+        "Should have image fields"
+    );
 }
-
-// ─── HN-like: should pick item-rows, not vote links or spacers ───
 
 #[test]
 fn extract_hn_like_finds_stories_not_vote_links() {
@@ -135,7 +140,9 @@ fn extract_hn_like_finds_stories_not_vote_links() {
         return;
     }
     let b = TestBrowser::new("ext-hn");
-    if !goto_fixture(b.name(), "extract_hn_like.html") { return; }
+    if !goto_fixture(b.name(), "extract_hn_like.html") {
+        return;
+    }
 
     let json = extract_json(b.name());
 
@@ -147,16 +154,20 @@ fn extract_hn_like_finds_stories_not_vote_links() {
 
     for item in items {
         let title = item.get("title").and_then(|v| v.as_str()).unwrap_or("");
-        assert!(!title.contains("▲") && title.len() > 5, "Title should be article, not vote: '{title}'");
+        assert!(
+            !title.contains("▲") && title.len() > 5,
+            "Title should be article, not vote: '{title}'"
+        );
     }
 
     for item in items {
         let url = item.get("url").and_then(|v| v.as_str()).unwrap_or("");
-        assert!(!url.contains("/vote/"), "URL should be article URL, not vote: {url}");
+        assert!(
+            !url.contains("/vote/"),
+            "URL should be article URL, not vote: {url}"
+        );
     }
 }
-
-// ─── E-commerce: should prefer product cards over nav/footer links ───
 
 #[test]
 fn extract_ecommerce_finds_products_not_nav() {
@@ -164,7 +175,9 @@ fn extract_ecommerce_finds_products_not_nav() {
         return;
     }
     let b = TestBrowser::new("ext-ecom");
-    if !goto_fixture(b.name(), "extract_ecommerce.html") { return; }
+    if !goto_fixture(b.name(), "extract_ecommerce.html") {
+        return;
+    }
 
     let json = extract_json(b.name());
 
@@ -175,17 +188,27 @@ fn extract_ecommerce_finds_products_not_nav() {
     assert!(count >= 4, "Should find 4 product cards, got {count}");
 
     let pattern = json["pattern"].as_str().unwrap_or("");
-    assert!(!pattern.to_uppercase().contains("NAV"), "Should not extract nav pattern: {pattern}");
+    assert!(
+        !pattern.to_uppercase().contains("NAV"),
+        "Should not extract nav pattern: {pattern}"
+    );
 
     let first = &items[0];
     let title = first.get("title").and_then(|v| v.as_str()).unwrap_or("");
-    assert!(title.len() > 5, "Product should have meaningful title, got: '{title}'");
+    assert!(
+        title.len() > 5,
+        "Product should have meaningful title, got: '{title}'"
+    );
 
-    assert!(items.iter().any(|item| item.get("price").is_some()), "Should have price fields");
-    assert!(items.iter().any(|item| item.get("image").is_some()), "Should have image fields");
+    assert!(
+        items.iter().any(|item| item.get("price").is_some()),
+        "Should have price fields"
+    );
+    assert!(
+        items.iter().any(|item| item.get("image").is_some()),
+        "Should have image fields"
+    );
 }
-
-// ─── Search results list ───
 
 #[test]
 fn extract_list_finds_search_results() {
@@ -193,7 +216,9 @@ fn extract_list_finds_search_results() {
         return;
     }
     let b = TestBrowser::new("ext-list");
-    if !goto_fixture(b.name(), "extract_list.html") { return; }
+    if !goto_fixture(b.name(), "extract_list.html") {
+        return;
+    }
 
     let json = extract_json(b.name());
 
@@ -204,17 +229,21 @@ fn extract_list_finds_search_results() {
     assert!(count >= 4, "Should find >=4 search results, got {count}");
 
     let pattern = json["pattern"].as_str().unwrap_or("");
-    assert!(pattern.contains("LI") || pattern.contains("li"), "Pattern should be LI-based, got: {pattern}");
+    assert!(
+        pattern.contains("LI") || pattern.contains("li"),
+        "Pattern should be LI-based, got: {pattern}"
+    );
 
     for (i, item) in items.iter().enumerate() {
         let title = item.get("title").and_then(|v| v.as_str()).unwrap_or("");
         let url = item.get("url").and_then(|v| v.as_str()).unwrap_or("");
-        assert!(title.len() > 5, "Item {i} should have title, got: '{title}'");
+        assert!(
+            title.len() > 5,
+            "Item {i} should have title, got: '{title}'"
+        );
         assert!(!url.is_empty(), "Item {i} should have URL");
     }
 }
-
-// ─── Nav-heavy page: should extract feature cards, not nav links ───
 
 #[test]
 fn extract_nested_nav_prefers_content_over_navigation() {
@@ -222,7 +251,9 @@ fn extract_nested_nav_prefers_content_over_navigation() {
         return;
     }
     let b = TestBrowser::new("ext-nav");
-    if !goto_fixture(b.name(), "extract_nested_nav.html") { return; }
+    if !goto_fixture(b.name(), "extract_nested_nav.html") {
+        return;
+    }
 
     let json = extract_json(b.name());
 
@@ -232,14 +263,18 @@ fn extract_nested_nav_prefers_content_over_navigation() {
 
     assert!(count >= 4, "Should find 4 feature cards, got {count}");
 
-    let titles: Vec<&str> = items.iter().filter_map(|item| item.get("title").and_then(|v| v.as_str())).collect();
+    let titles: Vec<&str> = items
+        .iter()
+        .filter_map(|item| item.get("title").and_then(|v| v.as_str()))
+        .collect();
     let nav_titles = ["Home", "Features", "Pricing", "Docs", "Blog", "Login"];
     for title in &titles {
-        assert!(!nav_titles.contains(title), "Should not extract nav link '{title}'");
+        assert!(
+            !nav_titles.contains(title),
+            "Should not extract nav link '{title}'"
+        );
     }
 }
-
-// ─── No pattern page: should return error ───
 
 #[test]
 fn extract_no_pattern_returns_error() {
@@ -247,23 +282,27 @@ fn extract_no_pattern_returns_error() {
         return;
     }
     let b = TestBrowser::new("ext-nopattern");
-    if !goto_fixture(b.name(), "extract_no_pattern.html") { return; }
+    if !goto_fixture(b.name(), "extract_no_pattern.html") {
+        return;
+    }
 
     let (stdout, _, code) = run_cli(&["--json", "--browser", b.name(), "extract"]);
 
     if code == 0 {
         for line in stdout.lines() {
             if line.starts_with('{')
-                && let Ok(json) = serde_json::from_str::<serde_json::Value>(line) {
-                    let items = json["items"].as_array().map_or(0, std::vec::Vec::len);
-                    assert!(items <= 1, "No-pattern page should have <=1 items, got {items}");
-                    break;
-                }
+                && let Ok(json) = serde_json::from_str::<serde_json::Value>(line)
+            {
+                let items = json["items"].as_array().map_or(0, std::vec::Vec::len);
+                assert!(
+                    items <= 1,
+                    "No-pattern page should have <=1 items, got {items}"
+                );
+                break;
+            }
         }
     }
 }
-
-// ─── Mixed page (dashboard): should extract activity feed ───
 
 #[test]
 fn extract_mixed_finds_activity_feed() {
@@ -271,7 +310,9 @@ fn extract_mixed_finds_activity_feed() {
         return;
     }
     let b = TestBrowser::new("ext-mixed");
-    if !goto_fixture(b.name(), "extract_mixed.html") { return; }
+    if !goto_fixture(b.name(), "extract_mixed.html") {
+        return;
+    }
 
     let json = extract_json(b.name());
 
@@ -280,11 +321,15 @@ fn extract_mixed_finds_activity_feed() {
     let count = json["count"].as_u64().unwrap_or(0);
 
     assert!(count >= 4, "Should find 4 activity items, got {count}");
-    assert!(items.iter().any(|item| item.get("date").is_some()), "Should have dates");
-    assert!(items.iter().any(|item| item.get("image").is_some()), "Should have images");
+    assert!(
+        items.iter().any(|item| item.get("date").is_some()),
+        "Should have dates"
+    );
+    assert!(
+        items.iter().any(|item| item.get("image").is_some()),
+        "Should have images"
+    );
 }
-
-// ─── Extract with --selector scoping ───
 
 #[test]
 fn extract_with_selector_scopes_correctly() {
@@ -292,17 +337,20 @@ fn extract_with_selector_scopes_correctly() {
         return;
     }
     let b = TestBrowser::new("ext-selector");
-    if !goto_fixture(b.name(), "extract_ecommerce.html") { return; }
+    if !goto_fixture(b.name(), "extract_ecommerce.html") {
+        return;
+    }
 
     let json = extract_json_with_args(b.name(), &["--selector", ".product-grid"]);
 
     if let Some(json) = json {
         let count = json["count"].as_u64().unwrap_or(0);
-        assert!(count >= 4, "Scoped extract should find 4 products, got {count}");
+        assert!(
+            count >= 4,
+            "Scoped extract should find 4 products, got {count}"
+        );
     }
 }
-
-// ─── Extract with --limit ───
 
 #[test]
 fn extract_limit_caps_results() {
@@ -310,7 +358,9 @@ fn extract_limit_caps_results() {
         return;
     }
     let b = TestBrowser::new("ext-limit");
-    if !goto_fixture(b.name(), "extract_list.html") { return; }
+    if !goto_fixture(b.name(), "extract_list.html") {
+        return;
+    }
 
     let json = extract_json_with_args(b.name(), &["--limit", "2"]);
 
@@ -322,7 +372,6 @@ fn extract_limit_caps_results() {
     }
 }
 
-// ─── Link-heavy nav: should prefer job listings over nav links ───
 // MDR heuristic: text-to-link ratio filters navigation regions
 
 #[test]
@@ -331,7 +380,9 @@ fn extract_link_heavy_nav_prefers_content() {
         return;
     }
     let b = TestBrowser::new("ext-linknav");
-    if !goto_fixture(b.name(), "extract_link_heavy_nav.html") { return; }
+    if !goto_fixture(b.name(), "extract_link_heavy_nav.html") {
+        return;
+    }
 
     let json = extract_json(b.name());
 
@@ -343,13 +394,17 @@ fn extract_link_heavy_nav_prefers_content() {
 
     for item in items {
         let title = item.get("title").and_then(|v| v.as_str()).unwrap_or("");
-        assert!(!title.starts_with("Page "), "Should not extract nav link '{title}'");
+        assert!(
+            !title.starts_with("Page "),
+            "Should not extract nav link '{title}'"
+        );
     }
 
-    assert!(items.iter().any(|item| item.get("date").is_some()), "Job listings should have dates");
+    assert!(
+        items.iter().any(|item| item.get("date").is_some()),
+        "Job listings should have dates"
+    );
 }
-
-// ─── FAQ definition list ───
 
 #[test]
 fn extract_faq_items() {
@@ -357,7 +412,9 @@ fn extract_faq_items() {
         return;
     }
     let b = TestBrowser::new("ext-faq");
-    if !goto_fixture(b.name(), "extract_definition_list.html") { return; }
+    if !goto_fixture(b.name(), "extract_definition_list.html") {
+        return;
+    }
 
     let json = extract_json(b.name());
 
@@ -369,11 +426,12 @@ fn extract_faq_items() {
 
     for (i, item) in items.iter().enumerate() {
         let title = item.get("title").and_then(|v| v.as_str()).unwrap_or("");
-        assert!(title.len() > 5, "FAQ item {i} should have question, got: '{title}'");
+        assert!(
+            title.len() > 5,
+            "FAQ item {i} should have question, got: '{title}'"
+        );
     }
 }
-
-// ─── Semantic classes: classes matching /card|item|repo/ boost detection ───
 
 #[test]
 fn extract_semantic_classes_boost() {
@@ -381,7 +439,9 @@ fn extract_semantic_classes_boost() {
         return;
     }
     let b = TestBrowser::new("ext-semclass");
-    if !goto_fixture(b.name(), "extract_semantic_classes.html") { return; }
+    if !goto_fixture(b.name(), "extract_semantic_classes.html") {
+        return;
+    }
 
     let json = extract_json(b.name());
 
@@ -397,10 +457,11 @@ fn extract_semantic_classes_boost() {
         "First item should be repo, got: '{first_title}'"
     );
 
-    assert!(items.iter().any(|item| item.get("date").is_some()), "Should have dates");
+    assert!(
+        items.iter().any(|item| item.get("date").is_some()),
+        "Should have dates"
+    );
 }
-
-// ─── Ads interleaved: should extract articles, not ads ───
 
 #[test]
 fn extract_ads_interleaved_finds_articles() {
@@ -408,7 +469,9 @@ fn extract_ads_interleaved_finds_articles() {
         return;
     }
     let b = TestBrowser::new("ext-ads");
-    if !goto_fixture(b.name(), "extract_ads_interleaved.html") { return; }
+    if !goto_fixture(b.name(), "extract_ads_interleaved.html") {
+        return;
+    }
 
     let json = extract_json(b.name());
 
@@ -426,13 +489,17 @@ fn extract_ads_interleaved_finds_articles() {
 
     for item in items {
         let title = item.get("title").and_then(|v| v.as_str()).unwrap_or("");
-        assert!(!title.contains("Sponsored"), "Should not extract ads: '{title}'");
+        assert!(
+            !title.contains("Sponsored"),
+            "Should not extract ads: '{title}'"
+        );
     }
 
-    assert!(items.iter().any(|item| item.get("date").is_some()), "Should have dates");
+    assert!(
+        items.iter().any(|item| item.get("date").is_some()),
+        "Should have dates"
+    );
 }
-
-// ─── Flat table (leaderboard) ───
 
 #[test]
 fn extract_flat_table_rows() {
@@ -440,7 +507,9 @@ fn extract_flat_table_rows() {
         return;
     }
     let b = TestBrowser::new("ext-ftable");
-    if !goto_fixture(b.name(), "extract_flat_table.html") { return; }
+    if !goto_fixture(b.name(), "extract_flat_table.html") {
+        return;
+    }
 
     let json = extract_json(b.name());
 
@@ -452,8 +521,14 @@ fn extract_flat_table_rows() {
 
     let first = &items[0];
     let title = first.get("title").and_then(|v| v.as_str()).unwrap_or("");
-    assert!(title.contains("alice") || title.contains("dev"), "First should be username, got: '{title}'");
+    assert!(
+        title.contains("alice") || title.contains("dev"),
+        "First should be username, got: '{title}'"
+    );
 
     let first_url = first.get("url").and_then(|v| v.as_str()).unwrap_or("");
-    assert!(first_url.contains("/u/"), "Should link to user profile, got: {first_url}");
+    assert!(
+        first_url.contains("/u/"),
+        "Should link to user profile, got: {first_url}"
+    );
 }

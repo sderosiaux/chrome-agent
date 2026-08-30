@@ -1,33 +1,21 @@
-//! What an action says when it dispatched nothing.
+//! What an action says when it dispatched nothing, across the hit test's refusal path.
 //!
-//! Two failures measured on real sites, both living in the hit test's refusal path.
-//!
-//! 1. A consent wall pinned above the top of the viewport on a document whose scroll is
-//!    locked. The aim point was `(378, -14)` on seven attempts — three of them on a fresh
-//!    profile — to the pixel, and the tool answered `unknown / scroll_not_settled` →
-//!    `next: retry`. A stable failure classified as a transient one is an order to loop.
-//!
-//! 2. `--on-intercept refuse` answered with `{"ok":false,"error":"…"}` and nothing else: no
-//!    `hint` (which `hints.rs` promises every error), no `intercepted_by`, no `next`. The
-//!    receiver existed only inside an English sentence, so the mode that refuses to act — the
-//!    one where the agent most needs to know what to do — was the one that helped least.
+//! Two halves: a stable miss must not be classified as a transient one, and `--on-intercept
+//! refuse` must carry `hint`, `intercepted_by` and `next`, not just prose in `error`.
 
 use std::io::Write as _;
 use std::process::{Command, Stdio};
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 mod common;
 use common::TestBrowser;
 
-fn binary() -> String {
-    let mut path = std::env::current_exe().unwrap().parent().unwrap().parent().unwrap().to_path_buf();
-    path.push("chrome-agent");
-    path.to_string_lossy().into_owned()
-}
-
 fn run_cli(args: &[&str]) -> (String, i32) {
-    let output = Command::new(binary()).args(args).output().expect("Failed to run chrome-agent");
+    let output = Command::new(common::binary())
+        .args(args)
+        .output()
+        .expect("Failed to run chrome-agent");
     (
         String::from_utf8_lossy(&output.stdout).to_string(),
         output.status.code().unwrap_or(-1),
@@ -35,7 +23,7 @@ fn run_cli(args: &[&str]) -> (String, i32) {
 }
 
 fn run_batch(browser: &str, commands: &Value) -> Value {
-    let mut child = Command::new(binary())
+    let mut child = Command::new(common::binary())
         .args(["--browser", browser, "--json", "batch"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -84,14 +72,17 @@ struct PipeSession {
 impl PipeSession {
     fn start(browser: &str) -> Self {
         use std::io::BufRead as _;
-        let mut child = Command::new(binary())
+        let mut child = Command::new(common::binary())
             .args(["--browser", browser, "pipe"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()
             .expect("spawn pipe");
         let stdout = child.stdout.take().expect("pipe stdout");
-        Self { child, responses: std::io::BufReader::new(stdout).lines() }
+        Self {
+            child,
+            responses: std::io::BufReader::new(stdout).lines(),
+        }
     }
 
     fn send(&mut self, cmd: &Value) -> Value {
@@ -114,14 +105,10 @@ impl Drop for PipeSession {
     }
 }
 
-// ---------------------------------------------------------------------------
-// 1. A miss that will not change on its own
-// ---------------------------------------------------------------------------
+// --- 1. A miss that will not change on its own ---
 
-/// The control is inside a `position: fixed` wall whose top edge is above the viewport, on a
-/// document that cannot scroll. Every reading of the aim point agrees with the last one, and
-/// every one of them is off screen: that is a stable miss, and the only thing `retry` can do
-/// with it is spin.
+/// A `position: fixed` wall above the viewport on a document that cannot scroll: every
+/// reading agrees with the last, and every one is off screen.
 #[test]
 fn a_pinned_control_above_the_viewport_is_a_stable_miss_not_a_transient_one() {
     let b = TestBrowser::new("refusal-pinned");
@@ -136,13 +123,19 @@ fn a_pinned_control_above_the_viewport_is_a_stable_miss_not_a_transient_one() {
         "the readings converged, so the point is not \"still moving\": {response}"
     );
     assert_eq!(response["verdict"], "unknown", "{response}");
-    assert_eq!(response["verdict_reason"], "aim_point_off_target", "{response}");
+    assert_eq!(
+        response["verdict_reason"], "aim_point_off_target",
+        "{response}"
+    );
     assert_eq!(
         response["next"], "inspect",
         "a stable miss may never answer `retry` — the retry measures the same coordinate: {response}"
     );
     assert!(
-        response["message"].as_str().unwrap_or_default().starts_with("Did not click"),
+        response["message"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("Did not click"),
         "nothing was dispatched, so the message may not say \"Clicked\": {response}"
     );
     assert_eq!(
@@ -151,10 +144,7 @@ fn a_pinned_control_above_the_viewport_is_a_stable_miss_not_a_transient_one() {
         "refusing to aim means refusing to dispatch"
     );
 
-    // The property the classification rests on, checked rather than assumed: this answer does
-    // not change on its own, so an agent that took the old `retry` never stopped. The scroll
-    // the old hint recommended is the one the wall makes useless — it succeeds and moves
-    // nothing, because the wall is `position: fixed` and the document's scroll is locked.
+    // The property the classification rests on: the scroll succeeds and moves nothing.
     let (_, code) = run_cli(&["--browser", b.name(), "scroll", uid.as_str()]);
     assert_eq!(code, 0, "the scroll itself succeeds — and moves nothing");
     let again = click_json(b.name(), &[uid.as_str()]);
@@ -162,17 +152,17 @@ fn a_pinned_control_above_the_viewport_is_a_stable_miss_not_a_transient_one() {
         again["verdict_reason"], "aim_point_off_target",
         "the second attempt measures the same point as the first: {again}"
     );
-    assert_eq!(again["aim"], response["aim"], "to the pixel: {again} vs {response}");
+    assert_eq!(
+        again["aim"], response["aim"],
+        "to the pixel: {again} vs {response}"
+    );
     assert!(
         again["aim"][1].as_f64().unwrap_or(0.0) < 0.0,
         "the aim point is above the top edge of the viewport: {again}"
     );
 }
 
-/// The same miss in the other axis. The first site measured put the aim point above the top
-/// edge (`y = -14`); a second, independent one put it past the LEFT edge (`x = -263.7`, y inside
-/// the viewport) — four identical attempts, `scroll` without effect. A classification that reads
-/// one edge and not the other would answer `retry` here and loop exactly as before.
+/// The same stable miss in the other axis: past the LEFT edge, y inside the viewport.
 #[test]
 fn a_control_pinned_past_the_left_edge_is_the_same_stable_miss() {
     let b = TestBrowser::new("refusal-drawer");
@@ -183,7 +173,10 @@ fn a_control_pinned_past_the_left_edge_is_the_same_stable_miss() {
     let response = click_json(b.name(), &[uid.as_str()]);
 
     assert_eq!(response["delivery"], "off_target", "{response}");
-    assert_eq!(response["verdict_reason"], "aim_point_off_target", "{response}");
+    assert_eq!(
+        response["verdict_reason"], "aim_point_off_target",
+        "{response}"
+    );
     assert_eq!(response["next"], "inspect", "{response}");
     let aim = &response["aim"];
     assert!(
@@ -194,11 +187,14 @@ fn a_control_pinned_past_the_left_edge_is_the_same_stable_miss() {
         aim[1].as_f64().unwrap_or(-1.0) >= 0.0,
         "and its y is inside the viewport, which is what makes it a different reading: {response}"
     );
-    assert_eq!(eval(b.name(), "window.receiver"), Value::Null, "nothing was dispatched");
+    assert_eq!(
+        eval(b.name(), "window.receiver"),
+        Value::Null,
+        "nothing was dispatched"
+    );
 }
 
-/// The transient shape still answers `retry`: it is the one rung that licenses a repeat, and
-/// splitting the stable case out of it must not take the vocabulary with it.
+/// The transient shape still answers `retry`, the one rung that licenses a repeat.
 #[test]
 fn a_point_still_moving_keeps_its_retry() {
     let b = TestBrowser::new("refusal-smooth");
@@ -207,37 +203,48 @@ fn a_point_still_moving_keeps_its_retry() {
     }
     let response = click_json(b.name(), &["--selector", "#target"]);
     if response["delivery"] == "not_settled" {
-        assert_eq!(response["verdict_reason"], "scroll_not_settled", "{response}");
+        assert_eq!(
+            response["verdict_reason"], "scroll_not_settled",
+            "{response}"
+        );
         assert_eq!(response["next"], "retry", "{response}");
     } else {
-        // The scroll finished before the probe: nothing to assert about a settle that did not
-        // happen, and the fixture's own suite covers the landing.
-        assert_ne!(response["verdict_reason"], "scroll_not_settled", "{response}");
+        // The scroll finished before the probe: no settle to assert about.
+        assert_ne!(
+            response["verdict_reason"], "scroll_not_settled",
+            "{response}"
+        );
     }
 }
 
-// ---------------------------------------------------------------------------
-// 2. A refusal that names what it refused
-// ---------------------------------------------------------------------------
+// --- 2. A refusal that names what it refused ---
 
-/// Every field the caller has to branch on, in the mode that dispatches nothing. `error` is
-/// prose; `intercepted_by` and `next` are not, and an agent should not have to parse a
-/// sentence to learn which element to close.
+/// Every field the caller has to branch on, in the mode that dispatches nothing.
 fn assert_refusal_payload(response: &Value, mode: &str) {
     assert_eq!(response["ok"], Value::Bool(false), "{mode}: {response}");
     assert_eq!(response["delivery"], "intercepted", "{mode}: {response}");
     assert_eq!(
-        response["dispatched"], Value::Bool(false),
+        response["dispatched"],
+        Value::Bool(false),
         "{mode}: a refusal has to say that nothing was sent: {response}"
     );
-    assert_eq!(response["intercepted_by"]["id"], "scrim", "{mode}: {response}");
-    assert_eq!(response["intercepted_by"]["tag"], "DIV", "{mode}: {response}");
+    assert_eq!(
+        response["intercepted_by"]["id"], "scrim",
+        "{mode}: {response}"
+    );
+    assert_eq!(
+        response["intercepted_by"]["tag"], "DIV",
+        "{mode}: {response}"
+    );
     assert!(
         response["uid"].is_string(),
         "{mode}: a refusal names the node it aimed at, like every other targeted action: {response}"
     );
     assert_eq!(response["verdict"], "intercepted", "{mode}: {response}");
-    assert_eq!(response["verdict_reason"], "hit_test_receiver", "{mode}: {response}");
+    assert_eq!(
+        response["verdict_reason"], "hit_test_receiver",
+        "{mode}: {response}"
+    );
     assert_eq!(
         response["next"], "dismiss",
         "{mode}: the receiver is what stands between the caller and the action: {response}"
@@ -252,7 +259,10 @@ fn assert_refusal_payload(response: &Value, mode: &str) {
         "{mode}: the hint owes one imperative command: {hint}"
     );
     assert!(
-        response["error"].as_str().unwrap_or_default().contains("div#scrim"),
+        response["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("div#scrim"),
         "{mode}: {response}"
     );
 }
@@ -265,10 +275,19 @@ fn a_refused_interception_carries_the_payload_a_dispatch_would_have() {
     }
     let _ = eval(b.name(), "window.receiver = null; 1");
     let (stdout, code) = run_cli(&[
-        "--browser", b.name(), "--json", "--on-intercept", "refuse",
-        "click", "--selector", "#target",
+        "--browser",
+        b.name(),
+        "--json",
+        "--on-intercept",
+        "refuse",
+        "click",
+        "--selector",
+        "#target",
     ]);
-    assert_ne!(code, 0, "a refusal is a failure the caller has to handle: {stdout}");
+    assert_ne!(
+        code, 0,
+        "a refusal is a failure the caller has to handle: {stdout}"
+    );
     let response: Value = serde_json::from_str(&stdout).expect("JSON error response");
     assert_refusal_payload(&response, "cli");
     assert_eq!(
@@ -278,8 +297,6 @@ fn a_refused_interception_carries_the_payload_a_dispatch_would_have() {
     );
 }
 
-/// Pipe and batch share the dispatcher, and both used to lose the same fields on the same
-/// path. One refusal, three modes, one shape.
 #[test]
 fn pipe_and_batch_refuse_with_the_same_fields_as_the_cli() {
     let b = TestBrowser::new("refusal-modes");
@@ -316,7 +333,10 @@ fn uid_for(browser: &str, needles: &[&str]) -> String {
     let (stdout, code) = run_cli(&["--browser", browser, "--json", "inspect"]);
     assert_eq!(code, 0, "{stdout}");
     let snapshot: Value = serde_json::from_str(&stdout).expect("JSON inspect");
-    let text = snapshot["snapshot"].as_str().unwrap_or_default().to_string();
+    let text = snapshot["snapshot"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
     text.lines()
         .find(|line| needles.iter().all(|n| line.contains(n)))
         .and_then(|line| line.trim_start().strip_prefix("uid="))

@@ -1,29 +1,26 @@
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
 use crate::element_ref::ElementRef;
 
-const SESSION_FILE: &str = "sessions.json";
+pub const SESSION_FILE: &str = "sessions.json";
 
 /// Top-level session state persisted to disk.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct SessionStore {
     #[serde(default)]
     pub browsers: HashMap<String, BrowserSession>,
-    /// Browser names present when this store was loaded. Used at save time to
-    /// distinguish entries this process deliberately removed (delete from disk)
-    /// from entries other processes added after our load (leave alone).
+    /// Browser names present at load time. A save deletes only names this process dropped.
+    /// `pub(crate)` for `session_save::save_to`, the only reader.
     #[serde(skip)]
-    loaded_names: HashSet<String>,
-    /// Serialized value of each browser as we loaded it. At save time an entry that
-    /// still matches its loaded value is one we never touched, so we leave whatever
-    /// is on disk instead of republishing our copy. Without this, an agent that only
-    /// read the file would write its stale view of *other* agents' browsers back over
-    /// their newer state — a lost update between parallel `--browser <name>` agents.
+    pub(crate) loaded_names: HashSet<String>,
+    /// Serialized value of each browser as loaded. An entry still matching it was never
+    /// touched here, so the save keeps the on-disk copy; republishing it is a lost update
+    /// between parallel `--browser <name>` agents.
     #[serde(skip)]
-    loaded_entries: HashMap<String, String>,
+    pub(crate) loaded_entries: HashMap<String, String>,
 }
 
 /// Per-browser session state.
@@ -37,8 +34,7 @@ pub struct BrowserSession {
     #[serde(default)]
     pub proxy_server: Option<String>,
     /// Extra `--chrome-arg` flags this browser was launched with, in the order given.
-    /// Fixed at launch like `proxy_server` — a running Chrome cannot pick up a new one,
-    /// so a mismatch on reconnect is refused rather than silently reapplied.
+    /// Fixed at launch like `proxy_server`; a mismatch on reconnect is refused.
     #[serde(default)]
     pub chrome_args: Vec<String>,
     #[serde(default)]
@@ -56,22 +52,42 @@ pub struct PageSession {
     pub uid_map: HashMap<String, ElementRef>,
     #[serde(default)]
     pub last_snapshot: Option<String>,
-    /// Document `last_snapshot` was taken from. uids are `backendNodeId`s and those
-    /// counters overlap between documents, so `diff` needs this to tell "the page
-    /// changed under me" from "I am looking at a different page entirely".
-    /// `(frameId, loaderId)` of the document `last_snapshot` was taken from. The loader id
-    /// is the only signal that moves exactly when the document is replaced; a URL moves on
-    /// a fragment jump and stays put across a reload.
+    /// `(frameId, loaderId)` of the document `last_snapshot` was taken from. `backendNodeId`
+    /// counters overlap between documents, so `diff` needs this to tell "the page changed"
+    /// from "different document". The loader id moves exactly when the document is replaced.
     #[serde(default)]
     pub last_snapshot_frame: Option<String>,
     #[serde(default)]
     pub last_snapshot_loader: Option<String>,
-    /// Requested device metrics for this named page. They are reapplied to its current target on
-    /// each connection. A Chrome relaunch replaces the surrounding browser entry, so the metrics
-    /// expire with the browser process rather than leaking into a new one.
+    /// Requested device metrics, reapplied to this page's current target on each connection.
+    /// A Chrome relaunch replaces the browser entry, so they expire with the process.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device_emulation: Option<crate::emulation::DeviceEmulation>,
 }
+
+impl PageSession {
+    /// Take this reading as the page's baseline: the uid map, the text `diff` compares against,
+    /// and the identity that says whether the two are even comparable.
+    ///
+    /// The four assignments were copy-pasted at ten sites across `run.rs`, `run_helpers.rs`,
+    /// `pipe_dispatch.rs` and `pipe_report.rs` — the surface area of the seven-path baseline bug
+    /// (`.claude/rules/snapshot-and-inspect.md`). A site that stores three of the four is the
+    /// shape that bug took, and there is now no way to write one.
+    pub fn store_snapshot(&mut self, snapshot: crate::snapshot::Snapshot) {
+        self.uid_map = snapshot.uid_map;
+        self.last_snapshot = Some(snapshot.text);
+        let (frame, loader) = snapshot
+            .identity
+            .map_or((None, None), |(f, l)| (Some(f), Some(l)));
+        self.last_snapshot_frame = frame;
+        self.last_snapshot_loader = loader;
+    }
+}
+
+/// The disk halves live beside this file: reading in `session_load.rs`, writing (the lock, the
+/// read-merge-write, the dead-pid prune) in `session_save.rs`. Re-exported so call sites keep
+/// spelling them `session::X`.
+pub use crate::session_save::{FileLock, Liveness, cleanup_stale, liveness, save_to};
 
 /// Load the session store from disk. Returns empty store if file doesn't exist.
 pub fn load_session() -> Result<SessionStore, SessionError> {
@@ -83,11 +99,9 @@ pub fn load_session() -> Result<SessionStore, SessionError> {
 pub fn save_session(store: &mut SessionStore) -> Result<(), SessionError> {
     let result = save_to(&session_path()?, store);
     if result.is_ok() {
-        // A pid that is now on disk is reachable by `close`, `status` and the interrupt
-        // handler, so it is no longer this invocation's to reap. Disarming here rather
-        // than at each call site is the point: the write that makes a browser reachable
-        // is the same event that ends the window, and a save path added later inherits
-        // it instead of having to remember. See `kill::UNPERSISTED`.
+        // A pid on disk is reachable by `close`/`status`/the interrupt handler, so it is no
+        // longer this invocation's to reap. Disarmed here, not at call sites, so any future
+        // save path inherits it. See `kill::UNPERSISTED`.
         for pid in store.browsers.values().filter_map(|b| b.pid) {
             crate::kill::disarm(pid);
         }
@@ -96,297 +110,27 @@ pub fn save_session(store: &mut SessionStore) -> Result<(), SessionError> {
 }
 
 impl SessionStore {
-    /// Take this view as the baseline the next save merges against: which names we hold,
-    /// and the exact bytes of each entry. The save path reads the first to tell an entry
-    /// this process deliberately dropped from one another agent added after our load, and
-    /// the second to tell an entry we changed from one we merely read — republishing the
-    /// latter is the lost update between parallel `--browser <name>` agents.
-    ///
-    /// One method rather than two assignments in three places, because the two fields only
-    /// mean anything together: a name in `loaded_names` with no bytes in `loaded_entries`
-    /// reads as "changed" and gets republished.
+    /// Baseline the next save merges against: names held, plus the exact bytes of each
+    /// entry. Both fields must be set together; a name with no bytes reads as "changed"
+    /// and gets republished.
     pub fn take_baseline(&mut self) {
         self.loaded_names = self.browsers.keys().cloned().collect();
         self.loaded_entries = self
             .browsers
             .iter()
             .filter_map(|(name, entry)| {
-                serde_json::to_string(entry).ok().map(|json| (name.clone(), json))
+                serde_json::to_string(entry)
+                    .ok()
+                    .map(|json| (name.clone(), json))
             })
             .collect();
     }
-}
-
-/// Persist `store` to `path` under an exclusive lock, merging with whatever is
-/// currently on disk. This is the concurrency-safe core:
-///
-/// 1. Take an exclusive advisory lock so no two writers interleave.
-/// 2. Re-read the on-disk store (another agent may have written since we loaded).
-/// 3. Delete only the browsers this process held at load but no longer holds
-///    (e.g. `close`), leaving entries other agents added after our load intact.
-/// 4. Upsert this process's browsers.
-/// 5. Drop every entry whose browser process is provably gone (`prune_dead`).
-/// 6. Atomically replace the file.
-///
-/// Crate-visible (this module is private, so `pub` here reaches no further) for step 2's
-/// sake: what that re-read does with each of its three outcomes is
-/// the subject of `session_load`, and the tests that pin it have to drive the merge that
-/// consumes it. Nothing outside this crate can reach it.
-pub fn save_to(path: &Path, store: &mut SessionStore) -> Result<(), SessionError> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| SessionError("session path has no parent directory".into()))?;
-    std::fs::create_dir_all(parent)
-        .map_err(|e| SessionError(format!("Failed to create dir: {e}")))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
-    }
-
-    // Serialize concurrent writers for the read-merge-write critical section.
-    let _lock = FileLock::acquire(&parent.join("sessions.lock"))?;
-
-    // Merge our changes onto the freshest on-disk state. This read used to be
-    // `.unwrap_or_default()`, which made a store this process could not READ — the file
-    // intact, every other agent still reading it fine — into an empty one, and the merge
-    // below then published this process's single browser as the whole store. The three
-    // outcomes are separated in `session_load::reread_for_merge`, which explains why only
-    // the unreadable one refuses; the `?` here is the refusal, taken while the lock is held
-    // and before anything has been written, so the file keeps exactly what it had.
-    let mut merged = crate::session_load::reread_for_merge(path)?;
-    for name in &store.loaded_names {
-        if !store.browsers.contains_key(name) {
-            // Compare-and-delete: the drop was decided about the entry we loaded. If
-            // another writer republished this name since (e.g. relaunched the browser
-            // with a new pid while our stale-cleanup was in flight), the on-disk entry
-            // is not the one we judged dead — deleting it would orphan a live Chrome.
-            let on_disk_is_what_we_loaded = merged
-                .browsers
-                .get(name)
-                .and_then(|entry| serde_json::to_string(entry).ok())
-                .is_none_or(|json| store.loaded_entries.get(name) == Some(&json));
-            if on_disk_is_what_we_loaded {
-                merged.browsers.remove(name);
-            }
-        }
-    }
-    for (name, entry) in &store.browsers {
-        // Untouched since load: another agent may have advanced it while we were
-        // working, so keep the on-disk value rather than republishing our stale copy.
-        let untouched = serde_json::to_string(entry)
-            .ok()
-            .is_some_and(|json| store.loaded_entries.get(name) == Some(&json));
-        if untouched && merged.browsers.contains_key(name) {
-            continue;
-        }
-        merged.browsers.insert(name.clone(), entry.clone());
-    }
-
-    // Runs after the upsert so the test is applied to the pids actually about to be
-    // written, including this process's own. A browser that died mid-command leaves
-    // nothing worth persisting.
-    let pruned = prune_dead(&mut merged.browsers);
-    // Stop carrying the dropped entries in memory: the baseline below is taken from
-    // `store`, and an entry still present there would be re-upserted by our next save
-    // (the upsert branch treats "untouched and absent from disk" as ours to publish).
-    for name in &pruned {
-        store.browsers.remove(name);
-    }
-
-    let json = serde_json::to_string_pretty(&merged)
-        .map_err(|e| SessionError(format!("Failed to serialize session: {e}")))?;
-
-    // Atomic replace via a per-process temp file (unique name avoids clashing
-    // with a crashed process's leftover temp; the lock covers same-process races).
-    let tmp_path = path.with_extension(format!("json.tmp.{}", std::process::id()));
-    std::fs::write(&tmp_path, &json)
-        .map_err(|e| SessionError(format!("Failed to write {}: {e}", tmp_path.display())))?;
-    // Restrict permissions before publishing: the file holds WebSocket URLs that
-    // grant full browser control. Only the owning user should read it.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600));
-    }
-    std::fs::rename(&tmp_path, path).map_err(|e| {
-        // The temp name is per-PID, so nothing else will ever reclaim it.
-        let _ = std::fs::remove_file(&tmp_path);
-        SessionError(format!("Failed to rename session file: {e}"))
-    })?;
-
-    // Profile directories, judged against the store we just published and still under the
-    // lock that makes that store a fixed point. After the rename, not before: a sweep is
-    // housekeeping and must not delay or endanger the write it rides on.
-    crate::profiles::sweep_orphans(
-        &parent.join("browsers"),
-        &merged.browsers.keys().cloned().collect(),
-        &crate::profiles::Limits::default(),
-    );
-
-    // Our view is now the baseline for subsequent saves in this process.
-    store.take_baseline();
-
-    Ok(())
 }
 
 /// Where `browser::browser_profile_dir` puts profiles. Exposed so `close --purge-orphans`
 /// sweeps the same directory the save path does.
 pub fn browsers_dir() -> Result<PathBuf, SessionError> {
     Ok(dev_browser_dir()?.join("browsers"))
-}
-
-/// Exclusive advisory file lock, released on drop. Best-effort no-op on
-/// non-Unix platforms (single-user desktop usage).
-#[cfg(unix)]
-struct FileLock(std::fs::File);
-
-#[cfg(unix)]
-impl FileLock {
-    fn acquire(path: &Path) -> Result<Self, SessionError> {
-        use std::os::unix::io::AsRawFd;
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(path)
-            .map_err(|e| SessionError(format!("Failed to open lock {}: {e}", path.display())))?;
-        // SAFETY: flock on a valid fd only takes an advisory lock; no memory unsafety.
-        #[allow(unsafe_code)]
-        let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
-        if rc != 0 {
-            return Err(SessionError(format!(
-                "Failed to lock session store: {}",
-                std::io::Error::last_os_error()
-            )));
-        }
-        Ok(Self(file))
-    }
-}
-
-#[cfg(unix)]
-impl Drop for FileLock {
-    fn drop(&mut self) {
-        use std::os::unix::io::AsRawFd;
-        // SAFETY: unlocking a valid fd we hold; no memory unsafety.
-        #[allow(unsafe_code)]
-        unsafe {
-            libc::flock(self.0.as_raw_fd(), libc::LOCK_UN);
-        }
-    }
-}
-
-#[cfg(not(unix))]
-struct FileLock;
-
-#[cfg(not(unix))]
-impl FileLock {
-    fn acquire(_path: &Path) -> Result<Self, SessionError> {
-        Ok(Self)
-    }
-}
-
-/// Drop every entry whose browser process is provably gone, returning the names
-/// dropped. Called on the merged map inside the exclusive lock, so the pid it tests
-/// is the pid on disk at that instant.
-///
-/// Nothing ever removed an entry whose Chrome had exited — `close` removes only the
-/// browser it is given a name for — and each entry carries a `uid_map` plus a
-/// `last_snapshot` per page. Measured on a developer machine: 5,212,694 bytes, 2131
-/// entries, 2123 of them naming pids the kernel reports as gone, parsed *and*
-/// rewritten by every invocation including read-only ones. After one save: 7,827
-/// bytes, 8 entries, and `text --selector body` on a warm browser went from 0.38 s
-/// to under 0.01 s.
-fn prune_dead(browsers: &mut HashMap<String, BrowserSession>) -> Vec<String> {
-    let dead: Vec<String> = browsers
-        .iter()
-        .filter(|(_, session)| is_provably_dead(session))
-        .map(|(name, _)| name.clone())
-        .collect();
-    for name in &dead {
-        browsers.remove(name);
-    }
-    dead
-}
-
-/// Whether an entry may be dropped. Deliberately one-sided: keeping a stale entry
-/// costs bytes, deleting a live one costs the caller its browser.
-///
-/// - `pid: None` is kept unconditionally and without a probe. Both `--connect` and a
-///   managed reconnect through `DevToolsActivePort` store no pid (`browser.rs`), so
-///   "no pid" carries no information about liveness — and a probe here would put an
-///   HTTP round trip per entry on the path of every save.
-/// - A pid the OS will not classify is kept. See [`Liveness`].
-fn is_provably_dead(session: &BrowserSession) -> bool {
-    session.pid.is_some_and(|pid| liveness(pid) == Liveness::Dead)
-}
-
-/// What the OS will say about a pid. `Unknown` is not a shrug that gets rounded to
-/// `Dead`: `EPERM` means the process exists under another uid, and a recycled pid
-/// reads as `Alive` under a name that Chrome no longer holds. Both keep the entry —
-/// a stale entry is inert, and the launch path already relaunches over one.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Liveness {
-    Alive,
-    Dead,
-    Unknown,
-}
-
-pub fn liveness(pid: u32) -> Liveness {
-    #[cfg(unix)]
-    {
-        // kill() reads a non-positive pid as a process *group*, so those are not a
-        // question about one process and must not be answered as one.
-        let Ok(raw) = libc::pid_t::try_from(pid) else {
-            return Liveness::Unknown;
-        };
-        if raw <= 0 {
-            return Liveness::Unknown;
-        }
-        // SAFETY: kill(pid, 0) only checks existence and permission. No signal sent.
-        #[allow(unsafe_code)]
-        let rc = unsafe { libc::kill(raw, 0) };
-        if rc == 0 {
-            return Liveness::Alive;
-        }
-        if std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
-            Liveness::Dead
-        } else {
-            Liveness::Unknown
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        // No portable probe wired here, so no entry is ever provably dead and the
-        // store is never pruned. Growth is the previous behaviour, not a regression.
-        let _ = pid;
-        Liveness::Unknown
-    }
-}
-
-/// Remove stale browser sessions where the process is no longer running
-/// or the WebSocket endpoint is unreachable.
-pub fn cleanup_stale(store: &mut SessionStore) {
-    store.browsers.retain(|_name, session| {
-        if let Some(pid) = session.pid {
-            is_process_alive(pid)
-        } else {
-            // External connection (--connect) — probe HTTP endpoint
-            is_ws_reachable(&session.ws_endpoint)
-        }
-    });
-}
-
-/// Quick check if a WebSocket endpoint's Chrome is still alive
-/// by probing the HTTP /json/version endpoint (same host:port).
-fn is_ws_reachable(ws_url: &str) -> bool {
-    let http_url = crate::browser::extract_http_from_ws(ws_url);
-    let version_url = format!("{http_url}/json/version");
-    let agent = ureq::Agent::config_builder()
-        .timeout_global(Some(std::time::Duration::from_millis(500)))
-        .build()
-        .new_agent();
-    agent.get(&version_url).call().is_ok()
 }
 
 /// Ensure a browser session entry exists, returning a mutable ref.
@@ -415,11 +159,8 @@ pub fn ensure_browser<'a>(
 
 /// Guard proxy compatibility when reconnecting to a live named browser.
 ///
-/// A managed browser's proxy is fixed at launch, so a running browser cannot
-/// change it. When no proxy is requested (the common case for follow-up
-/// commands), we inherit the browser's existing proxy silently. We only refuse
-/// when the caller explicitly asks for a *different* proxy than the one the
-/// browser was launched with.
+/// A managed browser's proxy is fixed at launch. No proxy requested inherits the existing
+/// one silently; only an explicitly *different* proxy is refused.
 pub fn ensure_proxy_compatible(
     browser: &BrowserSession,
     requested_proxy: Option<&str>,
@@ -436,8 +177,8 @@ pub fn ensure_proxy_compatible(
     ))
 }
 
-/// `--chrome-arg` compatibility lives in `chrome_args.rs` (split for the 1000-line cap);
-/// re-exported so call sites keep spelling it `session::ensure_chrome_args_compatible`.
+/// `--chrome-arg` compatibility lives in `chrome_args.rs`, re-exported so call sites keep
+/// spelling it `session::ensure_chrome_args_compatible`.
 pub use crate::chrome_args::ensure_chrome_args_compatible;
 
 /// Ensure a page session entry exists, returning a mutable ref.
@@ -484,325 +225,41 @@ fn dev_browser_dir() -> Result<PathBuf, SessionError> {
         .ok_or_else(|| SessionError("Could not determine home directory".into()))
 }
 
-/// Treats anything short of a definite "no such process" as alive, so `cleanup_stale`
-/// keeps whatever [`liveness`] could not classify — the same bias as [`is_provably_dead`].
-fn is_process_alive(pid: u32) -> bool {
-    liveness(pid) != Liveness::Dead
-}
-
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
 pub struct SessionError(pub String);
 
+/// A minimal entry, shared with `session_save`'s tests so both halves build the same fixture.
+#[cfg(test)]
+pub fn browser_fixture(ws: &str) -> BrowserSession {
+    BrowserSession {
+        ws_endpoint: ws.to_string(),
+        pid: Some(1),
+        headless: true,
+        proxy_server: None,
+        chrome_args: Vec::new(),
+        daemon_pid: None,
+        pages: HashMap::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::browser_fixture as browser;
     use super::*;
-    use crate::session_load::load_from;
-
-    /// Two agents work on their own `--browser` names at the same time. The one that
-    /// only *read* the other's entry must not write its stale copy back over it.
-    /// This is the lost update that made a concurrent agent lose its snapshot.
-    #[test]
-    fn a_reader_does_not_clobber_another_agents_concurrent_write() {
-        let dir = std::env::temp_dir().join(format!("chrome-agent-session-test-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("sessions.json");
-        let _ = std::fs::remove_file(&path);
-
-        // Agent A publishes its browser.
-        let mut a = SessionStore::default();
-        ensure_browser(&mut a, "agent-a", "ws://a", None, true, None, Vec::new());
-        save_to(&path, &mut a).unwrap();
-
-        // Agent B loads the file, so it now holds a copy of agent-a it never touched.
-        let mut b = load_from(&path).unwrap();
-        ensure_browser(&mut b, "agent-b", "ws://b", None, true, None, Vec::new());
-
-        // Agent A moves on and records a snapshot while B is still working.
-        let mut a2 = load_from(&path).unwrap();
-        let browser = a2.browsers.get_mut("agent-a").unwrap();
-        let page = ensure_page(browser, "default", "target-1");
-        page.last_snapshot = Some("uid=n1 RootWebArea".into());
-        save_to(&path, &mut a2).unwrap();
-
-        // B saves last. Its own entry must land, and A's snapshot must survive.
-        save_to(&path, &mut b).unwrap();
-
-        let final_state = load_from(&path).unwrap();
-        assert!(final_state.browsers.contains_key("agent-b"), "agent-b should be saved");
-        let snapshot = final_state.browsers["agent-a"].pages.get("default").and_then(|p| p.last_snapshot.as_deref());
-        assert_eq!(
-            snapshot,
-            Some("uid=n1 RootWebArea"),
-            "agent-a's snapshot was clobbered by an agent that only read it"
-        );
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// The daemon heartbeat decides "browser 'foo' is dead, delete it" from a snapshot
-    /// read outside the lock. If another agent relaunches 'foo' (same name, new pid)
-    /// between that read and the heartbeat's save, the delete must not take the fresh
-    /// entry down with it — that would silently orphan a running Chrome seconds after
-    /// it was launched.
-    ///
-    /// Both pids are live: what is under test is the compare-and-delete, and a fixture
-    /// pid the OS reports as gone would be swept by `prune_dead` before reaching it.
-    #[test]
-    fn a_stale_delete_does_not_clobber_a_concurrent_relaunch() {
-        let dir = std::env::temp_dir().join(format!("chrome-agent-session-relaunch-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("sessions.json");
-        let relaunched = LivePid::spawn();
-
-        // The browser exists, and the heartbeat is about to judge it stale.
-        let mut original = SessionStore::default();
-        ensure_browser(&mut original, "foo", "ws://old", Some(std::process::id()), true, None, Vec::new());
-        save_to(&path, &mut original).unwrap();
-
-        // Heartbeat tick: loads, judges the entry stale, drops it in memory.
-        let mut heartbeat = load_from(&path).unwrap();
-        heartbeat.browsers.remove("foo");
-
-        // Before the heartbeat saves, another agent relaunches 'foo'.
-        let mut agent = load_from(&path).unwrap();
-        agent.browsers.remove("foo");
-        ensure_browser(&mut agent, "foo", "ws://fresh", Some(relaunched.id()), true, None, Vec::new());
-        save_to(&path, &mut agent).unwrap();
-
-        // The heartbeat's delete was decided about the old entry, not this one.
-        save_to(&path, &mut heartbeat).unwrap();
-
-        let final_state = load_from(&path).unwrap();
-        let survivor = final_state.browsers.get("foo");
-        assert_eq!(
-            survivor.and_then(|b| b.pid),
-            Some(relaunched.id()),
-            "the freshly relaunched browser was deleted by a stale-cleanup decision made about its predecessor"
-        );
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// A live process standing in for a running Chrome, so a fixture entry is not swept
-    /// by the dead-pid prune. Reaped on drop.
-    struct LivePid(std::process::Child);
-
-    impl LivePid {
-        fn spawn() -> Self {
-            Self(
-                std::process::Command::new("sleep")
-                    .arg("30")
-                    .spawn()
-                    .expect("spawn a stand-in for a running browser"),
-            )
-        }
-        fn id(&self) -> u32 {
-            self.0.id()
-        }
-    }
-
-    impl Drop for LivePid {
-        fn drop(&mut self) {
-            let _ = self.0.kill();
-            let _ = self.0.wait();
-        }
-    }
-
-    /// A save that cannot publish leaves no temp file behind.
-    ///
-    /// The destination is an existing non-empty directory, which is unopenable as a file.
-    /// It used to reach `fs::rename(file, dir)` and fail there, after the temp file had
-    /// been written — the leak this pins. It now fails one step earlier, at the re-read
-    /// inside the lock, because a destination that is present and will not read is exactly
-    /// the case `reread_for_merge` refuses instead of merging onto a guess. Both assertions
-    /// still hold and the second is now true for a stronger reason: nothing was created at
-    /// all. What this fixture can no longer construct is a destination that READS cleanly
-    /// and still fails to rename, so the `remove_file` in that arm is no longer exercised
-    /// here; it is a two-line cleanup on a branch reachable only from the filesystem
-    /// (`EXDEV`, a concurrent `rmdir` of the parent), which no in-process fixture reaches.
-    #[test]
-    fn a_save_that_cannot_publish_leaves_no_temp_file_behind() {
-        let dir = std::env::temp_dir().join(format!("chrome-agent-session-tmpleak-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("sessions.json");
-        std::fs::create_dir_all(path.join("occupied")).unwrap();
-
-        let mut store = SessionStore::default();
-        ensure_browser(&mut store, "leaky", "ws://x", None, true, None, Vec::new());
-        let result = save_to(&path, &mut store);
-        let err = result.expect_err("an unpublishable destination should fail the save").0;
-        assert!(err.contains("Failed to read"), "the refusal names what it could not do: {err}");
-
-        let tmp_path = path.with_extension(format!("json.tmp.{}", std::process::id()));
-        assert!(
-            !tmp_path.exists(),
-            "failed save left {} behind",
-            tmp_path.display()
-        );
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// A pid the OS reports as gone. Searched instead of hardcoded: any fixed number
-    /// can be in use on the machine running the test.
-    #[cfg(unix)]
-    fn a_dead_pid() -> u32 {
-        (60_000..99_990u32)
-            .find(|&pid| liveness(pid) == Liveness::Dead)
-            .expect("no unused pid in range")
-    }
-
-    /// The store grew forever: `close` removes the browser it is named, and nothing
-    /// removed an entry whose Chrome had exited. A save now drops those, and only those.
-    #[cfg(unix)]
-    #[test]
-    fn save_drops_dead_browsers_and_keeps_live_and_pidless_ones() {
-        let dir = tmp_dir("prune");
-        let path = dir.join(SESSION_FILE);
-
-        let mut seed = SessionStore::default();
-        // Alive: this very test process.
-        ensure_browser(&mut seed, "live", "ws://live", Some(std::process::id()), true, None, Vec::new());
-        // Dead: exited Chrome, the case that accumulated.
-        ensure_browser(&mut seed, "dead", "ws://dead", Some(a_dead_pid()), true, None, Vec::new());
-        ensure_browser(&mut seed, "dead-2", "ws://dead2", Some(a_dead_pid()), true, None, Vec::new());
-        // No pid: `--connect`, or a managed reconnect via DevToolsActivePort. Dropping
-        // this is how an agent loses the user's real Chrome.
-        ensure_browser(&mut seed, "external", "ws://127.0.0.1:9222/x", None, false, None, Vec::new());
-        // Give the dead entries the bulk an accumulated store carries.
-        for name in ["dead", "dead-2"] {
-            let browser = seed.browsers.get_mut(name).unwrap();
-            let page = ensure_page(browser, "default", "target-1");
-            page.last_snapshot = Some("x".repeat(4096));
-        }
-        // Written without going through `save_to`: this is the file an older binary
-        // left behind, which is the state that has to be recoverable.
-        std::fs::write(&path, serde_json::to_string_pretty(&seed).unwrap()).unwrap();
-        let size_with_dead = std::fs::metadata(&path).unwrap().len();
-
-        // Any save prunes — including one from a process that only read the file.
-        let mut reader = load_from(&path).unwrap();
-        save_to(&path, &mut reader).unwrap();
-
-        let disk = load_from(&path).unwrap();
-        let mut survivors: Vec<&str> = disk.browsers.keys().map(String::as_str).collect();
-        survivors.sort_unstable();
-        assert_eq!(
-            survivors,
-            ["external", "live"],
-            "expected only the dead entries to go"
-        );
-        let size_pruned = std::fs::metadata(&path).unwrap().len();
-        assert!(
-            size_pruned < size_with_dead,
-            "file did not shrink: {size_with_dead} -> {size_pruned}"
-        );
-
-        // The saving process must stop carrying the dropped entries, or its next save
-        // re-publishes them: the upsert branch reads "untouched and absent from disk"
-        // as an entry of ours to restore.
-        assert!(
-            !reader.browsers.contains_key("dead"),
-            "the pruned entry is still staged in memory: {:?}",
-            reader.browsers.keys()
-        );
-        save_to(&path, &mut reader).unwrap();
-        assert_eq!(
-            std::fs::metadata(&path).unwrap().len(),
-            size_pruned,
-            "a second save was not a no-op"
-        );
-
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    /// Pruning tests the pid found on disk under the lock, so it cannot reach another
-    /// agent's running browser: that pid answers `kill(pid, 0)`.
-    #[cfg(unix)]
-    #[test]
-    fn pruning_leaves_a_concurrent_agents_live_browser_alone() {
-        let dir = tmp_dir("prune-concurrent");
-        let path = dir.join(SESSION_FILE);
-
-        // Agent A publishes a live browser and records a snapshot on it.
-        let mut a = SessionStore::default();
-        ensure_browser(&mut a, "agent-a", "ws://a", Some(std::process::id()), true, None, Vec::new());
-        let browser = a.browsers.get_mut("agent-a").unwrap();
-        ensure_page(browser, "default", "target-a").last_snapshot = Some("uid=n1 RootWebArea".into());
-        save_to(&path, &mut a).unwrap();
-
-        // Agent B loads that view, adds its own browser and a dead leftover, and saves.
-        let mut b = load_from(&path).unwrap();
-        ensure_browser(&mut b, "agent-b", "ws://b", Some(std::process::id()), true, None, Vec::new());
-        ensure_browser(&mut b, "leftover", "ws://old", Some(a_dead_pid()), true, None, Vec::new());
-        save_to(&path, &mut b).unwrap();
-
-        // A saves again, holding its own stale copy of agent-b.
-        save_to(&path, &mut a).unwrap();
-
-        let disk = load_from(&path).unwrap();
-        assert!(!disk.browsers.contains_key("leftover"), "dead entry survived");
-        assert_eq!(
-            disk.browsers["agent-a"]
-                .pages
-                .get("default")
-                .and_then(|p| p.last_snapshot.as_deref()),
-            Some("uid=n1 RootWebArea"),
-            "agent-a lost its snapshot"
-        );
-        assert!(
-            disk.browsers.contains_key("agent-b"),
-            "another agent's live browser was pruned: {:?}",
-            disk.browsers.keys()
-        );
-
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    /// The one-sided predicate, stated directly.
-    #[test]
-    fn only_a_pid_the_os_calls_gone_makes_an_entry_droppable() {
-        let mut external = browser("ws://127.0.0.1:9222/x");
-        external.pid = None;
-        assert!(!is_provably_dead(&external), "--connect entry must be kept");
-
-        let mut live = browser("ws://live");
-        live.pid = Some(std::process::id());
-        assert!(!is_provably_dead(&live));
-
-        // Out of pid_t range: kill() would read it as a process group, so it is not a
-        // question about one process and the entry is kept.
-        let mut absurd = browser("ws://absurd");
-        absurd.pid = Some(u32::MAX);
-        assert!(!is_provably_dead(&absurd));
-        let mut zero = browser("ws://zero");
-        zero.pid = Some(0);
-        assert!(!is_provably_dead(&zero));
-
-        #[cfg(unix)]
-        {
-            let mut dead = browser("ws://dead");
-            dead.pid = Some(a_dead_pid());
-            assert!(is_provably_dead(&dead));
-        }
-    }
 
     #[test]
     fn session_roundtrip() {
         let mut store = SessionStore::default();
-        let browser =
-            ensure_browser(
-                &mut store,
-                "test",
-                "ws://localhost:9222",
-                Some(1234),
-                true,
-                Some("http://127.0.0.1:8080".into()),
-                vec!["--enable-features=WebMCP,WebMCPTesting".into()],
-            );
+        let browser = ensure_browser(
+            &mut store,
+            "test",
+            "ws://localhost:9222",
+            Some(1234),
+            true,
+            Some("http://127.0.0.1:8080".into()),
+            vec!["--enable-features=WebMCP,WebMCPTesting".into()],
+        );
         ensure_page(browser, "main", "target-abc");
 
         let json = serde_json::to_string(&store).unwrap();
@@ -814,7 +271,10 @@ mod tests {
         assert_eq!(b.pid, Some(1234));
         assert!(b.headless);
         assert_eq!(b.proxy_server.as_deref(), Some("http://127.0.0.1:8080"));
-        assert_eq!(b.chrome_args, vec!["--enable-features=WebMCP,WebMCPTesting".to_string()]);
+        assert_eq!(
+            b.chrome_args,
+            vec!["--enable-features=WebMCP,WebMCPTesting".to_string()]
+        );
         assert!(b.pages.contains_key("main"));
         assert_eq!(b.pages["main"].target_id, "target-abc");
     }
@@ -835,144 +295,18 @@ mod tests {
     fn proxied_browser_inherits_proxy_when_flag_omitted() {
         let mut existing = browser("ws://localhost:9222");
         existing.proxy_server = Some("http://127.0.0.1:8080".into());
-        // Follow-up command without --proxy-server inherits the running proxy.
+        // Omitted or identical inherits; a different explicit proxy is refused.
         assert!(ensure_proxy_compatible(&existing, None).is_ok());
-        // Same proxy is fine.
         assert!(ensure_proxy_compatible(&existing, Some("http://127.0.0.1:8080")).is_ok());
-        // A different explicit proxy is refused.
         assert!(ensure_proxy_compatible(&existing, Some("http://127.0.0.1:9090")).is_err());
     }
 
-    // `ensure_chrome_args_compatible` itself is tested in `chrome_args.rs`, where it lives.
-
-    // `bug_session_corrupt_json` and `bug_session_empty_file` moved to `session_load.rs`
-    // with the function they exercise.
+    // `ensure_chrome_args_compatible` is tested in `chrome_args.rs`, where it lives.
 
     #[test]
     fn bug_element_ref_unknown_type() {
         let json = r#"{"type":"futureType","data":"unknown"}"#;
         let result: Result<crate::element_ref::ElementRef, _> = serde_json::from_str(json);
         assert!(result.is_err());
-    }
-
-    // --- Concurrent session store (issue: parallel agents clobber sessions.json) ---
-
-    fn tmp_dir(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir()
-            .join(format!("chrome-agent_sess_{}_{}", tag, std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
-    }
-
-    fn browser(ws: &str) -> BrowserSession {
-        BrowserSession {
-            ws_endpoint: ws.to_string(),
-            pid: Some(1),
-            headless: true,
-            proxy_server: None,
-            chrome_args: Vec::new(),
-            daemon_pid: None,
-            pages: HashMap::new(),
-        }
-    }
-
-    #[test]
-    fn save_merges_concurrent_additions_from_another_process() {
-        let dir = tmp_dir("merge");
-        let path = dir.join(SESSION_FILE);
-
-        // This process loads an empty store and stages its own browser "a".
-        let mut mine = load_from(&path).unwrap();
-        mine.browsers.insert("a".into(), browser("ws://a"));
-
-        // Meanwhile another process persists browser "b".
-        let mut theirs = load_from(&path).unwrap();
-        theirs.browsers.insert("b".into(), browser("ws://b"));
-        save_to(&path, &mut theirs).unwrap();
-
-        // Our save must NOT clobber "b".
-        save_to(&path, &mut mine).unwrap();
-
-        let disk = load_from(&path).unwrap();
-        assert!(disk.browsers.contains_key("a"), "own entry lost: {:?}", disk.browsers.keys());
-        assert!(disk.browsers.contains_key("b"), "concurrent entry clobbered: {:?}", disk.browsers.keys());
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn save_deletes_only_entries_this_process_removed() {
-        let dir = tmp_dir("delete");
-        let path = dir.join(SESSION_FILE);
-
-        // Seed disk with two browsers.
-        let mut seed = SessionStore::default();
-        seed.browsers.insert("a".into(), browser("ws://a"));
-        seed.browsers.insert("b".into(), browser("ws://b"));
-        save_to(&path, &mut seed).unwrap();
-
-        // Load, drop "a" (like `close --browser a`), save.
-        let mut store = load_from(&path).unwrap();
-        store.browsers.remove("a");
-        save_to(&path, &mut store).unwrap();
-
-        let disk = load_from(&path).unwrap();
-        assert!(!disk.browsers.contains_key("a"), "removed entry should be gone");
-        assert!(disk.browsers.contains_key("b"), "untouched entry should remain");
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn save_does_not_delete_entries_added_by_others_after_load() {
-        let dir = tmp_dir("nodelete");
-        let path = dir.join(SESSION_FILE);
-
-        // We load empty, stage "a".
-        let mut mine = load_from(&path).unwrap();
-        mine.browsers.insert("a".into(), browser("ws://a"));
-
-        // Another process adds "c" after our load.
-        let mut other = load_from(&path).unwrap();
-        other.browsers.insert("c".into(), browser("ws://c"));
-        save_to(&path, &mut other).unwrap();
-
-        // Our save adds "a" and must leave "c" alone (we never knew about it).
-        save_to(&path, &mut mine).unwrap();
-
-        let disk = load_from(&path).unwrap();
-        assert!(disk.browsers.contains_key("a"));
-        assert!(disk.browsers.contains_key("c"), "must not delete an entry we never loaded");
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn concurrent_saves_under_lock_lose_no_updates() {
-        let dir = tmp_dir("threads");
-        let path = dir.join(SESSION_FILE);
-        let n = 24;
-
-        let handles: Vec<_> = (0..n)
-            .map(|i| {
-                let path = path.clone();
-                std::thread::spawn(move || {
-                    let mut store = load_from(&path).unwrap_or_default();
-                    store.browsers.insert(format!("b{i}"), browser(&format!("ws://{i}")));
-                    save_to(&path, &mut store).unwrap();
-                })
-            })
-            .collect();
-        for h in handles {
-            h.join().unwrap();
-        }
-
-        let disk = load_from(&path).unwrap();
-        for i in 0..n {
-            assert!(
-                disk.browsers.contains_key(&format!("b{i}")),
-                "lost update for b{i}; have {:?}",
-                disk.browsers.keys()
-            );
-        }
-        std::fs::remove_dir_all(&dir).ok();
     }
 }

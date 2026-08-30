@@ -1,17 +1,13 @@
 //! What a snapshot may not print.
 //!
-//! The accessibility tree is the widest path a field's value takes to stdout: `inspect` prints
-//! it, and every action report quotes the same lines back inside `delta`. Chrome masks a
-//! `type=password` there, which is why the leak went unnoticed — the other half of
-//! `element::SECRET_FIELD`, a card number or a one-time code in a `type=text` field, was
-//! reported verbatim on the same response whose `value`/`values_lost` fields said
-//! `{"redacted": true}`.
+//! `inspect` prints the a11y tree and every action report quotes it inside `delta`, so a
+//! field's value reaches stdout through here. Chrome masks `type=password` itself; the rest
+//! of `element::SECRET_FIELD` (a card number in a `type=text` field) does not.
 //!
-//! Secret-ness is a property of the ELEMENT, not of the string, so it cannot be decided from
-//! the tree alone: the a11y tree carries no `type` and no `autocomplete`. It is decided by
-//! asking the page — one scan with `element::SECRET_FIELD` as the predicate, and one round trip
-//! per secret field FOUND, so the cost follows the small number rather than the number of
-//! fields on the page. Nothing is asked at all when the tree holds no value to hide.
+//! Secret-ness is a property of the ELEMENT and the a11y tree carries no `type` and no
+//! `autocomplete`, so the page is asked: one scan with `element::SECRET_FIELD` as the
+//! predicate, then one round trip per secret field FOUND. Nothing is asked when the tree
+//! holds no value to hide.
 
 use std::collections::{HashMap, HashSet};
 
@@ -20,28 +16,18 @@ use serde_json::{Value, json};
 use crate::cdp::client::CdpClient;
 use crate::cdp::types::AXNode;
 
-/// What stands in for a value the tree may not print.
-///
-/// Fixed, never derived from the value: two snapshots of the same unchanged secret field have
-/// to compare equal, and a marker carrying a length or a hash would make every action report a
-/// change on every secret field it happened to see.
+/// What stands in for a value the tree may not print. Fixed, never derived from the value:
+/// two snapshots of an unchanged secret field must compare equal, or every action report
+/// would claim the field changed.
 pub const MARKER: &str = "<redacted>";
 
-/// Shortest secret looked for outside the field that holds it.
-///
-/// A secret's own node is redacted by identity whatever its length. This bound applies only to
-/// the search for the same string elsewhere on the page — an echo. Below four characters the
-/// search stops being about the secret: a three-digit security code of `123` also appears in a
-/// price, a date and a street number, and redacting those hides the page to protect nothing
-/// that is still hidden anyway.
+/// Shortest secret searched for OUTSIDE the field holding it. The field's own node is
+/// redacted by identity at any length. Below four characters an echo search is meaningless:
+/// a security code of `123` also appears in a price, a date and a street number.
 const MIN_SEARCHABLE: usize = 4;
 
-/// How many secret fields are located before the whole page's values are redacted instead.
-///
-/// Locating one costs a CDP round trip, and the probe runs on every snapshot — including the
-/// one every action's change report takes. A page holding more secret fields than this is not
-/// one an agent is reading field by field, so the cap resolves the other way than usual: it
-/// redacts rather than spends.
+/// Above this many secret fields, redact every value instead of locating each one — locating
+/// one costs a CDP round trip and the probe runs on every snapshot.
 const MAX_SECRET_FIELDS: usize = 32;
 
 /// The object group the probe's handles live in, released before the probe returns.
@@ -52,34 +38,28 @@ const OBJECT_GROUP: &str = "chrome-agent-secret";
 pub struct Redaction {
     /// Nodes whose `value=` is a secret. Their accessible name is a label, and stays.
     values: HashSet<i64>,
-    /// Nodes whose accessible NAME is the secret itself: Chrome exposes the editable content
-    /// of an input as a `generic` child whose name is the value, so redacting the input's
-    /// `value=` alone left the digits one line below it.
+    /// Nodes whose accessible NAME is the secret itself: Chrome exposes an input's editable
+    /// content as a `generic` child whose name is the value.
     texts: HashSet<i64>,
-    /// The secret strings, to catch a page that echoes one somewhere else entirely — a
-    /// checkout showing the card it is about to charge. Fails safe: an unrelated node holding
-    /// the same string is redacted too.
+    /// The secret strings, to catch a page echoing one elsewhere (a checkout showing the card
+    /// it will charge). Fails safe: an unrelated node with the same string is redacted too.
     strings: Vec<String>,
 }
 
 impl Redaction {
-    /// Nothing to hide — no candidate carried a value.
     pub fn none() -> Self {
         Self::default()
     }
 
-    /// What to print for a node's `value=`.
     pub fn value<'a>(&'a self, backend: Option<i64>, value: &'a str) -> &'a str {
         match backend {
-            // A value with no DOM node behind it cannot be classified, and an unclassified
-            // field is treated as a secret.
+            // A value with no DOM node behind it cannot be classified, so it is a secret.
             None => MARKER,
             Some(id) if self.values.contains(&id) => MARKER,
             _ => self.scrub(value),
         }
     }
 
-    /// What to print for a node's accessible name.
     pub fn name<'a>(&'a self, backend: Option<i64>, name: &'a str) -> &'a str {
         if backend.is_some_and(|id| self.texts.contains(&id)) {
             return MARKER;
@@ -87,10 +67,14 @@ impl Redaction {
         self.scrub(name)
     }
 
-    /// Replace the whole token when it carries a secret, rather than the matching slice: a
+    /// Replace the whole string when it carries a secret, not just the matching slice: a
     /// partially masked card number is still a card number minus a substring.
     fn scrub<'a>(&'a self, s: &'a str) -> &'a str {
-        if self.strings.iter().any(|secret| s.contains(secret.as_str())) {
+        if self
+            .strings
+            .iter()
+            .any(|secret| s.contains(secret.as_str()))
+        {
             MARKER
         } else {
             s
@@ -122,9 +106,7 @@ struct Candidate {
 }
 
 /// Decide what the tree may print, before a line of it is rendered.
-///
-/// Costs nothing on a page with no filled field — the common case, including every change
-/// report on a page that is not a form.
+/// Costs nothing on a page with no filled field.
 pub async fn probe(client: &CdpClient, nodes: &[AXNode]) -> Redaction {
     let candidates = candidates(nodes);
     if candidates.is_empty() {
@@ -133,8 +115,8 @@ pub async fn probe(client: &CdpClient, nodes: &[AXNode]) -> Redaction {
     build(nodes, &candidates, secret_nodes(client).await.as_ref())
 }
 
-/// Turn the page's answer into a redaction. Split from [`probe`] so the answer it fears —
-/// `None`, the question that could not be asked — is testable without a browser.
+/// Turn the page's answer into a redaction. `secret == None` means the page could not be
+/// asked. Pure, so the `None` branch is testable without a browser.
 fn build(nodes: &[AXNode], candidates: &[Candidate], secret: Option<&HashSet<i64>>) -> Redaction {
     let by_id: HashMap<&str, &AXNode> = nodes.iter().map(|n| (n.node_id.as_str(), n)).collect();
     let mut redaction = Redaction::default();
@@ -198,15 +180,11 @@ fn hide_subtree(by_id: &HashMap<&str, &AXNode>, node_id: &str, redaction: &mut R
     }
 }
 
-/// Which nodes on the page are secret fields, as backend node ids.
+/// Which nodes on the page are secret fields, as backend node ids. `None` means the question
+/// could not be answered, and the caller then redacts every value in the tree.
 ///
-/// `None` means the question could not be answered, and the caller then redacts every value in
-/// the tree: the alternative to an unanswered question is printing a card number.
-///
-/// The scan runs once for the whole page and its cost is one round trip per SECRET field found
-/// — not per field, and not per node. Asking each value-carrying node instead cost one round
-/// trip each: measured at +171ms on a form holding 60 filled inputs, paid on every action.
-/// A page has one card number and forty other fields, so the work follows the small number.
+/// One scan for the whole page, then one round trip per SECRET field found — not per
+/// value-carrying node, which measured +171ms on a form of 60 filled inputs, on every action.
 async fn secret_nodes(client: &CdpClient) -> Option<HashSet<i64>> {
     let handles = scan(client).await?;
     let mut ids = HashSet::new();
@@ -231,12 +209,9 @@ async fn secret_nodes(client: &CdpClient) -> Option<HashSet<i64>> {
     complete.then_some(ids)
 }
 
-/// One in-page pass over every element that could be a secret field, `element::SECRET_FIELD`
-/// as the predicate. Returns a JS handle per match.
-///
-/// Descends into same-origin iframes, which is exactly the set `Accessibility.getFullAXTree`
-/// can report on: a cross-origin frame is out-of-process, its nodes are not in this tree, and
-/// its content is unreachable from here either way.
+/// One in-page pass with `element::SECRET_FIELD` as the predicate, returning a JS handle per
+/// match. Descends into same-origin iframes, which is exactly the set
+/// `Accessibility.getFullAXTree` reports on — cross-origin frames are out-of-process.
 async fn scan(client: &CdpClient) -> Option<Vec<String>> {
     let expression = format!(
         r"(() => {{
@@ -259,13 +234,16 @@ async fn scan(client: &CdpClient) -> Option<Vec<String>> {
         "objectGroup": OBJECT_GROUP,
         "returnByValue": false,
     });
-    // Scope to the frame the `frame` command bound, the way `eval` and `inspect` do: the tree
-    // being rendered is that frame's, so the scan has to run there too.
+    // Scope to the bound frame, like `eval` and `inspect`: the tree being rendered is that
+    // frame's, so the scan must run there too.
     if let Some(ctx) = client.frame_context() {
         params["contextId"] = json!(ctx.context_id);
     }
     let result: Value = client.call("Runtime.evaluate", params).await.ok()?;
-    if result.get("exceptionDetails").is_some() {
+    // Discarded on purpose: `None` makes `build` redact every value on the page, and there is no
+    // channel here to say why — the caller renders a tree, it does not report errors. A message
+    // would have to be printed beside the redaction, which is louder than the fact it explains.
+    if crate::element::js_exception(&result).is_some() {
         return None;
     }
     let array = result.get("result")?.get("objectId")?.as_str()?;
@@ -280,8 +258,14 @@ async fn scan(client: &CdpClient) -> Option<Vec<String>> {
     let mut handles = Vec::new();
     for entry in entries {
         // Skip `length` and anything else that is not an element handle.
-        if entry.get("name").and_then(Value::as_str).is_some_and(|n| n.parse::<usize>().is_ok())
-            && let Some(id) = entry.get("value").and_then(|v| v.get("objectId")).and_then(Value::as_str)
+        if entry
+            .get("name")
+            .and_then(Value::as_str)
+            .is_some_and(|n| n.parse::<usize>().is_ok())
+            && let Some(id) = entry
+                .get("value")
+                .and_then(|v| v.get("objectId"))
+                .and_then(Value::as_str)
         {
             handles.push(id.to_string());
         }
@@ -315,13 +299,15 @@ mod tests {
     fn an_ordinary_value_is_untouched() {
         let r = Redaction::for_tests(&[2], &[16], &["4111111111111111"]);
         assert_eq!(r.value(Some(6), "leave at the door"), "leave at the door");
-        assert_eq!(r.name(Some(6), "Note for the courier"), "Note for the courier");
+        assert_eq!(
+            r.name(Some(6), "Note for the courier"),
+            "Note for the courier"
+        );
     }
 
     #[test]
     fn an_echo_of_the_secret_is_redacted_wherever_it_appears() {
-        // The checkout page showing the card it is about to charge: the same digits reach the
-        // same output without ever being a value=.
+        // A checkout echoing the card it will charge: same digits, never a value=.
         let r = Redaction::for_tests(&[2], &[], &["4111111111111111"]);
         assert_eq!(r.name(Some(26), "4111111111111111"), MARKER);
         assert_eq!(r.name(Some(26), "Charging card 4111111111111111"), MARKER);
@@ -343,11 +329,12 @@ mod tests {
 
     #[test]
     fn the_marker_does_not_depend_on_the_value_it_hides() {
-        // Two snapshots of the same unchanged secret field must compare equal, and so must
-        // two different secrets: a marker that varied would turn every action report into a
-        // report of change.
+        // A marker that varied would turn every action report into a report of change.
         let r = Redaction::for_tests(&[2], &[], &[]);
-        assert_eq!(r.value(Some(2), "4111111111111111"), r.value(Some(2), "4242424242424242"));
+        assert_eq!(
+            r.value(Some(2), "4111111111111111"),
+            r.value(Some(2), "4242424242424242")
+        );
     }
 
     #[test]
@@ -373,8 +360,8 @@ mod tests {
 
     #[test]
     fn an_unanswered_question_redacts_every_value() {
-        // The scan threw, or a secret field could not be named. Nothing is known about any
-        // field, so nothing is printed: the alternative is printing a card number.
+        // The scan threw, or a secret field could not be named: nothing is known, so
+        // nothing is printed.
         let nodes = [
             ax(2, "a", Some("Card number"), Some("4111111111111111")),
             ax(6, "b", Some("Note"), Some("leave at the door")),
@@ -383,7 +370,7 @@ mod tests {
         let r = build(&nodes, &found, None);
         assert_eq!(r.value(Some(2), "4111111111111111"), MARKER);
         assert_eq!(r.value(Some(6), "leave at the door"), MARKER);
-        // The fields are still named, so an agent can still see and aim at them.
+        // Names survive, so an agent can still aim at the fields.
         assert_eq!(r.name(Some(6), "Note"), "Note");
     }
 

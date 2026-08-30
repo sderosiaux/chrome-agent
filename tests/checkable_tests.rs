@@ -5,14 +5,11 @@ use serde_json::Value;
 mod common;
 use common::TestBrowser;
 
-fn binary() -> String {
-    let mut path = std::env::current_exe().unwrap().parent().unwrap().parent().unwrap().to_path_buf();
-    path.push("chrome-agent");
-    path.to_string_lossy().into_owned()
-}
-
 fn run_cli(args: &[&str]) -> (String, i32) {
-    let output = Command::new(binary()).args(args).output().expect("Failed to run chrome-agent");
+    let output = Command::new(common::binary())
+        .args(args)
+        .output()
+        .expect("Failed to run chrome-agent");
     (
         String::from_utf8_lossy(&output.stdout).to_string(),
         output.status.code().unwrap_or(-1),
@@ -24,7 +21,12 @@ fn open(browser: &str) -> bool {
     if !common::browser_ready() {
         return false;
     }
-    let (_, code) = run_cli(&["--browser", browser, "goto", &common::fixture_url("checkable_kinds.html")]);
+    let (_, code) = run_cli(&[
+        "--browser",
+        browser,
+        "goto",
+        &common::fixture_url("checkable_kinds.html"),
+    ]);
     if code != 0 {
         return common::unavailable("goto checkable_kinds.html failed");
     }
@@ -38,36 +40,53 @@ fn eval(browser: &str, expr: &str) -> String {
 
 fn check(browser: &str, selector: &str) -> (Value, i32) {
     let (out, code) = run_cli(&[
-        "--browser", browser, "--verdict", "off", "--json", "check", "--selector", selector,
+        "--browser",
+        browser,
+        "--verdict",
+        "off",
+        "--json",
+        "check",
+        "--selector",
+        selector,
     ]);
     (serde_json::from_str(&out).unwrap_or(Value::Null), code)
 }
 
-/// The worst shape of bug: the tool reports success and leaves the page in the
-/// opposite state. `el.checked` is undefined on a div, so a truthiness read calls a
-/// checked ARIA checkbox unchecked, clicks it, and turns it off.
+/// `el.checked` is undefined on a div, so a truthiness read would click a checked ARIA
+/// checkbox off while reporting success.
 #[test]
 fn checking_an_aria_checkbox_that_is_already_on_leaves_it_on() {
     let b = TestBrowser::new("chk-aria-on");
     if !open(b.name()) {
         return;
     }
-    assert_eq!(eval(b.name(), "document.getElementById('aria_on').getAttribute('aria-checked')"), "true");
+    assert_eq!(
+        eval(
+            b.name(),
+            "document.getElementById('aria_on').getAttribute('aria-checked')"
+        ),
+        "true"
+    );
 
     let (v, code) = check(b.name(), "#aria_on");
     assert_eq!(code, 0, "check should succeed: {v}");
     assert_eq!(
-        eval(b.name(), "document.getElementById('aria_on').getAttribute('aria-checked')"),
+        eval(
+            b.name(),
+            "document.getElementById('aria_on').getAttribute('aria-checked')"
+        ),
         "true",
         "check must never turn a checked box off: {v}"
     );
     assert!(
-        v["message"].as_str().unwrap_or_default().contains("Already"),
+        v["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Already"),
         "an already-checked box should report as already checked: {v}"
     );
 }
 
-/// The complement: an ARIA checkbox that is off must actually be turned on.
 #[test]
 fn checking_an_aria_checkbox_that_is_off_turns_it_on() {
     let b = TestBrowser::new("chk-aria-off");
@@ -77,14 +96,17 @@ fn checking_an_aria_checkbox_that_is_off_turns_it_on() {
     let (v, code) = check(b.name(), "#aria_off");
     assert_eq!(code, 0, "check should succeed: {v}");
     assert_eq!(
-        eval(b.name(), "document.getElementById('aria_off').getAttribute('aria-checked')"),
+        eval(
+            b.name(),
+            "document.getElementById('aria_off').getAttribute('aria-checked')"
+        ),
         "true",
         "check should have turned it on: {v}"
     );
 }
 
 /// Every `HTMLInputElement` exposes `.checked`, including a text input, where it means
-/// nothing. Reporting "Checked" there is a plain lie.
+/// nothing — so the guard refuses rather than reporting "Checked".
 #[test]
 fn checking_a_text_input_is_refused() {
     let b = TestBrowser::new("chk-text");
@@ -101,8 +123,7 @@ fn checking_a_text_input_is_refused() {
     );
 }
 
-/// A radio cannot be unchecked by clicking it. Clicking anyway leaves it checked and
-/// reporting "Unchecked" would be false.
+/// A radio cannot be unchecked by clicking it, so the guard refuses before dispatching.
 #[test]
 fn unchecking_a_radio_is_refused() {
     let b = TestBrowser::new("chk-radio");
@@ -110,20 +131,32 @@ fn unchecking_a_radio_is_refused() {
         return;
     }
     let (out, code) = run_cli(&[
-        "--browser", b.name(), "--verdict", "off", "--json", "uncheck", "--selector", "#radio",
+        "--browser",
+        b.name(),
+        "--verdict",
+        "off",
+        "--json",
+        "uncheck",
+        "--selector",
+        "#radio",
     ]);
     let v: Value = serde_json::from_str(&out).unwrap_or(Value::Null);
     assert_ne!(code, 0, "unchecking a radio should fail, got: {v}");
-    assert_eq!(eval(b.name(), "document.getElementById('radio').checked"), "true", "still checked: {v}");
-    // The refusal has to come from the guard that knows why, not from the read-back
-    // noticing afterwards that the click failed to do anything.
+    assert_eq!(
+        eval(b.name(), "document.getElementById('radio').checked"),
+        "true",
+        "still checked: {v}"
+    );
+    // The refusal comes from the guard, not from the read-back noticing afterwards.
     assert!(
-        v["error"].as_str().unwrap_or_default().contains("radio cannot be unchecked"),
+        v["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("radio cannot be unchecked"),
         "the reason must name the real constraint, not just report the click did nothing: {v}"
     );
 }
 
-/// Native checkboxes must keep working, both directions.
 #[test]
 fn native_checkboxes_still_work() {
     let b = TestBrowser::new("chk-native");
@@ -132,10 +165,24 @@ fn native_checkboxes_still_work() {
     }
     let (v, code) = check(b.name(), "#native");
     assert_eq!(code, 0, "{v}");
-    assert_eq!(eval(b.name(), "document.getElementById('native').checked"), "true", "{v}");
+    assert_eq!(
+        eval(b.name(), "document.getElementById('native').checked"),
+        "true",
+        "{v}"
+    );
 
     let (v, code) = check(b.name(), "#native_on");
     assert_eq!(code, 0, "{v}");
-    assert_eq!(eval(b.name(), "document.getElementById('native_on').checked"), "true", "already on stays on: {v}");
-    assert!(v["message"].as_str().unwrap_or_default().contains("Already"), "{v}");
+    assert_eq!(
+        eval(b.name(), "document.getElementById('native_on').checked"),
+        "true",
+        "already on stays on: {v}"
+    );
+    assert!(
+        v["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Already"),
+        "{v}"
+    );
 }

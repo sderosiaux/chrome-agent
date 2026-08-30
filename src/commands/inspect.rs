@@ -13,15 +13,14 @@ pub async fn run(
     focus_uid: Option<&str>,
     role_filter: Option<&[&str]>,
 ) -> Result<Snapshot, crate::BoxError> {
-    let snapshot = crate::snapshot::take_snapshot(client, verbose, max_depth, focus_uid, role_filter).await?;
+    let snapshot =
+        crate::snapshot::take_snapshot(client, verbose, max_depth, focus_uid, role_filter).await?;
     Ok(snapshot)
 }
 
-/// One reading of the page, rendered twice: the full baseline to persist and the reduced
-/// view the caller asked for.
-///
-/// Every caller that both *shows* a tree and *stores* one goes through here, so the rule
-/// that a display flag never reaches the baseline is stated once — see `snapshot::Views`.
+/// One reading of the page rendered twice: the full baseline to persist, and the reduced view
+/// the caller asked for. Every caller that both shows and stores a tree goes through here, so
+/// a display flag can never reach the baseline.
 pub async fn views(
     client: &CdpClient,
     verbose: bool,
@@ -32,16 +31,13 @@ pub async fn views(
     Ok(crate::snapshot::take_views(client, verbose, max_depth, focus_uid, role_filter).await?)
 }
 
-/// Scroll and collect unique filtered items from virtualized lists (X.com, etc.).
-/// Takes repeated snapshots while scrolling, deduplicates by text content,
-/// stops when `limit` unique items are collected or no new items appear.
+/// Collect unique items from a virtualized list by snapshotting while scrolling, deduplicated
+/// by text, until `limit` items or three barren rounds.
 ///
-/// The collected text is a UNION over scroll positions: it never described the page at any
-/// one moment, so it cannot be a diff baseline. `Views::full` is therefore a fresh, full
-/// reading taken once the scrolling has stopped — the page as it now stands — while the
-/// union stays what the caller is shown. Its `uid_map` keeps the union too: an item that
-/// scrolled out of a virtualized list is gone from the final tree, and dropping its uid
-/// would take away the only handle the caller was given for it.
+/// The collected text is a UNION over scroll positions and never described the page at one
+/// moment, so it cannot be a diff baseline: `Views::full` is a fresh reading taken after the
+/// scrolling stops. The `uid_map` keeps the union, since an item that scrolled out of the
+/// final tree still needs a handle.
 pub async fn scroll_collect(
     client: &CdpClient,
     verbose: bool,
@@ -54,10 +50,8 @@ pub async fn scroll_collect(
     let mut uid_map: HashMap<String, ElementRef> = HashMap::new();
     let max_scrolls = limit * 3;
     let mut stale_count = 0;
-    // `limit * 3` bounds the iterations, not the time: each one costs a settle window, so a
-    // page that keeps producing items turns `--limit 500` into 1500 rounds of up to two
-    // seconds. The caller's `--timeout` is the answer to "how long am I willing to wait",
-    // so it bounds the whole collection too.
+    // `limit * 3` bounds iterations, not time: each costs a settle window of up to 2s. The
+    // caller's `--timeout` bounds the whole collection.
     let deadline = std::time::Instant::now() + client.call_timeout();
     let mut ran_out_of_time = false;
 
@@ -66,7 +60,8 @@ pub async fn scroll_collect(
             ran_out_of_time = true;
             break;
         }
-        let snapshot = crate::snapshot::take_snapshot(client, verbose, None, focus_uid, role_filter).await?;
+        let snapshot =
+            crate::snapshot::take_snapshot(client, verbose, None, focus_uid, role_filter).await?;
         let prev_len = collected.len();
         for line in snapshot.text.lines() {
             let trimmed = line.trim();
@@ -76,23 +71,22 @@ pub async fn scroll_collect(
         }
         uid_map.extend(snapshot.uid_map);
 
-        if collected.len() >= limit { break; }
+        if collected.len() >= limit {
+            break;
+        }
 
-        // If no new items found after scroll, stop (end of list)
+        // Three scrolls with no new item means the end of the list.
         if collected.len() == prev_len {
             stale_count += 1;
-            if stale_count >= 3 { break; }
+            if stale_count >= 3 {
+                break;
+            }
         } else {
             stale_count = 0;
         }
 
-        // Scroll down one viewport, then wait for DOM mutations to settle.
-        //
-        // The wait used to be an inline promise whose 400ms debounce re-armed on every
-        // mutation with no ceiling: on a page that mutates forever — a ticker, a live feed,
-        // a rotating ad slot — it never resolved, and `awaitPromise` then held the whole
-        // command open. `snapshot::settle` is the same debounce with a hard timer that
-        // nothing clears, so a live page costs the ceiling instead of the session.
+        // Scroll one viewport, then settle: a 400 ms debounce under a 2000 ms ceiling that no
+        // mutation clears, so a continuously-mutating page costs the ceiling, not the session.
         let _ = client
             .call::<_, serde_json::Value>(
                 "Runtime.evaluate",
@@ -106,8 +100,8 @@ pub async fn scroll_collect(
     }
 
     collected.truncate(limit);
-    // Say when the list is short because time ran out rather than because the page ended:
-    // the two look identical in the output otherwise.
+    // A list cut short by the timeout and one cut short by the page ending look identical
+    // otherwise.
     let note = if ran_out_of_time {
         format!(
             "\n({} items collected; stopped at the {}s --timeout while the page was still producing items)",
@@ -119,9 +113,7 @@ pub async fn scroll_collect(
     };
     let text = format!("{}{note}", collected.join("\n"));
 
-    // One more full reading, after the scrolling: the baseline has to be a page state, and
-    // the union above is not one. Costs a single `getFullAXTree` on a path that already
-    // spent up to `limit * 3` of them.
+    // One more full reading: the baseline has to be a page state, and the union is not one.
     let mut full = crate::snapshot::take_snapshot(client, verbose, None, None, None).await?;
     // The final tree wins on any uid it also holds; the union keeps the ones it alone saw.
     for (uid, element) in full.uid_map {
@@ -131,70 +123,89 @@ pub async fn scroll_collect(
     Ok(Views::from_parts(full, Some(text)))
 }
 
-/// Post-process snapshot text to resolve and append href URLs on link nodes.
+/// Append resolved `href` URLs to the link nodes of a rendered snapshot.
+///
+/// Two CDP calls whatever the link count, and one when every href is already absolute. It used to
+/// be a `DOM.resolveNode` + `Runtime.callFunctionOn` pair per link node — 240 serial round trips
+/// on a 120-link page, unbounded and the highest count in this codebase. `DOM.getDocument` carries
+/// every `backendNodeId` with its `href` attribute in one reading; a single `Runtime.evaluate`
+/// then absolutises the relative ones against the base URL of the document each came from.
 pub async fn resolve_urls(
     client: &CdpClient,
     text: &str,
     uid_map: &HashMap<String, ElementRef>,
 ) -> String {
+    let link_backend = |line: &str| -> Option<i64> {
+        let (uid, role) = crate::snapshot_render::uid_and_role(line)?;
+        if role != "link" {
+            return None;
+        }
+        uid_map.get(uid).and_then(ElementRef::backend_node_id)
+    };
+
+    let wanted: HashSet<i64> = text.lines().filter_map(link_backend).collect();
+    let hrefs = if wanted.is_empty() {
+        HashMap::new()
+    } else {
+        link_hrefs(client, &wanted).await.unwrap_or_default()
+    };
+
     let mut result = String::with_capacity(text.len());
     for line in text.lines() {
         result.push_str(line);
-        // Match lines like "uid=n42 link "Some text""
-        let trimmed = line.trim();
-        if let Some(rest) = trimmed.strip_prefix("uid=")
-            && let Some((uid, after_uid)) = rest.split_once(' ') {
-                let role = after_uid.split([' ', '"']).next().unwrap_or("");
-                if role == "link"
-                    && let Some(element_ref) = uid_map.get(uid)
-                        && let Some(backend_id) = element_ref.backend_node_id()
-                            && let Ok(href) = resolve_href(client, backend_id).await
-                                && !href.is_empty() {
-                                    result.push_str(&format!(" url=\"{href}\""));
-                                }
-            }
+        if let Some(backend_id) = link_backend(line)
+            && let Some(href) = hrefs.get(&backend_id)
+            && !href.is_empty()
+        {
+            result.push_str(" url=");
+            result.push_str(&crate::snapshot_render::quote(href));
+        }
         result.push('\n');
     }
     result
 }
 
-/// Result of paging/capping a rendered snapshot for display.
+/// A windowed snapshot rendering.
 pub struct Paged {
-    /// The (possibly windowed) text, with a truncation note appended when truncated.
+    /// The window, with a truncation note appended when there is one.
     pub text: String,
-    /// Total number of characters in the full snapshot.
+    /// Characters in the FULL snapshot, not in the window.
     pub total_chars: usize,
-    /// Whether characters were dropped after the returned window.
     pub truncated: bool,
-    /// Offset to pass on the next call to continue paging (only when truncated).
+    /// Where to resume paging; `None` unless truncated.
     pub next_offset: Option<usize>,
 }
 
-/// Apply char-based paging to a rendered snapshot.
-///
-/// `offset` skips the first N characters (stable because uids are stable across
-/// inspects); `max_chars` caps the returned window. UTF-8 safe — never slices a
-/// multi-byte char. When the window is capped short of the end, a machine-readable
-/// tail is appended so an agent knows how to continue or narrow.
-///
-/// When `offset == 0` and `max_chars` is `None`, the text is returned unchanged
-/// (matches the no-cap default of `text`/`read`).
+/// Char-based paging over a rendered snapshot: `offset` skips N characters, `max_chars` caps
+/// the window, and a truncated window gains a tail naming the next `--offset`. UTF-8 safe.
+/// `offset == 0` with no `max_chars` returns the text unchanged.
 #[must_use]
 pub fn paginate(text: &str, offset: usize, max_chars: Option<usize>) -> Paged {
     let total_chars = text.chars().count();
 
     if offset == 0 && max_chars.is_none() {
-        return Paged { text: text.to_string(), total_chars, truncated: false, next_offset: None };
+        return Paged {
+            text: text.to_string(),
+            total_chars,
+            truncated: false,
+            next_offset: None,
+        };
     }
 
-    // Byte index of the offset-th char (clamped to end).
-    let start_byte = text.char_indices().nth(offset).map_or(text.len(), |(i, _)| i);
+    // Byte index of the offset-th char, clamped to the end.
+    let start_byte = text
+        .char_indices()
+        .nth(offset)
+        .map_or(text.len(), |(i, _)| i);
     let window = &text[start_byte..];
     let window_chars = total_chars.saturating_sub(offset);
 
     let (shown, kept) = match max_chars {
         Some(max) if window_chars > max => {
-            let end_byte = window.char_indices().nth(max).map_or(window.len(), |(i, _)| i);
+            let end_byte = window
+                .char_indices()
+                .nth(max)
+                .map_or(window.len(), |(i, _)| i);
             (&window[..end_byte], max)
         }
         _ => (window, window_chars),
@@ -218,28 +229,132 @@ pub fn paginate(text: &str, offset: usize, max_chars: Option<usize>) -> Paged {
     }
 }
 
-async fn resolve_href(client: &CdpClient, backend_node_id: i64) -> Result<String, crate::BoxError> {
-    let resolved: crate::cdp::types::ResolveNodeResult = client
-        .call("DOM.resolveNode", crate::cdp::types::ResolveNodeParams {
-            node_id: None,
-            backend_node_id: Some(backend_node_id),
-            object_group: Some("chrome-agent-urls".into()),
-            execution_context_id: None,
+/// `backendNodeId → absolute href` for the wanted nodes.
+async fn link_hrefs(
+    client: &CdpClient,
+    wanted: &HashSet<i64>,
+) -> Result<HashMap<i64, String>, crate::BoxError> {
+    let doc: serde_json::Value = client
+        .call("DOM.getDocument", json!({"depth": -1, "pierce": true}))
+        .await?;
+    let root = doc.get("root").ok_or("DOM.getDocument returned no root")?;
+    let mut found: Vec<(i64, String, String)> = Vec::new();
+    collect_links(root, "", None, wanted, &mut found);
+
+    // Only relative hrefs need the page; a site writing absolute ones costs one call in total.
+    let relative: Vec<usize> = (0..found.len())
+        .filter(|&i| !is_absolute(&found[i].2))
+        .collect();
+    if !relative.is_empty() {
+        let pairs: Vec<[&str; 2]> = relative
+            .iter()
+            .map(|&i| [found[i].1.as_str(), found[i].2.as_str()])
+            .collect();
+        if let Some(absolute) = absolutise(client, &pairs).await {
+            for (&slot, url) in relative.iter().zip(absolute) {
+                if !url.is_empty() {
+                    found[slot].2 = url;
+                }
+            }
+        }
+    }
+
+    Ok(found.into_iter().map(|(id, _, href)| (id, href)).collect())
+}
+
+/// Walk a `DOM.getDocument` tree collecting `(backendNodeId, base URL, raw href)` for the wanted
+/// nodes. `anchor` carries the enclosing `<a>`'s href down, which is what the old
+/// `this.closest('a')` did for a link node pointing at an element inside the anchor.
+fn collect_links(
+    node: &serde_json::Value,
+    base: &str,
+    anchor: Option<&str>,
+    wanted: &HashSet<i64>,
+    out: &mut Vec<(i64, String, String)>,
+) {
+    // A document node — the page's, or an iframe's — carries the base its hrefs resolve against.
+    let base = node
+        .get("baseURL")
+        .or_else(|| node.get("documentURL"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(base);
+    let anchor = href_attribute(node).or(anchor);
+
+    if let Some(href) = anchor
+        && let Some(id) = node
+            .get("backendNodeId")
+            .and_then(serde_json::Value::as_i64)
+        && wanted.contains(&id)
+    {
+        out.push((id, base.to_string(), href.to_string()));
+    }
+
+    for key in ["children", "shadowRoots", "pseudoElements"] {
+        if let Some(list) = node.get(key).and_then(serde_json::Value::as_array) {
+            for child in list {
+                collect_links(child, base, anchor, wanted, out);
+            }
+        }
+    }
+    if let Some(content) = node.get("contentDocument") {
+        collect_links(content, base, None, wanted, out);
+    }
+}
+
+/// The `href` of an `<a>`/`<area>`. `DOM.getDocument` hands attributes back flat.
+fn href_attribute(node: &serde_json::Value) -> Option<&str> {
+    let name = node.get("nodeName").and_then(serde_json::Value::as_str)?;
+    if !name.eq_ignore_ascii_case("a") && !name.eq_ignore_ascii_case("area") {
+        return None;
+    }
+    node.get("attributes")?
+        .as_array()?
+        .chunks(2)
+        .find_map(|pair| {
+            let key = pair.first()?.as_str()?;
+            key.eq_ignore_ascii_case("href")
+                .then(|| pair.get(1)?.as_str())
+                .flatten()
         })
-        .await?;
-    let object_id = resolved.object.object_id.ok_or("no objectId")?;
+}
+
+/// Whether an href already carries a scheme (RFC 3986 `scheme:`), so no base is needed.
+fn is_absolute(href: &str) -> bool {
+    let mut chars = href.chars();
+    if !chars.next().is_some_and(|c| c.is_ascii_alphabetic()) {
+        return false;
+    }
+    for c in chars {
+        if c == ':' {
+            return true;
+        }
+        if !c.is_ascii_alphanumeric() && !matches!(c, '+' | '-' | '.') {
+            return false;
+        }
+    }
+    false
+}
+
+/// Resolve `[base, href]` pairs against each other in one call. `None` on any failure, which
+/// leaves the raw attribute in place rather than dropping the link.
+async fn absolutise(client: &CdpClient, pairs: &[[&str; 2]]) -> Option<Vec<String>> {
+    // U+2028/U+2029 are legal inside a JSON string and were illegal inside a JS one before ES2019.
+    let payload = serde_json::to_string(pairs)
+        .ok()?
+        .replace('\u{2028}', "\\u2028")
+        .replace('\u{2029}', "\\u2029");
+    let expression = format!(
+        "JSON.stringify({payload}.map(p => {{ try {{ return new URL(p[1], p[0]).href }} catch (e) {{ return \"\"; }} }}))"
+    );
     let result: serde_json::Value = client
-        .call("Runtime.callFunctionOn", json!({
-            "objectId": object_id,
-            "functionDeclaration": "function() { return this.href || this.closest('a')?.href || ''; }",
-            "returnByValue": true,
-        }))
-        .await?;
-    let href = result.get("result")
-        .and_then(|r| r.get("value"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    Ok(href.to_string())
+        .call(
+            "Runtime.evaluate",
+            json!({"expression": expression, "returnByValue": true}),
+        )
+        .await
+        .ok()?;
+    let text = result.get("result")?.get("value")?.as_str()?;
+    serde_json::from_str(text).ok()
 }
 
 #[cfg(test)]
@@ -297,7 +412,7 @@ mod tests {
 
     #[test]
     fn paginate_utf8_safe_no_panic() {
-        // 3-byte chars: naive byte slicing would panic mid-char.
+        // Naive byte slicing would panic mid-char.
         let text = "日本語テストデータ"; // 9 chars
         let p = paginate(text, 2, Some(3)); // chars 2..5 = "語テス"
         assert_eq!(p.text.chars().take(3).collect::<String>(), "語テス");
@@ -307,15 +422,14 @@ mod tests {
 
     #[test]
     fn paginate_exact_fit_not_truncated() {
-        // Guards the `window_chars > max` comparison against an off-by-one (> vs >=):
-        // when the window exactly fills the cap, nothing is dropped and no tail is added.
+        // Guards `window_chars > max` against an off-by-one.
         let text = "abcdefghij"; // 10 chars
         let p = paginate(text, 0, Some(10));
         assert_eq!(p.text, text);
         assert!(!p.truncated);
         assert_eq!(p.next_offset, None);
 
-        // Same, offset into the middle: chars 4..10 = "efghij", cap == remaining.
+        // Offset into the middle, cap == remaining.
         let p2 = paginate(text, 4, Some(6));
         assert_eq!(p2.text, "efghij");
         assert!(!p2.truncated);
@@ -330,20 +444,74 @@ mod tests {
         assert!(!p.truncated);
     }
 
+    use super::{collect_links, href_attribute, is_absolute};
+    use serde_json::json;
+    use std::collections::HashSet;
+
     #[test]
-    fn url_append_only_on_links() {
-        let text = "uid=n1 heading \"Title\"\nuid=n2 link \"Click me\"\nuid=n3 button \"OK\"\n";
-        // Without CDP, we just verify the parsing logic identifies link lines
-        for line in text.lines() {
-            let trimmed = line.trim();
-            if let Some(rest) = trimmed.strip_prefix("uid=")
-                && let Some((_uid, after_uid)) = rest.split_once(' ')
-            {
-                let role = after_uid.split([' ', '"']).next().unwrap_or("");
-                if role == "link" {
-                    assert!(line.contains("Click me"));
-                }
-            }
+    fn a_scheme_is_what_makes_an_href_absolute() {
+        for absolute in [
+            "https://e.com/a",
+            "mailto:a@b.c",
+            "javascript:void(0)",
+            "data:,x",
+        ] {
+            assert!(is_absolute(absolute), "{absolute}");
         }
+        for relative in ["/a", "a/b", "//host/p", "#frag", "?q=1", "", "1x:y"] {
+            assert!(!is_absolute(relative), "{relative}");
+        }
+    }
+
+    #[test]
+    fn only_anchors_carry_an_href() {
+        let anchor = json!({"nodeName": "A", "attributes": ["class", "c", "href", "/x"]});
+        assert_eq!(href_attribute(&anchor), Some("/x"));
+        let link_tag = json!({"nodeName": "LINK", "attributes": ["href", "/style.css"]});
+        assert_eq!(href_attribute(&link_tag), None);
+        let bare = json!({"nodeName": "A", "attributes": ["class", "c"]});
+        assert_eq!(href_attribute(&bare), None);
+    }
+
+    /// One walk replaces the `DOM.resolveNode` + `Runtime.callFunctionOn` pair per link: the base
+    /// comes from the enclosing document, and a node INSIDE an anchor inherits its href — what
+    /// `this.closest('a')` used to do.
+    #[test]
+    fn one_walk_finds_every_wanted_href_with_its_base() {
+        let doc = json!({
+            "nodeName": "#document",
+            "baseURL": "https://e.com/dir/page",
+            "children": [{
+                "nodeName": "A",
+                "backendNodeId": 10,
+                "attributes": ["href", "../other"],
+                "children": [
+                    {"nodeName": "SPAN", "backendNodeId": 11, "attributes": []},
+                    {"nodeName": "#text", "backendNodeId": 12}
+                ]
+            }, {
+                "nodeName": "IFRAME",
+                "backendNodeId": 20,
+                "contentDocument": {
+                    "nodeName": "#document",
+                    "baseURL": "https://inner.example/sub/",
+                    "children": [{"nodeName": "A", "backendNodeId": 21, "attributes": ["href", "deep"]}]
+                }
+            }]
+        });
+        let wanted: HashSet<i64> = [10, 11, 21, 99].into_iter().collect();
+        let mut found = Vec::new();
+        collect_links(&doc, "", None, &wanted, &mut found);
+
+        assert_eq!(found.len(), 3, "{found:?}");
+        assert!(found.contains(&(10, "https://e.com/dir/page".into(), "../other".into())));
+        assert!(
+            found.contains(&(11, "https://e.com/dir/page".into(), "../other".into())),
+            "a node inside the anchor inherits it: {found:?}"
+        );
+        assert!(
+            found.contains(&(21, "https://inner.example/sub/".into(), "deep".into())),
+            "an iframe's links resolve against the iframe's base: {found:?}"
+        );
     }
 }

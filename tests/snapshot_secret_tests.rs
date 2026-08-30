@@ -1,11 +1,7 @@
-//! A value the response redacts, printed by the snapshot on the line above.
+//! The accessibility snapshot must not print a value the response redacts.
 //!
-//! `fill` redacts a secret because the response "reaches stdout, the agent transcript and any
-//! `--record` file". The accessibility snapshot reaches all three by the same route and printed
-//! the same value verbatim: `inspect` prints it, and every action report quotes those lines back
-//! inside `delta`. Chrome masks a `type=password` in the tree, which is what hid the leak — the
-//! half that matters is a card number or a one-time code in a `type=text` field, secret only
-//! because its `autocomplete` attribute says so.
+//! Chrome masks a `type=password` by itself; the case that needs redaction is a card number or
+//! one-time code in a `type=text` field, secret only because of its `autocomplete` attribute.
 
 use std::process::Command;
 
@@ -14,18 +10,20 @@ use serde_json::Value;
 mod common;
 use common::TestBrowser;
 
-/// Every string the fixture holds in a secret field, plus the digits it echoes into a
-/// `generic` node. None of these may appear in any output.
-const SECRETS: &[&str] = &["4111111111111111", "4242424242424242", "7391", "903214", "hunter2secret"];
-
-fn binary() -> String {
-    let mut path = std::env::current_exe().unwrap().parent().unwrap().parent().unwrap().to_path_buf();
-    path.push("chrome-agent");
-    path.to_string_lossy().into_owned()
-}
+/// Every string the fixture holds in a secret field. None may appear in any output.
+const SECRETS: &[&str] = &[
+    "4111111111111111",
+    "4242424242424242",
+    "7391",
+    "903214",
+    "hunter2secret",
+];
 
 fn run_cli(args: &[&str]) -> (String, i32) {
-    let output = Command::new(binary()).args(args).output().expect("Failed to run chrome-agent");
+    let output = Command::new(common::binary())
+        .args(args)
+        .output()
+        .expect("Failed to run chrome-agent");
     (
         String::from_utf8_lossy(&output.stdout).to_string(),
         output.status.code().unwrap_or(-1),
@@ -60,8 +58,7 @@ fn assert_no_secret(label: &str, text: &str) {
     }
 }
 
-/// `inspect` is where the leak is widest: the fields are pre-filled, so no action is needed for
-/// a card number to reach stdout.
+/// The fixture's fields are pre-filled, so `inspect` alone can leak a card number.
 #[test]
 fn inspect_names_every_secret_field_without_printing_one() {
     let b = TestBrowser::new("secret-inspect");
@@ -72,56 +69,64 @@ fn inspect_names_every_secret_field_without_printing_one() {
     assert_eq!(code, 0, "{text}");
     assert_no_secret("inspect", &text);
 
-    // The node, its uid, its role and its label are what an agent aims by — all still there.
-    for label in ["Card number", "Security code", "One-time code", "Password", "Note for the courier"] {
-        assert!(text.contains(label), "the field must still be named ({label}):\n{text}");
+    for label in [
+        "Card number",
+        "Security code",
+        "One-time code",
+        "Password",
+        "Note for the courier",
+    ] {
+        assert!(
+            text.contains(label),
+            "the field must still be named ({label}):\n{text}"
+        );
     }
-    // Four secret fields plus Chrome's editable-content child inside each: the value token is
-    // present and states that it was withheld, rather than disappearing.
+    // Four secret fields in the fixture; each keeps a value token saying it was withheld.
     assert_eq!(
         text.matches("value=\"<redacted>\"").count(),
         4,
         "one marker per secret field:\n{text}"
     );
-    // And the ordinary field is printed, which is the point of the field.
     assert!(
         text.contains("value=\"leave at the door\""),
         "an ordinary value must survive:\n{text}"
     );
 }
 
-/// The other consumer of the same text. Every mutating command re-reads the page and quotes
-/// the changed lines in `delta` — the response that says `{"redacted": true}` about what it
-/// wrote used to print the same digits three lines later.
+/// A mutating command quotes changed tree lines in `delta`, the second place a secret escapes.
 #[test]
 fn an_action_delta_never_quotes_a_secret() {
     let b = TestBrowser::new("secret-delta");
     if !open(b.name(), "snapshot_secret_values.html") {
         return;
     }
-    // Baseline, so the next action has something to compare against.
     let (base, _) = run_cli(&["--browser", b.name(), "inspect"]);
     assert_no_secret("baseline inspect", &base);
 
-    // A fill that REPLACES the card number: before the fix this produced three delta lines
-    // carrying both the old and the new number (the field, Chrome's editable child, and the
-    // page's own echo of it).
-    let v = json_cli(b.name(), &["fill", "--selector", "#card", "4242424242424242"]);
+    // A fill that replaces the card number, so the delta holds both numbers.
+    let v = json_cli(
+        b.name(),
+        &["fill", "--selector", "#card", "4242424242424242"],
+    );
     assert_no_secret("fill response", &v.to_string());
-    assert_eq!(v["value"]["redacted"], true, "the fill's own report agrees: {v}");
+    assert_eq!(
+        v["value"]["redacted"], true,
+        "the fill's own report agrees: {v}"
+    );
     assert_eq!(v["value"]["verbatim"], true, "and the write landed: {v}");
 
-    // A click elsewhere: its delta still walks past every secret field.
     let clicked = json_cli(b.name(), &["click", "--selector", "#pay-submit"]);
     assert_no_secret("click response", &clicked.to_string());
     assert!(
-        clicked["delta"].as_str().unwrap_or_default().contains("paid"),
+        clicked["delta"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("paid"),
         "the change it did cause is still reported: {clicked}"
     );
 }
 
-/// The marker has to be fixed, not derived. A marker carrying a length or a hash would make
-/// every secret field on the page look changed on every action.
+/// The marker is fixed: a length or hash would make every secret field look changed.
 #[test]
 fn two_snapshots_of_an_unchanged_secret_compare_equal() {
     let b = TestBrowser::new("secret-stable");
@@ -135,19 +140,22 @@ fn two_snapshots_of_an_unchanged_secret_compare_equal() {
     assert_eq!(v["added"], 0, "{v}");
     assert_eq!(v["removed"], 0, "{v}");
     assert!(
-        v["diff"].as_str().unwrap_or_default().contains("No changes detected"),
+        v["diff"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("No changes detected"),
         "and it says so: {v}"
     );
 
-    // Same text, character for character — the marker does not depend on what it hides.
     let (second, _) = run_cli(&["--browser", b.name(), "inspect"]);
-    assert_eq!(first, second, "two reads of the same page must render identically");
+    assert_eq!(
+        first, second,
+        "two reads of the same page must render identically"
+    );
 }
 
-/// The trade-off, pinned so it cannot change silently: a secret whose value the page really
-/// replaced now compares equal, because both sides render the same marker. What is NOT lost is
-/// a secret that disappears — the `value=` token stops being emitted, which is how
-/// `values_lost` still finds it.
+/// The accepted trade-off: a replaced secret compares equal, since both sides render the same
+/// marker. A secret that DISAPPEARS stays visible, because an empty value emits no token.
 #[test]
 fn a_changed_secret_is_invisible_to_the_diff_but_a_lost_one_is_not() {
     let b = TestBrowser::new("secret-tradeoff");
@@ -155,23 +163,30 @@ fn a_changed_secret_is_invisible_to_the_diff_but_a_lost_one_is_not() {
         return;
     }
     run_cli(&["--browser", b.name(), "inspect"]);
-    let v = json_cli(b.name(), &["fill", "--selector", "#card", "4242424242424242"]);
+    let v = json_cli(
+        b.name(),
+        &["fill", "--selector", "#card", "4242424242424242"],
+    );
     let delta = v["delta"].as_str().unwrap_or_default();
     assert!(
         !delta.contains("uid=n2 ") || !delta.contains("value="),
         "the changed secret is not reported as a value change: {v}"
     );
 
-    // The loss half, on the fixture built for it: emptying a secret field is still visible,
-    // because an empty value emits no token at all.
+    // The loss half, on the fixture built for it.
     let b2 = TestBrowser::new("secret-tradeoff-lost");
     if !open(b2.name(), "form_value_secret_lost_on_submit.html") {
         return;
     }
-    json_cli(b2.name(), &["fill", "--selector", "#card", "4111111111111111"]);
+    json_cli(
+        b2.name(),
+        &["fill", "--selector", "#card", "4111111111111111"],
+    );
     let lost = json_cli(b2.name(), &["click", "--selector", "#pay-submit"]);
     assert_no_secret("values_lost response", &lost.to_string());
-    let entries = lost["values_lost"].as_array().unwrap_or_else(|| panic!("no values_lost: {lost}"));
+    let entries = lost["values_lost"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no values_lost: {lost}"));
     assert!(
         entries.iter().any(|e| e["redacted"] == true),
         "a lost secret is still named, and still redacted: {lost}"

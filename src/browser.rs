@@ -13,9 +13,8 @@ pub struct BrowserOptions {
     pub connect: Option<String>,
     pub proxy_server: Option<String>,
     pub copy_cookies: bool,
-    /// Extra flags passed straight to the Chrome command line (`--chrome-arg`, repeatable).
-    /// Applies only to a browser this tool launches itself — see
-    /// [`normalized_chrome_args_option`] for the `--connect` and forbidden-flag rules.
+    /// Extra flags for the Chrome command line (`--chrome-arg`), only for a browser this tool
+    /// launches. See [`normalized_chrome_args_option`] for the forbidden-flag rules.
     pub chrome_args: Vec<String>,
 }
 
@@ -36,19 +35,15 @@ impl Default for BrowserOptions {
 
 /// Result of resolving a browser connection.
 pub struct BrowserConnection {
-    /// WebSocket endpoint for the browser (Target.* commands).
+    /// Browser-level WebSocket endpoint (`Target.*` commands).
     pub ws_endpoint: String,
     /// HTTP base URL for /json/list queries.
     pub http_endpoint: Option<String>,
     pub pid: Option<u32>,
 }
 
-/// Fetch the page-specific WebSocket URL for a given target ID.
-/// Queries /json/list on the browser's HTTP endpoint.
-pub async fn get_page_ws_url(
-    http_endpoint: &str,
-    target_id: &str,
-) -> Result<String, BrowserError> {
+/// Fetch a target's page WebSocket URL from /json/list on the browser's HTTP endpoint.
+pub async fn get_page_ws_url(http_endpoint: &str, target_id: &str) -> Result<String, BrowserError> {
     let url = format!("{}/json/list", http_endpoint.trim_end_matches('/'));
 
     // Retry a few times — Chrome may not be fully ready yet
@@ -60,9 +55,11 @@ pub async fn get_page_ws_url(
                     for page in pages {
                         let id = page.get("id").and_then(|v| v.as_str()).unwrap_or("");
                         if id == target_id
-                            && let Some(ws) = page.get("webSocketDebuggerUrl").and_then(|v| v.as_str()) {
-                                return Ok(ws.to_string());
-                            }
+                            && let Some(ws) =
+                                page.get("webSocketDebuggerUrl").and_then(|v| v.as_str())
+                        {
+                            return Ok(ws.to_string());
+                        }
                     }
                     // Target not found in list — might not be created yet
                     last_err = BrowserError::NotFound(format!(
@@ -85,9 +82,13 @@ pub fn validate_browser_name(name: &str) -> Result<(), BrowserError> {
     if name.is_empty() {
         return Err(BrowserError::Launch("Browser name cannot be empty".into()));
     }
-    if !name.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+    if !name
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+    {
         return Err(BrowserError::Launch(
-            "Browser name must contain only alphanumeric characters, hyphens, and underscores".into(),
+            "Browser name must contain only alphanumeric characters, hyphens, and underscores"
+                .into(),
         ));
     }
     Ok(())
@@ -151,8 +152,7 @@ pub fn normalized_proxy_option(
     proxy_server.map(validate_proxy_server).transpose()
 }
 
-/// `--chrome-arg` validation lives in `chrome_args.rs` (split for the 1000-line cap);
-/// re-exported so call sites keep spelling it `browser::normalized_chrome_args_option`.
+/// `--chrome-arg` validation lives in `chrome_args.rs`, re-exported here.
 pub use crate::chrome_args::normalized_chrome_args_option;
 
 /// Resolve a browser connection: either connect to an existing Chrome or launch one.
@@ -185,30 +185,24 @@ pub async fn resolve_browser(opts: &BrowserOptions) -> Result<BrowserConnection,
 }
 
 /// Launch a Chromium instance with remote debugging.
-/// Uses a lock file to prevent concurrent launches from racing.
 async fn launch_browser(opts: &BrowserOptions) -> Result<BrowserConnection, BrowserError> {
     let profile_dir = browser_profile_dir(&opts.name)?;
-    std::fs::create_dir_all(&profile_dir).map_err(|e| {
-        BrowserError::Launch(format!("Failed to create profile dir: {e}"))
-    })?;
-    // Restrict the profile dir to the current user. It can hold cookies and the
-    // Local State decryption key copied from the user's real Chrome profile
-    // (--copy-cookies), so other local users must not be able to traverse it.
+    std::fs::create_dir_all(&profile_dir)
+        .map_err(|e| BrowserError::Launch(format!("Failed to create profile dir: {e}")))?;
+    // 0700: the profile can hold cookies and the Local State decryption key copied from
+    // the user's real Chrome profile (--copy-cookies).
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(&profile_dir, std::fs::Permissions::from_mode(0o700));
     }
 
-    // Prevent concurrent launches: if DevToolsActivePort already exists and points
-    // at a live Chrome, reconnect to it instead of spawning a fresh instance.
+    // A DevToolsActivePort pointing at a live Chrome means reconnect, not a second launch.
     let port_file = profile_dir.join("DevToolsActivePort");
     let existing = try_reconnect_existing(&port_file).await;
 
-    // Copy cookies from the user's real Chrome profile only when we are about to
-    // spawn a *fresh* browser. Copying while reconnecting to a live managed Chrome
-    // would overwrite its in-use SQLite Cookies DB in place (corruption risk) and
-    // the copy would never be loaded anyway (silent auth no-op) — see FIX A5.
+    // Only when spawning a *fresh* browser: copying into a live managed Chrome overwrites
+    // its in-use SQLite Cookies DB and would never be loaded anyway.
     if should_copy_cookies(opts.copy_cookies, existing.is_some()) {
         copy_chrome_cookies(&profile_dir)?;
     }
@@ -231,16 +225,12 @@ async fn launch_browser(opts: &BrowserOptions) -> Result<BrowserConnection, Brow
     })?;
 
     let pid = child.id();
-    // From here until `save_session` writes it, this pid lives only in this process's
-    // memory. Arming it makes the interrupt and error paths able to reap it; the port
-    // timeout below was the one case that had its own handling, and every other way out
-    // of this window leaked. See `kill::UNPERSISTED`.
+    // Until `save_session` writes it, this pid lives only in memory. Arming it lets the
+    // interrupt and error paths reap it instead of leaking a browser. See `kill::UNPERSISTED`.
     crate::kill::arm(pid);
 
-    // Wait for DevToolsActivePort to appear. If it never shows (e.g. slow start
-    // under load), the spawned Chrome would otherwise be orphaned — `Child`'s
-    // drop does NOT kill the process and no pid was persisted yet, so `close`
-    // could never reap it. Kill the child before propagating the error.
+    // If DevToolsActivePort never appears, kill the child before propagating: `Child`'s drop
+    // does not kill it and no pid is persisted yet, so nothing else could reap it.
     let port_file = profile_dir.join("DevToolsActivePort");
     let ws_endpoint = match wait_for_devtools_port(&port_file, Duration::from_secs(10)).await {
         Ok(ws) => ws,
@@ -285,34 +275,25 @@ fn managed_launch_args(profile_dir: &Path, opts: &BrowserOptions) -> Vec<String>
         args.push("--disable-infobars".into());
         args.push("--disable-component-extensions-with-background-pages".into());
     }
-    // Appended last so a caller's `--chrome-arg` can override anything above that isn't on
-    // the forbidden list (`validate_chrome_args`) — Chromium keeps the last value it parses
-    // for a repeated switch.
+    // Last, so a caller's `--chrome-arg` overrides anything above that is not forbidden:
+    // Chromium keeps the last value it parses for a repeated switch.
     args.extend(opts.chrome_args.iter().cloned());
     args
 }
 
-/// Decide whether `--copy-cookies` should run for this launch.
-///
-/// Cookies must only be copied when spawning a *fresh* browser. When we are
-/// reconnecting to an already-running managed Chrome, copying would overwrite
-/// its live `SQLite` Cookies DB in place and would never be loaded by the running
-/// instance anyway (silent auth no-op).
+/// Whether `--copy-cookies` should run for this launch. Only on a fresh spawn: copying into a
+/// running managed Chrome overwrites its live `SQLite` Cookies DB and is never loaded.
 const fn should_copy_cookies(copy_requested: bool, reconnecting_to_live: bool) -> bool {
     copy_requested && !reconnecting_to_live
 }
 
-/// Try to reconnect to a Chrome already described by a `DevToolsActivePort` file.
-///
-/// Returns `Some` when the port file points at a live, reachable browser.
-/// Returns `None` when there is no port file, or it is stale (Chrome dead) — in
-/// the stale case the file is removed so a fresh launch can proceed cleanly.
+/// Reconnect to the Chrome a `DevToolsActivePort` file describes, if it is still reachable.
+/// `None` when there is no port file or it is stale; a stale one is removed.
 async fn try_reconnect_existing(port_file: &Path) -> Option<BrowserConnection> {
     if !port_file.exists() {
         return None;
     }
     if let Some(ws) = read_devtools_active_port(port_file) {
-        // Verify the WebSocket is actually reachable (not stale)
         let http = extract_http_endpoint(&ws);
         if http_get_json(&format!("{http}/json/version"), Duration::from_secs(1))
             .await
@@ -325,9 +306,55 @@ async fn try_reconnect_existing(port_file: &Path) -> Option<BrowserConnection> {
             });
         }
     }
-    // Port file exists but Chrome is dead — remove stale file and launch fresh
+    // Port file exists but Chrome is dead: drop it and launch fresh.
     let _ = std::fs::remove_file(port_file);
     None
+}
+
+/// Kill the browser behind `pid` — on the way to relaunching `browser_name`, or on `close` —
+/// and wait for the kernel to agree it is gone. The one copy of that sequence: `cmd_close`
+/// kept its own, which removed `browsers_dir()/<name>/DevToolsActivePort`, one directory above
+/// the file [`browser_profile_dir`] writes, so it had never removed anything.
+///
+/// A signal is not an exit. Chrome keeps answering `/json/version` while it tears down and its
+/// `DevToolsActivePort` file outlives it, so a [`resolve_browser`] inside that window is met by
+/// [`try_reconnect_existing`] handing back the corpse: the "fresh" browser is the one just
+/// rejected, in the mode just rejected, recorded with `pid: None` so nothing can reach it
+/// again. Waiting for the pid and removing the port file is what makes a relaunch a relaunch.
+///
+/// Killing goes through [`crate::kill::kill_pid`] — the guard that asks whether the pid is a
+/// browser before signalling it, so a recycled pid is left alone. Its three refusals pass
+/// through as `Ok`: nothing was signalled, so nothing is mid-teardown.
+///
+/// `Err` only when the signal landed and the process is still there after the wait. The caller
+/// must not relaunch then: everything it would read about that profile is about to change.
+/// The guard's own reading rides back on `Ok`, for `close`, which REPORTS the kill rather than
+/// relaunching over it: `Err` is the one case it cannot infer (signalled, still there).
+pub fn kill_and_await_exit(
+    browser_name: &str,
+    pid: u32,
+) -> Result<crate::kill::KillOutcome, BrowserError> {
+    const EXIT_WAIT: Duration = Duration::from_secs(5);
+
+    let outcome = crate::kill::kill_pid(pid);
+    if outcome != crate::kill::KillOutcome::Signalled {
+        return Ok(outcome);
+    }
+    if !crate::kill::wait_until_gone(pid, EXIT_WAIT) {
+        return Err(BrowserError::Launch(format!(
+            "Browser '{browser_name}' (pid={pid}) was signalled to make room for a relaunch, \
+             and is still running {}s later. Nothing was relaunched: a Chrome that is shutting \
+             down still answers on its DevTools endpoint, so the replacement would have been \
+             the same browser. Retry, or run `chrome-agent --browser {browser_name} close`.",
+            EXIT_WAIT.as_secs()
+        )));
+    }
+    // Only once the process is gone: a live Chrome owns this file, and deleting it under a
+    // browser that survived would strand every later reconnect.
+    if let Ok(dir) = browser_profile_dir(browser_name) {
+        let _ = std::fs::remove_file(dir.join("DevToolsActivePort"));
+    }
+    Ok(outcome)
 }
 
 /// Auto-discover a running Chrome instance with remote debugging enabled.
@@ -335,13 +362,14 @@ async fn auto_discover() -> Result<BrowserConnection, BrowserError> {
     // 1. Check DevToolsActivePort files from known Chrome profile paths
     for candidate in devtools_active_port_candidates() {
         if let Some(ws) = read_devtools_active_port(&candidate)
-            && probe_ws_endpoint(&ws).await {
-                return Ok(BrowserConnection {
-                    http_endpoint: Some(extract_http_endpoint(&ws)),
-                    ws_endpoint: ws,
-                    pid: None,
-                });
-            }
+            && probe_ws_endpoint(&ws).await
+        {
+            return Ok(BrowserConnection {
+                http_endpoint: Some(extract_http_endpoint(&ws)),
+                ws_endpoint: ws,
+                pid: None,
+            });
+        }
     }
 
     // 2. Probe common debugging ports
@@ -360,9 +388,12 @@ async fn auto_discover() -> Result<BrowserConnection, BrowserError> {
 
 /// Resolve an HTTP endpoint to a WebSocket URL via /json/version.
 async fn resolve_http_endpoint(endpoint: &str) -> Result<BrowserConnection, BrowserError> {
-    let ws = fetch_ws_endpoint(endpoint).await.map_err(|_| {
+    // The cause travels: `fetch_ws_endpoint` already separates connection refused, timeout
+    // and malformed JSON, and dropping it left every `--connect` failure looking alike —
+    // including to `hints::error_hint`, which branches on "Connection refused".
+    let ws = fetch_ws_endpoint(endpoint).await.map_err(|cause| {
         BrowserError::NotFound(format!(
-            "Could not resolve CDP WebSocket from {endpoint}. \
+            "Could not resolve CDP WebSocket from {endpoint}: {cause}. \
              If Chrome uses built-in remote debugging, run `chrome-agent --connect` \
              without a URL for auto-discovery."
         ))
@@ -375,7 +406,6 @@ async fn resolve_http_endpoint(endpoint: &str) -> Result<BrowserConnection, Brow
     })
 }
 
-/// Extract an HTTP endpoint from a WebSocket URL.
 /// `ws://127.0.0.1:9222/devtools/browser/...` → `http://127.0.0.1:9222`
 pub fn extract_http_from_ws(ws_url: &str) -> String {
     extract_http_endpoint(ws_url)
@@ -392,10 +422,7 @@ fn extract_http_endpoint(ws_url: &str) -> String {
 
 /// Fetch the webSocketDebuggerUrl from a /json/version endpoint.
 async fn fetch_ws_endpoint(base_url: &str) -> Result<String, BrowserError> {
-    let url = format!(
-        "{}/json/version",
-        base_url.trim_end_matches('/')
-    );
+    let url = format!("{}/json/version", base_url.trim_end_matches('/'));
 
     let response = http_get_json(&url, Duration::from_secs(2)).await?;
 
@@ -408,12 +435,8 @@ async fn fetch_ws_endpoint(base_url: &str) -> Result<String, BrowserError> {
 }
 
 /// HTTP GET that returns JSON. Uses ureq (blocking, run on tokio `spawn_blocking`).
-async fn http_get_json(
-    url: &str,
-    timeout: Duration,
-) -> Result<serde_json::Value, BrowserError> {
+async fn http_get_json(url: &str, timeout: Duration) -> Result<serde_json::Value, BrowserError> {
     let url = url.to_string();
-    
 
     tokio::task::spawn_blocking(move || {
         let agent = ureq::Agent::config_builder()
@@ -440,7 +463,6 @@ async fn http_get_json(
 
 /// Check if a WebSocket endpoint is reachable.
 async fn probe_ws_endpoint(ws_url: &str) -> bool {
-    // Try connecting with a short timeout
     tokio::time::timeout(
         Duration::from_millis(500),
         tokio_tungstenite::connect_async(ws_url),
@@ -450,10 +472,7 @@ async fn probe_ws_endpoint(ws_url: &str) -> bool {
 }
 
 /// Wait for `DevToolsActivePort` file to appear and parse it.
-async fn wait_for_devtools_port(
-    path: &Path,
-    timeout: Duration,
-) -> Result<String, BrowserError> {
+async fn wait_for_devtools_port(path: &Path, timeout: Duration) -> Result<String, BrowserError> {
     let deadline = Instant::now() + timeout;
 
     while Instant::now() < deadline {
@@ -527,9 +546,7 @@ const DISCOVERY_PORTS: &[u16] = &[9222, 9223, 9224, 9225, 9226, 9227, 9228, 9229
 fn find_chromium() -> Result<PathBuf, BrowserError> {
     // 1. Check for managed Chromium
     if let Some(home) = dirs::home_dir() {
-        let managed = home
-            .join(".chrome-agent")
-            .join("chromium");
+        let managed = home.join(".chrome-agent").join("chromium");
 
         if cfg!(target_os = "macos") {
             let app = managed.join("Chromium.app/Contents/MacOS/Chromium");
@@ -567,6 +584,19 @@ fn find_chromium() -> Result<PathBuf, BrowserError> {
     }
 
     // 2. Check system Chrome
+    /// The first entry of `PATH` holding `name`, searched here rather than by shelling out to
+    /// `which`/`where`.
+    ///
+    /// Those two are themselves resolved through `PATH`, so finding Chrome ran a program the
+    /// same variable chose — one more execution than the search needs, and one this tool has no
+    /// reason to perform. Reading the variable and joining it is the whole of what they did.
+    fn on_path(name: &str) -> Option<PathBuf> {
+        let path = std::env::var_os("PATH")?;
+        std::env::split_paths(&path)
+            .map(|dir| dir.join(name))
+            .find(|candidate| candidate.is_file())
+    }
+
     let system_candidates: &[&str] = if cfg!(target_os = "macos") {
         &[
             "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
@@ -581,9 +611,7 @@ fn find_chromium() -> Result<PathBuf, BrowserError> {
             "chromium-browser",
         ]
     } else if cfg!(target_os = "windows") {
-        &[
-            "chrome.exe",
-        ]
+        &["chrome.exe"]
     } else {
         &[]
     };
@@ -593,25 +621,9 @@ fn find_chromium() -> Result<PathBuf, BrowserError> {
         if path.exists() {
             return Ok(path);
         }
-        // For Linux: check if it's on PATH
-        if cfg!(target_os = "linux")
-            && let Ok(output) = Command::new("which").arg(candidate).output()
-                && output.status.success() {
-                    let found = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                    if !found.is_empty() {
-                        return Ok(PathBuf::from(found));
-                    }
-                }
-        // For Windows: check if it's on PATH
-        if cfg!(target_os = "windows")
-            && let Ok(output) = Command::new("where").arg(candidate).output()
-                && output.status.success() {
-                    let found = String::from_utf8_lossy(&output.stdout)
-                        .lines().next().unwrap_or("").trim().to_string();
-                    if !found.is_empty() {
-                        return Ok(PathBuf::from(found));
-                    }
-                }
+        if let Some(found) = on_path(candidate) {
+            return Ok(found);
+        }
     }
 
     // Windows: standard install locations (not necessarily on PATH)
@@ -627,13 +639,12 @@ fn find_chromium() -> Result<PathBuf, BrowserError> {
     }
 
     Err(BrowserError::NotFound(
-        "Could not find Chrome or Chromium. Install Chrome and ensure it's on your PATH."
-            .into(),
+        "Could not find Chrome or Chromium. Install Chrome and ensure it's on your PATH.".into(),
     ))
 }
 
-/// Copy cookies (and Local State for decryption key) from the user's real Chrome profile.
-/// This gives the launched headless Chrome access to the user's logged-in sessions.
+/// Copy cookies and the `Local State` decryption key from the user's real Chrome profile, so
+/// the launched Chrome has their logged-in sessions.
 fn copy_chrome_cookies(profile_dir: &Path) -> Result<(), BrowserError> {
     let chrome_default = chrome_default_profile_dir()?;
     let cookies_src = chrome_default.join("Cookies");
@@ -643,14 +654,11 @@ fn copy_chrome_cookies(profile_dir: &Path) -> Result<(), BrowserError> {
         ));
     }
 
-    // Copy Cookies database
     let cookies_dst = profile_dir.join("Default");
-    std::fs::create_dir_all(&cookies_dst).map_err(|e| {
-        BrowserError::Launch(format!("Failed to create Default dir: {e}"))
-    })?;
-    std::fs::copy(&cookies_src, cookies_dst.join("Cookies")).map_err(|e| {
-        BrowserError::Launch(format!("Failed to copy Cookies: {e}"))
-    })?;
+    std::fs::create_dir_all(&cookies_dst)
+        .map_err(|e| BrowserError::Launch(format!("Failed to create Default dir: {e}")))?;
+    std::fs::copy(&cookies_src, cookies_dst.join("Cookies"))
+        .map_err(|e| BrowserError::Launch(format!("Failed to copy Cookies: {e}")))?;
     // Also copy WAL/SHM if they exist (SQLite journal files)
     for ext in ["Cookies-journal", "Cookies-wal", "Cookies-shm"] {
         let src = chrome_default.join(ext);
@@ -659,8 +667,8 @@ fn copy_chrome_cookies(profile_dir: &Path) -> Result<(), BrowserError> {
         }
     }
 
-    // Copy Local State (holds the encrypted cookie key on Windows/Linux; macOS keeps it
-    // in the Keychain instead, which is why a failure here is a warning, not an error).
+    // Local State holds the cookie key on Windows/Linux; macOS keeps it in the Keychain, so a
+    // failure here is a warning rather than an error.
     let local_state_src = chrome_default.parent().map(|p| p.join("Local State"));
     let local_state = match local_state_src {
         Some(src) if src.exists() => match std::fs::copy(&src, profile_dir.join("Local State")) {
@@ -683,12 +691,8 @@ enum LocalState {
     Failed(String),
 }
 
-/// What `--copy-cookies` may claim about itself.
-///
-/// It used to print "Copied cookies from Chrome profile" whatever happened to `Local
-/// State`, so a run whose decryption key never arrived reported the same success as one
-/// where everything landed. On Windows and Linux those cookies are undecryptable, and the
-/// symptom is a logged-out session with no clue why.
+/// What `--copy-cookies` may claim about itself. A copy without `Local State` must not read as
+/// success: on Windows and Linux the cookies cannot be decrypted and the session looks logged out.
 fn cookie_copy_message(local_state: &LocalState) -> String {
     match local_state {
         LocalState::Copied => "Copied cookies and decryption key from Chrome profile".into(),
@@ -715,10 +719,13 @@ fn chrome_default_profile_dir() -> Result<PathBuf, BrowserError> {
 
 /// Get the profile directory for a named browser instance.
 fn browser_profile_dir(name: &str) -> Result<PathBuf, BrowserError> {
-    let home = dirs::home_dir().ok_or_else(|| {
-        BrowserError::Launch("Could not determine home directory".into())
-    })?;
-    Ok(home.join(".chrome-agent").join("browsers").join(name).join("chromium-profile"))
+    let home = dirs::home_dir()
+        .ok_or_else(|| BrowserError::Launch("Could not determine home directory".into()))?;
+    Ok(home
+        .join(".chrome-agent")
+        .join("browsers")
+        .join(name)
+        .join("chromium-profile"))
 }
 
 fn auto_connect_error_message() -> String {
@@ -778,7 +785,8 @@ mod tests {
 
     #[test]
     fn read_devtools_active_port_parses_correctly() {
-        let dir = std::env::temp_dir().join(format!("chrome-agent_test_devtools-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("chrome-agent_test_devtools-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("DevToolsActivePort");
         std::fs::write(&path, "9222\n/devtools/browser/abc-123\n").unwrap();
@@ -792,7 +800,10 @@ mod tests {
 
     #[test]
     fn read_devtools_active_port_rejects_invalid() {
-        let dir = std::env::temp_dir().join(format!("chrome-agent_test_devtools_bad-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "chrome-agent_test_devtools_bad-{}",
+            std::process::id()
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("DevToolsActivePort");
         std::fs::write(&path, "not_a_number\n").unwrap();
@@ -802,12 +813,9 @@ mod tests {
 
     #[test]
     fn should_copy_cookies_only_on_fresh_spawn() {
-        // Fresh spawn (no live browser to reconnect to): copy when requested.
         assert!(should_copy_cookies(true, false));
         // Reconnecting to a live managed Chrome: never copy, even if requested.
-        // (Regression for FIX A5 — copy used to run unconditionally.)
         assert!(!should_copy_cookies(true, true));
-        // Not requested: never copy regardless of state.
         assert!(!should_copy_cookies(false, false));
         assert!(!should_copy_cookies(false, true));
     }
@@ -863,12 +871,10 @@ mod tests {
 
     #[test]
     fn attached_browser_rejects_launch_proxy() {
-        let error = normalized_proxy_option(
-            Some("http://127.0.0.1:9222"),
-            Some("http://127.0.0.1:8080"),
-        )
-        .unwrap_err()
-        .to_string();
+        let error =
+            normalized_proxy_option(Some("http://127.0.0.1:9222"), Some("http://127.0.0.1:8080"))
+                .unwrap_err()
+                .to_string();
         assert!(error.contains("applies only when chrome-agent launches Chrome"));
     }
 
@@ -893,7 +899,10 @@ mod tests {
 
     #[tokio::test]
     async fn try_reconnect_existing_none_when_absent() {
-        let dir = std::env::temp_dir().join(format!("chrome-agent_test_reconnect_absent-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "chrome-agent_test_reconnect_absent-{}",
+            std::process::id()
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("DevToolsActivePort");
         std::fs::remove_file(&path).ok();
@@ -903,7 +912,10 @@ mod tests {
 
     #[tokio::test]
     async fn try_reconnect_existing_removes_stale_file() {
-        let dir = std::env::temp_dir().join(format!("chrome-agent_test_reconnect_stale-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "chrome-agent_test_reconnect_stale-{}",
+            std::process::id()
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("DevToolsActivePort");
         // Valid format, but the port has no listening server → stale.
@@ -914,15 +926,53 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// The composed message used to discard the `BrowserError` it was built from, so a
+    /// refused connection, a timeout and a malformed `/json/version` all read alike — and
+    /// `hints::error_hint`, which branches on "Connection refused", could never see one.
+    #[tokio::test]
+    async fn a_connect_failure_carries_the_reason_it_failed() {
+        // A port nothing listens on: bound then released, so it is free at this instant.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind a free port");
+        let port = listener.local_addr().expect("read the port").port();
+        drop(listener);
+        let endpoint = format!("http://127.0.0.1:{port}");
+
+        let cause = fetch_ws_endpoint(&endpoint)
+            .await
+            .expect_err("nothing listens there")
+            .to_string();
+        let Err(composed) = resolve_http_endpoint(&endpoint).await else {
+            panic!("nothing listens on {endpoint}, so this cannot resolve");
+        };
+        let composed = composed.to_string();
+
+        assert!(
+            composed.contains(&cause),
+            "the cause must survive into the message a user reads:\n  cause: {cause}\n  said:  {composed}"
+        );
+        assert!(
+            composed.contains(&endpoint),
+            "the endpoint is still named: {composed}"
+        );
+        assert!(
+            composed.contains("auto-discovery"),
+            "the existing suggestion must not be lost: {composed}"
+        );
+    }
+
     #[test]
     fn a_missing_decryption_key_is_not_reported_as_a_clean_copy() {
-        // The failure mode this guards: cookies land, Local State does not, and the
-        // caller is told "Copied cookies from Chrome profile" — then sits in front of a
-        // logged-out session on Windows/Linux with nothing pointing at the cause.
+        // Cookies land, Local State does not: the caller must not read that as success.
         let failed = cookie_copy_message(&LocalState::Failed("Permission denied".into()));
         assert!(failed.contains("NOT the decryption key"), "{failed}");
-        assert!(failed.contains("Permission denied"), "the OS error must survive: {failed}");
-        assert!(failed.starts_with("warning:"), "a partial copy is not a success line: {failed}");
+        assert!(
+            failed.contains("Permission denied"),
+            "the OS error must survive: {failed}"
+        );
+        assert!(
+            failed.starts_with("warning:"),
+            "a partial copy is not a success line: {failed}"
+        );
 
         let copied = cookie_copy_message(&LocalState::Copied);
         assert!(copied.contains("decryption key"), "{copied}");

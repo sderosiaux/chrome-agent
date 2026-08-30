@@ -1,8 +1,7 @@
 //! The subcommand enums: what each verb of the CLI can be asked to do.
 //!
-//! Split out of `cli.rs` for the repo's 1000-line file cap and re-exported from it, so every
-//! call site stays `crate::cli::EmulateAction`. The seam is the natural one: `cli.rs` declares
-//! the flags and the verbs, and these declare what the verbs that have modes accept.
+//! Re-exported from `cli.rs`, which declares the flags and the verbs themselves, so call
+//! sites use `crate::cli::EmulateAction`.
 
 use clap::Subcommand;
 
@@ -73,8 +72,8 @@ pub enum WebmcpAction {
     /// List tools this page has registered — name, description, inputSchema. No outputSchema:
     /// the protocol defines none.
     List,
-    /// Call a tool by name (resolved to the `RegisteredTool` the page's own `getTools()` reported —
-    /// executeTool refuses a bare name). Reports what the tool declared AND what the page's
+    /// Call a tool by name, resolved to the `RegisteredTool` the page's `getTools()` reported
+    /// (executeTool refuses a bare name). Reports what the tool declared and what the
     /// accessibility tree measurably did, side by side.
     Call {
         /// Tool name, exactly as `webmcp list` reported it
@@ -99,10 +98,9 @@ pub enum DaemonAction {
 
 /// What `assert` can be asked about the page.
 ///
-/// One subcommand per kind of claim rather than a pile of flags on `assert`: the comparators
-/// that make sense differ per kind (a URL is equal or matches a pattern; a page's text is
-/// contained or matches), and clap's arg groups can then enforce "exactly one comparator"
-/// and "exactly one state" instead of the dispatcher discovering it at run time.
+/// One subcommand per kind of claim, not a pile of flags: the valid comparators differ per
+/// kind, so clap's arg groups can enforce "exactly one comparator" and "exactly one state"
+/// at parse time instead of the dispatcher discovering it at run time.
 #[derive(Subcommand)]
 pub enum AssertWhat {
     /// A form control's value (input, textarea, select)

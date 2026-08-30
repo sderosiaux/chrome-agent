@@ -1,11 +1,7 @@
-//! Shared test harness.
+//! Shared test harness: Chrome/fixture preconditions, per-test isolation.
 //!
-//! Every browser test in this suite used to open with the same twelve lines: find Chrome,
-//! `eprintln!("SKIP: …")`, `return`. A bare `return` inside `#[test]` is a pass, so a machine
-//! without Chrome — or a fixture deleted by mistake — turned ~57 of 68 tests into green
-//! no-ops. This module makes that failure loud when it matters and quiet when it doesn't:
-//! locally a missing Chrome still skips, but with `CHROME_AGENT_REQUIRE_CHROME=1` (set in CI)
-//! the same condition panics.
+//! A missing Chrome skips locally. With `CHROME_AGENT_REQUIRE_CHROME=1` (set in CI) the same
+//! condition panics instead, so a green run cannot mean "nothing ran".
 
 #![allow(dead_code)]
 
@@ -15,25 +11,20 @@ use std::process::Command;
 /// Environment variable CI sets to turn every skip into a failure.
 pub const REQUIRE_ENV: &str = "CHROME_AGENT_REQUIRE_CHROME";
 
-/// Whether a raw `REQUIRE_ENV` value demands a real browser run. Split from the lookup so
-/// the decision is testable without mutating the process environment (`set_var` is unsafe
-/// in edition 2024 and this crate forbids `unsafe`).
+/// Whether a raw `REQUIRE_ENV` value demands a real browser run. Split from the lookup so it
+/// is testable without mutating the environment.
 #[must_use]
 pub fn require_from(value: Option<&str>) -> bool {
     matches!(value, Some(v) if v != "0" && !v.is_empty())
 }
 
-/// Whether the caller demands a real browser run (CI) or tolerates a skip (a laptop
-/// without Chrome).
 #[must_use]
 pub fn require_chrome() -> bool {
     require_from(std::env::var(REQUIRE_ENV).ok().as_deref())
 }
 
-/// Report a precondition the test cannot meet. Returns `false` (the caller then returns and
-/// the test passes as a skip) unless a browser run was required, in which case it panics.
-///
-/// The pure form is `unavailable_with`; this is the environment-reading wrapper.
+/// Report a precondition the test cannot meet: `false` so the caller returns early and the
+/// test passes as a skip, unless a browser run was required, in which case it panics.
 pub fn unavailable(reason: &str) -> bool {
     unavailable_with(require_chrome(), reason)
 }
@@ -41,8 +32,7 @@ pub fn unavailable(reason: &str) -> bool {
 /// `unavailable` with the policy passed in.
 ///
 /// # Panics
-/// When `require` is set — that is the point: a CI run that silently skips every browser
-/// test reports the same green as one that ran them.
+/// When `require` is set.
 pub fn unavailable_with(require: bool, reason: &str) -> bool {
     assert!(
         !require,
@@ -64,7 +54,11 @@ pub fn chrome_available() -> bool {
         if std::path::Path::new(candidate).exists() {
             return true;
         }
-        if Command::new("which").arg(candidate).output().is_ok_and(|o| o.status.success()) {
+        if Command::new("which")
+            .arg(candidate)
+            .output()
+            .is_ok_and(|o| o.status.success())
+        {
             return true;
         }
     }
@@ -83,9 +77,7 @@ pub fn browser_ready() -> bool {
 /// Absolute path of a fixture, asserted to exist.
 ///
 /// # Panics
-/// When the fixture is missing. Deleting a fixture used to leave the tests that load it
-/// green: `file://…/gone.html` navigates to an error page and every later assertion was
-/// guarded by an early return.
+/// When the fixture is missing: a `file://` URL to a deleted one loads an error page.
 #[must_use]
 pub fn fixture_path(name: &str) -> PathBuf {
     let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -105,39 +97,32 @@ pub fn fixture_url(name: &str) -> String {
     format!("file://{}", fixture_path(name).display())
 }
 
-// ---------------------------------------------------------------------------
-// Isolation between concurrent test processes
-// ---------------------------------------------------------------------------
+// Isolation between concurrent test processes.
 
 /// The binary under test, resolved from the test executable's own location.
 ///
-/// Every suite had its own copy of this, and every copy was identical. It lives here now for
-/// the same reason [`TestBrowser`] does: the thing that must not drift is the thing that
-/// several files spell the same way.
+/// The one resolver: every suite used to carry a copy, and they disagreed — most popped twice
+/// unconditionally, one popped `deps/` only when it was there. The conditional form is the
+/// correct one and is what survives here: a test executable cargo places directly in
+/// `target/<profile>/` rather than in `target/<profile>/deps/` walks one directory too far
+/// under the unconditional pop, and then names a `chrome-agent` that does not exist.
 ///
-/// One trap it cannot remove, so it is written down instead: `cargo test --test X` does not
-/// always rebuild this binary. An A/B that edits `src/` and re-runs one suite can measure the
-/// PREVIOUS build and read as a regression that is not there. Run `cargo build` between the
-/// two states.
+/// NOTE: `cargo test --test X` does not always rebuild it. Run `cargo build` between two
+/// states of `src/` or the suite measures the previous build.
 #[must_use]
 pub fn binary() -> PathBuf {
     let mut path = std::env::current_exe().expect("test binary path");
-    path.pop(); // deps/
-    path.pop();
+    path.pop(); // the test executable's own directory
+    if path.ends_with("deps") {
+        path.pop();
+    }
     path.push("chrome-agent");
     path
 }
 
-/// A name no other process is using, and no later run of this one will reuse.
-///
-/// Two ingredients, and both are needed. The pid separates concurrent processes — two
-/// `cargo test` runs, which is the normal regime on a machine with several worktrees. The
-/// counter separates tests INSIDE one process: the harness runs them on parallel threads, so
-/// two tests that happen to pass the same label would otherwise drive one browser, and the
-/// first to finish would `close --purge` it under the second.
-///
-/// Not a random number: a name that appears in a failure message is worth being able to find
-/// again in `chrome-agent status` while the run is still going.
+/// A name no other process is using, and no later run of this one will reuse. The pid
+/// separates concurrent `cargo test` processes; the counter separates tests inside one, which
+/// the harness runs on parallel threads. Readable so it can be found in `chrome-agent status`.
 #[must_use]
 pub fn unique_name(label: &str) -> String {
     static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
@@ -145,19 +130,11 @@ pub fn unique_name(label: &str) -> String {
     format!("{label}-{}-{n}", std::process::id())
 }
 
-/// A browser this test owns, closed and purged when the test ends — including on panic.
+/// A browser this test owns, closed and purged on `Drop`, including on panic.
 ///
-/// This is the ONE mechanism. Twenty-four suites carried a byte-identical copy of it and five
-/// did not, and those five were the ones that failed: a fixed `--browser` name means two
-/// concurrent runs drive ONE browser, and the first to finish closes it under the second.
-/// Measured, before this existed, by running the whole suite twice at once from two
-/// directories: `action_report_tests` died with `transport: transport closed` on the browser
-/// named `pipe-bootstrap`, and `proxy_tests` timed out on `test-managed-proxy`. Both had
-/// hard-coded their name; neither had a bug.
-///
-/// RAII, and that matters as much as the name: a plain `close` statement at the end of a
-/// helper is skipped when an assertion panics, which leaks a Chrome and a ~14 MB profile
-/// directory per failure. `Drop` runs on the unwind.
+/// The one mechanism for browser isolation: a hard-coded `--browser` name lets two concurrent
+/// runs drive one browser. `Drop` rather than a trailing `close`, which a panicking assertion
+/// skips, leaking a Chrome and its ~14 MB profile.
 pub struct TestBrowser(String);
 
 impl TestBrowser {
@@ -180,11 +157,8 @@ impl Drop for TestBrowser {
     }
 }
 
-/// A temporary file path this test owns.
-///
-/// The same rule as the browser name, for the same reason: two suites wrote
-/// `/tmp/chrome-agent-<fixed>.jsonl` and `/tmp/chrome-agent-dblclick-selector-test.html`, so a
-/// concurrent run could rewrite or unlink the file between another run's write and its read.
+/// A temporary file path this test owns. Same rule as the browser name: a fixed path lets a
+/// concurrent run rewrite or unlink the file between another run's write and its read.
 #[must_use]
 pub fn temp_path(label: &str, extension: &str) -> PathBuf {
     std::env::temp_dir().join(format!("chrome-agent-{}.{extension}", unique_name(label)))

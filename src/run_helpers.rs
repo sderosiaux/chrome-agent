@@ -7,13 +7,11 @@ use crate::commands;
 use crate::element_ref::ElementRef;
 use crate::session::{self, BrowserSession, SessionStore};
 
-// Split for the 1000-line cap. Re-exported so `kill_pid` keeps one import path across
-// `run.rs`, `main.rs` and `orphans.rs` — three call sites that must not drift onto two
-// different kill paths, which is how the pid-reuse guard came to be bypassed once already.
+// One kill path for `run.rs`, `main.rs` and `orphans.rs`; a second bypasses the pid-reuse guard.
 pub use crate::kill::{KillOutcome, close_message, kill_pid};
 
-/// Connect to a page-level CDP endpoint with retry. Sets up Page domain,
-/// console interceptor, and optionally Runtime domain + stealth patches.
+/// Connect to a page-level CDP endpoint, 8 attempts. Enables Page, injects the console
+/// interceptor, and applies stealth patches or enables Runtime.
 pub async fn connect_page(
     http_endpoint: &str,
     target_id: &str,
@@ -24,11 +22,14 @@ pub async fn connect_page(
         match crate::browser::get_page_ws_url(http_endpoint, target_id).await {
             Ok(page_ws) => match CdpClient::connect(&page_ws).await {
                 Ok(client) => {
-                    // Verify connection is alive with a lightweight call
-                    if let Err(e) = client.call::<_, serde_json::Value>(
-                        "Runtime.evaluate",
-                        json!({"expression": "1", "returnByValue": true}),
-                    ).await {
+                    // Cheap liveness check: a connected socket is not a working session.
+                    if let Err(e) = client
+                        .call::<_, serde_json::Value>(
+                            "Runtime.evaluate",
+                            json!({"expression": "1", "returnByValue": true}),
+                        )
+                        .await
+                    {
                         last_err = format!("Connection verify failed: {e}");
                         drop(client);
                         if attempt < 7 {
@@ -36,7 +37,6 @@ pub async fn connect_page(
                         }
                         continue;
                     }
-                    // Setup: enable Page domain
                     if let Err(e) = client.enable("Page").await {
                         last_err = format!("Page.enable failed: {e}");
                         drop(client);
@@ -45,7 +45,6 @@ pub async fn connect_page(
                         }
                         continue;
                     }
-                    // Console interceptor
                     commands::console::inject(&client).await;
                     if stealth {
                         crate::setup::apply_stealth(&client).await;
@@ -65,7 +64,6 @@ pub async fn connect_page(
     Err(format!("Failed to connect to page after 8 attempts: {last_err}").into())
 }
 
-
 /// What an action reports about the page once it has run.
 pub struct ActionReport {
     /// `--inspect`: the whole tree.
@@ -78,10 +76,8 @@ pub struct ActionReport {
 }
 
 /// Reporting policy taken from the global flags, before `cli.command` is consumed.
-///
-/// `on_intercept` rides here rather than in a parallel parameter: it is a global flag like the
-/// other two, and this struct is already threaded through the CLI, pipe and batch paths, so
-/// carrying it costs no dispatcher signature.
+/// `on_intercept` rides here rather than in a parallel parameter: this struct already
+/// threads through the CLI, pipe and batch paths, so it costs no dispatcher signature.
 #[derive(Clone, Copy)]
 pub struct ReportPolicy {
     pub changes: bool,
@@ -92,26 +88,23 @@ pub struct ReportPolicy {
 impl ReportPolicy {
     /// Build the per-action report from the policy plus that command's own flags.
     pub const fn for_action(self, inspect: bool, max_depth: Option<usize>) -> ActionReport {
-        ActionReport { inspect, changes: self.changes, budget: self.budget, max_depth }
+        ActionReport {
+            inspect,
+            changes: self.changes,
+            budget: self.budget,
+            max_depth,
+        }
     }
 }
 
-/// What the four read-back verbs put on their responses: moved to `read_back` for the
-/// 1000-line file cap and re-exported here, so a caller still writes
-/// `run_helpers::fill_value_report` next to the `output_action` that ships it.
+/// What the four read-back verbs put on their responses. Re-exported so a caller writes
+/// `run_helpers::fill_value_report` next to the `output_action_with` that ships it.
 pub use crate::read_back::{bulk_fill_report, check_report, fill_value_report, select_report};
 
-/// The node an action is about to touch, whichever way it was named: `uid`, plus `role` and
-/// `name` when they come free.
+/// The node an action is about to touch: `uid`, plus best-effort `role`/`name` off the
+/// `DOM.describeNode` the uid already needs. Returns fields to merge into the response.
 ///
-/// Resolved before the action runs: afterwards the element may be detached, and the answer
-/// would describe a different page. Returns the fields to merge into the response, so a
-/// caller that has none of its own can pass this straight through.
-///
-/// `role`/`name` are best effort and come out of the `DOM.describeNode` the uid already needs
-/// — the explicit ARIA role or the tag name, and an accessible-name attribute if the element
-/// carries one. Not the computed accessibility name: that would cost another read, and it is
-/// what `inspect` is for. The uid path stays a plain echo and pays no round trip at all.
+/// Must be called BEFORE the action, or a detached element makes it describe another page.
 pub async fn target_details(
     client: &CdpClient,
     selector: Option<&str>,
@@ -129,76 +122,47 @@ pub async fn target_details(
             }
             Some(out)
         }
-        // A uid-targeted action already names its node; echoing it keeps the field's
-        // meaning the same whichever way the caller aimed.
+        // Echoed so `uid` means the same thing whichever way the caller aimed.
         (None, Some(uid)) => Some(json!({"uid": uid})),
         (None, None) => None,
     }
 }
 
-/// Merge two optional field sets into one response object.
-#[must_use]
-pub fn merge_details(
-    first: Option<serde_json::Value>,
-    second: Option<serde_json::Value>,
-) -> Option<serde_json::Value> {
-    match (first, second) {
-        (Some(mut a), Some(b)) => {
-            if let (Some(target), Some(extra)) = (a.as_object_mut(), b.as_object()) {
-                for (key, value) in extra {
-                    target.insert(key.clone(), value.clone());
-                }
-            }
-            Some(a)
+/// Copy an optional field set into a response object at the top level.
+///
+/// The ONE merge loop. It existed three times — inside a `merge_details` the CLI used, again
+/// inside `output_action_with`, and a third time as `pipe_dispatch::merge_into` — for one
+/// four-line body that decides what an action's response says about the node it touched.
+pub fn merge_into(obj: &mut serde_json::Value, details: Option<&serde_json::Value>) {
+    if let (Some(target), Some(fields)) = (
+        obj.as_object_mut(),
+        details.and_then(serde_json::Value::as_object),
+    ) {
+        for (key, value) in fields {
+            target.insert(key.clone(), value.clone());
         }
-        (Some(only), None) | (None, Some(only)) => Some(only),
-        (None, None) => None,
     }
 }
 
-/// Execute a command, report what it did to the page, and persist the new baseline.
+/// Report what a command did to the page and persist the new baseline, plus whatever the
+/// command itself observed (the value a fill left behind, the window a check looked through).
 ///
-/// By default an action now answers "what changed", not just "what I was asked to do".
-/// Without it the agent has to spend a second call to find out whether the click landed,
-/// and that extra turn is the cost this is meant to remove. `--verdict off` restores the
-/// older behaviour for callers that would rather have the latency back.
-pub async fn output_action(
-    client: &CdpClient,
-    store: &mut SessionStore,
-    browser_name: &str,
-    page_name: &str,
-    target_id: &str,
-    msg: String,
-    report: &ActionReport,
-    json_mode: bool,
-) -> Result<(), crate::BoxError> {
-    output_action_with(client, store, browser_name, page_name, target_id, msg, report, json_mode, None).await
-}
-
-/// `output_action` plus whatever the command itself observed — the value a fill left
-/// behind, the window a check looked through. Merged at the top level of the response so
-/// the CLI and the pipe dispatchers, which build their JSON separately, agree on shape.
-#[allow(clippy::too_many_arguments)]
+/// By default an action answers "what changed", saving a second call; `--verdict off` trades
+/// that for latency. `details` is merged at the top level, so a response built here and the same
+/// response built by a `pipe_dispatch::dispatch_*` have one shape — which is what lets `run.rs`
+/// call the dispatcher and hand its object straight to this.
 pub async fn output_action_with(
-    client: &CdpClient,
-    store: &mut SessionStore,
-    browser_name: &str,
-    page_name: &str,
-    target_id: &str,
+    ctx: &mut crate::page_ctx::PageCtx<'_>,
     msg: String,
     report: &ActionReport,
     json_mode: bool,
     details: Option<serde_json::Value>,
 ) -> Result<(), crate::BoxError> {
+    let client = ctx.client;
     let mut obj = json!({"ok": true, "message": msg});
-    if let Some(fields) = details.as_ref().and_then(serde_json::Value::as_object) {
-        for (key, value) in fields {
-            obj[key.as_str()] = value.clone();
-        }
-    }
+    merge_into(&mut obj, details.as_ref());
     let mut trailer = String::new();
-    // Silence used to mean four different things here. Whatever happens below, the response
-    // carries the one that applies.
+    // The response always names WHY it has nothing to report.
     let mut observation = if report.changes {
         crate::verdict::Observation::NoBaseline
     } else {
@@ -206,23 +170,18 @@ pub async fn output_action_with(
     };
 
     if report.inspect || report.changes {
-        // Wait for the page to stop reacting rather than for a fixed guess: a page that
-        // does nothing costs a quiet window, one that renders late is still caught.
+        // 100 ms quiet window, 1 s ceiling — not a fixed guess.
         crate::snapshot::settle(client, 100, 1000).await;
-        // The baseline is always full depth. Storing a `--max-depth` view would make the
-        // next comparison read every node the limit cut off as newly added: verified, an
-        // action with `--max-depth 1` then a plain `diff` invented additions.
+        // One reading, two renderings (`snapshot::Views`): the baseline is always full depth,
+        // `--inspect --max-depth` only narrows what is shown.
         //
-        // One reading, two renderings (`snapshot::Views`): the baseline and, when the caller
-        // asked for `--inspect --max-depth`, the shallower text printed for them. It used to
-        // be two `getFullAXTree` calls, so a page that moved between them printed a tree that
-        // was not the baseline stored beside it.
-        //
-        // A read that fails is not an action that failed. This used to propagate with `?`,
-        // so a click that had already been delivered came back as `ok:false` — and the
-        // natural response to that is to click again, which is real. `pipe_dispatch` stated
-        // the opposite policy in a comment and followed it; this is the CLI adopting it.
-        let display_depth = if report.inspect { report.max_depth } else { None };
+        // A read that fails is NOT an action that failed — `ok:false` after a delivered click
+        // invites a second click — hence the early return with a `read_failed` verdict.
+        let display_depth = if report.inspect {
+            report.max_depth
+        } else {
+            None
+        };
         let Ok(views) = commands::inspect::views(client, false, display_depth, None, None).await
         else {
             let assessment = crate::pipe_report::attach_verdict_for(
@@ -241,20 +200,26 @@ pub async fn output_action_with(
         let snapshot = views.full;
 
         if report.changes {
-            let previous = store
+            let previous = ctx
+                .store
                 .browsers
-                .get(browser_name)
-                .and_then(|b| b.pages.get(page_name))
+                .get(ctx.browser)
+                .and_then(|b| b.pages.get(ctx.page))
                 .map(|p| {
                     (
                         p.last_snapshot.clone(),
-                        p.last_snapshot_frame.clone().zip(p.last_snapshot_loader.clone()),
+                        p.last_snapshot_frame
+                            .clone()
+                            .zip(p.last_snapshot_loader.clone()),
                     )
                 });
             if let Some((Some(old_text), stored)) = previous {
                 let identity = commands::diff::Identity::from_loader(
                     stored.as_ref().map(|(f, l)| (f.as_str(), l.as_str())),
-                    snapshot.identity.as_ref().map(|(f, l)| (f.as_str(), l.as_str())),
+                    snapshot
+                        .identity
+                        .as_ref()
+                        .map(|(f, l)| (f.as_str(), l.as_str())),
                 );
                 let cmp = commands::diff::compare(identity, &old_text, &snapshot.text);
                 let body = if report.budget == 0 {
@@ -278,14 +243,8 @@ pub async fn output_action_with(
                     "identity_known": cmp.identity_known,
                 });
                 obj["delta"] = json!(body);
-                // Read off the fresh uid_map, which is still ours until the store takes it
-                // below. Feeds the verdict, so it has to run before it is settled.
-                //
-                // `Box::pin`: this future lives inside `output_action_with`, which the CLI's
-                // one big `match` on `Command` embeds in a single stack frame. Inlining its
-                // state machine there pushed that frame past clippy's `large_stack_frames`
-                // ceiling; boxing it keeps the frame flat for the cost of one allocation on a
-                // path that already did a full page read.
+                // Must run before the verdict is settled; it feeds it. `Box::pin` keeps the
+                // future off `run`'s single stack frame (clippy `large_stack_frames`).
                 let values_lost = Box::pin(crate::pipe_report::attach_values_lost(
                     client,
                     &snapshot.uid_map,
@@ -312,20 +271,12 @@ pub async fn output_action_with(
         }
 
         if let Some(shown) = shown {
-            // The caller asked to see the tree at their depth; the baseline above stays
-            // full so the two never get confused.
+            // The caller's depth, for display only; the baseline above stays full.
             obj["snapshot"] = json!(&shown);
             trailer = shown;
         }
 
-        if let Some(browser_s) = store.browsers.get_mut(browser_name) {
-            let page = session::ensure_page(browser_s, page_name, target_id);
-            page.last_snapshot = Some(snapshot.text);
-            let (f, l) = snapshot.identity.map_or((None, None), |(f, l)| (Some(f), Some(l)));
-            page.last_snapshot_frame = f;
-            page.last_snapshot_loader = l;
-            page.uid_map = snapshot.uid_map;
-        }
+        ctx.store_snapshot(snapshot);
     }
 
     let assessment = crate::pipe_report::attach_verdict_for(client, &mut obj, observation);
@@ -338,11 +289,9 @@ pub async fn output_action_with(
     Ok(())
 }
 
-/// The text-mode report for one action: its own message, the delta, and everything the
-/// response measured that the text branch used to drop (`src/render.rs`).
-///
-/// One function for both exits — the normal one and the failed-read early return — so the two
-/// cannot drift into printing different shapes for the same response.
+/// The text-mode report for one action: its message, the delta, and what the response
+/// measured (`src/render.rs`). One function for both exits, normal and failed-read, so they
+/// cannot print different shapes for the same response.
 fn print_action(
     msg: &str,
     trailer: &str,
@@ -358,36 +307,23 @@ fn print_action(
     }
 }
 
-/// Write the verdict, its reason, and — when the verdict is an admission of ignorance —
-/// what to do about it.
-///
-/// `hint` may already hold the diff's own advice (a navigation tells the caller its uids
-/// are dead). The verdict's hint goes in its own field rather than overwriting it: two
-/// different pieces of advice, one slot, and the more specific one loses.
+/// Write the verdict, its reason, and `next`. The verdict's hint gets its own field so it
+/// never overwrites the more specific `hint` the diff or the action may already have written.
 pub fn attach_verdict(obj: &mut serde_json::Value, assessment: crate::verdict::Assessment) {
     obj["verdict"] = json!(assessment.verdict.as_str());
     obj["verdict_reason"] = json!(assessment.reason);
-    // One token from a closed set of six, so an agent can branch on the next step without
-    // parsing the hint prose. Written here because this is the one place all three modes
-    // settle a verdict — the same reason `verdict_reason` lives here.
+    // One token from a closed set of six, so an agent branches without parsing prose.
     obj["next"] = json!(crate::verdict::next_for(assessment).as_str());
     if let Some(hint) = crate::verdict::hint_for(assessment) {
-        // An action that already wrote a hint knows more than the verdict does — an
-        // intercepted click can name the element that took it, where the generic hint can
-        // only say that one exists. Never overwrite the specific one with the generic one.
+        // `or_insert`: an action's own hint is more specific and must not be replaced.
         if let Some(map) = obj.as_object_mut() {
             map.entry("verdict_hint").or_insert_with(|| json!(hint));
         }
     }
 }
 
-/// Output goto result with optional post-inspect.
 pub async fn output_goto(
-    client: &CdpClient,
-    store: &mut SessionStore,
-    browser_name: &str,
-    page_name: &str,
-    target_id: &str,
+    ctx: &mut crate::page_ctx::PageCtx<'_>,
     url: &str,
     title: &str,
     landed: Option<&crate::landing::Landing>,
@@ -395,36 +331,31 @@ pub async fn output_goto(
     max_depth: Option<usize>,
     json_mode: bool,
 ) -> Result<(), crate::BoxError> {
-    let browser_session = store.browsers.get_mut(browser_name)
-        .ok_or_else(|| format!("Browser session '{browser_name}' not found in session store"))?;
-    let page = session::ensure_page(
-        browser_session,
-        page_name,
-        target_id,
-    );
-    // The old document is gone, so every uid in the stored map now points at a node that
-    // no longer exists — and `backendNodeId` counters overlap between documents, so a
-    // stale uid can silently resolve to an unrelated element on the new page. Drop the
-    // map here; the `if inspect` branches below refill it when the caller asked to see
-    // the page. Without a fresh inspect the agent gets "uid not found" and a hint, which
-    // is the correct answer.
-    page.uid_map.clear();
+    let (client, browser_name) = (ctx.client, ctx.browser);
+    if !ctx.store.browsers.contains_key(browser_name) {
+        return Err(format!("Browser session '{browser_name}' not found in session store").into());
+    }
+    // `backendNodeId` counters overlap between documents, so a stale uid can resolve to an
+    // unrelated element. The `if inspect` branch below refills the map.
+    ctx.clear_uid_map();
+    // One reading for both output modes. `--max-depth` decides what is PRINTED, never what is
+    // stored: a truncated baseline makes the next `diff` report every node past the limit added.
+    let views = if inspect {
+        Some(commands::inspect::views(client, false, max_depth, None, None).await?)
+    } else {
+        None
+    };
+    let shown = views.as_ref().map(|v| v.shown().to_string());
+    if let Some(views) = views {
+        ctx.store_snapshot(views.full);
+    }
     if json_mode {
         let mut obj = json!({"ok": true, "url": url, "title": title});
         if let Some(landing) = landed {
             landing.attach(&mut obj, browser_name);
         }
-        if inspect {
-            // `--max-depth` decides what is printed, never what is stored: a truncated
-            // baseline makes the next `diff` report every node past the limit as an addition.
-            let views = commands::inspect::views(client, false, max_depth, None, None).await?;
-            obj["snapshot"] = json!(views.shown());
-            let full = views.full;
-            page.last_snapshot = Some(full.text);
-            let (f, l) = full.identity.map_or((None, None), |(f, l)| (Some(f), Some(l)));
-            page.last_snapshot_frame = f;
-            page.last_snapshot_loader = l;
-            page.uid_map = full.uid_map;
+        if let Some(shown) = shown {
+            obj["snapshot"] = json!(shown);
         }
         json_output(&obj);
     } else {
@@ -436,32 +367,113 @@ pub async fn output_goto(
         if let Some(line) = landed.and_then(|landing| landing.text_line(browser_name)) {
             println!("{line}");
         }
-        if inspect {
-            // Same rule as the JSON branch above: the depth is a display flag.
-            let views = commands::inspect::views(client, false, max_depth, None, None).await?;
-            println!("{}", views.shown());
-            let full = views.full;
-            page.last_snapshot = Some(full.text);
-            let (f, l) = full.identity.map_or((None, None), |(f, l)| (Some(f), Some(l)));
-            page.last_snapshot_frame = f;
-            page.last_snapshot_loader = l;
-            page.uid_map = full.uid_map;
+        if let Some(shown) = shown {
+            println!("{shown}");
         }
     }
     Ok(())
 }
 
-/// Print a `serde_json::Value` as a single compact JSON line to stdout.
+/// The one writer of a `--json` response. Every `--json` line the CLI prints goes through here.
+///
+/// Serialization of a `Value` can still fail (a non-finite float reaches `serde_json` as an
+/// error, not as a panic), and `unwrap_or_default()` answered that with an EMPTY line — which
+/// breaks the `--json` contract in the one direction an agent cannot recover from: it reads as
+/// "no response" rather than as a failure. The fallback names what happened instead.
 pub fn json_output(value: &serde_json::Value) {
-    println!("{}", serde_json::to_string(value).unwrap_or_default());
+    println!("{}", json_line(value));
 }
 
-/// The error-recovery hints, moved to `hints` for the 1000-line file cap and re-exported
-/// here so `main`, `pipe` and `pipe_dispatch` keep their existing call sites.
+/// The line `json_output` prints, split out so the failure branch can be proven by a test
+/// instead of merely asserted — nothing about `println!` is observable from one.
+///
+/// Generic over `Serialize` rather than taking a `Value`: a `Value` is very nearly
+/// infallible to serialize, so a test could not reach the branch through one.
+pub fn json_line<T: serde::Serialize + ?Sized>(value: &T) -> String {
+    match serde_json::to_string(value) {
+        Ok(text) => text,
+        // Built by hand rather than through `json!` + `to_string`: the fallback for a failed
+        // serialization may not itself depend on serialization succeeding. `Value::String`'s
+        // `Display` is infallible and escapes the message, so the line is always valid JSON.
+        Err(e) => {
+            let escaped =
+                serde_json::Value::String(format!("response could not be serialized: {e}"));
+            format!("{{\"ok\":false,\"error\":{escaped}}}")
+        }
+    }
+}
+
+/// A CLI `batch` that `--stop-on-error` cut short — the carrier for exit code 1.
+///
+/// Like [`crate::commands::assert::NotHeld`] it travels the error channel without being an
+/// error, so no caller threads a second return type through `run`. Unlike `NotHeld` it prints
+/// nothing: the arm already wrote the batch's one response (JSON or text), and a second line
+/// here would put two responses on stdout for one invocation. `main` recognises it before its
+/// generic handler and exits 1 silently.
+#[derive(Debug)]
+pub struct BatchStopped;
+
+impl std::fmt::Display for BatchStopped {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("batch stopped at the first failed command")
+    }
+}
+
+impl std::error::Error for BatchStopped {}
+
+/// The text rendering of a batch response, for the same reason every other arm has one:
+/// `--json` is what asks for JSON, and text mode was printing the raw object.
+///
+/// One line per entry. The entry's own sentence when it has one (`message`, or `error` for a
+/// failure); otherwise the whole object, because a `text`/`snapshot`/`result` payload has no
+/// one-line form and dropping it would lose what the caller asked for.
+pub fn print_batch_text(out: &serde_json::Value, stopped_at: Option<u64>) {
+    for line in batch_text_lines(out, stopped_at) {
+        println!("{line}");
+    }
+}
+
+/// The pure half of [`print_batch_text`], so a test can assert on the lines without a terminal
+/// — the same split [`crate::render::action_lines`] uses.
+#[must_use]
+pub fn batch_text_lines(out: &serde_json::Value, stopped_at: Option<u64>) -> Vec<String> {
+    let results = out.get("results").and_then(serde_json::Value::as_array);
+    let mut lines: Vec<String> = results
+        .into_iter()
+        .flatten()
+        .enumerate()
+        .map(|(index, entry)| {
+            let ok = entry
+                .get("ok")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            let status = if ok { "ok" } else { "error" };
+            let summary = entry
+                .get("message")
+                .or_else(|| entry.get("error"))
+                .and_then(serde_json::Value::as_str)
+                .map_or_else(|| entry.to_string(), str::to_string);
+            format!("[{index}] {status} — {summary}")
+        })
+        .collect();
+    if let Some(index) = stopped_at {
+        let skipped = out
+            .get("skipped")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        lines.push(format!("stopped at command {index} — {skipped} skipped"));
+    }
+    lines
+}
+
+/// The error-recovery hints, re-exported for `main`, `pipe` and `pipe_dispatch`.
 pub use crate::hints::error_hint;
 
-/// Get the `uid_map` from the current session, or empty if none.
-pub fn get_uid_map(store: &SessionStore, browser_name: &str, page_name: &str) -> HashMap<String, ElementRef> {
+pub fn get_uid_map(
+    store: &SessionStore,
+    browser_name: &str,
+    page_name: &str,
+) -> HashMap<String, ElementRef> {
     store
         .browsers
         .get(browser_name)
@@ -524,9 +536,8 @@ pub async fn resolve_page_target(
 pub fn cmd_status(json_mode: bool) -> Result<(), crate::BoxError> {
     let store = session::load_session()?;
     let daemon_alive = session::daemon_socket_exists();
-    // Reported next to the sessions rather than in a command of its own: a browser the
-    // registry lost is invisible exactly where a user goes to look for one, and the two
-    // 19-day-old Chromes that motivated this were found with `ps`, not with this tool.
+    // Reported beside the sessions: a browser the registry lost is invisible exactly where
+    // someone goes to look for one.
     let orphans = crate::orphans::scan(&store);
 
     if json_mode {
@@ -543,8 +554,7 @@ pub fn cmd_status(json_mode: bool) -> Result<(), crate::BoxError> {
                 })
             })
             .collect();
-        // `null` where the process table could not be read, which is not the same claim
-        // as an empty list and would be a false all-clear if flattened into one.
+        // `null` where the process table could not be read; an empty list is a false all-clear.
         let orphan_json = orphans.as_ref().map(|found| {
             found
                 .iter()
@@ -567,7 +577,11 @@ pub fn cmd_status(json_mode: bool) -> Result<(), crate::BoxError> {
                 } else {
                     "external".into()
                 };
-                let mode = if browser.headless { "headless" } else { "headed" };
+                let mode = if browser.headless {
+                    "headless"
+                } else {
+                    "headed"
+                };
                 println!(
                     "browser={name}  {status}  {mode}  pages={}  ws={}",
                     browser.pages.len(),
@@ -592,9 +606,7 @@ pub fn cmd_status(json_mode: bool) -> Result<(), crate::BoxError> {
     Ok(())
 }
 
-
-/// Message for `cmd_stop`, given whether we actually reached a live daemon.
-/// Pure so the stop decision can be unit-tested without a socket.
+/// Pure, so the stop decision is unit-testable without a socket.
 #[cfg(any(unix, test))]
 const fn stop_message(reached_daemon: bool) -> &'static str {
     if reached_daemon {
@@ -608,65 +620,65 @@ pub async fn cmd_stop(json_mode: bool) -> Result<(), crate::BoxError> {
     #[cfg(not(unix))]
     {
         let msg = "Daemon is not supported on this platform.";
-        if json_mode { json_output(&json!({"ok": true, "message": msg})); }
-        else { println!("{msg}"); }
+        if json_mode {
+            json_output(&json!({"ok": true, "message": msg}));
+        } else {
+            println!("{msg}");
+        }
         return Ok(());
     }
 
     #[cfg(unix)]
     {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::UnixStream;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::UnixStream;
 
-    let socket_path = session::daemon_socket_path()?;
+        let socket_path = session::daemon_socket_path()?;
 
-    // Try to reach the daemon. A missing socket — or a stale one left by a
-    // crashed daemon (connect yields ECONNREFUSED) — both mean "not running".
-    // Don't let the raw connect error escape via `?`; clean the stale socket
-    // and report the friendly path instead.
-    let stream = if socket_path.exists() {
-        match UnixStream::connect(&socket_path).await {
-            Ok(stream) => Some(stream),
-            Err(_) => {
-                let _ = std::fs::remove_file(&socket_path);
-                None
+        // A missing socket and a stale one (ECONNREFUSED) both mean "not running": remove the
+        // stale socket rather than let the connect error escape via `?`.
+        let stream = if socket_path.exists() {
+            match UnixStream::connect(&socket_path).await {
+                Ok(stream) => Some(stream),
+                Err(_) => {
+                    let _ = std::fs::remove_file(&socket_path);
+                    None
+                }
             }
+        } else {
+            None
+        };
+
+        let Some(mut stream) = stream else {
+            let msg = stop_message(false);
+            if json_mode {
+                json_output(&json!({"ok": true, "message": msg}));
+            } else {
+                println!("{msg}");
+            }
+            return Ok(());
+        };
+
+        stream.write_all(b"{\"command\":\"stop\"}\n").await?;
+        stream.shutdown().await?;
+
+        let mut buf = Vec::new();
+        let _ = stream.read_to_end(&mut buf).await;
+
+        let msg = stop_message(true);
+        if json_mode {
+            json_output(&json!({"ok": true, "message": msg}));
+        } else {
+            println!("{msg}");
         }
-    } else {
-        None
-    };
-
-    let Some(mut stream) = stream else {
-        let msg = stop_message(false);
-        if json_mode { json_output(&json!({"ok": true, "message": msg})); }
-        else { println!("{msg}"); }
-        return Ok(());
-    };
-
-    stream
-        .write_all(b"{\"command\":\"stop\"}\n")
-        .await?;
-    stream.shutdown().await?;
-
-    let mut buf = Vec::new();
-    let _ = stream.read_to_end(&mut buf).await;
-
-    let msg = stop_message(true);
-    if json_mode { json_output(&json!({"ok": true, "message": msg})); }
-    else { println!("{msg}"); }
-    Ok(())
+        Ok(())
     } // #[cfg(unix)]
 }
 
-/// Whether this command can own the browser named by `--browser`, and may therefore
-/// take it down when interrupted.
-///
-/// `--browser` is a global flag, so every invocation carries a name — defaulted to
-/// `"default"`, the one most single-agent users get — including the commands that never
-/// open a browser at all. `run::run` returns before the connection block for each of
-/// these; arming the handler for them meant Ctrl+C during a read-only `status` killed
-/// whichever agent happened to hold that name. `close` is excluded for the opposite
-/// reason: it kills its own pid deliberately, and does not need a second, racier path.
+/// Whether this command owns the browser named by `--browser`, and may take it down when
+/// interrupted. `--browser` defaults to `"default"` even for commands that open no browser,
+/// so arming the handler for those lets a read-only `status` kill another agent's Chrome.
+/// `close` is excluded for the opposite reason: it already kills its own pid.
 #[must_use]
 pub const fn interrupt_owns_browser(command: &crate::cli::Command) -> bool {
     use crate::cli::Command as C;
@@ -677,27 +689,17 @@ pub const fn interrupt_owns_browser(command: &crate::cli::Command) -> bool {
 }
 
 /// The pid this invocation may kill on interrupt: its own browser's, and no other.
-///
-/// The Ctrl+C handler used to walk every entry in `sessions.json` — a file shared by
-/// every agent on the machine — so interrupting one agent killed the Chrome of every
-/// other agent running under a different `--browser` name, which is exactly the
-/// isolation the flag exists to provide.
+/// `sessions.json` is shared by every agent on the machine, so it must never be walked
+/// whole here.
 #[must_use]
 pub fn interrupt_kill_target(store: &SessionStore, browser_name: &str) -> Option<u32> {
     store.browsers.get(browser_name).and_then(|b| b.pid)
 }
 
-/// Remove a profile directory and confirm it stayed removed.
-///
-/// `remove_dir_all` returning `Ok` is not the same as the profile being gone. A Chrome that
-/// has been signalled but has not exited yet writes its state back on the way down, and the
-/// old loop broke on that first `Ok` and then claimed "(profile purged)" over a directory
-/// that reappeared a third of a second later. Measured on one close: 235 files before, none
-/// immediately after, 22 once the shutdown flush landed (`Local State`,
-/// `Default/Preferences`, `TransportSecurity`, three cache stubs) — and 946 of the 1204
-/// profile directories that had accumulated on a developer machine were exactly that
-/// residue. The loop now ends when the directory is absent rather than when one call
-/// succeeded, and a purge that never converges says so instead of being reported as done.
+/// Remove a profile directory and confirm it stayed removed: 8 attempts, 250 ms apart.
+/// `remove_dir_all` returning `Ok` is not enough — a signalled Chrome writes its state back
+/// on the way down. The loop ends when the directory is ABSENT, and a purge that never
+/// converges says so instead of claiming success.
 fn purge_profile(profile_dir: &std::path::Path) -> Result<(), String> {
     let mut last_error = None;
     for attempt in 0..8u32 {
@@ -717,14 +719,11 @@ fn purge_profile(profile_dir: &std::path::Path) -> Result<(), String> {
     }))
 }
 
-/// Sweep the profile directories the automatic prune would reach one command at a time.
-///
-/// The save-path sweep is capped at one removal per invocation so a read-only command never
-/// pays for housekeeping, which means a store that accumulated before any of this existed
-/// needs as many commands as it has orphans. This is that sweep, uncapped, on request.
+/// The save path removes one orphaned profile per invocation, so a read-only command never
+/// pays for housekeeping. This is the same sweep, uncapped, on request.
 pub fn cmd_purge_orphans(json_mode: bool) -> Result<(), crate::BoxError> {
-    // Loaded, not saved: saving would run the capped sweep under the lock as well, and the
-    // grace window is what makes reading the store outside the lock safe here.
+    // Loaded, not saved: saving would run the capped sweep under the lock too. The grace
+    // window is what makes this unlocked read safe.
     let store = session::load_session()?;
     let referenced = store.browsers.keys().cloned().collect();
     let browsers_dir = session::browsers_dir()?;
@@ -756,26 +755,30 @@ pub fn cmd_close(browser_name: &str, purge: bool, json_mode: bool) -> Result<(),
 
     let browser = store.browsers.remove(browser_name);
 
-    let outcome = browser.as_ref().and_then(|b| b.pid).map(|pid| (pid, kill_pid(pid)));
+    // A signal is not an exit: Chrome answers on its DevTools endpoint while tearing down, so
+    // a relaunch inside that window handshakes with the dying instance. Waiting for the pid
+    // (5s) and removing its port file is what makes `close` then reuse the name work — through
+    // `browser::kill_and_await_exit`, which owns that sequence AND the port file's real path.
+    // The copy that lived here removed `browsers_dir()/<name>/DevToolsActivePort`, one
+    // directory above `browser_profile_dir`, so it had never removed anything.
+    let killed = browser
+        .as_ref()
+        .and_then(|b| b.pid)
+        .map(|pid| (pid, crate::browser::kill_and_await_exit(browser_name, pid)));
 
-    // A signal is not an exit. Chrome keeps its DevTools HTTP endpoint answering for a
-    // moment while it tears down, so a relaunch inside that window reconnects to the
-    // dying instance and fails its WebSocket handshake. Waiting until the pid is gone —
-    // and removing the port file it leaves — is what lets `close` immediately followed
-    // by a fresh command on the same name work instead of racing.
-    let exited = outcome.map(|(pid, o)| match o {
-        crate::kill::KillOutcome::Signalled => {
-            let gone = crate::kill::wait_until_gone(pid, std::time::Duration::from_secs(5));
-            if gone && let Ok(dir) = session::browsers_dir() {
-                let _ = std::fs::remove_file(dir.join(browser_name).join("DevToolsActivePort"));
-            }
-            gone
-        }
-        crate::kill::KillOutcome::Gone => true,
-        // Nothing was signalled in either case, so there is no exit to have waited for.
-        // `Unverified` additionally did not establish that the process is still there —
-        // `false` here is "not observed gone", which is all this field ever meant.
-        crate::kill::KillOutcome::NotABrowser | crate::kill::KillOutcome::Unverified => false,
+    let outcome = killed.as_ref().map(|(pid, result)| {
+        // `Err` is only ever "signalled, still running after the wait"; its message is the
+        // relaunch caller's, and `close` writes its own.
+        (
+            *pid,
+            result.as_ref().copied().unwrap_or(KillOutcome::Signalled),
+        )
+    });
+    let exited = killed.as_ref().map(|(_, result)| match result {
+        // Signalled AND observed gone, or never signalled because it already was.
+        Ok(KillOutcome::Signalled | KillOutcome::Gone) => true,
+        // Nothing was signalled; `false` means "not observed gone".
+        Ok(KillOutcome::NotABrowser | KillOutcome::Unverified) | Err(_) => false,
     });
 
     let message = match (&browser, outcome) {
@@ -791,31 +794,28 @@ pub fn cmd_close(browser_name: &str, purge: bool, json_mode: bool) -> Result<(),
         (None, _) => format!("No browser session named '{browser_name}'."),
     };
 
-    // The entry was removed above, before anything was known. An outcome that established
-    // nothing about the process puts it back: `sessions.json` is what `status` lists and
-    // what a later `close` looks a pid up in, so forgetting an entry whose Chrome may well
-    // be running is how this command manufactures the very orphan `close --orphans` exists
-    // to clean up. The message printed above already says so.
+    // Removed above before anything was known; an outcome that established nothing puts it
+    // back, or this command manufactures the orphans `close --orphans` cleans up.
     let kept = outcome.is_some_and(|(_, o)| !o.entry_may_be_dropped());
     if kept && let Some(entry) = browser {
         store.browsers.insert(browser_name.to_string(), entry);
     }
 
-    // Purge browser profile if requested — but not on the outcome that kept the session.
-    // `--purge` means "close it and delete its profile", and this branch closed nothing:
-    // deleting the profile of a Chrome that may still be holding it is the destruction
-    // `purge_profile` grew eight retries to survive, done here in full knowledge that the
-    // process was never checked. Refusing costs one repeat of the command once the machine
-    // can answer; the alternative cannot be undone.
+    // Never purge on the outcome that KEPT the session: nothing was closed, so a live Chrome
+    // may still hold the profile. Refusing costs a repeat; the alternative is irreversible.
     let purge_outcome = if purge && !kept {
-        session::browsers_dir().ok().map(|dir| purge_profile(&dir.join(browser_name)))
+        session::browsers_dir()
+            .ok()
+            .map(|dir| purge_profile(&dir.join(browser_name)))
     } else {
         None
     };
 
     let message = match purge_outcome {
         None if purge && kept => {
-            format!("{message} (profile NOT purged: nothing was closed, so its profile may be in use)")
+            format!(
+                "{message} (profile NOT purged: nothing was closed, so its profile may be in use)"
+            )
         }
         None => message,
         Some(Ok(())) => format!("{message} (profile purged)"),
@@ -823,17 +823,14 @@ pub fn cmd_close(browser_name: &str, purge: bool, json_mode: bool) -> Result<(),
     };
 
     if json_mode {
-        // `ok` has always meant "the command ran", so a caller cannot read a kill out of
-        // it. `signalled` is the act itself: false where the pid was gone or reused, and
-        // the only field that separates a browser this closed from one it merely forgot.
+        // `ok` means "the command ran", so `signalled` is the only field separating a browser
+        // this closed from one it merely forgot.
         let mut response = json!({
             "ok": true,
             "message": message,
             "signalled": outcome.is_some_and(|(_, o)| o == KillOutcome::Signalled),
         });
-        // Only meaningful when something was signalled: whether the process was observed
-        // gone before `close` returned. Absent otherwise — a claim about a wait that
-        // never happened would be noise.
+        // Absent unless something was signalled: otherwise no wait ever happened.
         if outcome.is_some_and(|(_, o)| o == KillOutcome::Signalled) {
             response["exited"] = json!(exited == Some(true));
         }
@@ -852,16 +849,23 @@ mod tests {
 
     #[test]
     fn a_command_that_never_opens_a_browser_has_none_to_interrupt() {
-        // `--browser` is global, so these carry the default name and would otherwise
-        // kill whichever agent happens to be using it — while never having touched it.
-        // Each of these returns from `run::run` before the connection block.
+        // These carry the default `--browser` name without touching a browser.
         use crate::cli::Command as C;
         for command in [
-            C::Daemon { action: crate::cli::DaemonAction::Start },
+            C::Daemon {
+                action: crate::cli::DaemonAction::Start,
+            },
             C::Status,
             C::Stop,
-            C::Close { purge: false, purge_orphans: false, orphans: false },
-            C::History { filter: None, limit: 20 },
+            C::Close {
+                purge: false,
+                purge_orphans: false,
+                orphans: false,
+            },
+            C::History {
+                filter: None,
+                limit: 20,
+            },
         ] {
             assert!(
                 !interrupt_owns_browser(&command),
@@ -876,8 +880,24 @@ mod tests {
     #[test]
     fn an_interrupt_only_targets_this_invocation_s_browser() {
         let mut store = SessionStore::default();
-        session::ensure_browser(&mut store, "agent-1", "ws://a", Some(111), true, None, Vec::new());
-        session::ensure_browser(&mut store, "agent-2", "ws://b", Some(222), true, None, Vec::new());
+        session::ensure_browser(
+            &mut store,
+            "agent-1",
+            "ws://a",
+            Some(111),
+            true,
+            None,
+            Vec::new(),
+        );
+        session::ensure_browser(
+            &mut store,
+            "agent-2",
+            "ws://b",
+            Some(222),
+            true,
+            None,
+            Vec::new(),
+        );
 
         assert_eq!(interrupt_kill_target(&store, "agent-1"), Some(111));
         assert_eq!(
@@ -890,10 +910,78 @@ mod tests {
 
     #[test]
     fn stop_message_reflects_daemon_reachability() {
-        // Regression for A3c: a stale socket (connect refused) must map to the
-        // friendly "not running" path, not a raw propagated error. The reached=false
-        // branch is exactly what cmd_stop selects when connect fails.
+        // A stale socket (connect refused) is the reached=false branch, not an error.
         assert_eq!(stop_message(true), "Daemon stopped.");
         assert_eq!(stop_message(false), "Daemon is not running.");
+    }
+
+    /// A value that always fails to serialize, so the fallback branch is reachable from a test.
+    struct Unserializable;
+
+    impl serde::Serialize for Unserializable {
+        fn serialize<S: serde::Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
+            Err(serde::ser::Error::custom("a map key was not a string"))
+        }
+    }
+
+    #[test]
+    fn a_response_that_cannot_be_serialized_still_answers_ok_false() {
+        let line = json_line(&Unserializable);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&line).expect("the fallback must itself be valid JSON");
+        assert_eq!(
+            parsed["ok"], false,
+            "the --json contract promises {{\"ok\":false}} on stdout for every failure, and an \
+             empty line reads as no response at all: {line}"
+        );
+        let error = parsed["error"].as_str().unwrap_or_default();
+        assert!(
+            error.contains("could not be serialized"),
+            "the fallback names what happened: {line}"
+        );
+        assert!(
+            error.contains("a map key was not a string"),
+            "and carries serde's own reason: {line}"
+        );
+    }
+
+    #[test]
+    fn a_response_that_serializes_is_untouched() {
+        assert_eq!(json_line(&json!({"ok": true})), r#"{"ok":true}"#);
+    }
+
+    #[test]
+    fn batch_text_names_each_entry_and_what_was_skipped() {
+        // Captured through the pure builder rather than through `println!`, which a test
+        // cannot observe. Same two fields the JSON carries.
+        let out = json!({
+            "ok": false,
+            "results": [
+                {"ok": true, "message": "Clicked uid=n12"},
+                {"ok": false, "error": "No element with uid n99"},
+            ],
+            "stopped_at": 1,
+            "skipped": 2,
+        });
+        let lines = batch_text_lines(&out, Some(1));
+        assert_eq!(
+            lines,
+            vec![
+                "[0] ok — Clicked uid=n12".to_string(),
+                "[1] error — No element with uid n99".to_string(),
+                "stopped at command 1 — 2 skipped".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_batch_entry_with_no_sentence_keeps_its_payload() {
+        let out = json!({"ok": true, "results": [{"ok": true, "text": "hello"}]});
+        let lines = batch_text_lines(&out, None);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(
+            lines[0].contains("hello"),
+            "dropping a payload with no one-line form loses what the caller asked for: {lines:?}"
+        );
     }
 }

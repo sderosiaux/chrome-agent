@@ -1,29 +1,25 @@
 use std::time::Duration;
 
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::cdp::client::CdpClient;
 use crate::cdp::types::EvaluateResult;
 
-/// A captured network entry.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NetworkEntry {
     pub url: String,
-    /// Resource classification, not an HTTP verb. Live mode stores the CDP
-    /// `ResourceType` (`Document`/`XHR`/`Script`/…); retroactive mode stores the
-    /// Resource Timing `initiatorType` (`xmlhttprequest`/`script`/`img`/…).
-    /// Neither CDP `responseReceived` nor the Resource Timing API exposes the
-    /// real HTTP method, so this is deliberately the resource type in both modes.
+    /// Resource classification, not an HTTP verb — neither source exposes the method. Live
+    /// mode stores the CDP `ResourceType`, retroactive mode the Resource Timing
+    /// `initiatorType`.
     pub resource_type: String,
     pub status: u16,
     pub content_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
-    /// Why `body` is absent although capture was requested and the entry was selected:
-    /// the response was binary, and 2000 chars of base64 answer no question while still
-    /// costing tokens. Names the size and the command that does fetch bytes.
+    /// Why `body` is absent although capture was requested: the response was binary. Names
+    /// the size and the command that does fetch bytes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body_omitted: Option<String>,
     pub size: u64,
@@ -31,12 +27,8 @@ pub struct NetworkEntry {
 }
 
 // Content types eligible for body capture when the caller named nothing. `--filter` is
-// itself a selection, so it overrides this list (`should_capture_body`): the allowlist
-// exists to keep an unfiltered `--body` from pulling every image, font and stylesheet on
-// the page into the response — not to veto an explicit ask. Before that rule, `--filter
-// "/config/"` matching an `application/yaml` response listed the entry and silently
-// omitted the very body it was aimed at (issue #27), and growing this list one textual
-// MIME type at a time does not converge.
+// itself a selection and overrides this list: the allowlist keeps an unfiltered `--body`
+// from pulling every image and font into the response, not to veto an explicit ask.
 const CAPTURABLE_TYPES: &[&str] = &["json", "text", "javascript", "xml"];
 
 fn is_capturable_type(ct: &str) -> bool {
@@ -44,19 +36,14 @@ fn is_capturable_type(ct: &str) -> bool {
     CAPTURABLE_TYPES.iter().any(|t| lower.contains(t))
 }
 
-/// Whether to fetch this entry's body: requested, and either explicitly selected by a
-/// URL filter or of a type the default allowlist admits.
+/// Requested, and either selected by a URL filter or admitted by the allowlist.
 const fn should_capture_body(requested: bool, filtered: bool, capturable_type: bool) -> bool {
     requested && (filtered || capturable_type)
 }
 
-/// What `Network.getResponseBody` handed back. Binary answers are classified rather than
-/// printed: `body` reaches stdout and the transcript, and a base64 prefix of a PNG is
-/// noise that costs tokens. `base64Encoded` alone does NOT mean binary — Chrome sets it
-/// for every MIME its own allowlist does not call text, which is the exact judgement
-/// this feature exists to stop outsourcing (an `application/yaml` body came back
-/// base64-encoded). So the content decides: decoded bytes that are valid UTF-8 are the
-/// text they are, and only bytes that are not get counted instead of printed.
+/// What `Network.getResponseBody` handed back. `base64Encoded` does NOT mean binary —
+/// Chrome sets it for every MIME its own list does not call text (e.g. `application/yaml`).
+/// The content decides: decoded bytes that are valid UTF-8 are printed, the rest counted.
 enum FetchedBody {
     Text(String),
     Binary { bytes: usize },
@@ -65,7 +52,7 @@ enum FetchedBody {
 fn classify_body(body: &str, base64_encoded: bool) -> FetchedBody {
     if base64_encoded {
         let Ok(bytes) = crate::base64::decode(body) else {
-            // Chrome said base64 and lied about the encoding; all that is known is size.
+            // Undecodable: all that is known is the size.
             return FetchedBody::Binary { bytes: body.len() };
         };
         match String::from_utf8(bytes) {
@@ -81,8 +68,8 @@ fn classify_body(body: &str, base64_encoded: bool) -> FetchedBody {
     }
 }
 
-/// Retroactive mode: uses the Performance/Resource Timing API to list resources
-/// already loaded on the current page. Works without `Network.enable` (stealth-safe).
+/// List resources already loaded, via the Resource Timing API. No `Network.enable`, so
+/// stealth-safe; no status codes either.
 pub async fn run_retroactive(
     client: &CdpClient,
     filter: Option<&str>,
@@ -137,14 +124,15 @@ pub async fn run_retroactive(
         .filter_map(|e| {
             let url = e.get("url")?.as_str()?.to_string();
             if let Some(ref f) = filter_lower
-                && !url.to_ascii_lowercase().contains(f.as_str()) {
-                    return None;
-                }
+                && !url.to_ascii_lowercase().contains(f.as_str())
+            {
+                return None;
+            }
             let initiator = e.get("type").and_then(Value::as_str).unwrap_or("other");
             let duration = e.get("duration").and_then(Value::as_u64).unwrap_or(0);
             let size = e.get("size").and_then(Value::as_u64).unwrap_or(0);
 
-            // Map initiator type to a readable content type hint
+            // Initiator type → readable content-type hint.
             let content_type = match initiator {
                 "xmlhttprequest" | "fetch" => "xhr/fetch".to_string(),
                 "script" => "script".to_string(),
@@ -156,8 +144,8 @@ pub async fn run_retroactive(
 
             Some(NetworkEntry {
                 url,
-                resource_type: initiator.to_string(), // Resource Timing exposes initiatorType, not the HTTP method
-                status: 0,                             // Resource Timing API doesn't expose status
+                resource_type: initiator.to_string(), // initiatorType, not the HTTP method
+                status: 0,                            // not exposed by Resource Timing
                 content_type,
                 body: None,
                 body_omitted: None,
@@ -171,8 +159,7 @@ pub async fn run_retroactive(
     Ok(results)
 }
 
-/// Live capture mode: enables `Network` domain, subscribes to `responseReceived`
-/// events, and collects responses for the specified duration.
+/// Live capture: enable `Network`, collect `responseReceived` for `timeout_secs`.
 pub async fn run_live(
     client: &CdpClient,
     filter: Option<&str>,
@@ -180,7 +167,6 @@ pub async fn run_live(
     limit: usize,
     timeout_secs: u64,
 ) -> Result<Vec<NetworkEntry>, crate::BoxError> {
-    // Enable Network domain (required for live capture)
     client.enable("Network").await?;
 
     let mut rx = client.events();
@@ -189,7 +175,8 @@ pub async fn run_live(
 
     let mut entries: Vec<NetworkEntry> = Vec::new();
     // request id -> index into `entries`, for bodies still in flight.
-    let mut pending_bodies: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut pending_bodies: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
 
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -216,11 +203,9 @@ pub async fn run_live(
             Err(_) => break, // timeout
         };
 
-        // A body exists only once loading finished: `Network.getResponseBody` at
-        // `responseReceived` time answers "No data found" for anything that has not
-        // fully arrived yet, which in practice is most responses. So the entry is
-        // pushed at `responseReceived` (that is when the metadata exists) and its
-        // body is fetched when `loadingFinished` names the same request.
+        // The entry is pushed at `responseReceived` (where the metadata is) but its body is
+        // fetched at `loadingFinished`: `getResponseBody` answers "No data found" for
+        // anything still in flight, which is most responses.
         if event.method == "Network.loadingFinished" {
             let request_id = event
                 .params
@@ -237,7 +222,9 @@ pub async fn run_live(
             continue;
         }
 
-        let Some(response) = event.params.get("response") else { continue };
+        let Some(response) = event.params.get("response") else {
+            continue;
+        };
 
         let url = response
             .get("url")
@@ -245,16 +232,13 @@ pub async fn run_live(
             .unwrap_or("")
             .to_string();
 
-        // Apply filter
         if let Some(ref f) = filter_lower
-            && !url.to_ascii_lowercase().contains(f.as_str()) {
-                continue;
-            }
+            && !url.to_ascii_lowercase().contains(f.as_str())
+        {
+            continue;
+        }
 
-        let status = response
-            .get("status")
-            .and_then(Value::as_u64)
-            .unwrap_or(0) as u16;
+        let status = response.get("status").and_then(Value::as_u64).unwrap_or(0) as u16;
         let content_type = response
             .get("mimeType")
             .and_then(Value::as_str)
@@ -294,7 +278,7 @@ pub async fn run_live(
             body: None,
             body_omitted: None,
             size: encoded_length,
-            duration_ms: 0, // timing not directly available from responseReceived
+            duration_ms: 0, // not available from responseReceived
         });
 
         if entries.len() >= limit {
@@ -302,9 +286,8 @@ pub async fn run_live(
         }
     }
 
-    // Whatever never announced loadingFinished inside the window gets one best-effort
-    // read: the response may well be complete by now, and a missing body should mean
-    // "not there", not "the deadline landed between two events".
+    // Whatever never announced `loadingFinished` in the window gets one best-effort read, so
+    // a missing body means "not there" rather than "the deadline landed between two events".
     for (request_id, index) in pending_bodies {
         fill_body(client, &request_id, &mut entries[index]).await;
     }
@@ -312,9 +295,8 @@ pub async fn run_live(
     Ok(entries)
 }
 
-/// Fetch and classify one entry's body, in place. A `None` from the fetch leaves the
-/// entry bodyless — the response was evicted or never completed, and inventing an
-/// explanation would be a claim the tool did not measure.
+/// Fetch and classify one entry's body, in place. A failed fetch leaves the entry bodyless
+/// rather than inventing an explanation for it.
 async fn fill_body(client: &CdpClient, request_id: &str, entry: &mut NetworkEntry) {
     match fetch_response_body(client, request_id).await {
         Some(FetchedBody::Text(text)) => entry.body = Some(text),
@@ -328,19 +310,97 @@ async fn fill_body(client: &CdpClient, request_id: &str, entry: &mut NetworkEntr
     }
 }
 
-/// Format network entries as a human-readable table.
+/// What one `network` invocation observed. `--abort` blocks for a window and reports what it
+/// stopped; every other shape reports what it saw.
+pub enum Capture {
+    Blocked {
+        pattern: String,
+        seconds: u64,
+        urls: Vec<String>,
+    },
+    Requests(Vec<NetworkEntry>),
+}
+
+impl Capture {
+    /// The response every mode carries.
+    #[must_use]
+    pub fn to_json(&self) -> serde_json::Value {
+        match self {
+            Self::Blocked { urls, .. } => json!({"ok": true, "blocked": urls.len(), "urls": urls}),
+            Self::Requests(entries) => json!({"ok": true, "requests": entries}),
+        }
+    }
+
+    /// The CLI's rendering. `--abort` names its window before the list, because the command
+    /// blocked for it.
+    #[must_use]
+    pub fn text(&self) -> String {
+        match self {
+            Self::Blocked {
+                pattern,
+                seconds,
+                urls,
+            } => {
+                let mut out =
+                    format!("Blocking requests matching \"{pattern}\" for {seconds}s...\n");
+                for url in urls {
+                    out += &format!("  blocked: {url}\n");
+                }
+                out + &format!("Blocked {} request(s)", urls.len())
+            }
+            Self::Requests(entries) => format_text(entries),
+        }
+    }
+}
+
+/// One `network` invocation, whichever of its three shapes was asked for. The single entry point
+/// for CLI, pipe and batch — the branch used to be written out in both.
+pub async fn collect(
+    client: &CdpClient,
+    filter: Option<&str>,
+    body: bool,
+    live: Option<u64>,
+    limit: usize,
+    abort: Option<&str>,
+) -> Result<Capture, crate::BoxError> {
+    if let Some(pattern) = abort {
+        // `--live` doubles as the abort window (default 30s).
+        let seconds = live.unwrap_or(30);
+        let urls = run_route_abort(client, pattern, seconds).await?;
+        return Ok(Capture::Blocked {
+            pattern: pattern.to_string(),
+            seconds,
+            urls,
+        });
+    }
+    let entries = match live {
+        Some(secs) => run_live(client, filter, body, limit, secs).await?,
+        None => run_retroactive(client, filter, limit).await?,
+    };
+    Ok(Capture::Requests(entries))
+}
+
+/// Render the entries as a table.
 pub fn format_text(entries: &[NetworkEntry]) -> String {
     if entries.is_empty() {
         return "No network entries captured.".to_string();
     }
     let mut out = format!(
         "{:<70} {:>6} {:<14} {:>8} {:>6}\n{}\n",
-        "URL", "STATUS", "TYPE", "SIZE", "MS",
+        "URL",
+        "STATUS",
+        "TYPE",
+        "SIZE",
+        "MS",
         "-".repeat(110)
     );
     for e in entries {
         let url_display = crate::truncate::truncate_str(&e.url, 67, "...");
-        let status_str = if e.status == 0 { "-".to_string() } else { e.status.to_string() };
+        let status_str = if e.status == 0 {
+            "-".to_string()
+        } else {
+            e.status.to_string()
+        };
         let size_str = if e.size == 0 {
             "-".to_string()
         } else if e.size >= 1024 {
@@ -364,8 +424,7 @@ pub fn format_text(entries: &[NetworkEntry]) -> String {
     out
 }
 
-/// Fetch a response body via `Network.getResponseBody`. Returns `None` on failure
-/// (body may not be available if request was evicted from memory).
+/// `Network.getResponseBody`. `None` when the body is gone (evicted, or never completed).
 async fn fetch_response_body(client: &CdpClient, request_id: &str) -> Option<FetchedBody> {
     let result: Value = client
         .call(
@@ -383,16 +442,15 @@ async fn fetch_response_body(client: &CdpClient, request_id: &str) -> Option<Fet
     Some(classify_body(body, base64_encoded))
 }
 
-/// Params for `Fetch.enable` that pause every request matching `pattern` at the
-/// request stage. Extracted so tests can assert the exact wire shape.
+/// `Fetch.enable` params pausing every request matching `pattern`. Extracted so tests can
+/// assert the wire shape.
 fn fetch_enable_params(pattern: &str) -> Value {
     json!({
         "patterns": [{"urlPattern": pattern, "requestStage": "Request"}]
     })
 }
 
-/// Params for `Fetch.failRequest` that abort a paused request. Extracted so
-/// tests can assert the exact wire shape.
+/// `Fetch.failRequest` params aborting a paused request. Extracted for the same reason.
 fn fail_request_params(request_id: &str) -> Value {
     json!({
         "requestId": request_id,
@@ -406,11 +464,12 @@ pub async fn run_route_abort(
     pattern: &str,
     timeout_secs: u64,
 ) -> Result<Vec<String>, crate::BoxError> {
-    client.send("Fetch.enable", fetch_enable_params(pattern)).await?;
+    client
+        .send("Fetch.enable", fetch_enable_params(pattern))
+        .await?;
 
-    // Subscribe ONCE, before the loop. Re-subscribing each iteration (as a fresh
-    // `wait_for_event` call would) drops any `Fetch.requestPaused` events emitted
-    // during the `Fetch.failRequest` round-trip, leaking blocked requests.
+    // Subscribe ONCE, before the loop: re-subscribing per iteration drops the
+    // `Fetch.requestPaused` events emitted during the `Fetch.failRequest` round trip.
     let mut rx = client.events();
     let mut blocked = Vec::new();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
@@ -424,8 +483,7 @@ pub async fn run_route_abort(
             loop {
                 match rx.recv().await {
                     Ok(ev) if ev.method == "Fetch.requestPaused" => return Some(ev),
-                    Ok(_)
-                    | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
                 }
             }
@@ -434,10 +492,14 @@ pub async fn run_route_abort(
 
         match event {
             Ok(Some(ev)) => {
-                let request_id = ev.params.get("requestId")
+                let request_id = ev
+                    .params
+                    .get("requestId")
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
-                let url = ev.params.get("request")
+                let url = ev
+                    .params
+                    .get("request")
                     .and_then(|r| r.get("url"))
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
@@ -449,7 +511,7 @@ pub async fn run_route_abort(
                     blocked.push(url);
                 }
             }
-            // event channel closed, or timeout elapsed
+            // Channel closed, or the timeout elapsed.
             Ok(None) | Err(_) => break,
         }
     }
@@ -464,7 +526,7 @@ mod tests {
 
     #[test]
     fn bug_url_truncation_utf8_safe() {
-        // Bug: &e.url[..67] panics on URLs with multi-byte chars
+        // `&e.url[..67]` panics on multi-byte characters.
         let entry = NetworkEntry {
             url: "https://example.com/café/résumé/über/naïve/длинный".to_string(),
             resource_type: "Document".to_string(),
@@ -475,15 +537,12 @@ mod tests {
             body: None,
             body_omitted: None,
         };
-        // This should not panic
         let text = format_text(&[entry]);
         assert!(!text.is_empty());
     }
 
     #[test]
     fn route_abort_params_structure() {
-        // Assert the params the actual abort code path produces, not a literal
-        // rebuilt in the test body.
         let params = fetch_enable_params("*tracking*");
         let patterns = params.get("patterns").unwrap().as_array().unwrap();
         assert_eq!(patterns.len(), 1);
@@ -495,11 +554,10 @@ mod tests {
         assert_eq!(fail["reason"], "BlockedByClient");
     }
 
-
     #[test]
     fn a_url_filter_overrides_the_mime_allowlist() {
-        // The allowlist protects an unfiltered --body from the page's images and fonts;
-        // a filter is the caller naming what they want (issue #27: application/yaml).
+        // The allowlist protects an unfiltered --body from images and fonts; a filter is
+        // the caller naming what they want.
         assert!(should_capture_body(true, true, false));
         assert!(should_capture_body(true, false, true));
         assert!(!should_capture_body(true, false, false));
@@ -509,9 +567,8 @@ mod tests {
 
     #[test]
     fn base64_from_chrome_means_undecided_not_binary() {
-        // Chrome base64-encodes every MIME its own list does not call text — the very
-        // judgement this feature stops outsourcing. "cmV0cmllczogMw==" is "retries: 3":
-        // textual content stays text whatever the transport encoding said.
+        // "cmV0cmllczogMw==" is "retries: 3": textual content stays text whatever the
+        // transport encoding said.
         match classify_body("cmV0cmllczogMw==", true) {
             FetchedBody::Text(text) => assert_eq!(text, "retries: 3"),
             FetchedBody::Binary { .. } => panic!("valid UTF-8 counted as binary"),
@@ -536,7 +593,7 @@ mod tests {
 
     #[test]
     fn bug_body_truncation_utf8_safe() {
-        // Bug: &body[..2000] panics on bodies with multi-byte chars
+        // `&body[..2000]` panics on multi-byte characters.
         let entry = NetworkEntry {
             url: "https://example.com".to_string(),
             resource_type: "XHR".to_string(),
@@ -544,7 +601,7 @@ mod tests {
             content_type: "application/json".to_string(),
             size: 5000,
             duration_ms: 50,
-            body: Some("é".repeat(3000)),  // each é is 2 bytes
+            body: Some("é".repeat(3000)),
             body_omitted: None,
         };
         let text = format_text(&[entry]);
@@ -553,10 +610,7 @@ mod tests {
 
     #[test]
     fn entry_serializes_resource_type_not_method() {
-        // Regression: the field used to be `method` but held a CDP ResourceType
-        // (Document/XHR/Script) in live mode and a hardcoded "GET" in retroactive
-        // mode — mislabeled and inconsistent. It must now serialize as
-        // `resourceType` and never as `method`.
+        // The field must serialize as `resourceType`; it never held an HTTP method.
         let entry = NetworkEntry {
             url: "https://example.com/api".to_string(),
             resource_type: "XHR".to_string(),
@@ -574,7 +628,7 @@ mod tests {
 
     #[test]
     fn bug_body_preview_utf8_safe() {
-        // Bug: &b[..200] panics on bodies with multi-byte chars
+        // `&b[..200]` panics on multi-byte characters.
         let entry = NetworkEntry {
             url: "https://example.com".to_string(),
             resource_type: "XHR".to_string(),
@@ -582,7 +636,7 @@ mod tests {
             content_type: "application/json".to_string(),
             size: 500,
             duration_ms: 50,
-            body: Some("日本語テスト".repeat(100)),  // multi-byte Japanese
+            body: Some("日本語テスト".repeat(100)),
             body_omitted: None,
         };
         let text = format_text(&[entry]);

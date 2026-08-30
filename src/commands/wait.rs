@@ -17,10 +17,8 @@ pub enum Transition {
     NoChange,
 }
 
-/// Tracks in-flight network requests by requestId so we can tell when the page
-/// has gone quiet. Keying on a set (not a bare counter) makes duplicate `start`
-/// events and repeated `finish`/`fail` events harmless — removing an id that is
-/// not present is a no-op.
+/// In-flight requests by requestId. A set rather than a counter, so duplicate starts and
+/// repeated finish/fail events are harmless.
 #[derive(Default)]
 pub struct InFlightTracker {
     in_flight: HashSet<String>,
@@ -46,8 +44,8 @@ impl InFlightTracker {
         }
     }
 
-    /// Apply an event and report whether it flipped the idle state. This is the
-    /// exact decision the wait loop uses to start/stop its idle clock.
+    /// Apply an event and report whether it flipped the idle state — what the wait loop
+    /// starts and stops its idle clock on.
     pub fn observe(&mut self, method: &str, request_id: Option<&str>) -> Transition {
         let was_idle = self.is_idle();
         self.on_event(method, request_id);
@@ -69,11 +67,8 @@ impl InFlightTracker {
     }
 }
 
-/// Turn an in-page evaluation exception into a clear, actionable error.
-///
-/// `wait text` compiles the pattern with `new RegExp(pattern)`, so an invalid
-/// pattern throws a `SyntaxError` in the page. Without this the probe would just
-/// return no match and time out with a misleading "waiting for text" message.
+/// Turn an in-page evaluation exception into an actionable error. `wait text` compiles the
+/// pattern with `new RegExp`, so an invalid one throws instead of timing out as "no match".
 #[must_use]
 fn eval_exception_message(what: &str, pattern: &str, detail: &str) -> String {
     if what == "text" {
@@ -103,14 +98,9 @@ pub async fn run(
     let poll_interval = Duration::from_millis(200);
 
     let expression = match what {
-        // Regex semantics: the pattern is compiled in-page with `new RegExp(pattern)`
-        // and tested against `document.body.innerText`. This supports both plain
-        // substrings and full regex (e.g. "Foo|Bar", "^Loading") because every literal
-        // string is a valid regex that matches itself. The flip side: regex
-        // metacharacters are significant — a pattern like "cost($5)" is an *invalid*
-        // regex (unbalanced group) and throws a SyntaxError in the page rather than
-        // matching literally. We surface that exception below instead of silently
-        // timing out (see the `exception_details` check).
+        // Compiled in-page with `new RegExp` and tested against `document.body.innerText`,
+        // so metacharacters are significant: "cost($5)" is an invalid regex and throws
+        // rather than matching literally. The exception is surfaced below.
         "text" => format!(
             "new RegExp({}).test(document.body.innerText)",
             serde_json::to_string(pattern)?
@@ -125,7 +115,8 @@ pub async fn run(
         ),
         other => return Err(format!(
             "Unknown wait type: {other}. Use \"text\", \"url\", \"selector\", or \"network-idle\"."
-        ).into()),
+        )
+        .into()),
     };
 
     loop {
@@ -139,16 +130,15 @@ pub async fn run(
             )
             .await?;
 
-        // A thrown in-page exception (most commonly an invalid `text` regex) leaves
-        // `result.value` absent, which would otherwise look like "no match" and loop
-        // until the misleading timeout. Detect it and surface a clear error instead.
+        // A thrown in-page exception leaves `result.value` absent, which otherwise reads as
+        // "no match" and loops to a misleading timeout.
         if let Some(exc) = result.exception_details.as_ref() {
             let detail = exc
                 .exception
                 .as_ref()
                 .and_then(|o| o.description.as_ref())
                 .map_or(exc.text.as_str(), String::as_str);
-            // Errors' `description` carries a multi-line stack — keep just the message.
+            // `description` carries a multi-line stack; keep the first line.
             let detail = detail.lines().next().unwrap_or(detail);
             return Err(eval_exception_message(what, pattern, detail).into());
         }
@@ -175,9 +165,8 @@ pub async fn run(
     }
 }
 
-/// Wait until there are zero in-flight network requests for `idle_ms` continuously,
-/// bounded by `timeout_secs`. Opt-in (enables the Network domain) so it stays off
-/// the stealth hot path.
+/// Wait for `idle_ms` continuous milliseconds with zero in-flight requests, bounded by
+/// `timeout_secs`. Enables the Network domain, so it is opt-in and off the stealth hot path.
 async fn wait_network_idle(
     client: &CdpClient,
     timeout_secs: u64,
@@ -189,23 +178,16 @@ async fn wait_network_idle(
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
     let idle = Duration::from_millis(idle_ms);
     // Poll cap so we re-check the idle timer even when no events arrive.
-    let poll = idle.min(Duration::from_millis(100)).max(Duration::from_millis(10));
+    let poll = idle
+        .min(Duration::from_millis(100))
+        .max(Duration::from_millis(10));
 
     let mut tracker = InFlightTracker::new();
 
-    // CDP does NOT replay `Network.requestWillBeSent` for requests that were
-    // already in flight when we called `Network.enable`. So an empty tracker does
-    // NOT mean the page is quiet — starting the idle clock right away produces a
-    // false "idle" while the initial load is still fetching subresources. Gate the
-    // clock on the document's load state instead: only treat the page as
-    // idle-eligible once `document.readyState === 'complete'`. While it's still
-    // loading we hold the clock off and re-probe, which lets the pre-existing
-    // in-flight requests finish (via `Page`/`load`) before we ever declare idle.
-    //
-    // Limitation: a `fetch`/XHR kicked off *before* subscribe that keeps running
-    // *after* `readyState` reaches "complete" still isn't individually tracked
-    // (its `requestWillBeSent` was missed). readyState covers the common "page is
-    // still loading" case; post-load background requests remain best-effort.
+    // CDP does not replay `requestWillBeSent` for requests already in flight at
+    // `Network.enable`, so an empty tracker is not proof of quiet and the clock is gated on
+    // `document.readyState === 'complete'`. One left over: a fetch started before the
+    // subscribe and still running after readyState completes is never tracked.
     let mut page_loaded = document_complete(client).await.unwrap_or(false);
     let mut idle_since = refresh_idle_clock(page_loaded, &tracker, None);
 
@@ -239,8 +221,7 @@ async fn wait_network_idle(
             Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => {
                 return Err("Connection closed while waiting for network idle".into());
             }
-            // No event within the poll window. Until the initial load completes,
-            // re-probe readyState so pre-existing in-flight requests keep us busy;
+            // No event in the poll window: re-probe readyState until the load completes,
             // then re-check the idle timer.
             Err(_) => {
                 if !page_loaded {
@@ -252,18 +233,15 @@ async fn wait_network_idle(
     }
 }
 
-/// The page counts as quiet only when its initial load has completed AND no
-/// tracked requests are in flight. Gating on the load state is what prevents a
-/// false "idle" for requests already in flight before we subscribed (CDP does not
-/// replay their `requestWillBeSent`).
+/// Quiet means the initial load completed AND nothing tracked is in flight. The load gate is
+/// what prevents a false idle for requests that predate the subscribe.
 #[must_use]
 fn is_quiet(page_loaded: bool, tracker: &InFlightTracker) -> bool {
     page_loaded && tracker.is_idle()
 }
 
-/// Recompute the idle clock from the combined quiet state. The clock starts only
-/// on a rising edge (busy → quiet) so a continuously-quiet stretch is measured
-/// from its true start, and is cleared the moment the page goes busy again.
+/// Recompute the idle clock. It starts only on a rising edge (busy → quiet), so a
+/// continuously quiet stretch is measured from its true start, and clears when busy again.
 fn refresh_idle_clock(
     page_loaded: bool,
     tracker: &InFlightTracker,
@@ -276,9 +254,7 @@ fn refresh_idle_clock(
     }
 }
 
-/// Probe whether the document has finished its initial load. Used to seed and
-/// re-check the network-idle gate; see `wait_network_idle` for why an empty
-/// in-flight tracker is not sufficient to declare the page quiet.
+/// Whether the document finished its initial load. Seeds and re-checks the network-idle gate.
 async fn document_complete(client: &CdpClient) -> Result<bool, crate::BoxError> {
     let result: EvaluateResult = client
         .call(
@@ -301,34 +277,50 @@ async fn document_complete(client: &CdpClient) -> Result<bool, crate::BoxError> 
 mod tests {
     use std::time::Instant;
 
-    use super::{eval_exception_message, is_quiet, refresh_idle_clock, InFlightTracker, Transition};
-
-    // --- A10c: invalid-regex exception surfacing ---------------------------
+    use super::{
+        InFlightTracker, Transition, eval_exception_message, is_quiet, refresh_idle_clock,
+    };
 
     #[test]
     fn text_exception_reports_invalid_regex() {
-        let msg = eval_exception_message("text", "cost($5)", "SyntaxError: Invalid regular expression");
-        assert!(msg.contains("Invalid regex"), "should name the regex problem: {msg}");
-        assert!(msg.contains("cost($5)"), "should echo the offending pattern: {msg}");
-        assert!(msg.contains("SyntaxError"), "should include the engine detail: {msg}");
-        assert!(msg.contains("RegExp"), "should explain regex semantics: {msg}");
+        let msg = eval_exception_message(
+            "text",
+            "cost($5)",
+            "SyntaxError: Invalid regular expression",
+        );
+        assert!(
+            msg.contains("Invalid regex"),
+            "should name the regex problem: {msg}"
+        );
+        assert!(
+            msg.contains("cost($5)"),
+            "should echo the offending pattern: {msg}"
+        );
+        assert!(
+            msg.contains("SyntaxError"),
+            "should include the engine detail: {msg}"
+        );
+        assert!(
+            msg.contains("RegExp"),
+            "should explain regex semantics: {msg}"
+        );
     }
 
     #[test]
     fn non_text_exception_is_generic() {
         let msg = eval_exception_message("selector", "div", "TypeError: boom");
-        assert!(!msg.contains("Invalid regex"), "non-text wait is not a regex: {msg}");
+        assert!(
+            !msg.contains("Invalid regex"),
+            "non-text wait is not a regex: {msg}"
+        );
         assert!(msg.contains("selector"));
         assert!(msg.contains("div"));
         assert!(msg.contains("TypeError: boom"));
     }
 
-    // --- A10d: network-idle gating on load state ---------------------------
-
     #[test]
     fn not_quiet_until_page_loaded_even_with_empty_tracker() {
-        // The core of the bug: an empty tracker (no observed requests) must NOT
-        // count as idle while the initial load is still in progress.
+        // An empty tracker must not count as idle while the initial load is in progress.
         let t = InFlightTracker::new();
         assert!(t.is_idle(), "no observed requests");
         assert!(!is_quiet(false, &t), "page still loading -> not quiet");
@@ -345,12 +337,12 @@ mod tests {
     #[test]
     fn idle_clock_holds_off_until_page_loaded() {
         let t = InFlightTracker::new();
-        // While loading, the clock never starts despite the empty tracker.
         assert!(refresh_idle_clock(false, &t, None).is_none());
-        // Load completes -> clock starts (rising edge).
         let started = refresh_idle_clock(true, &t, None);
-        assert!(started.is_some(), "load complete should start the idle clock");
-        // Staying quiet must preserve the original start (no reset).
+        assert!(
+            started.is_some(),
+            "load complete should start the idle clock"
+        );
         let kept = refresh_idle_clock(true, &t, started);
         assert_eq!(kept, started, "continuously-quiet must not reset the clock");
     }
@@ -425,13 +417,13 @@ mod tests {
     fn unrelated_event_and_missing_id_ignored() {
         let mut t = InFlightTracker::new();
         t.on_event("Network.responseReceived", Some("r1")); // not a start/finish
-        t.on_event("Network.requestWillBeSent", None); // no id
+        t.on_event("Network.requestWillBeSent", None);
         assert!(t.is_idle());
     }
 
     #[test]
     fn repeated_finish_is_harmless() {
-        // A late/duplicate finish for the same id must not underflow or flip state.
+        // A duplicate finish must not underflow or flip state.
         let mut t = InFlightTracker::new();
         t.on_event("Network.requestWillBeSent", Some("r1"));
         t.on_event("Network.loadingFinished", Some("r1"));
@@ -442,22 +434,38 @@ mod tests {
 
     #[test]
     fn observe_reports_idle_transitions() {
-        // This is the exact decision the wait loop drives its idle clock from.
         let mut t = InFlightTracker::new();
-        assert_eq!(t.observe("Network.requestWillBeSent", Some("a")), Transition::BecameBusy);
+        assert_eq!(
+            t.observe("Network.requestWillBeSent", Some("a")),
+            Transition::BecameBusy
+        );
         // A second concurrent request does not re-trigger "busy".
-        assert_eq!(t.observe("Network.requestWillBeSent", Some("b")), Transition::NoChange);
-        // First of two finishing keeps us busy.
-        assert_eq!(t.observe("Network.loadingFinished", Some("a")), Transition::NoChange);
-        // Last one finishing flips to idle exactly once.
-        assert_eq!(t.observe("Network.loadingFinished", Some("b")), Transition::BecameIdle);
+        assert_eq!(
+            t.observe("Network.requestWillBeSent", Some("b")),
+            Transition::NoChange
+        );
+        assert_eq!(
+            t.observe("Network.loadingFinished", Some("a")),
+            Transition::NoChange
+        );
+        // The last one flips to idle exactly once.
+        assert_eq!(
+            t.observe("Network.loadingFinished", Some("b")),
+            Transition::BecameIdle
+        );
     }
 
     #[test]
     fn observe_ignores_noise_without_transition() {
         let mut t = InFlightTracker::new();
-        assert_eq!(t.observe("Network.responseReceived", Some("x")), Transition::NoChange);
-        assert_eq!(t.observe("Network.requestWillBeSent", None), Transition::NoChange);
+        assert_eq!(
+            t.observe("Network.responseReceived", Some("x")),
+            Transition::NoChange
+        );
+        assert_eq!(
+            t.observe("Network.requestWillBeSent", None),
+            Transition::NoChange
+        );
         assert!(t.is_idle());
     }
 }
