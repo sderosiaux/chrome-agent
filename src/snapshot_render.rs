@@ -437,9 +437,7 @@ mod tests {
 
     fn make_ax_value(s: &str) -> AXValue {
         AXValue {
-            value_type: "string".into(),
             value: Some(serde_json::Value::String(s.into())),
-            related_nodes: None,
         }
     }
 
@@ -449,12 +447,10 @@ mod tests {
             ignored: false,
             role: None,
             name: None,
-            description: None,
             value: None,
             properties: None,
             child_ids: None,
             backend_dom_node_id: None,
-            frame_id: None,
             parent_id: None,
         }
     }
@@ -463,9 +459,7 @@ mod tests {
         AXProperty {
             name: name.into(),
             value: AXValue {
-                value_type: "boolean".into(),
                 value: Some(serde_json::Value::Bool(val)),
-                related_nodes: None,
             },
         }
     }
@@ -478,19 +472,15 @@ mod tests {
                 ignored: false,
                 role: Some(make_ax_value("heading")),
                 name: Some(make_ax_value("Welcome")),
-                description: None,
                 value: None,
                 properties: Some(vec![AXProperty {
                     name: "level".into(),
                     value: AXValue {
-                        value_type: "integer".into(),
                         value: Some(serde_json::json!(1)),
-                        related_nodes: None,
                     },
                 }]),
                 child_ids: Some(vec![]),
                 backend_dom_node_id: Some(10),
-                frame_id: None,
                 parent_id: None,
             },
         ];
@@ -531,12 +521,10 @@ mod tests {
                 ignored: true,
                 role: None,
                 name: None,
-                description: None,
                 value: None,
                 properties: None,
                 child_ids: Some(vec!["2".into()]),
                 backend_dom_node_id: None,
-                frame_id: None,
                 parent_id: None,
             },
             AXNode {
@@ -544,12 +532,10 @@ mod tests {
                 ignored: false,
                 role: Some(make_ax_value("button")),
                 name: Some(make_ax_value("Click me")),
-                description: None,
                 value: None,
                 properties: Some(vec![make_bool_prop("focused", true)]),
                 child_ids: Some(vec![]),
                 backend_dom_node_id: Some(20),
-                frame_id: None,
                 parent_id: Some("1".into()),
             },
         ];

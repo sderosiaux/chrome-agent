@@ -204,7 +204,7 @@ path-scoped. Per-subsystem decisions are in `.claude/rules/`, listed above.
 - CDP `rename_all = "camelCase"` fails on acronyms: use `#[serde(rename = "backendDOMNodeId")]`
 - Browser-level WebSocket only supports `Target.*`. Page commands need page WS via `/json/list`.
 - `Accessibility.getFullAXTree` returns a flat list with parentId/childIds, not a tree.
-- Some AXRelatedNode fields may be missing — `Option<T>` + `#[serde(default)]` everywhere.
+- A CDP field this tool does not read is not declared in `src/cdp/types.rs` at all — serde ignores what it was not told about, and a declared field that is not `Option<T>` + `#[serde(default)]` is a field Chrome MUST send. Declare what something reads; put the rest in the type's doc comment.
 - `text --selector "main"` auto-falls back to `[role=main]` for ARIA compatibility.
 - Readability.js can fail on non-article pages — wrapped in try-catch with descriptive error.
 - `--stealth` patches are CDP-level (Page.addScriptToEvaluateOnNewDocument), not Chrome flags. `--disable-blink-features=AutomationControlled` is a myth.

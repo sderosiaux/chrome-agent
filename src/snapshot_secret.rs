@@ -415,21 +415,17 @@ mod tests {
     fn ax(backend: i64, node_id: &str, name: Option<&str>, value: Option<&str>) -> AXNode {
         use crate::cdp::types::AXValue;
         let wrap = |s: &str| AXValue {
-            value_type: "string".into(),
             value: Some(Value::String(s.into())),
-            related_nodes: None,
         };
         AXNode {
             node_id: node_id.into(),
             ignored: false,
             role: None,
             name: name.map(wrap),
-            description: None,
             value: value.map(wrap),
             properties: None,
             child_ids: None,
             backend_dom_node_id: Some(backend),
-            frame_id: None,
             parent_id: None,
         }
     }

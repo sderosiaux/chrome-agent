@@ -146,10 +146,15 @@ fn process_name(pid: u32) -> Option<String> {
 /// signal, `None` is the single path that goes on to signal.
 ///
 /// Pure because the alternative is untestable. The reading it stands in for is a `ps`
-/// resolved through `PATH`, and a test cannot take `ps` away from itself — `set_var` is
-/// unsafe in edition 2024 and this crate forbids `unsafe` outside two audited spots. So the
-/// door that mattered (a table that will not answer) was never exercised, which is how it
-/// stayed wired to `Gone`.
+/// resolved through `PATH`, and a test cannot take `ps` away from itself — `set_var` is unsafe
+/// in edition 2024, and `unsafe` here is `deny` (`Cargo.toml`, `[lints.rust]`) with each
+/// exception spelled `#[allow(unsafe_code)]` on the statement itself under a `// SAFETY:` line.
+/// There are six: `flock` acquire and release in `session::FileLock`, `kill(pid, 0)` in
+/// `session::liveness`, `gethostname` and the `CStr::from_ptr` that reads its buffer in
+/// `profiles::this_host`, and `utimensat` in one `#[cfg(test)]` helper. All six are a libc call
+/// with no safe equivalent in std, which is the only thing they have in common and the only
+/// reason any of them is here. So the door that mattered (a table that will not answer) was
+/// never exercised, which is how it stayed wired to `Gone`.
 #[cfg(any(unix, test))]
 fn classify(existence: crate::session::Liveness, comm: Option<&str>) -> Option<KillOutcome> {
     if existence == crate::session::Liveness::Dead {

@@ -204,11 +204,7 @@ mod tests {
         use crate::cdp::types::BoxModel;
         let model = BoxModel {
             content: vec![],  // empty quad
-            padding: vec![],
             border: vec![],
-            margin: vec![],
-            width: 0,
-            height: 0,
         };
         let (x, y) = model.content_center();
         assert!(x.abs() < f64::EPSILON);
