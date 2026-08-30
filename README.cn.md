@@ -216,7 +216,7 @@ chrome-agent screenshot
 ```
 --browser <name>         命名浏览器配置（默认："default"）
 --page <name>            命名标签页（默认："default"）
---connect [url]          连接到正在运行的 Chrome
+--connect <auto|url>     连接到正在运行的 Chrome（必须带值："auto"，或 ws:// / http:// URL）
 --headed                 显示浏览器窗口（默认：无头模式）
 --stealth                反检测补丁（Cloudflare、Turnstile）
 --copy-cookies           使用真实 Chrome 配置的 cookie
@@ -458,7 +458,7 @@ Claude Code 权限配置：
 | 隐身 | 7 项原生 CDP 补丁 | 委托给云服务商 | 无 |
 | 阅读模式 | `read`（Readability.js） | 无 | 无 |
 | 数据提取 | `extract`（自动检测重复数据） | 无 | 无 |
-| 代码量 | ~10.2K 行 | ~40K 行 | Playwright |
+| 代码量 | ~22.2K 行 Rust 代码（src/，不含空行与纯注释行；由测试实测） | ~40K 行（对方公布的数字，本仓库无法核实） | Playwright |
 | 设计目标 | 最少 token，最大自主性 | 功能完整平台 | 浏览器测试 |
 
 ## 许可证

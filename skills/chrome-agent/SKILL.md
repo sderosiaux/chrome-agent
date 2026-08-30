@@ -291,6 +291,13 @@ chrome-agent pdf [--filename name] [--landscape] [--background]
 chrome-agent download <url> [--out path] [--max-bytes N]        # in-page fetch, keeps the login
 chrome-agent download <--uid nN|--selector "css"> [--out path]  # CLICK it, capture the download
 
+# Session, history, and paths that already worked
+chrome-agent status                                              # browsers, pids, orphan= lines
+chrome-agent history
+chrome-agent macro list                                          # named paths, with their guards
+chrome-agent macro run checkout --var email=ada@example.com      # stops at the first guard that fails
+chrome-agent replay recording.jsonl                              # a pipe --record file, no guards
+
 chrome-agent tabs
 chrome-agent close [--purge]
 chrome-agent close --orphans                                     # close browsers no session claims

@@ -73,7 +73,7 @@ chrome-agent screenshot
 ## How It Works
 
 ```
-chrome-agent v0.14.0 (Rust, ~11.5K lines, 3 MB binary)
+chrome-agent v0.14.0 (~22.2K lines of Rust in src/, 3 MB binary)
     │
     │ WebSocket (Chrome DevTools Protocol)
     ▼
@@ -122,7 +122,8 @@ UIDs are stable across inspects (based on Chrome's `backendNodeId`). The agent i
 ```
 --browser <name>         Named browser profile (default: "default")
 --page <name>            Named page/tab (default: "default")
---connect [url]          Connect to running Chrome (auto or explicit)
+--connect <auto|url>     Connect to running Chrome (a value is required: "auto", or a
+                         ws:// or http:// URL)
 --headed                 Show browser window (default is headless)
 --stealth                Bypass bot detection (Cloudflare, Turnstile)
 --timeout <seconds>      Command timeout (default: 30)
@@ -318,7 +319,7 @@ Tell your agent to run `chrome-agent --help` — the help output includes a comp
 ### Connect to Your Browser
 
 ```bash
-chrome-agent --connect inspect    # auto-discover Chrome with debugging
+chrome-agent --connect auto inspect    # auto-discover Chrome with debugging
 google-chrome --remote-debugging-port=9222  # or launch manually
 ```
 
@@ -340,7 +341,7 @@ google-chrome --remote-debugging-port=9222  # or launch manually
 | Network capture | Retroactive + live | No | No | Metadata only (no bodies) |
 | Console capture | Stealth-safe interceptor | No | Console messages | No |
 | Pipe mode | JSON stdin/stdout | No | No | No |
-| Code | ~10.2K lines | ~76K lines (69K Playwright fork) | ~12K lines | Playwright |
+| Code | ~22.2K lines of Rust in `src/` (blank and comment-only lines excluded; a test re-measures it) | ~76K lines (their figure, unverified here) | ~12K lines (their figure, unverified here) | Playwright |
 
 ## License
 
