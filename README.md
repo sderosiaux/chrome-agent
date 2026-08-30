@@ -264,6 +264,8 @@ exit code — a failed assertion is `ok:false` with the same `assertion` object.
 | `frame <selector\|main>` | Switch `eval`/`inspect` into an iframe (or back to main). Persists only within a `pipe`/`batch` process. |
 | `emulate device --width W --height H [--dpr N] [--mobile] [--touch] [--orientation portrait\|landscape] [--label name]` | Apply explicit device metrics to the current named page. |
 | `emulate status\|reset` | Report requested and page-observed metrics, or clear that page's overrides. |
+| `webmcp list` | List tools a page registered on `document.modelContext`. No `outputSchema` — the protocol defines none. |
+| `webmcp call <name> [--args '{"k":"v"}'] [--inspect]` | Call a tool by name and report what it declared next to what the page's accessibility tree measurably did. |
 | `batch` | Execute multiple commands from a JSON array on stdin. |
 | `pipe` | Persistent JSON stdin/stdout connection. |
 
@@ -457,6 +459,51 @@ printf '%s\n' \
 - Target the intended iframe precisely (e.g. `iframe[src*="checkout"]`); a bare `iframe` matches the first one in DOM order, often an ad `about:blank` slot.
 - `frame` scopes `eval`/`inspect`; it does **not** scope `--selector` targeting. Run `inspect` after the switch to get iframe uids, then act by uid (uids resolve across frames).
 - Each standalone `chrome-agent <cmd>` opens a fresh connection, so `chrome-agent frame …` followed by a separate `chrome-agent inspect` loses the switch. Use `pipe`/`batch`.
+
+## WebMCP tools
+
+Pages can register tools on `document.modelContext` (W3C WICG WebMCP). `webmcp list` discovers
+them; `webmcp call` calls one and reports what it *declared* next to what the page *measurably
+did* — because the protocol defines no `outputSchema`. A tool's return is a freeform string with
+no contract to check it against, so `{"success":true}` and nothing having moved is not a
+protocol violation, it looks exactly like a correct call:
+
+```bash
+chrome-agent webmcp list
+# tool=add_to_cart "Add a product to the cart."
+# note: no tool here carries an outputSchema — the protocol defines none...
+
+chrome-agent inspect   # establish a baseline first, like any other action
+chrome-agent webmcp call add_to_cart --args '{"item":"Espresso Blend"}'
+# declared_result: {"success":true,"item":"Espresso Blend","price":"$18.00"}
+# verdict: changed (tree_delta) — added=3 removed=2 changed=1: a real cart line appeared
+
+chrome-agent webmcp call add_to_cart_broken --args '{"item":"Espresso Blend"}'
+# declared_result: {"success":true,"item":"Espresso Blend","price":"$18.00"}   <- byte-identical
+# verdict: unchanged (identical_tree) — nothing moved. Not "no effect": a canvas
+# repaint, a CSS-only change, or a handler that runs after the window all look like this too.
+```
+
+`webmcp call` is reported exactly like any other action command — `verdict`, `delta`, `next` —
+because that machinery is the only corroboration the protocol leaves available. It never invents
+a stronger claim than the tree can support: a call that declares success and moves nothing reads
+as `unchanged`, not as a lie, for the same reason `no_effect` elsewhere requires proof of
+delivery before it is used.
+
+Two of the spec's own sharp edges are handled rather than surfaced: `executeTool` requires the
+actual `RegisteredTool` object from `getTools()` (a bare name throws
+`TypeError: The provided value is not of type 'RegisteredTool'.`) and a JSON *string* second
+argument (an object throws `Failed to parse input arguments`) — `webmcp call <name>` resolves the
+tool and validates `--args` as JSON before either can happen.
+
+Under a `frame` binding, `webmcp` hits the same isolated-world blindness `eval` already has: a
+tool a frame's own main-world script registered is invisible from there (measured, not assumed —
+see `tests/fixtures/webmcp_iframe_host.html`). The response carries `frame_scoped: true` so an
+empty list reads as unproven, not as "this frame has none".
+
+Most installed Chrome builds have no native WebMCP yet. Test against the real API with
+`--chrome-arg --enable-features=WebMCP,WebMCPTesting` (see `--chrome-arg` above), or against a
+page that ships its own polyfill.
 
 ## Batch mode
 

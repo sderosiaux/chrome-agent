@@ -224,6 +224,12 @@ pub fn attach_verdict_for(
 }
 
 /// Commands that can move the page, and therefore owe the caller a change report.
+///
+/// `webmcp_call` is here and `webmcp_list` is not: calling a tool is the one `WebMCP` action that
+/// can move the page, and its declared result carries no schema to check against (no
+/// `outputSchema` exists in the protocol) — the accessibility-tree delta this hook attaches is
+/// the only corroboration available, exactly the reason this predicate exists. Listing tools is
+/// a read, like `assert`.
 pub fn mutates_page(cmd: &str) -> bool {
     matches!(
         cmd,
@@ -232,6 +238,7 @@ pub fn mutates_page(cmd: &str) -> bool {
             | "upload" | "drag" | "hover" | "scroll"
             | "fill-form" | "fill_form" | "fillform"
             | "fill_and_submit" | "fill-and-submit"
+            | "webmcp_call" | "webmcp-call"
     )
 }
 

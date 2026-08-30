@@ -15,7 +15,7 @@ use crate::pipe_dispatch::{
     dispatch_navigate_and_read, dispatch_network, dispatch_pdf, dispatch_press,
     dispatch_read, dispatch_screenshot, dispatch_scroll, dispatch_select,
     dispatch_tabs, dispatch_text, dispatch_type, dispatch_upload,
-    dispatch_wait, EmulationRecovery,
+    dispatch_wait, dispatch_webmcp_call, dispatch_webmcp_list, EmulationRecovery,
 };
 use crate::run_helpers::error_hint;
 use crate::session::{self, SessionStore};
@@ -317,6 +317,8 @@ async fn dispatch(
         "frame" => dispatch_frame(client, cmd).await,
         "emulate" => dispatch_emulate(client, store, browser_name, page_name, cmd).await,
         "assert" => dispatch_assert(client, store, browser_name, page_name, cmd).await,
+        "webmcp_list" | "webmcp-list" => dispatch_webmcp_list(client).await,
+        "webmcp_call" | "webmcp-call" => dispatch_webmcp_call(client, cmd).await,
         "batch" => dispatch_batch(client, browser_client, store, browser_name, page_name, target_id, timeout, global_max_depth, report, cmd, emulation_recovery).await,
         "" => Err("Missing \"cmd\" field".into()),
         other => Err(format!("Unknown command: {other}").into()),

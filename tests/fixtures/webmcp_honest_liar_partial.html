@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>WebMCP cart — honest, liar, partial</title>
+<style>
+  body { font: 15px/1.5 system-ui, sans-serif; margin: 2rem; color: #111; }
+  #cart-lines { padding-left: 1rem; }
+  #cart-lines li { margin: .25rem 0; }
+  .empty { color: #666; }
+</style>
+</head>
+<body>
+
+<h1>Roasters — checkout</h1>
+
+<h2 id="cart-heading">Cart: 0 items</h2>
+
+<ul id="cart-lines" aria-label="Cart lines">
+  <li class="empty" id="cart-empty">Your cart is empty</li>
+</ul>
+
+<script>
+// ---------------------------------------------------------------------------
+// Ground truth. The DOM is a rendering of this; the tools are judged against it.
+// ---------------------------------------------------------------------------
+window.__cart = [];
+
+// The one string all three tools return. Byte-identical on purpose: the point of
+// the fixture is that the protocol's answer cannot distinguish them.
+const IDENTICAL_RETURN = '{"success":true,"item":"Espresso Blend","price":"$18.00"}';
+
+function renderHeading() {
+  const n = window.__uiCount;
+  document.getElementById('cart-heading').textContent =
+    'Cart: ' + n + (n === 1 ? ' item' : ' items');
+}
+
+// What the UI *claims* the cart holds. Kept separate from __cart so the partial
+// tool can move one without the other.
+window.__uiCount = 0;
+
+function appendLine(item, price) {
+  const empty = document.getElementById('cart-empty');
+  if (empty) empty.remove();
+  const li = document.createElement('li');
+  const label = document.createElement('span');
+  label.textContent = item + ' — ' + price;
+  const remove = document.createElement('button');
+  remove.textContent = 'Remove ' + item;
+  remove.type = 'button';
+  li.appendChild(label);
+  li.appendChild(remove);
+  document.getElementById('cart-lines').appendChild(li);
+}
+
+// ---------------------------------------------------------------------------
+// Minimal polyfill, only when the real API is absent (no --enable-features=WebMCP).
+// Same call shape as Chrome 152: getTools() -> Promise<RegisteredTool[]>,
+// executeTool(tool, argsJsonString) -> Promise<string>, inputSchema serialized.
+// ---------------------------------------------------------------------------
+window.__webmcpPolyfill = false;
+if (typeof document.modelContext === 'undefined') {
+  window.__webmcpPolyfill = true;
+  const registry = [];
+  document.modelContext = {
+    registerTool(desc) {
+      registry.push(desc);
+      return { unregister() { registry.splice(registry.indexOf(desc), 1); } };
+    },
+    getTools() {
+      return Promise.resolve(registry.map(d => ({
+        name: d.name,
+        description: d.description,
+        title: d.title || '',
+        origin: location.origin,
+        window: window,
+        inputSchema: JSON.stringify(d.inputSchema)
+      })));
+    },
+    async executeTool(tool, argsJson) {
+      const d = registry.find(r => r.name === (tool && tool.name));
+      if (!d) throw new TypeError("The provided value is not of type 'RegisteredTool'.");
+      return await d.execute(JSON.parse(argsJson));
+    }
+  };
+}
+
+const SCHEMA = {
+  type: 'object',
+  properties: {
+    item: { type: 'string', description: 'Product name' },
+    quantity: { type: 'number', description: 'How many' }
+  },
+  required: ['item']
+};
+
+// --- HONEST: moves ground truth and the DOM, then reports success ------------
+document.modelContext.registerTool({
+  name: 'add_to_cart',
+  description: 'Add a product to the cart.',
+  inputSchema: SCHEMA,
+  async execute(args) {
+    window.__cart.push({ item: args.item, price: '$18.00' });
+    window.__uiCount = window.__cart.length;
+    renderHeading();
+    appendLine(args.item, '$18.00');
+    return IDENTICAL_RETURN;
+  }
+});
+
+// --- LIAR: touches nothing, reports the same success ------------------------
+document.modelContext.registerTool({
+  name: 'add_to_cart_broken',
+  description: 'Add a product to the cart.',
+  inputSchema: SCHEMA,
+  async execute(_args) {
+    return IDENTICAL_RETURN;
+  }
+});
+
+// --- PARTIAL: moves the counter only. No line, no ground truth ---------------
+document.modelContext.registerTool({
+  name: 'add_to_cart_partial',
+  description: 'Add a product to the cart.',
+  inputSchema: SCHEMA,
+  async execute(_args) {
+    window.__uiCount += 1;
+    renderHeading();
+    return IDENTICAL_RETURN;
+  }
+});
+
+// Ground truth, for the record. Never consulted by the protocol.
+window.__truth = () => JSON.stringify({
+  cart: window.__cart,
+  cart_size: window.__cart.length,
+  ui_count: window.__uiCount,
+  dom_lines: document.querySelectorAll('#cart-lines li:not(.empty)').length
+});
+</script>
+</body>
+</html>

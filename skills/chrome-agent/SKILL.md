@@ -199,6 +199,20 @@ chrome-agent --page mobile emulate reset
 # Acting on an emulated page activates its tab (backgrounds siblings — a Chromium requirement
 # for orientation). Under --touch, click/check tap; dblclick/hover/drag stay mouse events.
 
+# WebMCP tools — document.modelContext.getTools()/.executeTool()
+chrome-agent webmcp list                                          # name, description, inputSchema; no outputSchema
+chrome-agent inspect                                              # baseline first, like any action
+chrome-agent webmcp call add_to_cart --args '{"item":"Espresso Blend"}'
+# Reported like any other action: verdict/delta/next come from the same accessibility-tree
+# diff every mutating command gets — the protocol defines no outputSchema, so that diff is the
+# only corroboration for what a tool DECLARED it did. A tool that declares success and moves
+# nothing reads verdict=unchanged/identical_tree, never a stronger claim (canvas/CSS/late
+# handlers all look the same to this measurement). Resolves the RegisteredTool object and
+# validates --args as JSON itself, so the spec's own TypeError/SyntaxError traps don't reach you.
+# Under `frame`, hits the same isolated-world blindness eval has — response carries
+# frame_scoped:true when that applies; an empty list there is unproven, not "none".
+# Most installed Chrome has no native WebMCP: `--chrome-arg --enable-features=WebMCP,WebMCPTesting`.
+
 # Iframes — the frame switch lives on the connection, so use pipe/batch:
 printf '%s\n' \
   '{"cmd":"frame","target":"iframe[src*=\"checkout\"]"}' \
