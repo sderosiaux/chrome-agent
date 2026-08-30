@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Account — subscription</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 2rem; }
+  section { display: none; }
+  section.on { display: block; }
+  #done { color: #0a0; font-weight: 600; }
+</style>
+</head>
+<body>
+  <h1>Your account</h1>
+
+  <!-- The shape the design's example describes, offline: a page, a control that reveals a
+       form, a field, a confirmation. Three steps that each produce a DIFFERENT observation,
+       which is what a distiller has to be tested against — one that only ever sees `changed`
+       proves nothing about the whitelist. -->
+  <section id="overview" class="on">
+    <p>Plan: Pro, renewed monthly.</p>
+    <button id="billing" data-test="billing">Manage billing</button>
+  </section>
+
+  <section id="billing-panel">
+    <h2>Cancel your subscription</h2>
+    <label for="email">Confirm your email</label>
+    <input id="email" name="email" type="email" autocomplete="email">
+    <label for="card">Card on file</label>
+    <input id="card" name="card" type="text" autocomplete="cc-number" value="">
+    <button id="confirm">Confirm</button>
+  </section>
+
+  <section id="result">
+    <p id="done">Cancellation recorded</p>
+  </section>
+
+  <script>
+    document.getElementById('billing').addEventListener('click', () => {
+      document.getElementById('overview').classList.remove('on');
+      document.getElementById('billing-panel').classList.add('on');
+    });
+    document.getElementById('confirm').addEventListener('click', () => {
+      document.getElementById('billing-panel').classList.remove('on');
+      document.getElementById('result').classList.add('on');
+    });
+  </script>
+</body>
+</html>

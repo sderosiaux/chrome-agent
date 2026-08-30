@@ -3,6 +3,7 @@ mod browser;
 mod cdp;
 mod chrome_args;
 mod cli;
+mod cli_actions;
 mod commands;
 mod connect_cli;
 #[cfg(unix)]
@@ -18,6 +19,10 @@ mod hit_test_report;
 mod hints;
 mod kill;
 mod landing;
+mod macros;
+mod macros_record;
+mod macros_cmd;
+mod macros_run;
 mod orphans;
 mod pipe;
 mod pipe_dispatch;
@@ -128,6 +133,12 @@ async fn main() {
         // failure and exit 1 — the very conflation the code exists to remove.
         if let Some(not_held) = e.downcast_ref::<commands::assert::NotHeld>() {
             std::process::exit(not_held.report());
+        }
+        // A macro that stopped has a report of its own — the step, the guard, what was observed
+        // and the action's own `next`. It prints once, here, rather than being flattened to its
+        // first sentence by the handler below.
+        if let Some(stopped) = e.downcast_ref::<macros_run::Stopped>() {
+            std::process::exit(stopped.report());
         }
         // A refusal is not a bare sentence: `--on-intercept refuse` measured who was in the
         // way before deciding not to act, and the mode that refuses is the one whose caller has

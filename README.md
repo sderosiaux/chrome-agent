@@ -422,6 +422,26 @@ also bring their page to the foreground first, because a background tab answers 
 five-second timer — with several pages open in one browser, clicking on one makes it the active
 one, which is what clicking means.
 
+### Macros
+
+A macro is a path that already worked once, kept under a name with the postconditions observed
+on that success. `macro record` distils a recorded session — the exploration and the dead ends
+do not survive — and `macro run` replays it, checking every step's guards and stopping at the
+first that does not hold.
+
+```bash
+chrome-agent macro record cancel --from-recording session.jsonl
+chrome-agent macro run cancel --var email=ada@example.com
+```
+
+What becomes a guard is the whole point: `delivery: target_hit`, the verdict WORD (never the
+reason), `value.verbatim`, and a `url_matches` built from the path. Never the `changed` counters,
+never a uid, never a duration — a macro that pins those breaks on a page that still works. A step
+aimed by a uid is recorded by role and accessible name or refused outright; a secret field becomes
+a declared parameter and is never written to the file. A guard that does not hold stops the run
+and reports the step, the guard, what was observed and the action's own `next`. There is no
+repair and no retry: that line is deliberate.
+
 Two blind spots, both stated rather than papered over: the read-back window is a fixed 60 ms
 (reported as `observed_after_ms`, so a validator firing at 400 ms is outside it — `wait` then
 `assert value`), and canvas, WebGL and CSS-only effects are invisible to the accessibility tree.

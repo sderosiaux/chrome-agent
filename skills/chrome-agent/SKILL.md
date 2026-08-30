@@ -123,6 +123,18 @@ produce. `click`, `dblclick`, `hover` and `drag` bring their page to the foregro
 background tab answers pointer events on a fixed five-second timer), so acting on one page of a
 multi-page browser makes that page the active one.
 
+**Macros — do it once, keep the path.** When a task worked, `macro record <name>
+--from-recording <file>` (or `{"cmd":"macro","action":"record","name":"x"}` inside the pipe
+session that just did it) distils the steps that changed the page, drops the exploration and the
+dead ends, and keeps on each step only what survives tomorrow: `delivery: target_hit`, the
+verdict **word**, `value.verbatim`, a `url_matches` on the path. Never the `changed` counters,
+never a uid, never a duration. A step you aimed by uid is recorded by role + accessible name, or
+**refused** — no macro that works once. A secret field becomes a declared parameter and is never
+stored, so `macro run` refuses without `--var`. A guard that does not hold **stops** the run and
+gives you the step index, the guard, what was observed and the action's own `next`; nothing is
+repaired or retried. Steps that could promise nothing are marked `unguarded` in the file and
+counted in both reports — read that number before trusting a green run.
+
 **Two stated blind spots.** Neither can be fixed by retrying:
 
 - **The observation window is fixed at 60 ms** (`observed_after_ms` reports it). It catches a
