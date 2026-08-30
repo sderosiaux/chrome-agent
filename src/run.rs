@@ -450,7 +450,7 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
             }
             let role_filter: Option<Vec<&str>> = filter.as_deref().map(|f| f.split(',').map(str::trim).collect());
             let views = if let Some(max) = limit {
-                commands::inspect::scroll_collect(&client, verbose, uid.as_deref(), role_filter.as_deref(), max).await?
+                Box::pin(commands::inspect::scroll_collect(&client, verbose, uid.as_deref(), role_filter.as_deref(), max)).await?
             } else {
                 commands::inspect::views(&client, verbose, max_depth, uid.as_deref(), role_filter.as_deref()).await?
             };
@@ -569,7 +569,7 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
         Command::Download { url, uid, selector, out, timeout, max_bytes } => {
             let target = commands::download::Target::parse(url.as_deref(), uid.as_deref(), selector.as_deref())?;
             let uid_map = get_uid_map(&store, &cli.browser, &cli.page);
-            let outcome = commands::download::dispatch(&client, &uid_map, &target, out.as_deref(), timeout, max_bytes, policy.on_intercept, &cli.browser).await?;
+            let outcome = Box::pin(commands::download::dispatch(&client, &uid_map, &target, out.as_deref(), timeout, max_bytes, policy.on_intercept, &cli.browser)).await?;
             if json_mode { json_output(&outcome.to_json()); } else { outcome.print_text(); }
         }
 
@@ -634,7 +634,7 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
             // `commands::assert::NotHeld` when the claim did not hold, which `main` turns
             // into exit 2 before its generic error path (which would say 1).
             let uid_map = get_uid_map(&store, &cli.browser, &cli.page);
-            commands::assert::run_cli(&client, &uid_map, what, json_mode).await?;
+            Box::pin(commands::assert::run_cli(&client, &uid_map, what, json_mode)).await?;
         }
 
         Command::Type { text, selector } => {
@@ -725,7 +725,7 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
         Command::Network { filter, body, live, limit, abort } => {
             if let Some(ref pattern) = abort {
                 let timeout_secs = live.unwrap_or(30);
-                let blocked = commands::network::run_route_abort(&client, pattern, timeout_secs).await?;
+                let blocked = Box::pin(commands::network::run_route_abort(&client, pattern, timeout_secs)).await?;
                 if json_mode {
                     json_output(&json!({"ok": true, "blocked": blocked.len(), "urls": blocked}));
                 } else {
@@ -896,12 +896,15 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
             let mut emulation_recovery = crate::pipe_dispatch::EmulationRecovery::new(
                 &client, &store, &cli.browser, &cli.page,
             ).await;
-            let out = crate::pipe_dispatch::run_batch(
+            // Boxed like `pipe::run_pipe` above and the four arms marked the same way: `run`
+            // holds every arm's locals in ONE stack frame, and the biggest futures are the ones
+            // that carry another dispatcher whole. Nothing else about these calls changed.
+            let out = Box::pin(crate::pipe_dispatch::run_batch(
                 &client, &browser_client, &mut store,
                 &cli.browser, &cli.page, &target_id,
                 cli.timeout, cli.max_depth, policy, &cmds, stop_on_error,
                 &mut emulation_recovery,
-            ).await;
+            )).await;
             json_output(&out);
         }
 

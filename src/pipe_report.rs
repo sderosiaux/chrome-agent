@@ -219,6 +219,14 @@ pub fn attach_verdict_for(
         // reported a narrower, more specific one, and that claim is the stronger of the two.
         map.entry("observed_after_ms").or_insert_with(|| json!(ms));
     }
+    // What the action spent waiting, when it waited. Attached here because this is the one
+    // place all three modes pass through, and absent otherwise: a field that reads `waited_ms: 0`
+    // on every fast action is a field nobody reads on the one action that took ten seconds.
+    if let Some(ms) = client.take_settle_wait_ms()
+        && let Some(map) = out.as_object_mut()
+    {
+        map.insert("waited_ms".into(), json!(ms));
+    }
     crate::run_helpers::attach_verdict(out, assessment);
     assessment
 }

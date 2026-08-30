@@ -93,6 +93,15 @@ nothing at all is known about the target — dismiss that element first, then re
 `no_effect`, delivery was proven and the page stayed still, so repeating is the one thing that
 cannot help.
 
+**Latency has a field.** `waited_ms` appears on a mutating response when the action waited for
+the page to load after it, and only then — so a ten-second command explains itself instead of
+looking like a hung tool. A pointer event Chrome does not acknowledge within 8 s fails with
+`ok:false` rather than waiting out `--timeout`, and its message says the event may already have
+reached the page: **do not repeat it**, run `inspect` and read the state it was supposed to
+produce. `click`, `dblclick`, `hover` and `drag` bring their page to the foreground first (a
+background tab answers pointer events on a fixed five-second timer), so acting on one page of a
+multi-page browser makes that page the active one.
+
 **Two stated blind spots.** Neither can be fixed by retrying:
 
 - **The observation window is fixed at 60 ms** (`observed_after_ms` reports it). It catches a

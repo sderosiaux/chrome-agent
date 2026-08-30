@@ -296,6 +296,21 @@ pub fn error_hint(msg: &str, browser: &str) -> Option<String> {
              baseline to report a change against. Run `{run} inspect` first: it is what \
              creates both."
         ))
+    } else if msg.contains("was dispatched and Chrome did not acknowledge it") {
+        // Rule 3, on the one failure in this module where the tool KNOWS the action may have
+        // landed. The generic timeout branch below would answer "use --timeout N for slow
+        // pages", which is wrong twice over: the budget was not the caller's to raise (an
+        // input event has its own, shorter one), and the advice reads as "try again with more
+        // patience" about an event the page may have already acted on.
+        Some(format!(
+            "The event left this tool and Chrome never confirmed what became of it, so the \
+             page may have received it and may not. Do not repeat the action: the page cannot \
+             tell a retry from a second deliberate click, and on a submit or a purchase that is \
+             two of them. Run `{run} inspect` and read the state the action was supposed to \
+             produce; act on what you see rather than on what was intended. A pointer event \
+             answers in milliseconds on a healthy page — a page that is mid-navigation, or a \
+             renderer that has stopped answering, is what this looks like."
+        ))
     } else if msg.contains("Timeout") || msg.contains("timeout") {
         Some("Use --timeout N for slow pages".to_string())
     } else if msg.contains("not interactable") || msg.contains("no visible box model") {
@@ -441,6 +456,7 @@ mod tests {
         "No snapshot stored for this page",
         "uid_map is empty",
         "Timeout waiting for selector",
+        "Input.dispatchMouseEvent was dispatched and Chrome did not acknowledge it within 8s, so what the page did with it is unknown. The event may already have reached the page.",
         "Element uid=n47 has no visible box model.",
         "Refused to click uid=n47: not interactable",
         "not interactable",
@@ -549,6 +565,20 @@ mod tests {
         assert_eq!(uid_in("Element uid=e12 has no resolvable backend node."), Some("e12"));
         assert_eq!(uid_in("no uid here"), None);
         assert_eq!(uid_in("trailing uid="), None);
+    }
+
+    /// An input event whose acknowledgement expired is the second failure of that family, and
+    /// the generic timeout advice ("use --timeout N for slow pages") is exactly the wrong one:
+    /// it reads as "be more patient and try again" about an event the page may have acted on.
+    #[test]
+    fn an_unacknowledged_input_forbids_the_retry_rather_than_raising_the_budget() {
+        let msg = "Input.dispatchMouseEvent was dispatched and Chrome did not acknowledge it \
+                   within 8s, so what the page did with it is unknown. The event may already \
+                   have reached the page.";
+        let hint = error_hint(msg, "agent-7").expect("a hint");
+        assert!(hint.contains("Do not repeat the action"), "{hint}");
+        assert!(hint.contains("`chrome-agent --browser agent-7 inspect`"), "{hint}");
+        assert!(!hint.contains("--timeout N"), "the generic branch must not swallow this: {hint}");
     }
 
     /// A lost transport is the one failure where the tool knows least and the reflex costs

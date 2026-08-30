@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>A click that navigates a subframe</title>
+</head>
+<body>
+  <h1>Nothing here navigates</h1>
+  <button id="go">Add a tracker</button>
+  <p id="state">idle</p>
+  <script>
+    // The shape measured on a real shop: clicking spawns an iframe (an analytics or payment
+    // frame) which navigates immediately. `Page.frameNavigated` fires for the SUBFRAME, and
+    // `Page.loadEventFired` never will — the main document loaded long ago and loads once.
+    // The main frame does not navigate: the URL below is unchanged after the click.
+    document.getElementById('go').addEventListener('click', () => {
+      const frame = document.createElement('iframe');
+      frame.style.cssText = 'width:1px;height:1px;border:0';
+      frame.src = 'about:blank';
+      document.body.appendChild(frame);
+      // A second navigation of the same subframe, as the real page did (about:blank, then an
+      // address that fails). `about:blank#n` stays offline: a test may not reach the network.
+      setTimeout(() => { frame.src = 'about:blank#tracked'; }, 10);
+      document.getElementById('state').textContent = 'tracked';
+    });
+  </script>
+</body>
+</html>

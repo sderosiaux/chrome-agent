@@ -95,6 +95,20 @@ sits ABOVE the top edge (negative y, the shape measured on a consent wall at `(3
 measured on a second site at `(-263.7, 107.5)`). Both must report `off_target` →
 `aim_point_off_target` → `inspect`.
 
+## `click_spawns_subframe.html` and `click_navigates_away.html`
+
+A pair, and the pair is the point. The first spawns an iframe when clicked and navigates it
+twice — the shape a real shop showed when a product tile was clicked, where the frame went to
+`about:blank` and then to `chrome-error://chromewebdata/`. Its TOP frame never navigates, so
+`Page.loadEventFired` never fires, and a wait armed by any `frameNavigated` ran to its
+ten-second ceiling on every such click (10.10 s measured, against 0.14 s for a click at an inert
+coordinate on the same page). The second is the control: a plain link, so the top frame really
+does navigate and the wait is owed. A fix that only made clicks fast would pass the first and
+fail the second.
+
+Both are offline. `click_spawns_subframe.html` navigates its iframe to `about:blank#tracked`
+rather than to an address that fails, because a test may not reach the network.
+
 ## Everything else
 
 `frame_*` for iframe binding, `dialog_click.html` for the JS dialog handler,

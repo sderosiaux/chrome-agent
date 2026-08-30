@@ -16,8 +16,46 @@ type PendingMap = Arc<Mutex<HashMap<u64, oneshot::Sender<CdpResponse>>>>;
 /// `--timeout` default, which is the number a caller reaches for when asked how long they
 /// are willing to wait.
 const DEFAULT_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Deadline for an input event's acknowledgement, whatever `--timeout` says.
+///
+/// An input event is not a computation the page might legitimately take half a minute over:
+/// Chrome acknowledges one in single-digit milliseconds when the pipeline is healthy. The one
+/// measured exception is a page that is not the active tab, where `Input.dispatchMouseEvent`
+/// answers after a fixed 5.00 s — 5007, 5004, 5023 ms across runs — so a deadline at or below
+/// five seconds would turn a slow-but-delivered click into an error. Eight seconds sits above
+/// that and far below the 30 s default, which is the difference between an agent that learns
+/// something is wrong and one that stares at a silent terminal for half a minute.
+///
+/// This is a deadline on the ANSWER, never on the event: see `element::input_timeout`, which
+/// is why the failure it produces forbids the retry instead of inviting it.
+const INPUT_ACK_DEADLINE: std::time::Duration = std::time::Duration::from_secs(8);
 const DIALOG_REQUEST_ID_START: u64 = 1_000_000_000;
 const DIALOG_REQUEST_ID_MAX: u64 = i32::MAX as u64;
+
+/// What a call that ran out of time says about itself.
+///
+/// Two failures, two sentences, and the difference is not cosmetic: only one of them may be
+/// repeated safely. A call that computes something may legitimately outlast the caller's
+/// patience, and raising `--timeout` is the answer. An input event is not a computation — what
+/// expired is the ACKNOWLEDGEMENT, and the event itself may already be in the page, so the
+/// sentence says "dispatched" first and never invites a second attempt. `hints::error_hint`
+/// keys the recovery off this wording.
+fn timeout_message(method: &str, deadline: std::time::Duration) -> String {
+    if method.starts_with("Input.") {
+        format!(
+            "{method} was dispatched and Chrome did not acknowledge it within {}s, so what the \
+             page did with it is unknown. The event may already have reached the page.",
+            deadline.as_secs()
+        )
+    } else {
+        format!(
+            "{method} did not answer within {}s. An in-page promise that never settles \
+             (awaitPromise) is the usual cause; raise --timeout if the page is merely slow.",
+            deadline.as_secs()
+        )
+    }
+}
 
 /// Execution context bound to a specific frame by the `frame` command.
 ///
@@ -64,6 +102,19 @@ pub struct CdpClient {
     /// keeps the number measured rather than assumed, without threading an `Instant` through
     /// every dispatcher signature in all three modes.
     last_dispatch: std::sync::Mutex<Option<std::time::Instant>>,
+    /// Whether this connection has already asked its page to come to the foreground.
+    ///
+    /// `Page.bringToFront` costs 3 ms and is idempotent, but it is a state change on the
+    /// browser, so it is made once per connection and only by a path that dispatches pointer
+    /// input — see `ensure_foreground`.
+    foregrounded: AtomicBool,
+    /// How long this action spent waiting for a page load it had reason to expect.
+    ///
+    /// Recorded here for the same reason `last_dispatch` is: the wait happens in `element`,
+    /// the response is assembled in the verdict wiring, and threading a `Duration` through
+    /// every dispatcher signature in all three modes to carry one number is worse than one
+    /// interior-mutable slot on the connection they all share.
+    settle_wait: std::sync::Mutex<Option<std::time::Duration>>,
     /// Whether chrome-agent should synthesize taps instead of mouse clicks for this target.
     ///
     /// Device emulation is reapplied when each connection opens, so this connection-local flag
@@ -109,6 +160,8 @@ impl CdpClient {
             frame_ctx: std::sync::Mutex::new(None),
             call_timeout: std::sync::Mutex::new(DEFAULT_CALL_TIMEOUT),
             last_dispatch: std::sync::Mutex::new(None),
+            foregrounded: AtomicBool::new(false),
+            settle_wait: std::sync::Mutex::new(None),
             touch_emulation: AtomicBool::new(false),
         })
     }
@@ -118,6 +171,60 @@ impl CdpClient {
         if let Ok(mut slot) = self.last_dispatch.lock() {
             *slot = Some(std::time::Instant::now());
         }
+        // A pipe session reuses one connection for every command, so a wait recorded by the
+        // click that navigated would otherwise still be on the response of the next command,
+        // which waited for nothing. Cleared where the action starts, taken where it is read.
+        if let Ok(mut slot) = self.settle_wait.lock() {
+            *slot = None;
+        }
+    }
+
+    /// Bring this connection's page to the foreground, once.
+    ///
+    /// Measured, on a page that is not the active tab (`document.visibilityState === "hidden"`):
+    /// `Input.dispatchMouseEvent` answers after 5007, 5004 and 5023 ms, while `Runtime.evaluate`
+    /// on the same connection answers in 0–1 ms — so the renderer's main thread is not busy, the
+    /// input pipeline is waiting for something a backgrounded page never produces, and Chrome
+    /// gives up on a fixed five-second timer. `Page.bringToFront` costs 3 ms and takes the same
+    /// events to 0–6 ms. A page becomes hidden without anyone asking: opening a second page
+    /// backgrounds the first, and Chrome's own `chrome://settings/help` update check did it to a
+    /// browser this tool had launched.
+    ///
+    /// Only the pointer paths call this, and the restraint is measured too: `Input.dispatchKeyEvent`
+    /// answers in 1 ms on the same hidden page, so `press` and `type` have nothing to gain and
+    /// would be paying a state change for it.
+    ///
+    /// Consequence, stated rather than hidden: with several pages open in one browser, clicking
+    /// on one foregrounds it — which is what clicking means, and what `emulation` already does
+    /// for the same class of reason. Best effort: a target that refuses to come forward is not a
+    /// reason to refuse the click, it only costs the latency this exists to remove.
+    pub async fn ensure_foreground(&self) {
+        if self.foregrounded.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        // Boxed: this runs inside every pointer path, and those futures are held alive inside
+        // `run::run`'s match arm. Inlining another `call` state machine four times over pushed
+        // that frame past clippy's ceiling — a pin costs one allocation on a path that already
+        // makes a round trip.
+        let call = Box::pin(self.call::<_, Value>("Page.bringToFront", serde_json::json!({})));
+        let _: Result<Value, _> = call.await;
+    }
+
+    /// Record how long an action waited for a page load after dispatching.
+    pub fn note_settle_wait(&self, waited: std::time::Duration) {
+        if let Ok(mut slot) = self.settle_wait.lock() {
+            *slot = Some(waited);
+        }
+    }
+
+    /// How long this action waited for a load, when it waited at all.
+    ///
+    /// Takes rather than reads: the number belongs to one action's response, and a connection
+    /// that outlives the action (pipe, batch) must not hand it to the next one.
+    #[must_use]
+    pub fn take_settle_wait_ms(&self) -> Option<u64> {
+        let waited = self.settle_wait.lock().ok()?.take()?;
+        u64::try_from(waited.as_millis()).ok()
     }
 
     pub(crate) fn set_touch_emulation(&self, enabled: bool) {
@@ -163,6 +270,32 @@ impl CdpClient {
         params: P,
         session_id: Option<String>,
     ) -> Result<R, CdpClientError> {
+        self.call_within(method, params, session_id, self.call_timeout()).await
+    }
+
+    /// Dispatch an input event and wait for Chrome to acknowledge it, under
+    /// [`INPUT_ACK_DEADLINE`] rather than `--timeout`.
+    ///
+    /// The distinction is not tidiness. `--timeout` is the caller's patience for the page's
+    /// own work — a slow load, an evaluation that awaits a promise — and an input event is
+    /// none of that: the acknowledgement comes from the browser's input pipeline, and when it
+    /// does not come, waiting thirty seconds tells the caller nothing that eight does not.
+    pub async fn send_input<P: Serialize>(
+        &self,
+        method: &'static str,
+        params: P,
+    ) -> Result<(), CdpClientError> {
+        let _: Value = self.call_within(method, params, None, INPUT_ACK_DEADLINE).await?;
+        Ok(())
+    }
+
+    async fn call_within<P: Serialize, R: DeserializeOwned>(
+        &self,
+        method: &'static str,
+        params: P,
+        session_id: Option<String>,
+        deadline: std::time::Duration,
+    ) -> Result<R, CdpClientError> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let params_value =
             serde_json::to_value(params).map_err(CdpClientError::Serialization)?;
@@ -183,19 +316,13 @@ impl CdpClient {
             return Err(e.into());
         }
 
-        let deadline = self.call_timeout();
         let response = match tokio::time::timeout(deadline, rx).await {
             Ok(received) => received.map_err(|_| CdpClientError::DispatcherGone)?,
             Err(_) => {
                 // Drop the slot: leaving it behind leaks one entry per timed-out call, and
                 // a late answer would then be delivered to a receiver nobody awaits.
                 self.pending.lock().await.remove(&id);
-                return Err(CdpClientError::Timeout(format!(
-                    "{method} did not answer within {}s. An in-page promise that never \
-                     settles (awaitPromise) is the usual cause; raise --timeout if the page \
-                     is merely slow.",
-                    deadline.as_secs()
-                )));
+                return Err(CdpClientError::Timeout(timeout_message(method, deadline)));
             }
         };
 
@@ -422,6 +549,29 @@ async fn dispatch_loop(
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    /// The two timeouts do not share a sentence, because they do not share a recovery: one
+    /// says raise the budget, the other says the action may already have happened.
+    #[test]
+    fn an_input_that_went_unacknowledged_never_reads_as_a_slow_page() {
+        let input = timeout_message("Input.dispatchMouseEvent", INPUT_ACK_DEADLINE);
+        assert!(input.starts_with("Input.dispatchMouseEvent was dispatched"), "{input}");
+        assert!(input.contains("may already have reached the page"), "{input}");
+        assert!(!input.contains("--timeout"), "raising the budget is not the recovery: {input}");
+        assert!(input.contains("8s"), "the deadline it actually waited: {input}");
+
+        let evaluate = timeout_message("Runtime.evaluate", DEFAULT_CALL_TIMEOUT);
+        assert!(evaluate.contains("--timeout"), "{evaluate}");
+        assert!(!evaluate.contains("dispatched"), "{evaluate}");
+    }
+
+    /// The deadline has to sit above the one stall Chrome is known to produce, or a click that
+    /// works — slowly — becomes an error.
+    #[test]
+    fn the_input_deadline_clears_the_background_tab_stall_and_undercuts_the_default() {
+        assert!(INPUT_ACK_DEADLINE > Duration::from_secs(5), "the measured stall is 5.00 s");
+        assert!(INPUT_ACK_DEADLINE < DEFAULT_CALL_TIMEOUT);
+    }
 
     fn event(method: &str) -> CdpEvent {
         CdpEvent {
