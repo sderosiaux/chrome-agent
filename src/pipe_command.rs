@@ -114,6 +114,10 @@ impl PipeCommand {
             Self::Batch(_) => "batch",
         }
     }
+
+    fn validate(&self) -> Result<(), crate::BoxError> {
+        crate::pipe_validate::validate(self)
+    }
 }
 
 /// Parse one command object. The tag is read first so an absent or unknown `cmd` keeps the
@@ -126,7 +130,9 @@ pub fn parse(cmd: &Value) -> Result<PipeCommand, crate::BoxError> {
     else {
         return Err("Missing \"cmd\" field".into());
     };
-    PipeCommand::deserialize(cmd).map_err(|e| describe(name, cmd, &e.to_string()))
+    let parsed = PipeCommand::deserialize(cmd).map_err(|e| describe(name, cmd, &e.to_string()))?;
+    parsed.validate()?;
+    Ok(parsed)
 }
 
 /// serde's message, made to say what this protocol's messages have always said.
@@ -366,9 +372,9 @@ pub struct ScreenshotArgs {
     #[serde(default)]
     pub format: Option<String>,
     #[serde(default)]
-    pub quality: Option<u64>,
+    pub quality: Option<u32>,
     #[serde(default)]
-    pub max_width: Option<u64>,
+    pub max_width: Option<u32>,
     #[serde(default)]
     pub uid: Option<String>,
     #[serde(default)]
@@ -641,6 +647,7 @@ pub struct BatchArgs {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser as _;
     use serde_json::json;
 
     fn err(cmd: &Value) -> String {
@@ -776,13 +783,120 @@ mod tests {
         assert!(parse(&json!({"cmd": "click", "xy": [1, 2, 3]})).is_err());
         assert!(parse(&json!({"cmd": "click", "xy": [1]})).is_err());
         assert!(parse(&json!({"cmd": "click", "xy": "100,200"})).is_err());
-        let PipeCommand::Click(args) = parse(&json!({"cmd": "click", "xy": null})).unwrap() else {
+        let PipeCommand::Click(args) =
+            parse(&json!({"cmd": "click", "uid": "n1", "xy": null})).unwrap()
+        else {
             panic!("click");
         };
         assert!(
             args.xy.is_none(),
             "an explicit null is an absent flag, as it always was"
         );
+    }
+
+    #[test]
+    fn target_groups_are_exercised_through_both_parsers() {
+        let cases: &[(&[&str], Value)] = &[
+            (&["click"], json!({"cmd": "click"})),
+            (
+                &["click", "n1", "--selector", "#go"],
+                json!({"cmd": "click", "uid": "n1", "selector": "#go"}),
+            ),
+            (&["click", "n1"], json!({"cmd": "click", "uid": "n1"})),
+            (&["fill", "x"], json!({"cmd": "fill", "value": "x"})),
+            (
+                &["fill", "x", "--uid", "n1", "--selector", "#field"],
+                json!({"cmd": "fill", "value": "x", "uid": "n1", "selector": "#field"}),
+            ),
+            (
+                &["fill", "x", "--uid", "n1"],
+                json!({"cmd": "fill", "value": "x", "uid": "n1"}),
+            ),
+            (
+                &["select", "x", "--uid", "n1", "--selector", "select"],
+                json!({"cmd": "select", "value": "x", "uid": "n1", "selector": "select"}),
+            ),
+            (
+                &["check", "n1", "--selector", "#box"],
+                json!({"cmd": "check", "uid": "n1", "selector": "#box"}),
+            ),
+            (
+                &["uncheck", "n1", "--selector", "#box"],
+                json!({"cmd": "uncheck", "uid": "n1", "selector": "#box"}),
+            ),
+            (
+                &["upload", "--uid", "n1", "--selector", "input"],
+                json!({"cmd": "upload", "files": [], "uid": "n1", "selector": "input"}),
+            ),
+            (
+                &["text", "n1", "--selector", "main"],
+                json!({"cmd": "text", "uid": "n1", "selector": "main"}),
+            ),
+            (&["text"], json!({"cmd": "text"})),
+            (
+                &["screenshot", "--uid", "n1", "--selector", "main"],
+                json!({"cmd": "screenshot", "uid": "n1", "selector": "main"}),
+            ),
+            (&["screenshot"], json!({"cmd": "screenshot"})),
+            (
+                &["download", "https://example.test", "--uid", "n1"],
+                json!({"cmd": "download", "url": "https://example.test", "uid": "n1"}),
+            ),
+            (
+                &["download", "https://example.test"],
+                json!({"cmd": "download", "url": "https://example.test"}),
+            ),
+        ];
+
+        for (argv, command) in cases {
+            let cli = crate::cli::Cli::try_parse_from(
+                std::iter::once("chrome-agent").chain(argv.iter().copied()),
+            );
+            let pipe = parse(command);
+            assert_eq!(
+                cli.is_ok(),
+                pipe.is_ok(),
+                "CLI {argv:?} and pipe {command} disagree"
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_interception_policy_is_a_refusal() {
+        for command in [
+            json!({"cmd": "click", "uid": "n1", "on_intercept": "refuze"}),
+            json!({"cmd": "check", "uid": "n1", "on_intercept": "refuze"}),
+            json!({"cmd": "uncheck", "uid": "n1", "on_intercept": "refuze"}),
+            json!({"cmd": "download", "url": "https://example.test", "on_intercept": "refuze"}),
+            json!({"cmd": "fill_and_submit", "fields": [], "submit": "#go", "on_intercept": "refuze"}),
+        ] {
+            let message = err(&command);
+            assert!(
+                message.contains("Unknown --on-intercept value"),
+                "{message}"
+            );
+        }
+    }
+
+    #[test]
+    fn ambiguous_waits_and_irrelevant_emulation_fields_are_refused() {
+        for command in [
+            json!({"cmd": "wait", "what": "text", "pattern": "done", "url": "/done"}),
+            json!({"cmd": "wait", "text": "done", "selector": ".done"}),
+            json!({"cmd": "wait", "pattern": "done"}),
+            json!({"cmd": "emulate", "action": "status", "width": 320}),
+            json!({"cmd": "emulate", "action": "reset", "mobile": true}),
+        ] {
+            assert!(parse(&command).is_err(), "accepted {command}");
+        }
+    }
+
+    #[test]
+    fn screenshot_numbers_cannot_wrap_the_cdp_types() {
+        let message = err(&json!({"cmd": "screenshot", "max_width": 4_294_967_296_u64}));
+        assert!(message.contains("max_width"), "{message}");
+        let message = err(&json!({"cmd": "screenshot", "quality": 4_294_967_296_u64}));
+        assert!(message.contains("quality"), "{message}");
     }
 
     /// `assert` round-trips through the CLI's own parser, so the two cannot disagree.

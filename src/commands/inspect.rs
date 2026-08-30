@@ -48,11 +48,13 @@ pub async fn scroll_collect(
     let mut collected: Vec<String> = Vec::new();
     let mut seen = HashSet::new();
     let mut uid_map: HashMap<String, ElementRef> = HashMap::new();
-    let max_scrolls = limit * 3;
+    let max_scrolls = limit.saturating_mul(3);
     let mut stale_count = 0;
     // `limit * 3` bounds iterations, not time: each costs a settle window of up to 2s. The
     // caller's `--timeout` bounds the whole collection.
-    let deadline = std::time::Instant::now() + client.call_timeout();
+    let deadline = std::time::Instant::now()
+        .checked_add(client.call_timeout())
+        .ok_or("Inspect timeout is too large")?;
     let mut ran_out_of_time = false;
 
     for _ in 0..max_scrolls {

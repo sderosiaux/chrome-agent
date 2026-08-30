@@ -9,6 +9,11 @@ paths:
   - "src/daemon.rs"
   - "src/geometry.rs"
   - "src/base64.rs"
+  - "src/secure_fs.rs"
+  - "src/session.rs"
+  - "src/session_load.rs"
+  - "src/session_save.rs"
+  - "src/profiles.rs"
   - "tests/download_click_tests.rs"
   - "tests/download_limit_tests.rs"
   - "tests/history_privacy_tests.rs"
@@ -17,6 +22,10 @@ paths:
 # Every file this tool writes, and how it gets there
 
 Every file is written 0600, and `~/.chrome-agent` itself 0700.
+
+`secure_fs.rs` is the shared implementation: private directory creation/restriction is 0700 and
+file restriction is 0600. Session JSON, locks, history, recordings, daemon files, screenshots,
+PDFs and downloads all pass through it or apply the same helper immediately after creation.
 
 `history.jsonl` was the exception that proved the sentence was not being checked: it was the one
 writer in the tree with no `set_permissions`, so it landed at 0644 holding every URL a session

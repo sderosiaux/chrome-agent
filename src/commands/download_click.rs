@@ -137,14 +137,9 @@ pub async fn arm(client: &CdpClient) -> Result<Armed, crate::BoxError> {
     // Before creating our own directory, so the collector never sees a half-created one.
     let _ = collect_abandoned(&tmp, COLLECT_CAP);
     let dir = incoming_dir(&tmp);
-    std::fs::create_dir_all(&dir)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
-    }
+    crate::secure_fs::create_private_dir_all(&dir)?;
     // Before the CDP call: the subscription must predate anything that can produce an event.
-    let events = client.events();
+    let events = client.browser_events();
     let path = dir.display().to_string();
     if let Err(error) = client
         .call::<_, Value>(
@@ -337,11 +332,7 @@ pub fn place(
         copy_without_following(completed_path, &destination)?;
         let _ = std::fs::remove_file(completed_path);
     }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&destination, std::fs::Permissions::from_mode(0o600));
-    }
+    crate::secure_fs::restrict_file(&destination)?;
     let bytes = std::fs::metadata(&destination)?.len();
     Ok((destination.display().to_string(), bytes))
 }

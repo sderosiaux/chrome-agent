@@ -469,9 +469,25 @@ pub fn refusal_in(error: &crate::BoxError) -> Option<&Refused> {
 /// probe, the dispatch and the response's uid, so a re-render cannot bind three different nodes.
 pub struct SelectorHandle {
     pub object_id: String,
+    pub backend_node_id: Option<i64>,
     pub uid: Option<String>,
     pub role: Option<String>,
     pub name: Option<String>,
+}
+
+impl SelectorHandle {
+    /// The identity fields for an action response, all read from this exact handle.
+    #[must_use]
+    pub fn report(&self) -> Option<Value> {
+        let mut out = json!({"uid": self.uid.as_ref()?});
+        if let Some(role) = &self.role {
+            out["role"] = json!(role);
+        }
+        if let Some(name) = &self.name {
+            out["name"] = json!(name);
+        }
+        Some(out)
+    }
 }
 
 pub async fn resolve_selector(
@@ -501,6 +517,7 @@ pub async fn resolve_selector(
     let described = describe(client, &object_id).await;
     Ok(SelectorHandle {
         object_id,
+        backend_node_id: described.as_ref().and_then(|d| d.backend_node_id),
         uid: described.as_ref().and_then(|d| d.uid.clone()),
         role: described.as_ref().and_then(|d| d.role.clone()),
         name: described.and_then(|d| d.name),
@@ -509,6 +526,7 @@ pub async fn resolve_selector(
 
 /// The uid, and the cheapest honest (role, name) available for it.
 pub struct Described {
+    pub backend_node_id: Option<i64>,
     pub uid: Option<String>,
     pub role: Option<String>,
     pub name: Option<String>,
@@ -523,10 +541,8 @@ pub async fn describe(client: &CdpClient, object_id: &str) -> Option<Described> 
         .await
         .ok()?;
     let node = described.get("node")?;
-    let uid = node
-        .get("backendNodeId")
-        .and_then(Value::as_i64)
-        .map(|id| format!("n{id}"));
+    let backend_node_id = node.get("backendNodeId").and_then(Value::as_i64);
+    let uid = backend_node_id.map(|id| format!("n{id}"));
     let attributes = attribute_pairs(node);
     let role = attributes
         .iter()
@@ -547,7 +563,12 @@ pub async fn describe(client: &CdpClient, object_id: &str) -> Option<Described> 
                 .map(|(_, v)| v.clone())
         })
         .filter(|s| !s.is_empty());
-    Some(Described { uid, role, name })
+    Some(Described {
+        backend_node_id,
+        uid,
+        role,
+        name,
+    })
 }
 
 /// `DOM.describeNode` returns attributes as a flat `[name, value, name, value, …]` list.

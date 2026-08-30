@@ -1,7 +1,7 @@
 # chrome-agent v0.15.0
 
 Single Rust binary for browser automation via CDP, built for AI agents. 43 subcommands
-(`chrome-agent --help`), 28.4K lines of Rust in `src/` across 82 files (measure: `tokei src/`),
+(`chrome-agent --help`), 29.0K lines of Rust in `src/` across 84 files (measure: `tokei src/`),
 one regex crate (`regex-lite`, for `assert --matches`), 3 MB binary.
 
 ## Architecture
@@ -17,7 +17,7 @@ CLI (clap) → CDP Client (WebSocket) → Chrome
 | `src/page_ctx.rs` | `PageCtx`: the two clients, the store, the three names that locate a page in it, and the two global flags, in one struct — so a dispatcher takes three parameters instead of eleven |
 | `src/render.rs` | text-mode renderer: the `value:` / `values lost:` / `verdict:` / `next:` lines, colour only on a tty |
 | `src/pipe_command.rs` | the pipe/batch protocol as types: one `deny_unknown_fields` struct per verb, so a mistyped key is an error instead of a silently ignored one |
-| `src/pipe.rs`, `src/pipe_dispatch*.rs`, `src/pipe_report.rs`, `src/pipe_emulation.rs` | pipe mode (persistent connection, JSON stdin/stdout); the dispatchers shared by pipe, batch and CLI batch, plus `dispatch_assert` and `run_batch`; `mutates_page` + `attach_change_report`; strict JSON emulation parsing |
+| `src/pipe.rs`, `src/pipe_command.rs`, `src/pipe_validate.rs`, `src/pipe_dispatch*.rs`, `src/pipe_report.rs`, `src/pipe_emulation.rs` | pipe mode (persistent connection, JSON stdin/stdout); typed per-verb protocol plus cross-field validation; the dispatchers shared by pipe, batch and CLI batch, plus `dispatch_assert` and `run_batch`; `mutates_page` + `attach_change_report`; strict JSON emulation parsing |
 | `src/macros*.rs` | macro file format and store (`macros.rs`), session history → macro (`macros_record.rs`), guarded execution (`macros_run.rs`), the `macro list/show/record/run` surface (`macros_cmd.rs`) |
 | `src/cdp/`, `src/setup.rs` | WebSocket transport, message correlation, CDP types, the input-event deadline (`send_input`), `ensure_foreground`; console interceptor injection and 7 stealth patches |
 | `src/element.rs` | uid resolution, fill, type, press, the settle machinery, `js_exception`. Owns `SECRET_FIELD`, the one predicate deciding whether a value may be printed |
@@ -30,7 +30,7 @@ CLI (clap) → CDP Client (WebSocket) → Chrome
 | `src/landing.rs`, `src/serving.rs` | where a navigation ended up vs where it aimed (redirect rule, auth-wall guess, `host_and_path`/`origin_of`); and what answered: `challenge` / `error` / `nothing_actionable` / `unreadable` / `page` |
 | `src/hints/` | error-recovery hints: one fact, one resolved command, an explicit refusal to retry when a retry is dangerous |
 | `src/browser.rs`, `src/chrome_args.rs`, `src/daemon.rs` | Chrome launch, auto-discovery, stale DevToolsActivePort cleanup, profile management; `--chrome-arg` validation and the inherit-when-omitted merge; optional Unix micro-daemon with heartbeat and crash recovery |
-| `src/session.rs`, `src/session_load.rs`, `src/session_save.rs`, `src/profiles.rs`, `src/orphans.rs`, `src/kill.rs` | JSON session persistence (`~/.chrome-agent/sessions.json`, 0600) split by direction: `session.rs` holds the types, the `ensure_*` accessors and the paths; the load path keeps "absent", "unreadable" and "unparseable" distinct; `session_save.rs` holds the flock + read-merge-write, `FileLock` (which `commands/history.rs` takes too) and the one-sided dead-pid prune. Plus the three-condition orphan-profile predicate; running browsers no session entry claims, recognised by `--user-data-dir`; `KillOutcome` |
+| `src/session.rs`, `src/session_load.rs`, `src/session_save.rs`, `src/secure_fs.rs`, `src/profiles.rs`, `src/orphans.rs`, `src/kill.rs` | JSON session persistence (`~/.chrome-agent/sessions.json`, 0600) split by direction; shared 0600/0700 enforcement for files and directories; flock + read-merge-write and one-sided dead-pid prune. Plus the three-condition orphan-profile predicate; running browsers no session entry claims, recognised by `--user-data-dir`; `KillOutcome` |
 | `src/emulation.rs` | page-scoped device metrics: validation, transactional CDP apply/reset, persistence, observed status |
 | `src/base64.rs`, `src/truncate.rs` | RFC 4648 decoder for screenshot/pdf/download (no `base64` crate, keeps the musl graph pure-Rust); UTF-8 safe string truncation |
 | `src/commands/` | 25 modules: goto, click, dblclick, fill, inspect, eval, text, read, extract, diff, network, console, wait, screenshot, pdf, download, download_click, tabs, frame, batch, assert, assert_args, record, history, webmcp. `select`/`check`/`upload`/`drag` had one too, each a single call into `element_controls` behind a message the dispatcher already built |
@@ -96,8 +96,9 @@ The trigger is the `Read` tool; `rg`, `sed` and `wc` through Bash do not arm a p
 - **3 targeting modes** — uid (from inspect), CSS selector (`--selector`), coordinates (`--xy`). Exactly one per invocation, declared as a clap `ArgGroup`, so two of them is a usage error before a browser is opened.
 - **ElementRef abstraction** — the session stores `{"type":"backendNode","id":N}`, ready for BiDi.
 - **`--json` mode** — errors exit 1 with `{"ok":false}` on stdout. Parse stdout for the error; the exit code only signals failure. The exception is a malformed invocation: clap answers that on stderr, with nothing on stdout.
+- **Stdout delivery** — production output uses `out_line!`/`out!`, backed by one non-panicking writer. A closed consumer records a delivery failure, lets command/session cleanup finish, then exits 1; a source scanner forbids falling back to the standard print macros.
 - **Content extraction hierarchy** — `read` (articles) > `extract` (repeating data) > `text --selector` (scoped) > `text` (full page) > `eval` (structured JS) > `network` (API responses).
-- **Pipe mode** — `chrome-agent pipe` reads JSON from stdin and writes JSON to stdout. One connection, uids stable across the sequence — which is the reason to use it. It removes ~12 ms of per-command overhead and nothing else: measured 1.5x on a nine-command read stream, 1.1x on fills and clicks. Record in `docs/design/pipe-latency.md`, re-measure with `./scripts/measure-pipe.sh`.
+- **Pipe mode** — `chrome-agent pipe` reads JSON from stdin and writes JSON to stdout. One connection, uids stable across the sequence — which is the reason to use it. It removes ~12 ms of per-command overhead and nothing else: measured 1.5x on a nine-command read stream, 1.1x on fills and clicks. A startup/final persistence failure is a terminal `{"ok":false,"terminal":true,...}` line and exit 1, not a command response. Record latency in `docs/design/pipe-latency.md`, re-measure with `./scripts/measure-pipe.sh`.
 - **Command aliases** — navigate/open/go, snap/snapshot/tree, js/execute, capture, tap.
 - **A source file stays under 1000 lines.** Measure with `find src -name '*.rs' | xargs wc -l | sort -rn | head`. A file that outgrows the cap is split and the new module re-exported via `pub use`, so no call site moves. Enforcement is a local PostToolUse hook (`~/.claude/hooks/file-size-guard.sh`) blocking a `Write`/`Edit` over the cap, not a CI gate, so any route that is not an edit can exceed it.
 
@@ -136,6 +137,7 @@ The trigger is the `Read` tool; `rg`, `sed` and `wc` through Bash do not arm a p
 - `batch` CLI mode: a new CDP connection means new backendNodeIds, so uids change between invocations. Use pipe mode for uid-stable multi-command flows.
 - `select` on a non-`<select>` element throws "Element is not a \<select\>". Custom dropdowns (React, MUI) need a click + click approach.
 - `network --abort` is blocking: it intercepts requests for `--live N` seconds, then disables the Fetch domain. Start it before navigating.
+- `network --live` uses a Network-only event channel. Event loss keeps observed entries but answers `ok:false`, `complete:false`, `lostEvents:N`; `--limit` gives selected bodies 1 s to finish plus one bounded 1 s read window, never the rest of `--live`.
 - `download` takes exactly one target: a URL, `--uid`, or `--selector`. Two is refused rather than ranked, by clap, before a browser is opened — as on every other verb that can be aimed more than one way. The URL path holds the file in memory as base64 during transfer (hence `--max-bytes`); the click path streams to disk through Chrome and is capped by cancelling the transfer.
 - `download --uid` needs a uid from a *stored* snapshot: `goto` clears the map, so `inspect` first.
 - A click-triggered download and the page's own reaction are not separable: `download --selector` clicks, and if the element navigates instead of downloading, that navigation happened. The response says no download began; it does not say the page is where it was.

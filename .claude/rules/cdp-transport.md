@@ -8,6 +8,15 @@ paths:
 
 # The wire to Chrome: deadlines, dialogs, foreground, stealth
 
+## Event loss is domain-specific
+
+`CdpClient` fans async events into separate `Page`, `Network`, `Fetch` and `Browser` broadcast
+channels at the dispatcher, each with capacity 4096. A shared all-CDP channel made `Lagged(n)`
+ambiguous: console or DOM traffic could make a network capture claim it lost network evidence.
+Consumers subscribe before the triggering command, and a lag now means events from the domain
+being measured were actually dropped. Body-fetch CDP calls run after network event collection,
+so their round trips cannot stall that receiver.
+
 ## `--stealth`
 
 7 CDP patches: `navigator.webdriver`, `chrome.runtime`, WebGL, UA, Permissions, the input

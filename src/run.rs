@@ -50,7 +50,7 @@ fn output_read(json_mode: bool, value: &Value, text: &str) {
     if json_mode {
         json_output(value);
     } else {
-        println!("{text}");
+        out_line!("{text}");
     }
 }
 
@@ -80,11 +80,11 @@ async fn output_history_step(
             .to_string()
     };
     match out.get("url") {
-        Some(_) => println!("{} — {}", field("url"), field("title")),
-        None => println!("{}", field("message")),
+        Some(_) => out_line!("{} — {}", field("url"), field("title")),
+        None => out_line!("{}", field("message")),
     }
     if let Some(snapshot) = out.get("snapshot").and_then(Value::as_str) {
-        println!("{snapshot}");
+        out_line!("{snapshot}");
     }
     Ok(())
 }
@@ -173,9 +173,9 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
             } else {
                 let text = commands::history::format_text(&entries);
                 if text.is_empty() {
-                    println!("No history entries found.");
+                    out_line!("No history entries found.");
                 } else {
-                    println!("{text}");
+                    out_line!("{text}");
                 }
             }
             return Ok(());
@@ -520,17 +520,17 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
                 let field = |key: &str| out.get(key).and_then(Value::as_str).unwrap_or_default();
                 let title = field("title");
                 if !title.is_empty() {
-                    println!("# {title}");
-                    println!();
+                    out_line!("# {title}");
+                    out_line!();
                 }
                 // `--html` prints nothing when Readability produced no content, as it always
                 // did; the plain-text branch always has something to print.
                 if html {
                     if let Some(content) = out.get("content").and_then(Value::as_str) {
-                        println!("{content}");
+                        out_line!("{content}");
                     }
                 } else {
-                    println!("{}", field("text"));
+                    out_line!("{}", field("text"));
                 }
             }
         }
@@ -568,11 +568,11 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
                 json_output(&out);
             } else {
                 if out["document_changed"] == json!(true) {
-                    println!("Page navigated — previous uids are gone. New page:");
+                    out_line!("Page navigated — previous uids are gone. New page:");
                 }
                 let body = out["diff"].as_str().unwrap_or_default();
                 if !body.is_empty() {
-                    println!("{body}");
+                    out_line!("{body}");
                 }
             }
         }
@@ -590,8 +590,8 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
                 uid,
                 selector,
                 format: Some(format),
-                quality: quality.map(u64::from),
-                max_width: max_width.map(u64::from),
+                quality,
+                max_width,
             };
             let out = Box::pin(dispatch::dispatch_screenshot(&ctx, &args)).await?;
             let path = out["path"].as_str().unwrap_or_default().to_string();
@@ -662,7 +662,7 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
             if json_mode {
                 json_output(&commands::extract::to_json(&result));
             } else {
-                print!("{}", commands::extract::format_text(&result));
+                out!("{}", commands::extract::format_text(&result));
             }
         }
 
@@ -681,7 +681,7 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
                 json_output(&Box::pin(dispatch::dispatch_eval(&client, &args)).await?);
             } else {
                 let expr = commands::eval::scoped_expression(&expression, selector.as_deref());
-                println!("{}", commands::eval::run(&client, &expr).await?);
+                out_line!("{}", commands::eval::run(&client, &expr).await?);
             }
         }
 
@@ -734,10 +734,14 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
                 abort.as_deref(),
             ))
             .await?;
+            let complete = capture.is_complete();
             if json_mode {
                 json_output(&capture.to_json());
             } else {
-                println!("{}", capture.text());
+                out_line!("{}", capture.text());
+            }
+            if !complete {
+                return Err(Box::new(commands::network::IncompleteCapture));
             }
         }
 
@@ -758,7 +762,7 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
             if json_mode {
                 json_output(&commands::console::to_json(&reading));
             } else {
-                println!("{}", commands::console::format_text(&reading));
+                out_line!("{}", commands::console::format_text(&reading));
             }
         }
 
@@ -766,7 +770,7 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
             if json_mode {
                 json_output(&dispatch::dispatch_tabs(&ctx).await?);
             } else {
-                print!(
+                out!(
                     "{}",
                     commands::tabs::run(ctx.browser_client, ctx.store).await?
                 );
@@ -813,8 +817,8 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
                 if json_mode {
                     json_output(&response);
                 } else {
-                    println!("{}", config.text_line());
-                    println!(
+                    out_line!("{}", config.text_line());
+                    out_line!(
                         "{}",
                         crate::emulation::format_effective_metrics(&response["effective"])
                     );
@@ -833,13 +837,13 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
                 if json_mode {
                     json_output(&response);
                 } else if let Some(requested_line) = requested_line {
-                    println!("{requested_line}");
-                    println!(
+                    out_line!("{requested_line}");
+                    out_line!(
                         "{}",
                         crate::emulation::format_effective_metrics(&response["effective"])
                     );
                 } else {
-                    println!("No device emulation on page={:?}.", cli.page);
+                    out_line!("No device emulation on page={:?}.", cli.page);
                 }
             }
             EmulateAction::Reset => {
@@ -849,7 +853,7 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
                 if json_mode {
                     json_output(&response);
                 } else {
-                    println!("Cleared device emulation from page={:?}.", cli.page);
+                    out_line!("Cleared device emulation from page={:?}.", cli.page);
                 }
             }
         },
@@ -862,9 +866,9 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
                         json_output(&out);
                     } else {
                         let tools = out["tools"].as_array().cloned().unwrap_or_default();
-                        print!("{}", commands::webmcp::render_list_text(&tools));
+                        out!("{}", commands::webmcp::render_list_text(&tools));
                         if out["frame_scoped"] == json!(true) {
-                            println!("{}", commands::webmcp::FRAME_SCOPED_LIST_NOTE);
+                            out_line!("{}", commands::webmcp::FRAME_SCOPED_LIST_NOTE);
                         }
                     }
                 }

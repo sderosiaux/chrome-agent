@@ -35,6 +35,44 @@ const DEFAULT_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 const INPUT_ACK_DEADLINE: std::time::Duration = std::time::Duration::from_secs(8);
 const DIALOG_REQUEST_ID_START: u64 = 1_000_000_000;
 const DIALOG_REQUEST_ID_MAX: u64 = i32::MAX as u64;
+/// Per-domain event capacity. A receiver that lags this channel lost events from the domain it
+/// is measuring, not unrelated console/DOM traffic.
+const EVENT_BUFFER_CAPACITY: usize = 4096;
+
+/// Async CDP events are split at the dispatcher. Every current consumer listens to exactly one
+/// domain; keeping those queues separate makes `Lagged(n)` evidence about that domain.
+struct EventHub {
+    page: broadcast::Sender<CdpEvent>,
+    network: broadcast::Sender<CdpEvent>,
+    fetch: broadcast::Sender<CdpEvent>,
+    browser: broadcast::Sender<CdpEvent>,
+}
+
+impl EventHub {
+    fn new(capacity: usize) -> Self {
+        let (page, _) = broadcast::channel(capacity);
+        let (network, _) = broadcast::channel(capacity);
+        let (fetch, _) = broadcast::channel(capacity);
+        let (browser, _) = broadcast::channel(capacity);
+        Self {
+            page,
+            network,
+            fetch,
+            browser,
+        }
+    }
+
+    fn send(&self, event: CdpEvent) {
+        let sender = match event.method.split_once('.').map(|(domain, _)| domain) {
+            Some("Page") => &self.page,
+            Some("Network") => &self.network,
+            Some("Fetch") => &self.fetch,
+            Some("Browser") => &self.browser,
+            _ => return,
+        };
+        let _ = sender.send(event);
+    }
+}
 
 /// What a call that ran out of time says about itself. Only a slow computation may be
 /// repeated (raise `--timeout`); an input event whose acknowledgement expired may already have
@@ -90,7 +128,7 @@ pub struct CdpClient {
     sender: CdpSender,
     next_id: AtomicU64,
     pending: PendingMap,
-    events_tx: broadcast::Sender<CdpEvent>,
+    events: Arc<EventHub>,
     _dispatcher: tokio::task::JoinHandle<()>,
     /// Frame the `frame` command switched into. Interior-mutable so `eval`/`inspect`, which
     /// take `&self`, can read it.
@@ -142,19 +180,19 @@ impl CdpClient {
     pub async fn connect(url: &str) -> Result<Self, CdpClientError> {
         let (sender, receiver) = transport::connect(url).await?;
         let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
-        let (events_tx, _) = broadcast::channel::<CdpEvent>(256);
+        let events = Arc::new(EventHub::new(EVENT_BUFFER_CAPACITY));
 
         let dispatcher = tokio::spawn(dispatch_loop(
             receiver,
             Arc::clone(&pending),
-            events_tx.clone(),
+            Arc::clone(&events),
         ));
 
         Ok(Self {
             sender,
             next_id: AtomicU64::new(1),
             pending,
-            events_tx,
+            events,
             _dispatcher: dispatcher,
             frame_ctx: std::sync::Mutex::new(None),
             call_timeout: std::sync::Mutex::new(DEFAULT_CALL_TIMEOUT),
@@ -361,8 +399,20 @@ impl CdpClient {
         }
     }
 
-    pub fn events(&self) -> broadcast::Receiver<CdpEvent> {
-        self.events_tx.subscribe()
+    pub fn page_events(&self) -> broadcast::Receiver<CdpEvent> {
+        self.events.page.subscribe()
+    }
+
+    pub fn network_events(&self) -> broadcast::Receiver<CdpEvent> {
+        self.events.network.subscribe()
+    }
+
+    pub fn fetch_events(&self) -> broadcast::Receiver<CdpEvent> {
+        self.events.fetch.subscribe()
+    }
+
+    pub fn browser_events(&self) -> broadcast::Receiver<CdpEvent> {
+        self.events.browser.subscribe()
     }
 
     /// Install a background task that auto-answers JS dialogs per `policy`, so an unanswered
@@ -377,7 +427,7 @@ impl CdpClient {
         if !policy.auto_handles() {
             return;
         }
-        let mut rx = self.events();
+        let mut rx = self.page_events();
         let sender = self.sender.clone();
         tokio::spawn(async move {
             // Fire-and-forget ids stay inside Chromium's accepted signed 32-bit range and
@@ -440,7 +490,7 @@ impl CdpClient {
 
     /// Wait for a specific CDP event on an already-subscribed receiver.
     ///
-    /// Subscribe with [`Self::events`] *before* issuing the triggering command: a fast (e.g.
+    /// Subscribe to the event's domain *before* issuing the triggering command: a fast (e.g.
     /// cached) response fires the event before a late subscription exists, and the wait then
     /// stalls until the timeout.
     pub async fn wait_for_event_on(
@@ -503,12 +553,12 @@ impl Drop for CdpClient {
 async fn dispatch_loop(
     mut receiver: transport::CdpReceiver,
     pending: PendingMap,
-    events_tx: broadcast::Sender<CdpEvent>,
+    events: Arc<EventHub>,
 ) {
     let mut cause = None;
     loop {
         match receiver.recv().await {
-            Ok(Some(message)) => route_message(&message, &pending, &events_tx).await,
+            Ok(Some(message)) => route_message(&message, &pending, &events).await,
             Ok(None) => break,
             // The transport knows why it stopped. Carry it: clearing `pending` silently makes
             // every waiting call answer `dispatcher task exited`, which names no cause.
@@ -533,11 +583,7 @@ async fn dispatch_loop(
 /// subscribers, or — when it fits neither shape — to [`resolve_unreadable`].
 ///
 /// Separate from [`dispatch_loop`] so the routing decision is testable without a WebSocket.
-async fn route_message(
-    message: &str,
-    pending: &PendingMap,
-    events_tx: &broadcast::Sender<CdpEvent>,
-) {
+async fn route_message(message: &str, pending: &PendingMap, events: &EventHub) {
     let parsed: CdpMessage = match serde_json::from_str(message) {
         Ok(m) => m,
         // Never dropped: if it carried an `id`, a call is waiting on it and would otherwise
@@ -552,7 +598,7 @@ async fn route_message(
             }
         }
         CdpMessage::Event(event) => {
-            let _ = events_tx.send(event);
+            events.send(event);
         }
     }
 }
@@ -663,12 +709,12 @@ mod tests {
         let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
         let (tx, rx) = oneshot::channel();
         pending.lock().await.insert(7, tx);
-        let (events_tx, _events_rx) = broadcast::channel::<CdpEvent>(16);
+        let events = EventHub::new(16);
 
         route_message(
             r#"{"id":7,"error":{"code":"-32000","message":"x"}}"#,
             &pending,
-            &events_tx,
+            &events,
         )
         .await;
 
@@ -776,9 +822,9 @@ mod tests {
         let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
         let (tx, rx) = oneshot::channel();
         pending.lock().await.insert(7, tx);
-        let (events_tx, _events_rx) = broadcast::channel::<CdpEvent>(16);
+        let events = EventHub::new(16);
 
-        route_message("not json at all", &pending, &events_tx).await;
+        route_message("not json at all", &pending, &events).await;
 
         assert_eq!(
             pending.lock().await.len(),
@@ -794,9 +840,10 @@ mod tests {
         let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
         let (tx, rx) = oneshot::channel();
         pending.lock().await.insert(7, tx);
-        let (events_tx, mut events_rx) = broadcast::channel::<CdpEvent>(16);
+        let events = EventHub::new(16);
+        let mut page_events = events.page.subscribe();
 
-        route_message(r#"{"id":7,"result":{"ok":true}}"#, &pending, &events_tx).await;
+        route_message(r#"{"id":7,"result":{"ok":true}}"#, &pending, &events).await;
         let PendingReply::Read(response) = rx.await.expect("the response must be delivered") else {
             panic!("a well-formed response is readable");
         };
@@ -805,13 +852,45 @@ mod tests {
         route_message(
             r#"{"method":"Page.loadEventFired","params":{}}"#,
             &pending,
-            &events_tx,
+            &events,
         )
         .await;
         assert_eq!(
-            events_rx.recv().await.unwrap().method,
+            page_events.recv().await.unwrap().method,
             "Page.loadEventFired"
         );
+    }
+
+    #[tokio::test]
+    async fn unrelated_domains_cannot_lag_a_network_receiver() {
+        let events = EventHub::new(2);
+        let mut network_events = events.network.subscribe();
+
+        for _ in 0..100 {
+            events.send(event("Page.frameNavigated"));
+            events.send(event("Runtime.consoleAPICalled"));
+        }
+        events.send(event("Network.responseReceived"));
+
+        let received = network_events.recv().await.expect(
+            "page and runtime traffic must not consume the Network domain's queue capacity",
+        );
+        assert_eq!(received.method, "Network.responseReceived");
+    }
+
+    #[tokio::test]
+    async fn network_lag_counts_only_network_events() {
+        let events = EventHub::new(2);
+        let mut network_events = events.network.subscribe();
+        for _ in 0..3 {
+            events.send(event("Network.requestWillBeSent"));
+        }
+
+        let error = network_events
+            .recv()
+            .await
+            .expect_err("one Network event was lost");
+        assert_eq!(error, broadcast::error::RecvError::Lagged(1));
     }
 
     /// A response whose `error.data` is an object is an ordinary protocol error: typed
@@ -821,12 +900,12 @@ mod tests {
         let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
         let (tx, rx) = oneshot::channel();
         pending.lock().await.insert(3, tx);
-        let (events_tx, _events_rx) = broadcast::channel::<CdpEvent>(16);
+        let events = EventHub::new(16);
 
         route_message(
             r#"{"id":3,"error":{"code":-32000,"message":"Cannot find context","data":{"context":9}}}"#,
             &pending,
-            &events_tx,
+            &events,
         )
         .await;
 

@@ -94,7 +94,7 @@ pub async fn run(
         return wait_network_idle(client, timeout_secs, idle_ms).await;
     }
 
-    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+    let deadline = wait_deadline(timeout_secs)?;
     let poll_interval = Duration::from_millis(200);
 
     let expression = match what {
@@ -172,10 +172,10 @@ async fn wait_network_idle(
     timeout_secs: u64,
     idle_ms: u64,
 ) -> Result<String, crate::BoxError> {
-    let mut rx = client.events();
+    let mut rx = client.network_events();
     client.enable("Network").await?;
 
-    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+    let deadline = wait_deadline(timeout_secs)?;
     let idle = Duration::from_millis(idle_ms);
     // Poll cap so we re-check the idle timer even when no events arrive.
     let poll = idle
@@ -214,9 +214,11 @@ async fn wait_network_idle(
                 tracker.observe(&event.method, request_id);
                 idle_since = refresh_idle_clock(page_loaded, &tracker, idle_since);
             }
-            // Missed events under load — conservatively restart the idle clock.
-            Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {
-                idle_since = None;
+            Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(missed))) => {
+                return Err(format!(
+                    "Network-idle wait lost {missed} Network event(s); in-flight state is unknown"
+                )
+                .into());
             }
             Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => {
                 return Err("Connection closed while waiting for network idle".into());
@@ -231,6 +233,12 @@ async fn wait_network_idle(
             }
         }
     }
+}
+
+fn wait_deadline(timeout_secs: u64) -> Result<Instant, crate::BoxError> {
+    Instant::now()
+        .checked_add(Duration::from_secs(timeout_secs))
+        .ok_or_else(|| "Wait timeout is too large".into())
 }
 
 /// Quiet means the initial load completed AND nothing tracked is in flight. The load gate is
@@ -279,7 +287,13 @@ mod tests {
 
     use super::{
         InFlightTracker, Transition, eval_exception_message, is_quiet, refresh_idle_clock,
+        wait_deadline,
     };
+
+    #[test]
+    fn oversized_timeout_is_a_refusal_not_an_instant_overflow() {
+        assert!(wait_deadline(u64::MAX).is_err());
+    }
 
     #[test]
     fn text_exception_reports_invalid_regex() {

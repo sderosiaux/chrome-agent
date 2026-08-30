@@ -8,7 +8,7 @@
 //! the command object `pipe`/`batch` take, so `macro run` reuses their dispatcher.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -191,12 +191,13 @@ impl Macro {
     pub fn save(&self) -> Result<PathBuf, crate::BoxError> {
         check_name(&self.name)?;
         let dir = store_dir();
-        std::fs::create_dir_all(&dir)
+        crate::secure_fs::create_private_dir_all(&dir)
             .map_err(|e| format!("Cannot create {}: {e}", dir.display()))?;
         let path = path_of(&self.name);
         let text = serde_json::to_string_pretty(self)?;
         std::fs::write(&path, text).map_err(|e| format!("Cannot write {}: {e}", path.display()))?;
-        restrict(&path);
+        crate::secure_fs::restrict_file(&path)
+            .map_err(|e| format!("Cannot restrict {} to mode 0600: {e}", path.display()))?;
         Ok(path)
     }
 
@@ -327,16 +328,6 @@ pub fn summary(name: &str) -> Value {
         }
         Err(e) => json!({"name": name, "error": e.to_string()}),
     }
-}
-
-fn restrict(path: &Path) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
-    }
-    #[cfg(not(unix))]
-    let _ = path;
 }
 
 #[cfg(test)]

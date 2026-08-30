@@ -119,11 +119,11 @@ impl Outcome {
         if self.downloaded {
             let bytes = self.bytes.unwrap_or(0);
             match &self.mime {
-                Some(mime) => println!(
+                Some(mime) => out_line!(
                     "{} ({bytes} bytes, {mime})",
                     self.path.as_deref().unwrap_or("")
                 ),
-                None => println!("{} ({bytes} bytes)", self.path.as_deref().unwrap_or("")),
+                None => out_line!("{} ({bytes} bytes)", self.path.as_deref().unwrap_or("")),
             }
             return;
         }

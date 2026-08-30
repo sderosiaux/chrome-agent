@@ -17,14 +17,16 @@ use crate::run_helpers::merge_into;
 // --- Composite dispatchers ---
 
 pub async fn dispatch_navigate_and_read(
-    ctx: &PageCtx<'_>,
+    ctx: &mut PageCtx<'_>,
     args: &NavigateAndReadArgs,
 ) -> Result<Value, crate::BoxError> {
-    let client = ctx.client;
-    let goto_result = commands::goto::run(client, &args.url, ctx.timeout, &[]).await?;
-    client.set_frame_context(None); // navigation invalidates any bound frame (issue #8)
+    let goto_result = commands::goto::run(ctx.client, &args.url, ctx.timeout, &[]).await?;
+    // Navigation already happened even if history or Readability fails below. Stale backend ids
+    // can overlap the new document and resolve to an unrelated element.
+    ctx.clear_uid_map();
+    ctx.client.set_frame_context(None); // navigation invalidates any bound frame (issue #8)
     let _ = commands::history::append(&goto_result.url, &goto_result.title, ctx.page);
-    let read_result = commands::read::run(client, false, args.truncate.map(as_usize)).await?;
+    let read_result = commands::read::run(ctx.client, false, args.truncate.map(as_usize)).await?;
     let mut out = json!({"ok": true, "url": goto_result.url, "title": goto_result.title, "content": read_result.text_content});
     // `landed` matters more here than on a bare `goto`: without it a login page's prose comes
     // back as if it were the article that was asked for.
@@ -61,15 +63,11 @@ pub async fn dispatch_fill_and_submit(
         let outcome = crate::element::fill_selector_with(client, selector, value, false).await?;
         outcomes.push((selector.to_string(), outcome));
     }
-    let submitted = crate::element::click_selector(
-        client,
-        submit_selector,
-        on_intercept(
-            args.on_intercept.as_deref(),
-            crate::hit_test::OnIntercept::default(),
-        ),
-    )
-    .await?;
+    let intercept = on_intercept(
+        args.on_intercept.as_deref(),
+        crate::hit_test::OnIntercept::default(),
+    )?;
+    let submitted = crate::element::click_selector(client, submit_selector, intercept).await?;
     if let Some(pattern) = wait_for {
         let is_selector = pattern.contains('.')
             || pattern.contains('#')
@@ -146,7 +144,7 @@ pub async fn dispatch_dblclick(
     args: &PointerArgs,
 ) -> Result<Value, crate::BoxError> {
     let max_depth = args.max_depth.map(as_usize).or(ctx.max_depth);
-    let on_intercept = on_intercept(args.on_intercept.as_deref(), ctx.report.on_intercept);
+    let on_intercept = on_intercept(args.on_intercept.as_deref(), ctx.report.on_intercept)?;
     // The node is resolved before the action: afterwards it may be detached, and the answer
     // would describe a different page.
     let (msg, details) = if let Some(sel) = &args.selector {
@@ -183,15 +181,13 @@ pub async fn dispatch_select(
     args: &ValueArgs,
 ) -> Result<Value, crate::BoxError> {
     let max_depth = args.max_depth.map(as_usize).or(ctx.max_depth);
-    let target = crate::run_helpers::target_details(
-        ctx.client,
-        args.selector.as_deref(),
-        args.uid.as_deref(),
-    )
-    .await;
-    let (msg, outcome) = if let Some(sel) = &args.selector {
-        let outcome = crate::element::select_option_selector(ctx.client, sel, &args.value).await?;
+    let (target, msg, outcome) = if let Some(sel) = &args.selector {
+        let handle = crate::hit_test::resolve_selector(ctx.client, sel).await?;
+        let target = handle.report();
+        let outcome =
+            crate::element::select_option_handle(ctx.client, &handle, &args.value).await?;
         (
+            target,
             format!("Selected \"{}\" on selector '{sel}'", outcome.label()),
             outcome,
         )
@@ -199,6 +195,7 @@ pub async fn dispatch_select(
         let uid_map = ctx.uid_map();
         let outcome = crate::element::select_option(ctx.client, &uid_map, uid, &args.value).await?;
         (
+            Some(json!({"uid": uid})),
             format!("Selected \"{}\" on uid={uid}", outcome.label()),
             outcome,
         )
@@ -224,13 +221,17 @@ pub async fn dispatch_check(
     selector: Option<&str>,
     intercept: Option<&str>,
 ) -> Result<Value, crate::BoxError> {
-    let target = crate::run_helpers::target_details(ctx.client, selector, uid).await;
-    let outcome = if let Some(sel) = selector {
-        crate::element::set_checked_selector(ctx.client, sel, desired).await?
+    let (target, outcome) = if let Some(sel) = selector {
+        let handle = crate::hit_test::resolve_selector(ctx.client, sel).await?;
+        let target = handle.report();
+        let outcome = crate::element::set_checked_handle(ctx.client, &handle, sel, desired).await?;
+        (target, outcome)
     } else if let Some(uid) = uid {
         let uid_map = ctx.uid_map();
-        let on_intercept = on_intercept(intercept, ctx.report.on_intercept);
-        crate::element::set_checked(ctx.client, &uid_map, uid, desired, on_intercept).await?
+        let on_intercept = on_intercept(intercept, ctx.report.on_intercept)?;
+        let outcome =
+            crate::element::set_checked(ctx.client, &uid_map, uid, desired, on_intercept).await?;
+        (Some(json!({"uid": uid})), outcome)
     } else {
         return Err("check: provide \"uid\" or \"selector\"".into());
     };
@@ -253,19 +254,21 @@ pub async fn dispatch_upload(
         .files
         .clone()
         .ok_or("upload: missing \"files\" array")?;
-    let target = crate::run_helpers::target_details(
-        ctx.client,
-        args.selector.as_deref(),
-        args.uid.as_deref(),
-    )
-    .await;
-    let msg = if let Some(uid) = &args.uid {
+    let (target, msg) = if let Some(uid) = &args.uid {
         let uid_map = ctx.uid_map();
         crate::element::set_file_input(ctx.client, &uid_map, uid, &files).await?;
-        format!("Uploaded {} file(s) to uid={uid}", files.len())
+        (
+            Some(json!({"uid": uid})),
+            format!("Uploaded {} file(s) to uid={uid}", files.len()),
+        )
     } else if let Some(sel) = &args.selector {
-        crate::element::set_file_input_selector(ctx.client, sel, &files).await?;
-        format!("Uploaded {} file(s) to selector '{sel}'", files.len())
+        let handle = crate::hit_test::resolve_selector(ctx.client, sel).await?;
+        let target = handle.report();
+        crate::element::set_file_input_handle(ctx.client, &handle, &files).await?;
+        (
+            target,
+            format!("Uploaded {} file(s) to selector '{sel}'", files.len()),
+        )
     } else {
         return Err("upload: provide \"uid\" or \"selector\"".into());
     };

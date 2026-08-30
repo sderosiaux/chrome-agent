@@ -2,6 +2,7 @@
 paths:
   - "src/pipe.rs"
   - "src/pipe_command.rs"
+  - "src/pipe_validate.rs"
   - "src/pipe_dispatch.rs"
   - "src/pipe_dispatch_actions.rs"
   - "tests/pipe_protocol_tests.rs"
@@ -55,6 +56,13 @@ one inert `"verdict":"off"` in `slow_dispatch_tests` was removed as the dead key
 anything else outside a verb's declared set. A `_record` that is present but not a string is
 refused instead of ignored.
 
+`pipe_validate.rs` enforces relationships serde cannot express. The pipe now refuses two target
+forms where clap's `ArgGroup` permits exactly/at most one; an unknown `on_intercept`; a `wait`
+that mixes `what`/`pattern` with a shorthand or supplies `pattern` alone; and device fields on
+`emulate status|reset`. `pipe_command::tests::target_groups_are_exercised_through_both_parsers`
+feeds the same accepted and rejected forms through `Cli::try_parse_from` and the pipe parser, so
+the parity claim reads both implementations rather than testing only one and naming the other.
+
 ## One dispatcher, and what it cost to have two
 
 `pipe_dispatch::dispatch_single`. Pipe, pipe `batch` and CLI `batch` all reach it; `pipe.rs`
@@ -88,6 +96,15 @@ the six divergences, and the six verbs that deliberately did not collapse.
 own copy of the connect sequence its doc comment already claimed to be the only one of, and those
 had drifted too (a different "no HTTP endpoint" message). Both now call it. Consequence, stated:
 `replay`'s message for a browser with no HTTP endpoint is now the longer pipe one.
+
+## Session finalization is part of the protocol
+
+Every response may have been delivered successfully and the final session-store write may still
+fail. Pipe/replay therefore save after normal EOF and after processing or stdout failure. A
+failure outside an individual command is emitted as one terminal JSON line:
+`{"ok":false,"terminal":true,"phase":"startup|finalize","error":"…"}`, followed by process
+exit 1. It is not a response to the preceding command. A broken stdout may prevent that line from
+being delivered, but it no longer skips the save attempt.
 
 ## What one connection is actually worth
 

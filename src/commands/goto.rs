@@ -56,7 +56,7 @@ pub async fn run(
 
     // Subscribe BEFORE navigating: a cached load fires `Page.loadEventFired` immediately, and
     // missing it stalls until the full timeout.
-    let mut events = client.events();
+    let mut events = client.page_events();
 
     let nav_result: NavigateResult = client
         .call(
