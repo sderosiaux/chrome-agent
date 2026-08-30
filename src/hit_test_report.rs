@@ -64,6 +64,14 @@ pub struct Dispatched {
     pub name: Option<String>,
     /// Which shape of `off_target` this was, when it was one.
     pub unaimable: Option<Unaimable>,
+    /// Which `--on-intercept` policy produced this refusal, when one did. Read only by the
+    /// generic `Intercepted` branch of [`Dispatched::refusal_message`] and by
+    /// [`crate::hints::intercepted_refusal_hint`], so the words describe the actual mode instead
+    /// of a hardcoded "refuse" — `Guard` refuses for a different, measured reason (the receiver
+    /// looked like a control) than `Refuse` does (the caller asked for every interception to
+    /// stop). `None` reads as `Refuse`'s wording: every existing caller of `skipped` that never
+    /// calls [`Dispatched::under`] keeps the words it already had.
+    pub on_intercept: Option<crate::hit_test::OnIntercept>,
 }
 
 impl Dispatched {
@@ -77,6 +85,7 @@ impl Dispatched {
             role: None,
             name: None,
             unaimable: None,
+            on_intercept: None,
         }
     }
 
@@ -101,6 +110,13 @@ impl Dispatched {
     #[must_use]
     pub const fn unaimed(mut self, cause: Option<Unaimable>) -> Self {
         self.unaimable = cause;
+        self
+    }
+
+    /// Carry which `--on-intercept` policy decided this refusal, for the message and the hint.
+    #[must_use]
+    pub const fn under(mut self, mode: crate::hit_test::OnIntercept) -> Self {
+        self.on_intercept = Some(mode);
         self
     }
 
@@ -153,9 +169,15 @@ impl Dispatched {
                     receiver.describe()
                 )
             } else {
+                let because = match self.on_intercept {
+                    Some(crate::hit_test::OnIntercept::Guard) => {
+                        "--on-intercept guard judged it a control rather than static content"
+                    }
+                    _ => "--on-intercept refuse",
+                };
                 format!(
                     "The event would have been aimed at the target's centre and {} occupies \
-                     that point, so nothing was dispatched (--on-intercept refuse). Deal with \
+                     that point, so nothing was dispatched ({because}). Deal with \
                      it first (dismiss the banner or scrim, close the dialog), then repeat this \
                      action — the page has seen no event from this command, so the repeat \
                      duplicates nothing. Repeating it while that element is still there \
@@ -207,14 +229,23 @@ impl Dispatched {
                 "Did not {verb} {target}: no point inside the element's own boxes could be \
                  aimed at, so nothing was dispatched."
             ),
-            _ => format!(
-                "Did not {verb} {target}: {} occupies the point it would have been aimed at, \
-                 and --on-intercept refuse was set.",
-                self.receiver.as_ref().map_or_else(
+            _ => {
+                let who = self.receiver.as_ref().map_or_else(
                     || "another element".to_string(),
                     Hit::describe
-                )
-            ),
+                );
+                match self.on_intercept {
+                    Some(crate::hit_test::OnIntercept::Guard) => format!(
+                        "Did not {verb} {target}: {who} occupies the point it would have been \
+                         aimed at, and --on-intercept guard judged it a control rather than \
+                         static content, so nothing was dispatched."
+                    ),
+                    _ => format!(
+                        "Did not {verb} {target}: {who} occupies the point it would have been \
+                         aimed at, and --on-intercept refuse was set."
+                    ),
+                }
+            }
         })
     }
 }
@@ -294,7 +325,8 @@ impl Refused {
         crate::run_helpers::attach_verdict(&mut obj, self.assessment());
         obj["hint"] = json!(crate::hints::intercepted_refusal_hint(
             browser,
-            self.dispatched.receiver.as_ref()
+            self.dispatched.receiver.as_ref(),
+            self.dispatched.on_intercept.unwrap_or(crate::hit_test::OnIntercept::Refuse)
         ));
         obj
     }
@@ -317,7 +349,11 @@ impl Refused {
         lines.push(format!("next: {}", crate::verdict::next_for(self.assessment())));
         lines.push(format!(
             "hint: {}",
-            crate::hints::intercepted_refusal_hint(browser, self.dispatched.receiver.as_ref())
+            crate::hints::intercepted_refusal_hint(
+                browser,
+                self.dispatched.receiver.as_ref(),
+                self.dispatched.on_intercept.unwrap_or(crate::hit_test::OnIntercept::Refuse)
+            )
         ));
         lines
     }
@@ -345,6 +381,7 @@ mod tests {
             modal,
             iframe: false,
             same_doc: true,
+            actionable: false,
             uid: Some("n11".into()),
         }
     }

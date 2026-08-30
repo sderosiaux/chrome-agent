@@ -39,6 +39,13 @@ pub enum OnIntercept {
     /// Refuse the action without dispatching. For a caller that would rather re-plan than
     /// hand an event to an element it did not name.
     Refuse,
+    /// Dispatch through a receiver that looks like static content in the way; refuse a receiver
+    /// that looks like it does something (`Hit::looks_inert`). Neither extreme is right for
+    /// every caller: `dispatch` sent a click through lequipe.fr's cookie-consent "accept" button
+    /// while aiming at unrelated navigation and accepted the wall on the caller's behalf, and
+    /// `refuse` would also stop on the five of eight measured interceptions that were a
+    /// `HEADER`, plain text, an image, or an inert iframe — none of which needed re-planning.
+    Guard,
 }
 
 impl OnIntercept {
@@ -46,8 +53,9 @@ impl OnIntercept {
         match value {
             "dispatch" => Ok(Self::Dispatch),
             "refuse" => Ok(Self::Refuse),
+            "guard" => Ok(Self::Guard),
             other => Err(format!(
-                "Unknown --on-intercept value '{other}'. Use \"dispatch\" (default) or \"refuse\"."
+                "Unknown --on-intercept value '{other}'. Use \"dispatch\" (default), \"refuse\", or \"guard\"."
             )),
         }
     }
@@ -59,6 +67,24 @@ impl OnIntercept {
             .and_then(Value::as_str)
             .and_then(|v| Self::parse(v).ok())
             .unwrap_or(fallback)
+    }
+}
+
+/// Whether an interception should be refused under `on_intercept`, given what the probe found
+/// occupying the aim point.
+///
+/// `Refuse` always refuses and `Dispatch` never does — this is the one place `Guard` differs:
+/// it refuses unless the receiver is POSITIVELY known and looks inert (`Hit::looks_inert`).
+/// `None` (no receiver was identified, which `aim` treats as possible though rare) and an
+/// `<iframe>` receiver (opaque from here, see [`Hit::looks_inert`]) both fail that test and so
+/// both refuse — the same "unknown leans toward caution" rule applied twice, once for a
+/// specific structural case and once for the absence of any reading at all.
+#[must_use]
+pub fn should_refuse_intercept(on_intercept: OnIntercept, receiver: Option<&Hit>) -> bool {
+    match on_intercept {
+        OnIntercept::Refuse => true,
+        OnIntercept::Dispatch => false,
+        OnIntercept::Guard => !receiver.is_some_and(Hit::looks_inert),
     }
 }
 
@@ -120,6 +146,10 @@ pub struct Probe {
 }
 
 /// The element the aim point resolved to.
+// Each flag answers an independent question the probe measured (in the top layer, an iframe,
+// same document, structurally interactive); collapsing them into an enum would force an order
+// on facts nothing here orders — `Probe` above takes the same allowance for the same reason.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Deserialize)]
 pub struct Hit {
     pub tag: String,
@@ -138,6 +168,19 @@ pub struct Hit {
     pub iframe: bool,
     #[serde(default, rename = "sameDoc")]
     pub same_doc: bool,
+    /// A native interactive tag, an ARIA interactive role, explicit keyboard focusability
+    /// (`tabIndex >= 0`), or a `cursor: pointer` computed style — computed inside the same probe
+    /// call that already runs (`PROBE_JS`), so this costs no extra CDP round trip. Read through
+    /// [`Hit::looks_inert`], never alone: an `<iframe>` ignores this field entirely (see there).
+    ///
+    /// Deliberately NOT a keyword match against `text`/`class` ("accept", "agree", "j'accepte",
+    /// the CMP vendor's own class fragments): measured against eight real interceptions, `class`
+    /// and `text` were what let a PERSON recognise a consent button on sight, but a keyword list
+    /// is never complete, never covers every language, and is exactly the kind of site-specific
+    /// pattern-matching this project avoids elsewhere. A structural signal generalises; a
+    /// wordlist accumulates exceptions forever.
+    #[serde(default)]
+    pub actionable: bool,
     /// Resolved afterwards, best effort — an overlay container usually has no accessibility
     /// node, so it usually has no uid either.
     #[serde(skip)]
@@ -166,6 +209,20 @@ impl Hit {
         out
     }
 
+    /// Whether `--on-intercept guard` may dispatch through this receiver.
+    ///
+    /// An `<iframe>` is always `false` here, whatever [`Hit::actionable`] says: its content is
+    /// opaque from outside — cross-origin content refuses to answer at all, and same-origin
+    /// would need a second execution context this probe does not open, which is a CDP call this
+    /// project does not spend on every intercepted click to resolve a case measured at one in
+    /// eight. Between a false refusal on an inert search-box iframe and a false dispatch into an
+    /// unseen consent wall, this project accepts the former: the receiver is genuinely unknown,
+    /// and `Guard`'s whole premise is to lean on "unknown" rather than guess through it.
+    #[must_use]
+    pub const fn looks_inert(&self) -> bool {
+        !self.iframe && !self.actionable
+    }
+
     pub(crate) fn report(&self) -> Value {
         json!({
             "uid": self.uid,
@@ -177,6 +234,7 @@ impl Hit {
             "modal": self.modal,
             "iframe": self.iframe,
             "same_document": self.same_doc,
+            "actionable": self.actionable,
         })
     }
 }
@@ -244,19 +302,37 @@ const PROBE_JS: &str = r"function () {
     try { return el.matches(':modal'); }
     catch (e) { return el.tagName === 'DIALOG' && el.hasAttribute('open'); }
   };
+  // Structural interactivity, not a wordlist: a native interactive tag, an ARIA interactive
+  // role, explicit keyboard focusability, or a pointer cursor — none perfect alone (a
+  // decorative hover-effect wrapper reads as actionable; a bare div with a click listener and
+  // none of these reads as inert), computed here so it costs no extra round trip.
+  const INTERACTIVE_TAGS = ['BUTTON', 'A', 'INPUT', 'SELECT', 'TEXTAREA', 'LABEL', 'OPTION', 'SUMMARY'];
+  const INTERACTIVE_ROLES = ['button', 'link', 'checkbox', 'radio', 'menuitem', 'menuitemcheckbox',
+    'menuitemradio', 'option', 'tab', 'switch', 'combobox'];
+  const actionableOf = (el, style) => {
+    if (INTERACTIVE_TAGS.includes(el.tagName)) return true;
+    const role = (el.getAttribute('role') || '').toLowerCase();
+    if (INTERACTIVE_ROLES.includes(role)) return true;
+    if (typeof el.tabIndex === 'number' && el.tabIndex >= 0) return true;
+    return style.cursor === 'pointer';
+  };
   return {
     rendered: true, inViewport, aimIn, landed, depth, offsetKnown,
     aim: [cx, cy], top: [cx + ox, cy + oy],
-    hit: h ? {
-      tag: h.tagName,
-      id: h.id || null,
-      cls: (typeof h.className === 'string' && h.className) ? h.className : null,
-      z: window.getComputedStyle(h).zIndex,
-      text: (h.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 40),
-      modal: modalOf(h),
-      iframe: h.tagName === 'IFRAME',
-      sameDoc: h.ownerDocument === this.ownerDocument
-    } : null
+    hit: h ? (() => {
+      const style = window.getComputedStyle(h);
+      return {
+        tag: h.tagName,
+        id: h.id || null,
+        cls: (typeof h.className === 'string' && h.className) ? h.className : null,
+        z: style.zIndex,
+        text: (h.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 40),
+        modal: modalOf(h),
+        iframe: h.tagName === 'IFRAME',
+        sameDoc: h.ownerDocument === this.ownerDocument,
+        actionable: actionableOf(h, style)
+      };
+    })() : null
   };
 }";
 
@@ -724,6 +800,7 @@ mod tests {
             modal: false,
             iframe: false,
             same_doc: true,
+            actionable: false,
             uid: None,
         };
         // Two classes at most: the point is to be findable, not to reproduce the attribute.
@@ -734,6 +811,7 @@ mod tests {
     fn on_intercept_refuses_an_unknown_policy() {
         assert_eq!(OnIntercept::parse("dispatch"), Ok(OnIntercept::Dispatch));
         assert_eq!(OnIntercept::parse("refuse"), Ok(OnIntercept::Refuse));
+        assert_eq!(OnIntercept::parse("guard"), Ok(OnIntercept::Guard));
         assert!(OnIntercept::parse("maybe").is_err());
         // A per-command override, and the session policy when there is none.
         assert_eq!(
@@ -744,6 +822,56 @@ mod tests {
             OnIntercept::from_cmd(&json!({"cmd": "click"}), OnIntercept::Refuse),
             OnIntercept::Refuse
         );
+    }
+
+    fn hit(tag: &str, iframe: bool, actionable: bool) -> Hit {
+        Hit {
+            tag: tag.into(),
+            id: None,
+            cls: None,
+            z: None,
+            text: String::new(),
+            modal: false,
+            iframe,
+            same_doc: true,
+            actionable,
+            uid: None,
+        }
+    }
+
+    /// The eight receivers measured on lequipe.fr/lefigaro.fr/vinted.fr, reduced to their two
+    /// families: five inert (a HEADER, two text DIVs, an IMG, a search iframe) and three
+    /// actionable (a consent BUTTON, a CMP iframe, a country-selector cell) — `z_index` and
+    /// `modal` carried nothing on any of the eight, so neither appears here.
+    #[test]
+    fn looks_inert_separates_the_two_measured_families() {
+        assert!(hit("HEADER", false, false).looks_inert());
+        assert!(hit("DIV", false, false).looks_inert(), "plain banner text");
+        assert!(hit("IMG", false, false).looks_inert());
+        assert!(!hit("BUTTON", false, true).looks_inert(), "consent accept button");
+        assert!(!hit("DIV", false, true).looks_inert(), "a div acting as a selector option");
+        // An iframe is inert here (a search box) but `looks_inert` still refuses it: content is
+        // opaque from outside, so "inert" cannot be measured, only assumed.
+        assert!(!hit("IFRAME", true, false).looks_inert(), "opaque content refuses regardless");
+        assert!(!hit("IFRAME", true, true).looks_inert(), "a CMP iframe, doubly so");
+    }
+
+    #[test]
+    fn should_refuse_intercept_only_guards_what_looks_actionable() {
+        let inert = hit("DIV", false, false);
+        let actionable = hit("BUTTON", false, true);
+        let unknown_iframe = hit("IFRAME", true, false);
+
+        assert!(!should_refuse_intercept(OnIntercept::Dispatch, Some(&inert)));
+        assert!(!should_refuse_intercept(OnIntercept::Dispatch, Some(&actionable)));
+        assert!(should_refuse_intercept(OnIntercept::Refuse, Some(&inert)));
+        assert!(should_refuse_intercept(OnIntercept::Refuse, Some(&actionable)));
+
+        assert!(!should_refuse_intercept(OnIntercept::Guard, Some(&inert)));
+        assert!(should_refuse_intercept(OnIntercept::Guard, Some(&actionable)));
+        assert!(should_refuse_intercept(OnIntercept::Guard, Some(&unknown_iframe)));
+        // No receiver identified at all: still refuse under Guard rather than assume inert.
+        assert!(should_refuse_intercept(OnIntercept::Guard, None));
     }
 
     /// `DOM.describeNode` hands attributes back as one flat list; a pair-wise read of it is

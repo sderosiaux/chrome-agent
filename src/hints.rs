@@ -236,9 +236,16 @@ pub fn download_unfinished_hint(browser: &str) -> String {
 ///
 /// Two wordings, because a modal dialog has one dismissal every page agrees on and a banner or
 /// scrim does not — the criterion is the receiver's own `modal` flag, which rule 2 requires
-/// stating rather than offering two commands and a shrug.
+/// stating rather than offering two commands and a shrug. `mode` picks a third wording within
+/// the non-modal case: `Guard` refused because the receiver looked like a control, `Refuse`
+/// because the caller asked for every interception to stop — the fact each names is different,
+/// so the words are too.
 #[must_use]
-pub fn intercepted_refusal_hint(browser: &str, receiver: Option<&crate::hit_test::Hit>) -> String {
+pub fn intercepted_refusal_hint(
+    browser: &str,
+    receiver: Option<&crate::hit_test::Hit>,
+    mode: crate::hit_test::OnIntercept,
+) -> String {
     let run = invocation(browser);
     let who = receiver.map_or_else(|| "Another element".to_string(), crate::hit_test::Hit::describe);
     if receiver.is_some_and(|hit| hit.modal) {
@@ -250,12 +257,17 @@ pub fn intercepted_refusal_hint(browser: &str, receiver: Option<&crate::hit_test
              refusal."
         );
     }
+    let because = match mode {
+        crate::hit_test::OnIntercept::Guard => {
+            "--on-intercept guard judged it a control rather than static content"
+        }
+        _ => "--on-intercept refuse was set",
+    };
     format!(
-        "{who} occupies the point this action would have been aimed at, and --on-intercept \
-         refuse was set, so nothing was dispatched and the page is exactly as it was. Do not \
-         repeat this command while that element is there: it will refuse identically. Run \
-         `{run} inspect` to find that element's own dismiss control, act on it, and aim here \
-         again once it is gone."
+        "{who} occupies the point this action would have been aimed at, and {because}, so \
+         nothing was dispatched and the page is exactly as it was. Do not repeat this command \
+         while that element is there: it will refuse identically. Run `{run} inspect` to find \
+         that element's own dismiss control, act on it, and aim here again once it is gone."
     )
 }
 
@@ -853,9 +865,10 @@ mod tests {
             modal: false,
             iframe: false,
             same_doc: true,
+            actionable: true,
             uid: Some("n210".into()),
         };
-        let hint = intercepted_refusal_hint("agent-7", Some(&receiver));
+        let hint = intercepted_refusal_hint("agent-7", Some(&receiver), crate::hit_test::OnIntercept::Refuse);
         assert!(hint.starts_with("div#gdpr-wall.wall"), "rule 1, the fact first: {hint}");
         assert!(
             hint.contains("`chrome-agent --browser agent-7 inspect`"),
@@ -884,16 +897,51 @@ mod tests {
             modal: true,
             iframe: false,
             same_doc: true,
+            actionable: true,
             uid: None,
         };
-        let modal = intercepted_refusal_hint("default", Some(&dialog));
+        let refuse = crate::hit_test::OnIntercept::Refuse;
+        let modal = intercepted_refusal_hint("default", Some(&dialog), refuse);
         assert!(modal.contains("`chrome-agent press Escape`"), "{modal}");
         dialog.modal = false;
-        assert_ne!(modal, intercepted_refusal_hint("default", Some(&dialog)));
+        assert_ne!(modal, intercepted_refusal_hint("default", Some(&dialog), refuse));
         // And with nothing to name, it is still a hint rather than a silence.
-        let anonymous = intercepted_refusal_hint("default", None);
+        let anonymous = intercepted_refusal_hint("default", None, refuse);
         assert!(anonymous.starts_with("Another element"), "{anonymous}");
         assert!(anonymous.contains("chrome-agent inspect"), "{anonymous}");
+    }
+
+    /// `guard` refused for a different, measured reason than a caller who asked for `refuse`
+    /// outright — the words say which, or an agent cannot tell "the caller chose this" from
+    /// "the tool judged the receiver a control" from the response alone.
+    #[test]
+    fn a_guard_refusal_names_its_own_reason_not_the_callers_choice() {
+        let receiver = crate::hit_test::Hit {
+            tag: "BUTTON".into(),
+            id: None,
+            cls: Some("Cmp__action Cmp__action--yes".into()),
+            z: None,
+            text: "oui, j'accepte".into(),
+            modal: false,
+            iframe: false,
+            same_doc: true,
+            actionable: true,
+            uid: Some("n42".into()),
+        };
+        let guard = intercepted_refusal_hint(
+            "default",
+            Some(&receiver),
+            crate::hit_test::OnIntercept::Guard,
+        );
+        let refuse = intercepted_refusal_hint(
+            "default",
+            Some(&receiver),
+            crate::hit_test::OnIntercept::Refuse,
+        );
+        assert_ne!(guard, refuse);
+        assert!(guard.contains("judged it a control"), "{guard}");
+        assert!(!guard.contains("refuse was set"), "{guard}");
+        assert!(refuse.contains("refuse was set"), "{refuse}");
     }
 
     /// A missing snapshot has one command and now also the reason it is needed.

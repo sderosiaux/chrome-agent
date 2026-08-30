@@ -131,8 +131,11 @@ pub struct Cli {
     /// What a click/double-click does when the hit test says another element occupies the
     /// point it was aimed at. `dispatch` (default) sends it anyway — what a pointer does —
     /// and names the receiver in `intercepted_by`. `refuse` returns an error and dispatches
-    /// nothing.
-    #[arg(long, default_value = "dispatch", value_parser = ["dispatch", "refuse"], global = true)]
+    /// nothing. `guard` dispatches through a receiver that looks like static content and
+    /// refuses one that looks like a control (a button, a link, an iframe, anything focusable
+    /// or styled as clickable) — the middle ground for an interception that might be a
+    /// cookie-consent "accept" button instead of the cosmetic overlay `dispatch` assumes.
+    #[arg(long, default_value = "dispatch", value_parser = ["dispatch", "refuse", "guard"], global = true)]
     pub on_intercept: String,
 
     /// Copy cookies from your real Chrome profile (uses your logged-in sessions)

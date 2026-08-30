@@ -67,12 +67,20 @@ LLM USAGE GUIDE:
     js           went through a JS click()/MouseEvent: no hit test, licenses nothing
     not_probed   no hit test, or its answer misses the document that matters (iframe target):
                  absence of evidence, licenses NO conclusion
-    # --on-intercept refuse errors instead of dispatching; default dispatch sends it anyway
-    # (what a pointer does) and names the receiver in intercepted_by. The refusal is ok:false
-    # (exit 1) and carries the SAME fields as the dispatch -- delivery, intercepted_by, verdict,
-    # verdict_reason, next, verdict_hint, hint -- plus dispatched:false. Branch on "next" there
-    # too; nothing reached the page, so acting on the receiver and re-aiming duplicates nothing.
-    # dispatched:false is on every response that aimed and sent nothing, refusal or not.
+    # --on-intercept: dispatch (default) sends it anyway (what a pointer does) and names the
+    # receiver in intercepted_by. refuse always errors on an interception instead. guard is the
+    # middle ground -- it reads intercepted_by.actionable (native interactive tag, ARIA
+    # interactive role, tabIndex>=0, or cursor:pointer -- computed in the same probe, no extra
+    # CDP call) and dispatches through a receiver that looks inert, refuses one that looks like
+    # a control. An <iframe> receiver ALWAYS refuses under guard even when its content happens
+    # to be inert: opaque from outside, so "inert" would be assumed, not measured. Default stays
+    # dispatch -- guard's predicate lacks dispatch's own measured record and flipping the
+    # default would change outcomes for every overlapping-button case, not only consent walls.
+    # A refusal (either mode) is ok:false (exit 1) and carries the SAME fields as a dispatch --
+    # delivery, intercepted_by, verdict, verdict_reason, next, verdict_hint, hint -- plus
+    # dispatched:false. Branch on "next" there too; nothing reached the page, so acting on the
+    # receiver and re-aiming duplicates nothing. dispatched:false is on every response that
+    # aimed and sent nothing, refusal or not.
     # "waited_ms" appears when the action waited for the page to load after it, and only then.
     # A click that navigates carries it; one that changed nothing on the top frame has no such
     # field. It is the answer to "why did that take so long", and it is per action: pipe reuses

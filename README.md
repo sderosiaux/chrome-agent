@@ -292,6 +292,7 @@ where it is not declared is a usage error naming the invocation which works.
 --max-depth <N>          Limit inspect depth
 --verdict <mode>         auto (default): an action reports what changed. off: report the action only
 --budget <chars>         Cap that change report (default 1200; 0 = uncapped)
+--on-intercept <mode>    dispatch (default), guard, or refuse — see the table below
 --ignore-https-errors    Accept self-signed certs
 --json                   Structured JSON output
 --dialog <mode>          JS dialog policy: accept (default), dismiss, or manual
@@ -382,6 +383,35 @@ sending the event anyway — `ok:false`, exit 1, and the same fields the dispatc
 carried (`delivery`, `intercepted_by`, `verdict`, `next`, `verdict_hint`, `hint`) plus
 `dispatched:false`, because the mode that refuses to act is the one whose caller has the most
 re-planning to do.
+
+| `--on-intercept` | Sends through the receiver when it looks... | Refuses when it looks... |
+|---|---|---|
+| `dispatch` (default) | anything | never — always sends |
+| `guard` | inert (no interactive tag/role, not focusable, no `cursor: pointer`) | actionable, or an `<iframe>` (opaque — see below), or unidentified |
+| `refuse` | never — always refuses | anything |
+
+`guard` is the middle ground: neither extreme was right for an interception measured during a
+site audit, where a click aimed at unrelated navigation landed on a consent wall's own "accept"
+button and `dispatch` sent the click through it, accepting the wall on the caller's behalf. Five
+of eight interceptions measured that day were inert (a `HEADER`, plain text, an image, a search
+`<iframe>`) and would have been wrongly refused by a blanket `refuse`; three could act (that
+consent button, a CMP `<iframe>`, a country-selector cell) and were wrongly sent through by
+`dispatch`. `guard` reads `intercepted_by.actionable` — a native interactive tag, an ARIA
+interactive role, explicit keyboard focusability, or a `cursor: pointer` computed style,
+whichever the receiver has — computed inside the same probe call, so it costs no extra round
+trip. It is deliberately **not** a keyword match against the receiver's text or class name
+("accept", "agree", "j'accepte", a CMP vendor's own class fragment): those carried the
+information to a person reading the field data, but a wordlist is never complete and never will
+be, in every language a consent wall might use. An `<iframe>` receiver refuses under `guard`
+regardless — its content is opaque from outside, so "inert" would be assumed, not measured, and
+between a false refusal on an inert search box and a false dispatch into an unseen consent wall
+this project accepts the former. The default stays `dispatch`: `guard`'s predicate has not been
+measured at the scale that justifies `dispatch`'s own default (12/12 on the design fixtures, and
+separately checked across dozens of real sites), and flipping the default would change outcomes
+for every overlapping-button case, not only consent walls. A refusal under `guard` carries the
+exact same payload a refusal under `refuse` does (`delivery`, `intercepted_by` — now with
+`actionable` — `verdict`, `next`, `verdict_hint`, `hint`, `dispatched:false`); the two differ
+only in the words explaining *why* nothing was dispatched.
 
 `waited_ms` rides on a mutating response when the action waited for the page to load after it,
 and only then — a click that navigates carries it, a click that did not does not, and it is what

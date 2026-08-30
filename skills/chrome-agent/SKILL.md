@@ -59,14 +59,35 @@ which chrome-agent || npm install -g chrome-agent   # or: cargo install chrome-a
 | `js` | Went through a JS `click()`/`MouseEvent`, which performs no hit test. | Interception is inapplicable, not undetected. Licenses nothing. |
 | `not_probed` | No hit test ran, or its answer does not cover the document that matters (a target inside an iframe). | Absence of evidence. Licenses **no** conclusion. |
 
-`--on-intercept refuse` turns an interception into an error that dispatches nothing, instead of
-the default `dispatch` (send it anyway — what a pointer does — and name the receiver). The
-refusal is `ok:false` (CLI exit 1) and carries **the same fields as the dispatch** —
-`delivery`, `intercepted_by`, `uid`, `aim`, `verdict`, `verdict_reason`, `next`, `verdict_hint`
-and `hint` — plus `dispatched:false`. Branch on `next` there as everywhere else: it says
-`dismiss`, and since nothing reached the page, dealing with the receiver and aiming again
-duplicates nothing. `dispatched:false` appears on **every** response that aimed and sent
-nothing, refusal or not.
+Three `--on-intercept` modes:
+
+| Mode | Sends through a receiver that looks... | Refuses a receiver that looks... |
+|---|---|---|
+| `dispatch` (default) | anything — what a pointer does | never |
+| `guard` | inert (no interactive tag/role, not focusable, no `cursor: pointer`) | actionable, an `<iframe>` (opaque, see below), or unidentified |
+| `refuse` | never | anything |
+
+`guard` reads `intercepted_by.actionable`, computed in the SAME probe call (no extra CDP round
+trip): a native interactive tag (`BUTTON`/`A`/`INPUT`/`SELECT`/`TEXTAREA`/`LABEL`/`OPTION`/`SUMMARY`),
+an ARIA interactive role, explicit keyboard focusability (`tabIndex >= 0`), or a `cursor: pointer`
+computed style. It exists because `dispatch` sent a click through a consent wall's own "accept"
+button during a site audit — the hit test was right, the click was aimed at unrelated
+navigation, and `dispatch` accepted the wall on the caller's behalf. `refuse` would have been
+just as wrong the other way: five of eight receivers measured that day were inert (`HEADER`,
+plain text, an image, a search `iframe`) and needed no re-planning at all. An `<iframe>`
+receiver always refuses under `guard`, whatever `actionable` says: its content is opaque from
+outside, so "inert" cannot be measured, only assumed — an accepted false positive, not a missed
+true one. The default stays `dispatch`: `guard`'s predicate has no record at `dispatch`'s own
+scale (12/12 fixtures, checked separately across dozens of real sites), and flipping the default
+would change outcomes for every overlapping-button case, not only consent walls.
+
+Any refusal (`refuse` or `guard`) is `ok:false` (CLI exit 1) and carries **the same fields as
+the dispatch** — `delivery`, `intercepted_by`, `uid`, `aim`, `verdict`, `verdict_reason`, `next`,
+`verdict_hint` and `hint` — plus `dispatched:false`. Branch on `next` there as everywhere else:
+it says `dismiss`, and since nothing reached the page, dealing with the receiver and aiming
+again duplicates nothing. `dispatched:false` appears on **every** response that aimed and sent
+nothing, refusal or not. The `hint`/`error` text names which mode refused and why — "guard
+judged it a control" or "refuse was set" — never the other one's wording.
 
 ## The rule: never report a success the tool did not confirm
 
@@ -280,7 +301,7 @@ declared is an exit-1 usage error that names the invocation which works.
 --max-depth N      # limit inspect tree depth
 --verdict MODE     # auto (default): report what changed. off: report the action only
 --budget N         # cap the change report, in chars (default 1200; 0 = uncapped)
---on-intercept M   # dispatch (default) | refuse
+--on-intercept M   # dispatch (default) | guard | refuse — see table above
 --timeout N        # deadline on every CDP call (default 30s)
 --headed           # show the window
 --connect URL      # attach to a real Chrome (DataDome/Kasada)
