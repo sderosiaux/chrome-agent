@@ -569,27 +569,30 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
                 commands::extract::scroll_to_load(&client).await?;
             }
             let role_filter: Option<Vec<&str>> = filter.as_deref().map(|f| f.split(',').map(str::trim).collect());
-            let (mut text, uid_map, doc_identity) = if let Some(max) = limit {
-                let result = commands::inspect::scroll_collect(&client, verbose, uid.as_deref(), role_filter.as_deref(), max).await?;
-                (result.text, result.uid_map, result.identity)
+            let views = if let Some(max) = limit {
+                commands::inspect::scroll_collect(&client, verbose, uid.as_deref(), role_filter.as_deref(), max).await?
             } else {
-                let s = commands::inspect::run(&client, verbose, max_depth, uid.as_deref(), role_filter.as_deref()).await?;
-                (s.text, s.uid_map, s.identity)
+                commands::inspect::views(&client, verbose, max_depth, uid.as_deref(), role_filter.as_deref()).await?
             };
-            if urls {
-                text = commands::inspect::resolve_urls(&client, &text, &uid_map).await;
-            }
+            // `--urls` annotates the lines it prints. Applied to the baseline it would make
+            // every link read as changed on the next diff, which reads no url= token.
+            let shown = if urls {
+                commands::inspect::resolve_urls(&client, views.shown(), &views.full.uid_map).await
+            } else {
+                views.shown().to_string()
+            };
             // Persist the FULL snapshot so diff and uid lookups stay complete;
-            // paging only affects what we print/return.
+            // --filter/--max-depth/--uid/--urls and paging only affect what we print.
             if let Some(browser_s) = store.browsers.get_mut(&cli.browser) {
                 let page = session::ensure_page(browser_s, &cli.page, &target_id);
-                page.uid_map = uid_map;
-                page.last_snapshot = Some(text.clone());
-                let (f, l) = doc_identity.map_or((None, None), |(f, l)| (Some(f), Some(l)));
+                let full = views.full;
+                page.uid_map = full.uid_map;
+                page.last_snapshot = Some(full.text);
+                let (f, l) = full.identity.map_or((None, None), |(f, l)| (Some(f), Some(l)));
                 page.last_snapshot_frame = f;
                 page.last_snapshot_loader = l;
             }
-            let paged = commands::inspect::paginate(&text, offset, max_chars);
+            let paged = commands::inspect::paginate(&shown, offset, max_chars);
             if json_mode {
                 json_output(&json!({
                     "ok": true,

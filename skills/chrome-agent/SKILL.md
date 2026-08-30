@@ -167,6 +167,9 @@ chrome-agent inspect --filter "link" --urls               # links with resolved 
 chrome-agent inspect --filter "article" --scroll --limit 50   # infinite scroll
 chrome-agent inspect --max-chars 4000 [--offset 4000]     # cap/page huge trees
 chrome-agent diff                                         # what changed since last inspect
+# Every narrowing flag above (--filter/--max-depth/--uid/--limit/--urls/--max-chars) changes
+# what is PRINTED only. `diff` always compares against the full tree, and every uid on the
+# page stays actionable — so `inspect --filter button` then `diff` reports what really moved.
 
 # Click / double-click (uid, --selector, --xy)
 chrome-agent click <uid> [--inspect]

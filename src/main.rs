@@ -29,6 +29,7 @@ mod run_helpers;
 mod session;
 mod setup;
 mod snapshot;
+mod snapshot_render;
 mod snapshot_secret;
 mod truncate;
 mod verdict;

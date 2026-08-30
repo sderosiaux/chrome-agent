@@ -326,6 +326,10 @@ LLM USAGE GUIDE:
     - --max-depth works on goto/click/fill --inspect too (not just standalone inspect).
     - --filter gives a flat list — great for finding interactive elements quickly.
     - inspect --max-chars caps output and tells you the next --offset to page through.
+    - Narrowing an inspect (--filter, --max-depth, --uid, --limit, --urls, --max-chars) only
+      changes what is PRINTED. The snapshot stored for the next `diff` is always the full
+      tree, and every uid on the page stays actionable — so `inspect --filter button` then
+      `diff` reports what really moved, not the nodes the filter hid from you.
     - wait network-idle beats fixed sleeps for SPA/XHR settle (opt-in, off the stealth hot path).
     - download uses an in-page fetch, so it keeps the page's login, and rejects
       responses over 64 MiB by default (--max-bytes N overrides it). Click-triggered

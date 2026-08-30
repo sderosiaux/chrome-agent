@@ -92,13 +92,15 @@ pub async fn run_a11y(
 
     for role in &roles {
         let filter = vec![*role];
-        let snapshot = if scroll {
-            super::inspect::scroll_collect(client, false, None, Some(&filter), limit).await?
+        // The filtered rendering is all this wants — it stores no baseline, so there is
+        // nothing here for a reduced snapshot to poison.
+        let text = if scroll {
+            super::inspect::scroll_collect(client, false, None, Some(&filter), limit).await?.shown().to_string()
         } else {
-            super::inspect::run(client, false, None, None, Some(&filter)).await?
+            super::inspect::run(client, false, None, None, Some(&filter)).await?.text
         };
 
-        let lines: Vec<&str> = snapshot.text.lines()
+        let lines: Vec<&str> = text.lines()
             .filter(|l| l.trim().starts_with("uid="))
             .collect();
 
