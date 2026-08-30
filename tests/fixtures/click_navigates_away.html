@@ -1,0 +1,14 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>A click that navigates the page</title>
+</head>
+<body>
+  <h1>This one really does navigate</h1>
+  <!-- The control half of `click_spawns_subframe.html`: here the TOP frame navigates, so
+       `Page.loadEventFired` will fire and the wait for it is owed. Removing the wait for a
+       subframe's navigation must not remove this one. -->
+  <a id="leave" href="click_spawns_subframe.html">Leave this page</a>
+</body>
+</html>

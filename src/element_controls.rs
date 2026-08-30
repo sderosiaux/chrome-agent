@@ -529,7 +529,7 @@ pub async fn set_file_input(
         }))
         .await
         .map_err(|e| ElementError::Action(format!("setFileInputFiles failed: {e}")))?;
-    wait_for_stabilization(nav_events).await;
+    wait_for_stabilization(client, nav_events).await;
     Ok(())
 }
 
@@ -575,7 +575,7 @@ pub async fn set_file_input_selector(
         }))
         .await
         .map_err(|e| ElementError::Action(format!("setFileInputFiles failed: {e}")))?;
-    wait_for_stabilization(nav_events).await;
+    wait_for_stabilization(client, nav_events).await;
     Ok(())
 }
 
@@ -621,27 +621,30 @@ pub async fn drag(
         }
     };
 
+    // See `CdpClient::ensure_foreground`: a drag is five pointer events, and each one of them
+    // pays the background-tab timer.
+    client.ensure_foreground().await;
     let nav_events = client.events();
-    client.send("Input.dispatchMouseEvent",
+    client.send_input("Input.dispatchMouseEvent",
         mouse(MouseEventType::MouseMoved, x1, y1, None, None, None))
         .await.map_err(|e| ElementError::Action(format!("drag move failed: {e}")))?;
 
-    client.send("Input.dispatchMouseEvent",
+    client.send_input("Input.dispatchMouseEvent",
         mouse(MouseEventType::MousePressed, x1, y1, Some(MouseButton::Left), Some(1), Some(1)))
         .await.map_err(|e| ElementError::Action(format!("drag press failed: {e}")))?;
 
     for (x, y) in drag_interpolation_points(x1, y1, x2, y2, 5) {
-        client.send("Input.dispatchMouseEvent",
+        client.send_input("Input.dispatchMouseEvent",
             mouse(MouseEventType::MouseMoved, x, y, Some(MouseButton::Left), Some(1), None))
             .await.map_err(|e| ElementError::Action(format!("drag step failed: {e}")))?;
         tokio::time::sleep(Duration::from_millis(16)).await;
     }
 
-    client.send("Input.dispatchMouseEvent",
+    client.send_input("Input.dispatchMouseEvent",
         mouse(MouseEventType::MouseReleased, x2, y2, Some(MouseButton::Left), Some(0), Some(1)))
         .await.map_err(|e| ElementError::Action(format!("drag release failed: {e}")))?;
 
-    wait_for_stabilization(nav_events).await;
+    wait_for_stabilization(client, nav_events).await;
     Ok(())
 }
 

@@ -135,7 +135,7 @@ pub async fn fill_selector(
     let actual = payload.get("value").and_then(serde_json::Value::as_str).map(str::to_string);
     let max_length = payload.get("maxLength").and_then(serde_json::Value::as_i64);
     let sensitive = payload.get("sensitive").and_then(serde_json::Value::as_bool).unwrap_or(false);
-    wait_for_stabilization(nav_events).await;
+    wait_for_stabilization(client, nav_events).await;
     Ok(crate::element::FillOutcome::new(value, actual)
         .with_max_length(max_length)
         .secret(sensitive))

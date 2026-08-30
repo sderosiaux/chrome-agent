@@ -381,6 +381,15 @@ carried (`delivery`, `intercepted_by`, `verdict`, `next`, `verdict_hint`, `hint`
 `dispatched:false`, because the mode that refuses to act is the one whose caller has the most
 re-planning to do.
 
+`waited_ms` rides on a mutating response when the action waited for the page to load after it,
+and only then — a click that navigates carries it, a click that did not does not, and it is what
+answers "why did that take so long" without the caller guessing. A pointer event that Chrome does
+not acknowledge within 8 s fails instead of waiting out `--timeout`, and says the event may
+already have reached the page: the one thing not to do there is send it again. Pointer actions
+also bring their page to the foreground first, because a background tab answers them on a fixed
+five-second timer — with several pages open in one browser, clicking on one makes it the active
+one, which is what clicking means.
+
 Two blind spots, both stated rather than papered over: the read-back window is a fixed 60 ms
 (reported as `observed_after_ms`, so a validator firing at 400 ms is outside it — `wait` then
 `assert value`), and canvas, WebGL and CSS-only effects are invisible to the accessibility tree.

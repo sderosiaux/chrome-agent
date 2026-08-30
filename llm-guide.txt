@@ -63,6 +63,16 @@ LLM USAGE GUIDE:
     # verdict_reason, next, verdict_hint, hint -- plus dispatched:false. Branch on "next" there
     # too; nothing reached the page, so acting on the receiver and re-aiming duplicates nothing.
     # dispatched:false is on every response that aimed and sent nothing, refusal or not.
+    # "waited_ms" appears when the action waited for the page to load after it, and only then.
+    # A click that navigates carries it; one that changed nothing on the top frame has no such
+    # field. It is the answer to "why did that take so long", and it is per action: pipe reuses
+    # one connection and the wait is never carried to the next command.
+    # A pointer event is answered in milliseconds on a healthy page. If Chrome does not answer
+    # one within 8s the command FAILS (ok:false) rather than waiting out --timeout, and the
+    # error says the event may already have reached the page: do NOT repeat it, run inspect and
+    # read the state the action was supposed to produce. click/dblclick/hover/drag also bring
+    # their page to the foreground first -- a background tab answers pointer events on a fixed
+    # 5s timer -- so acting on one page of a multi-page browser makes it the active one.
     # Two blind spots no retry can fix: the read-back window is a fixed 60ms (a validator at
     # 400ms is outside it -- use wait + assert value), and canvas/WebGL/CSS-only effects are
     # invisible to the a11y tree (use screenshot or eval, never a second click).

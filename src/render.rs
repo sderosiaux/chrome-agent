@@ -43,6 +43,9 @@ use crate::verdict::{Assessment, Verdict};
 /// a line anybody reads — the same reasoning, and the same budget, as `assert`'s own renderer.
 const LINE_BUDGET: usize = 120;
 
+/// Below this, a wait is not news. See [`waited_line`].
+const WAIT_WORTH_SAYING_MS: u64 = 1000;
+
 /// Whether this stream gets ANSI, decided once.
 ///
 /// A struct rather than a global: the tests render both ways in one process, and a
@@ -136,6 +139,7 @@ pub fn action_lines(obj: &Value, assessment: Assessment, paint: Paint) -> Vec<St
     let mut lines = Vec::new();
     let said_value = value_lines(obj, paint, &mut lines);
     observation_line(obj, said_value, &mut lines);
+    waited_line(obj, &mut lines);
     lost_value_lines(obj, paint, &mut lines);
     receiver_line(obj, paint, &mut lines);
     lines.push(format!(
@@ -244,6 +248,29 @@ fn observation_line(obj: &Value, said_value: bool, lines: &mut Vec<String>) {
     if let Some(ms) = obj.get("observed_after_ms").and_then(Value::as_u64) {
         lines.push(format!("observed: {ms} ms after the action"));
     }
+}
+
+/// How long the action spent waiting for a page load, when that was long enough to notice.
+///
+/// A threshold rather than every value, and the reason is the same rule the module opens with:
+/// a `waited: 90 ms` line on a click that felt instant teaches the reader to skip the block
+/// where `waited: 10.1 s` will one day appear. One second is where a person starts wondering
+/// whether the tool is stuck — the exact question this line exists to answer. `--json` carries
+/// the number whatever its size, because a machine reading latency has no such threshold.
+fn waited_line(obj: &Value, lines: &mut Vec<String>) {
+    let Some(ms) = obj.get("waited_ms").and_then(Value::as_u64) else {
+        return;
+    };
+    if ms < WAIT_WORTH_SAYING_MS {
+        return;
+    }
+    // Integer arithmetic rather than a float divide: the number is milliseconds off a clock,
+    // and a wait long enough to print is never long enough to need more than one decimal.
+    lines.push(format!(
+        "waited: {}.{}s for the page to finish loading after this action",
+        ms / 1000,
+        (ms % 1000) / 100
+    ));
 }
 
 /// Fields that held a value before this action and hold none after it.
@@ -485,6 +512,20 @@ mod tests {
         // receiver, and the full paragraph stays in the response's `verdict_hint`.
         assert!(out.contains("hint: Deal with the element named above first"), "{out}");
         assert!(out.lines().all(|l| l.len() < 200), "no line is a paragraph: {out}");
+    }
+
+    /// A wait a person noticed gets a line; a wait nobody noticed does not, or the block that
+    /// will one day carry "waited: 10.1s" is one the reader has learned to skip.
+    #[test]
+    fn only_a_wait_worth_noticing_reaches_the_terminal() {
+        let mut lines = Vec::new();
+        waited_line(&json!({"waited_ms": 10_100}), &mut lines);
+        assert_eq!(lines, vec!["waited: 10.1s for the page to finish loading after this action"]);
+
+        let mut quiet = Vec::new();
+        waited_line(&json!({"waited_ms": 90}), &mut quiet);
+        waited_line(&json!({"ok": true}), &mut quiet);
+        assert!(quiet.is_empty(), "{quiet:?}");
     }
 
     /// The gloss is the whole point of the verdict line: `unchanged (identical_tree)` reads as

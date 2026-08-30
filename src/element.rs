@@ -164,12 +164,16 @@ fn refusal(
 
 /// A click at coordinates somebody else decided on: mouse normally, touch under emulation.
 async fn dispatch_click_at(client: &CdpClient, cx: f64, cy: f64) -> Result<(), ElementError> {
+    // A pointer event on a page that is not the foreground tab is answered on a fixed
+    // five-second timer; on the foreground tab, in single-digit milliseconds. Once per
+    // connection, 3 ms — see `CdpClient::ensure_foreground` for the measurements.
+    client.ensure_foreground().await;
     // Subscribe BEFORE dispatching so a fast navigation isn't missed.
     let nav_events = client.events();
     client.mark_dispatch();
     if client.touch_emulation_enabled() {
         client
-            .send(
+            .send_input(
                 "Input.dispatchTouchEvent",
                 json!({
                     "type": "touchStart",
@@ -179,7 +183,7 @@ async fn dispatch_click_at(client: &CdpClient, cx: f64, cy: f64) -> Result<(), E
             .await
             .map_err(|e| ElementError::Action(format!("touchStart failed: {e}")))?;
         client
-            .send(
+            .send_input(
                 "Input.dispatchTouchEvent",
                 json!({"type": "touchEnd", "touchPoints": []}),
             )
@@ -187,7 +191,7 @@ async fn dispatch_click_at(client: &CdpClient, cx: f64, cy: f64) -> Result<(), E
             .map_err(|e| ElementError::Action(format!("touchEnd failed: {e}")))?;
     } else {
         client
-            .send("Input.dispatchMouseEvent", DispatchMouseEventParams {
+            .send_input("Input.dispatchMouseEvent", DispatchMouseEventParams {
                 event_type: MouseEventType::MousePressed,
                 x: cx, y: cy,
                 button: Some(MouseButton::Left), buttons: Some(1), click_count: Some(1),
@@ -198,7 +202,7 @@ async fn dispatch_click_at(client: &CdpClient, cx: f64, cy: f64) -> Result<(), E
             .map_err(|e| ElementError::Action(format!("mousePressed failed: {e}")))?;
 
         client
-            .send("Input.dispatchMouseEvent", DispatchMouseEventParams {
+            .send_input("Input.dispatchMouseEvent", DispatchMouseEventParams {
                 event_type: MouseEventType::MouseReleased,
                 x: cx, y: cy,
                 button: Some(MouseButton::Left), buttons: Some(0), click_count: Some(1),
@@ -209,7 +213,7 @@ async fn dispatch_click_at(client: &CdpClient, cx: f64, cy: f64) -> Result<(), E
             .map_err(|e| ElementError::Action(format!("mouseReleased failed: {e}")))?;
     }
 
-    wait_for_stabilization(nav_events).await;
+    wait_for_stabilization(client, nav_events).await;
     Ok(())
 }
 
@@ -236,7 +240,7 @@ pub async fn js_click(client: &CdpClient, object_id: &str) -> Result<(), Element
         )));
     }
 
-    wait_for_stabilization(nav_events).await;
+    wait_for_stabilization(client, nav_events).await;
     Ok(())
 }
 
@@ -406,7 +410,7 @@ pub async fn fill(
     let actual = payload.get("value").and_then(serde_json::Value::as_str).map(str::to_string);
     let max_length = payload.get("maxLength").and_then(serde_json::Value::as_i64);
     let sensitive = payload.get("sensitive").and_then(serde_json::Value::as_bool).unwrap_or(false);
-    wait_for_stabilization(nav_events).await;
+    wait_for_stabilization(client, nav_events).await;
     Ok(FillOutcome::new(value, actual).with_max_length(max_length).secret(sensitive))
 }
 
@@ -458,7 +462,7 @@ pub async fn type_text(
         .await
         .map_err(|e| ElementError::Action(format!("insertText failed: {e}")))?;
 
-    wait_for_stabilization(nav_events).await;
+    wait_for_stabilization(client, nav_events).await;
     Ok(())
 }
 
@@ -552,7 +556,7 @@ pub async fn press_key(
         .await
         .map_err(|e| ElementError::Action(format!("keyUp failed: {e}")))?;
 
-    wait_for_stabilization(nav_events).await;
+    wait_for_stabilization(client, nav_events).await;
     Ok(())
 }
 
@@ -570,8 +574,12 @@ pub async fn hover(
         ))
     })?;
 
+    // A pointer event on a page that is not the foreground tab is answered on a fixed
+    // five-second timer; on the foreground tab, in single-digit milliseconds. Once per
+    // connection, 3 ms — see `CdpClient::ensure_foreground` for the measurements.
+    client.ensure_foreground().await;
     client
-        .send("Input.dispatchMouseEvent", DispatchMouseEventParams {
+        .send_input("Input.dispatchMouseEvent", DispatchMouseEventParams {
             event_type: MouseEventType::MouseMoved,
             x, y,
             button: None, buttons: None, click_count: None,
@@ -584,13 +592,20 @@ pub async fn hover(
     Ok(())
 }
 
-/// Wait (≤`timeout`) for one event matching `method` on an already-open
-/// subscription. `true` if it arrived. Lagged: keep going, the event may follow.
-async fn recv_event(rx: &mut broadcast::Receiver<CdpEvent>, method: &str, timeout: Duration) -> bool {
+/// Wait (≤`timeout`) for one event satisfying `matches` on an already-open subscription.
+/// `true` if it arrived. Lagged: keep going, the event may follow.
+///
+/// A predicate rather than a method name, because the name alone was not enough to tell the
+/// two navigations apart — see [`main_frame_navigated`].
+async fn recv_event_where(
+    rx: &mut broadcast::Receiver<CdpEvent>,
+    matches: impl Fn(&CdpEvent) -> bool + Send + Sync,
+    timeout: Duration,
+) -> bool {
     tokio::time::timeout(timeout, async {
         loop {
             match rx.recv().await {
-                Ok(event) if event.method == method => return true,
+                Ok(event) if matches(&event) => return true,
                 Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(broadcast::error::RecvError::Closed) => return false,
             }
@@ -600,15 +615,70 @@ async fn recv_event(rx: &mut broadcast::Receiver<CdpEvent>, method: &str, timeou
     .unwrap_or(false)
 }
 
+/// Wait (≤`timeout`) for one event of this exact method.
+async fn recv_event(rx: &mut broadcast::Receiver<CdpEvent>, method: &str, timeout: Duration) -> bool {
+    recv_event_where(rx, |event| event.method == method, timeout).await
+}
+
+/// A `Page.frameNavigated` for the TOP frame, which is the only one whose load we can wait for.
+///
+/// `Page.loadEventFired` is a main-frame event: it carries a timestamp and nothing else, and it
+/// fires once per top-level document. A subframe navigating produces `Page.frameNavigated` with
+/// a `parentId` and, later, `Page.frameStoppedLoading` — never a load event. So a wait armed by
+/// a subframe's navigation is a wait for something that cannot arrive, and it ran to the full
+/// ceiling every time.
+///
+/// That is not a corner case. Measured on shop.app: clicking a product tile appends a tracking
+/// iframe, which navigates to `about:blank` and then to `chrome-error://chromewebdata/` — two
+/// `frameNavigated` events for a SUBFRAME, 4 ms apart, no load event ever. The click took
+/// 10.10 s, of which 10.05 s was this wait; a click at an inert coordinate on the same page in
+/// the same session took 0.14 s. `tests/fixtures/click_spawns_subframe.html` is that shape,
+/// offline.
+fn main_frame_navigated(event: &CdpEvent) -> bool {
+    event.method == "Page.frameNavigated"
+        && event
+            .params
+            .get("frame")
+            .is_some_and(|frame| frame.get("parentId").is_none())
+}
+
 /// Wait for the page to stabilize after an action. `nav_events` MUST be
 /// subscribed (`client.events()`) BEFORE dispatching the action — `broadcast`
 /// only delivers post-subscribe messages, so a fast `frameNavigated`/
 /// `loadEventFired` firing before we wait would be missed (the `goto` race).
-/// 50ms probe for navigation; only then wait (≤10s) for load.
-pub async fn wait_for_stabilization(mut nav_events: broadcast::Receiver<CdpEvent>) {
-    if recv_event(&mut nav_events, "Page.frameNavigated", Duration::from_millis(50)).await {
-        let _ = recv_event(&mut nav_events, "Page.loadEventFired", Duration::from_secs(10)).await;
+/// 50ms probe for a TOP-frame navigation; only then wait (≤10s) for its load.
+///
+/// The probe keeps reading for its whole window rather than returning on the first
+/// `frameNavigated`: a click that spawns a tracking iframe AND navigates the page produces the
+/// subframe's event first, and stopping there would now skip a wait that is owed.
+///
+/// The wait is measured and handed to the connection, so the response can say how long it took
+/// (`waited_ms`). A ten-second action that explains itself is a page being slow; a ten-second
+/// action that says nothing is the tool being broken, and the caller cannot tell them apart.
+pub async fn wait_for_stabilization(
+    client: &CdpClient,
+    nav_events: broadcast::Receiver<CdpEvent>,
+) {
+    // Boxed: this future holds a subscription and two nested timeouts, and it is awaited from
+    // thirteen action paths that `run::run` holds live in one match arm. Inline, it is counted
+    // thirteen times in that frame.
+    if let Some(waited) = Box::pin(settle_after_navigation(nav_events)).await {
+        client.note_settle_wait(waited);
     }
+}
+
+/// The wait itself: `Some(duration)` when a top-frame navigation armed it, `None` when none
+/// was seen. Split from the wrapper so the rule can be tested with a broadcast channel and no
+/// Chrome — which is how the subframe case is pinned.
+async fn settle_after_navigation(
+    mut nav_events: broadcast::Receiver<CdpEvent>,
+) -> Option<Duration> {
+    if !recv_event_where(&mut nav_events, main_frame_navigated, Duration::from_millis(50)).await {
+        return None;
+    }
+    let started = std::time::Instant::now();
+    let _ = recv_event(&mut nav_events, "Page.loadEventFired", Duration::from_secs(10)).await;
+    Some(started.elapsed())
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -757,17 +827,21 @@ pub async fn js_dblclick(client: &CdpClient, object_id: &str) -> Result<(), Elem
         .await
         .map_err(|e| ElementError::Action(format!("JS dblclick failed: {e}")))?;
 
-    wait_for_stabilization(nav_events).await;
+    wait_for_stabilization(client, nav_events).await;
     Ok(())
 }
 
 /// Double-click at coordinates.
 pub async fn dblclick_at_coords(client: &CdpClient, x: f64, y: f64) -> Result<(), ElementError> {
+    // A pointer event on a page that is not the foreground tab is answered on a fixed
+    // five-second timer; on the foreground tab, in single-digit milliseconds. Once per
+    // connection, 3 ms — see `CdpClient::ensure_foreground` for the measurements.
+    client.ensure_foreground().await;
     let nav_events = client.events();
     client.mark_dispatch();
     for click_count in [1, 2] {
         client
-            .send("Input.dispatchMouseEvent", DispatchMouseEventParams {
+            .send_input("Input.dispatchMouseEvent", DispatchMouseEventParams {
                 event_type: MouseEventType::MousePressed, x, y,
                 button: Some(MouseButton::Left), buttons: Some(1),
                 click_count: Some(click_count),
@@ -778,7 +852,7 @@ pub async fn dblclick_at_coords(client: &CdpClient, x: f64, y: f64) -> Result<()
             .map_err(|e| ElementError::Action(format!("mousePressed failed: {e}")))?;
 
         client
-            .send("Input.dispatchMouseEvent", DispatchMouseEventParams {
+            .send_input("Input.dispatchMouseEvent", DispatchMouseEventParams {
                 event_type: MouseEventType::MouseReleased, x, y,
                 button: Some(MouseButton::Left), buttons: Some(0),
                 click_count: Some(click_count),
@@ -788,7 +862,7 @@ pub async fn dblclick_at_coords(client: &CdpClient, x: f64, y: f64) -> Result<()
             .await
             .map_err(|e| ElementError::Action(format!("mouseReleased failed: {e}")))?;
     }
-    wait_for_stabilization(nav_events).await;
+    wait_for_stabilization(client, nav_events).await;
     Ok(())
 }
 
@@ -820,6 +894,20 @@ mod tests {
         CdpEvent { method: method.to_string(), params: serde_json::Value::Null, session_id: None }
     }
 
+    /// A `Page.frameNavigated` as Chrome sends it: the top frame carries no `parentId`, a
+    /// subframe does.
+    fn navigated(parent: Option<&str>) -> CdpEvent {
+        let frame = match parent {
+            Some(id) => serde_json::json!({"id": "F1", "parentId": id, "url": "about:blank"}),
+            None => serde_json::json!({"id": "F0", "url": "https://example.com/"}),
+        };
+        CdpEvent {
+            method: "Page.frameNavigated".to_string(),
+            params: serde_json::json!({"frame": frame}),
+            session_id: None,
+        }
+    }
+
     #[test]
     fn check_js_exception_none() {
         let val = serde_json::json!({"result": {"value": true}});
@@ -845,11 +933,53 @@ mod tests {
     async fn stabilization_sees_navigation_buffered_before_wait() {
         let (tx, _) = broadcast::channel::<CdpEvent>(16);
         let rx = tx.subscribe(); // subscribe first (pre-action)
-        tx.send(ev("Page.frameNavigated")).unwrap();
+        tx.send(navigated(None)).unwrap();
         tx.send(ev("Page.loadEventFired")).unwrap();
         // Both events already buffered → completes promptly, does not hang.
-        tokio::time::timeout(Duration::from_secs(1), wait_for_stabilization(rx))
+        let waited = tokio::time::timeout(Duration::from_secs(1), settle_after_navigation(rx))
             .await
             .expect("should not hang when nav events are already buffered");
+        assert!(waited.is_some(), "a top-frame navigation arms the wait");
+    }
+
+    /// The ten seconds. A subframe navigating is not something `Page.loadEventFired` will ever
+    /// answer for, so arming the wait on it meant waiting the full ceiling on every page that
+    /// spawns a tracking iframe when clicked — 10.10 s on shop.app, measured.
+    #[tokio::test]
+    async fn a_subframe_navigation_arms_no_wait() {
+        let (tx, _) = broadcast::channel::<CdpEvent>(16);
+        let rx = tx.subscribe();
+        tx.send(navigated(Some("F0"))).unwrap();
+        tx.send(navigated(Some("F0"))).unwrap();
+        let waited = tokio::time::timeout(Duration::from_secs(2), settle_after_navigation(rx))
+            .await
+            .expect("must not wait for a load event that cannot come");
+        assert_eq!(waited, None, "nothing was waited for, and nothing is reported");
+    }
+
+    /// And the case that makes the probe read its whole window instead of returning on the
+    /// first event: a click that spawns a tracker AND navigates. The subframe's event comes
+    /// first; the wait is still owed to the top frame's.
+    #[tokio::test]
+    async fn a_subframe_event_does_not_hide_the_navigation_behind_it() {
+        let (tx, _) = broadcast::channel::<CdpEvent>(16);
+        let rx = tx.subscribe();
+        tx.send(navigated(Some("F0"))).unwrap();
+        tx.send(navigated(None)).unwrap();
+        tx.send(ev("Page.loadEventFired")).unwrap();
+        let waited = tokio::time::timeout(Duration::from_secs(1), settle_after_navigation(rx))
+            .await
+            .expect("should not hang");
+        assert!(waited.is_some(), "the top-frame navigation still arms the wait");
+    }
+
+    #[test]
+    fn only_the_top_frame_is_a_navigation_we_can_wait_for() {
+        assert!(main_frame_navigated(&navigated(None)));
+        assert!(!main_frame_navigated(&navigated(Some("F0"))));
+        // A frameNavigated whose shape we cannot read is not a top-frame claim either way;
+        // `params` absent means no `frame`, and the predicate must not panic on it.
+        assert!(!main_frame_navigated(&ev("Page.frameNavigated")));
+        assert!(!main_frame_navigated(&ev("Page.loadEventFired")));
     }
 }
