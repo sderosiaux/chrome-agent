@@ -36,6 +36,7 @@ mod run;
 mod run_helpers;
 mod serving;
 mod session;
+mod session_load;
 mod setup;
 mod snapshot;
 mod snapshot_render;

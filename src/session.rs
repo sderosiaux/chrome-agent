@@ -75,7 +75,7 @@ pub struct PageSession {
 
 /// Load the session store from disk. Returns empty store if file doesn't exist.
 pub fn load_session() -> Result<SessionStore, SessionError> {
-    load_from(&session_path()?)
+    crate::session_load::load_from(&session_path()?)
 }
 
 /// Save the session store to disk, merging with the current on-disk state so
@@ -95,31 +95,26 @@ pub fn save_session(store: &mut SessionStore) -> Result<(), SessionError> {
     result
 }
 
-/// Read a session store from an explicit path (empty store if the file is
-/// absent). Records the loaded browser names as the delete baseline.
-fn load_from(path: &Path) -> Result<SessionStore, SessionError> {
-    if !path.exists() {
-        return Ok(SessionStore::default());
+impl SessionStore {
+    /// Take this view as the baseline the next save merges against: which names we hold,
+    /// and the exact bytes of each entry. The save path reads the first to tell an entry
+    /// this process deliberately dropped from one another agent added after our load, and
+    /// the second to tell an entry we changed from one we merely read — republishing the
+    /// latter is the lost update between parallel `--browser <name>` agents.
+    ///
+    /// One method rather than two assignments in three places, because the two fields only
+    /// mean anything together: a name in `loaded_names` with no bytes in `loaded_entries`
+    /// reads as "changed" and gets republished.
+    pub fn take_baseline(&mut self) {
+        self.loaded_names = self.browsers.keys().cloned().collect();
+        self.loaded_entries = self
+            .browsers
+            .iter()
+            .filter_map(|(name, entry)| {
+                serde_json::to_string(entry).ok().map(|json| (name.clone(), json))
+            })
+            .collect();
     }
-
-    let contents = std::fs::read_to_string(path)
-        .map_err(|e| SessionError(format!("Failed to read {}: {e}", path.display())))?;
-
-    let mut store: SessionStore = serde_json::from_str(&contents)
-        .map_err(|e| SessionError(format!("Failed to parse {}: {e}", path.display())))?;
-    store.loaded_names = store.browsers.keys().cloned().collect();
-    store.loaded_entries = snapshot_entries(&store.browsers);
-    Ok(store)
-}
-
-/// Serialize each browser entry so save can tell "I changed this" from "I only read it".
-fn snapshot_entries(browsers: &HashMap<String, BrowserSession>) -> HashMap<String, String> {
-    browsers
-        .iter()
-        .filter_map(|(name, entry)| {
-            serde_json::to_string(entry).ok().map(|json| (name.clone(), json))
-        })
-        .collect()
 }
 
 /// Persist `store` to `path` under an exclusive lock, merging with whatever is
@@ -132,7 +127,12 @@ fn snapshot_entries(browsers: &HashMap<String, BrowserSession>) -> HashMap<Strin
 /// 4. Upsert this process's browsers.
 /// 5. Drop every entry whose browser process is provably gone (`prune_dead`).
 /// 6. Atomically replace the file.
-fn save_to(path: &Path, store: &mut SessionStore) -> Result<(), SessionError> {
+///
+/// Crate-visible (this module is private, so `pub` here reaches no further) for step 2's
+/// sake: what that re-read does with each of its three outcomes is
+/// the subject of `session_load`, and the tests that pin it have to drive the merge that
+/// consumes it. Nothing outside this crate can reach it.
+pub fn save_to(path: &Path, store: &mut SessionStore) -> Result<(), SessionError> {
     let parent = path
         .parent()
         .ok_or_else(|| SessionError("session path has no parent directory".into()))?;
@@ -147,8 +147,14 @@ fn save_to(path: &Path, store: &mut SessionStore) -> Result<(), SessionError> {
     // Serialize concurrent writers for the read-merge-write critical section.
     let _lock = FileLock::acquire(&parent.join("sessions.lock"))?;
 
-    // Merge our changes onto the freshest on-disk state.
-    let mut merged = load_from(path).unwrap_or_default();
+    // Merge our changes onto the freshest on-disk state. This read used to be
+    // `.unwrap_or_default()`, which made a store this process could not READ — the file
+    // intact, every other agent still reading it fine — into an empty one, and the merge
+    // below then published this process's single browser as the whole store. The three
+    // outcomes are separated in `session_load::reread_for_merge`, which explains why only
+    // the unreadable one refuses; the `?` here is the refusal, taken while the lock is held
+    // and before anything has been written, so the file keeps exactly what it had.
+    let mut merged = crate::session_load::reread_for_merge(path)?;
     for name in &store.loaded_names {
         if !store.browsers.contains_key(name) {
             // Compare-and-delete: the drop was decided about the entry we loaded. If
@@ -219,8 +225,7 @@ fn save_to(path: &Path, store: &mut SessionStore) -> Result<(), SessionError> {
     );
 
     // Our view is now the baseline for subsequent saves in this process.
-    store.loaded_names = store.browsers.keys().cloned().collect();
-    store.loaded_entries = snapshot_entries(&store.browsers);
+    store.take_baseline();
 
     Ok(())
 }
@@ -492,6 +497,7 @@ pub struct SessionError(pub String);
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session_load::load_from;
 
     /// Two agents work on their own `--browser` names at the same time. The one that
     /// only *read* the other's entry must not write its stale copy back over it.
@@ -604,20 +610,31 @@ mod tests {
         }
     }
 
+    /// A save that cannot publish leaves no temp file behind.
+    ///
+    /// The destination is an existing non-empty directory, which is unopenable as a file.
+    /// It used to reach `fs::rename(file, dir)` and fail there, after the temp file had
+    /// been written — the leak this pins. It now fails one step earlier, at the re-read
+    /// inside the lock, because a destination that is present and will not read is exactly
+    /// the case `reread_for_merge` refuses instead of merging onto a guess. Both assertions
+    /// still hold and the second is now true for a stronger reason: nothing was created at
+    /// all. What this fixture can no longer construct is a destination that READS cleanly
+    /// and still fails to rename, so the `remove_file` in that arm is no longer exercised
+    /// here; it is a two-line cleanup on a branch reachable only from the filesystem
+    /// (`EXDEV`, a concurrent `rmdir` of the parent), which no in-process fixture reaches.
     #[test]
-    fn a_failed_rename_does_not_leak_the_temp_file() {
+    fn a_save_that_cannot_publish_leaves_no_temp_file_behind() {
         let dir = std::env::temp_dir().join(format!("chrome-agent-session-tmpleak-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        // Make the destination an existing non-empty directory: fs::write to the
-        // sibling temp path succeeds, fs::rename(file, dir) then fails.
         let path = dir.join("sessions.json");
         std::fs::create_dir_all(path.join("occupied")).unwrap();
 
         let mut store = SessionStore::default();
         ensure_browser(&mut store, "leaky", "ws://x", None, true, None, Vec::new());
         let result = save_to(&path, &mut store);
-        assert!(result.is_err(), "rename onto a directory should fail the save");
+        let err = result.expect_err("an unpublishable destination should fail the save").0;
+        assert!(err.contains("Failed to read"), "the refusal names what it could not do: {err}");
 
         let tmp_path = path.with_extension(format!("json.tmp.{}", std::process::id()));
         assert!(
@@ -828,39 +845,8 @@ mod tests {
 
     // `ensure_chrome_args_compatible` itself is tested in `chrome_args.rs`, where it lives.
 
-    #[test]
-    fn bug_session_corrupt_json() {
-        let dir = tmp_dir("corrupt");
-        let path = dir.join(SESSION_FILE);
-        std::fs::write(&path, "NOT VALID JSON {{{").unwrap();
-        // Exercise the real load path: a corrupt file must surface a parse
-        // error (not panic, not silently default away the on-disk state).
-        let result = load_from(&path);
-        let err = result.expect_err("corrupt JSON should error").to_string();
-        assert!(err.contains("Failed to parse"), "unexpected error: {err}");
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn bug_session_empty_file() {
-        let dir = tmp_dir("empty");
-        let path = dir.join(SESSION_FILE);
-        std::fs::write(&path, "").unwrap();
-        // An empty (e.g. externally truncated) file is not valid JSON. load_from
-        // surfaces the parse error rather than pretending the store was empty —
-        // the absent-file case (Ok(default)) is handled separately by the
-        // `!path.exists()` guard, verified below.
-        let err = load_from(&path)
-            .expect_err("empty file should error")
-            .to_string();
-        assert!(err.contains("Failed to parse"), "unexpected error: {err}");
-
-        // Contrast: a genuinely absent file loads a default (empty) store.
-        std::fs::remove_file(&path).unwrap();
-        let default = load_from(&path).expect("absent file should default");
-        assert!(default.browsers.is_empty());
-        std::fs::remove_dir_all(&dir).ok();
-    }
+    // `bug_session_corrupt_json` and `bug_session_empty_file` moved to `session_load.rs`
+    // with the function they exercise.
 
     #[test]
     fn bug_element_ref_unknown_type() {

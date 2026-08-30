@@ -772,7 +772,10 @@ pub fn cmd_close(browser_name: &str, purge: bool, json_mode: bool) -> Result<(),
             gone
         }
         crate::kill::KillOutcome::Gone => true,
-        crate::kill::KillOutcome::NotABrowser => false,
+        // Nothing was signalled in either case, so there is no exit to have waited for.
+        // `Unverified` additionally did not establish that the process is still there —
+        // `false` here is "not observed gone", which is all this field ever meant.
+        crate::kill::KillOutcome::NotABrowser | crate::kill::KillOutcome::Unverified => false,
     });
 
     let message = match (&browser, outcome) {
@@ -788,14 +791,32 @@ pub fn cmd_close(browser_name: &str, purge: bool, json_mode: bool) -> Result<(),
         (None, _) => format!("No browser session named '{browser_name}'."),
     };
 
-    // Purge browser profile if requested
-    let purge_outcome = if purge {
+    // The entry was removed above, before anything was known. An outcome that established
+    // nothing about the process puts it back: `sessions.json` is what `status` lists and
+    // what a later `close` looks a pid up in, so forgetting an entry whose Chrome may well
+    // be running is how this command manufactures the very orphan `close --orphans` exists
+    // to clean up. The message printed above already says so.
+    let kept = outcome.is_some_and(|(_, o)| !o.entry_may_be_dropped());
+    if kept && let Some(entry) = browser {
+        store.browsers.insert(browser_name.to_string(), entry);
+    }
+
+    // Purge browser profile if requested — but not on the outcome that kept the session.
+    // `--purge` means "close it and delete its profile", and this branch closed nothing:
+    // deleting the profile of a Chrome that may still be holding it is the destruction
+    // `purge_profile` grew eight retries to survive, done here in full knowledge that the
+    // process was never checked. Refusing costs one repeat of the command once the machine
+    // can answer; the alternative cannot be undone.
+    let purge_outcome = if purge && !kept {
         session::browsers_dir().ok().map(|dir| purge_profile(&dir.join(browser_name)))
     } else {
         None
     };
 
     let message = match purge_outcome {
+        None if purge && kept => {
+            format!("{message} (profile NOT purged: nothing was closed, so its profile may be in use)")
+        }
         None => message,
         Some(Ok(())) => format!("{message} (profile purged)"),
         Some(Err(e)) => format!("{message} (profile NOT purged: {e})"),

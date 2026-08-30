@@ -81,6 +81,87 @@ pub enum KillOutcome {
     NotABrowser,
     /// The pid holds no process. Nothing to signal, nothing lost.
     Gone,
+    /// The pid could not be classified, because the reading that classifies it did not
+    /// happen. Nothing was signalled and — this is the whole point of the word — nothing
+    /// is claimed about the browser: it may be running, and this invocation cannot say.
+    ///
+    /// It exists because the three words above are all ASSERTIONS about a process, and the
+    /// only reading behind two of them was a `ps` whose failure was silently rounded to
+    /// `Gone`. See [`process_name`] for the two doors that reach it.
+    Unverified,
+}
+
+impl KillOutcome {
+    /// Whether `close` may forget the session entry after this outcome.
+    ///
+    /// Three of the four settle what the entry names: the browser was signalled, the pid
+    /// holds no process at all, or the pid holds a live process that is somebody else's —
+    /// in each case the entry no longer names a running browser of ours, and dropping it
+    /// loses nothing. `Unverified` settles none of that, and the entry is the ONLY handle
+    /// anything has on that Chrome: `sessions.json` is what `status` lists and what `close`
+    /// looks a pid up in. Dropping it there is precisely how a browser becomes an orphan
+    /// that neither command can reach — the leak `orphans.rs` exists to clean up after, now
+    /// manufactured by the command whose job was to prevent it.
+    ///
+    /// So the entry stays and `close` says why. The cost is stated rather than hidden: on a
+    /// machine whose process table never answers (a `ps`-less image, or any non-Unix
+    /// target, where nothing is ever signalled either) `close` stops removing entries at
+    /// all. That is the honest shape of a command that cannot close anything there, and an
+    /// entry whose process really did exit is dropped by `prune_dead` on the next save
+    /// anyway — `liveness` answers that question without `ps`.
+    #[must_use]
+    pub const fn entry_may_be_dropped(self) -> bool {
+        !matches!(self, Self::Unverified)
+    }
+}
+
+/// The executable behind `pid` per the process table, or `None` when that table would not
+/// answer — which is not the same fact and must not be reported as one.
+///
+/// Two doors reach the `None`, and only the first was ever checked. `ps` may not exist: a
+/// distroless or scratch image is exactly the audience a fully static musl binary is built
+/// for, and there `output()` fails to spawn. And a `ps` that exists may refuse the question:
+/// busybox's applet does not implement `-p <pid> -o comm=`, so it exits non-zero with an
+/// empty stdout, which `output()` reports as `Ok`. `orphans::process_table` already gates on
+/// `status.success()` for exactly this reason (`orphans.rs:86`); this is the same rule,
+/// applied to the other reader of the same table.
+///
+/// An empty name on a successful read is `None` too: [`kill_pid`] only asks after
+/// `liveness` has said the pid is not dead, so a table that answers about a process it holds
+/// and names nothing has told us nothing to classify.
+#[cfg(unix)]
+fn process_name(pid: u32) -> Option<String> {
+    let out = std::process::Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "comm="])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let comm = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!comm.is_empty()).then_some(comm)
+}
+
+/// What the two readings imply, as one pure function: `Some(outcome)` is a refusal to
+/// signal, `None` is the single path that goes on to signal.
+///
+/// Pure because the alternative is untestable. The reading it stands in for is a `ps`
+/// resolved through `PATH`, and a test cannot take `ps` away from itself — `set_var` is
+/// unsafe in edition 2024 and this crate forbids `unsafe` outside two audited spots. So the
+/// door that mattered (a table that will not answer) was never exercised, which is how it
+/// stayed wired to `Gone`.
+#[cfg(any(unix, test))]
+fn classify(existence: crate::session::Liveness, comm: Option<&str>) -> Option<KillOutcome> {
+    if existence == crate::session::Liveness::Dead {
+        return Some(KillOutcome::Gone);
+    }
+    match comm {
+        // `Alive` or `Unknown`, and no name for it. Both readings failed to produce a fact,
+        // and the pid is the only thing this invocation knows.
+        None => Some(KillOutcome::Unverified),
+        Some(comm) if !is_browser_process(comm) => Some(KillOutcome::NotABrowser),
+        Some(_) => None,
+    }
 }
 
 /// Kill a managed-browser process (best-effort, unix only). Killing the
@@ -92,22 +173,34 @@ pub enum KillOutcome {
 /// no longer names a browser, is left alone. The check-then-kill window is
 /// milliseconds — not zero, but no longer unbounded.
 ///
-/// Returns which of those three happened, so a caller can say so. Callers that kill
+/// Two questions, asked in that order rather than merged into one reading. "Does this pid
+/// exist" is [`crate::session::liveness`]: `kill(pid, 0)`, in-process, no subprocess, and
+/// already tri-state, so a pid the OS declines to classify is not rounded to gone. Only
+/// once that answer is not `Dead` is "is it a browser" worth asking, and only that second
+/// question needs the process table. Merging them is what made a `ps` this tool could not
+/// run report `Gone` — a statement about the process — for a pid it had never looked at.
+///
+/// Returns which of those four happened, so a caller can say so. Callers that kill
 /// on their way to relaunching (`run.rs`) or on interrupt (`main.rs`) discard it:
 /// they act the same either way.
+///
+/// One race is accepted and named: a process that exits between the `liveness` probe and
+/// the `ps` read makes `ps` exit non-zero, and this answers `Unverified` where `Gone` would
+/// have been exact. The window is one fork+exec, and "I did not establish it" is a weaker
+/// claim than the truth rather than a contradiction of it — the direction this whole module
+/// errs in.
 pub fn kill_pid(pid: u32) -> KillOutcome {
     #[cfg(unix)]
     {
-        let comm = std::process::Command::new("ps")
-            .args(["-p", &pid.to_string(), "-o", "comm="])
-            .output()
-            .ok()
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
-        let Some(comm) = comm.filter(|c| !c.is_empty()) else {
-            return KillOutcome::Gone;
-        };
-        if !is_browser_process(&comm) {
-            return KillOutcome::NotABrowser;
+        let existence = crate::session::liveness(pid);
+        // The process table is read only when the first question did not already settle it,
+        // so a dead pid costs no fork and, more to the point, cannot be misclassified by a
+        // `ps` that never ran.
+        let comm = (existence != crate::session::Liveness::Dead)
+            .then(|| process_name(pid))
+            .flatten();
+        if let Some(refusal) = classify(existence, comm.as_deref()) {
+            return refusal;
         }
         let _ = std::process::Command::new("kill")
             .arg(pid.to_string())
@@ -118,10 +211,16 @@ pub fn kill_pid(pid: u32) -> KillOutcome {
     }
     #[cfg(not(unix))]
     {
-        // No portable kill wired here, so nothing is ever signalled — and saying
-        // `Gone` would be a claim about the process this platform never checked.
+        // No portable kill is wired here and no portable probe either (`liveness` answers
+        // `Unknown` on every pid), so this platform signals nothing and checks nothing.
+        // `Gone` and `NotABrowser` are both claims about a process it never looked at —
+        // the second one being the lie it used to tell, since `close_message` then said the
+        // pid "now belongs to another process". `Unverified` is what actually happened.
+        // Consequence, deliberate: `close` here removes no session entry (see
+        // `KillOutcome::entry_may_be_dropped`), which is the honest shape of a command that
+        // cannot close anything — it used to drop the entry and leave the Chrome running.
         let _ = pid;
-        KillOutcome::NotABrowser
+        KillOutcome::Unverified
     }
 }
 
@@ -147,11 +246,16 @@ pub fn wait_until_gone(pid: u32, timeout: std::time::Duration) -> bool {
     }
 }
 
-/// What `close` says, given what the kill actually did. The entry leaves the store in
-/// all three cases — a pid that is gone or reused describes a browser that is already
-/// not running — but only one of them closed anything, and the other two name a pid
-/// this tool deliberately did not signal. Pure, so the wording is testable without
-/// spawning a browser.
+/// What `close` says, given what the kill actually did. Only one of the four closed
+/// anything; the other three name a pid this tool deliberately did not signal, and the
+/// sentence has to be the same statement as the act. Pure, so the wording is testable
+/// without spawning a browser.
+///
+/// Three of them also say `Removed session`, because the entry really does leave the store
+/// there — a pid that is gone or reused describes a browser that is already not running.
+/// `Unverified` is the one that does not, and its wording carries both halves of why:
+/// nothing was signalled, and nothing was established, so the browser may still be running
+/// and the entry is kept as the handle on it (`KillOutcome::entry_may_be_dropped`).
 #[must_use]
 pub fn close_message(browser_name: &str, pid: u32, outcome: KillOutcome) -> String {
     match outcome {
@@ -161,6 +265,10 @@ pub fn close_message(browser_name: &str, pid: u32, outcome: KillOutcome) -> Stri
         }
         KillOutcome::NotABrowser => format!(
             "Removed session={browser_name} (pid={pid} now belongs to another process and was left alone)"
+        ),
+        KillOutcome::Unverified => format!(
+            "Kept session={browser_name} (pid={pid} could not be checked against the process table, \
+             so nothing was signalled and the browser may still be running)"
         ),
     }
 }
@@ -206,7 +314,7 @@ mod tests {
         let signalled = close_message("s9", 80548, KillOutcome::Signalled);
         assert!(signalled.starts_with("Closed browser=s9"), "{signalled}");
 
-        for refused in [KillOutcome::NotABrowser, KillOutcome::Gone] {
+        for refused in [KillOutcome::NotABrowser, KillOutcome::Gone, KillOutcome::Unverified] {
             let message = close_message("s9", 80548, refused);
             assert!(
                 !message.contains("Closed"),
@@ -214,6 +322,68 @@ mod tests {
             );
             assert!(message.contains("80548"), "the pid left alone is the fact: {message}");
         }
+    }
+
+    /// The reading that classifies a pid can fail, and its failure used to be spelled
+    /// `Gone` — "pid was no longer running", a statement about the machine made by a
+    /// process that had just failed to look at it.
+    ///
+    /// Two doors, both reachable on the platform this binary is built to run everywhere on:
+    /// a distroless image has no `ps` at all (spawn fails), and a busybox `ps` refuses
+    /// `-p <pid> -o comm=` (non-zero exit, empty stdout — an `Ok` from `output()`, which is
+    /// why only the first door was ever checked). `process_name` collapses both to `None`;
+    /// what this pins is that `None` no longer means dead.
+    #[test]
+    fn a_process_table_that_will_not_answer_is_not_a_dead_process() {
+        use crate::session::Liveness;
+
+        for existence in [Liveness::Alive, Liveness::Unknown] {
+            assert_eq!(
+                classify(existence, None),
+                Some(KillOutcome::Unverified),
+                "a reading that did not happen is not a fact about the process ({existence:?})"
+            );
+        }
+
+        // The word has to stay true all the way to what a person reads and to what the
+        // store does. Neither may claim the browser is gone.
+        let message = close_message("s9", 80548, KillOutcome::Unverified);
+        assert!(!message.contains("no longer running"), "{message}");
+        assert!(!message.contains("another process"), "{message}");
+        assert!(message.contains("may still be running"), "{message}");
+        assert!(
+            !KillOutcome::Unverified.entry_may_be_dropped(),
+            "dropping the entry is how the browser it names becomes unreachable"
+        );
+
+        // And the other three are unchanged: each of them did establish something.
+        assert_eq!(classify(Liveness::Dead, None), Some(KillOutcome::Gone));
+        assert_eq!(classify(Liveness::Alive, Some("sleep")), Some(KillOutcome::NotABrowser));
+        assert_eq!(classify(Liveness::Alive, Some("Google Chrome")), None, "this one signals");
+        for settled in [KillOutcome::Signalled, KillOutcome::Gone, KillOutcome::NotABrowser] {
+            assert!(settled.entry_may_be_dropped(), "{settled:?} settles what the entry names");
+        }
+    }
+
+    /// `liveness` precedes `ps` rather than replacing it: a dead pid is answered without
+    /// spawning anything, so the classification of a gone browser no longer depends on a
+    /// process table being present. `Gone` stays reachable, and now for a measured reason.
+    #[test]
+    fn a_pid_that_is_gone_is_answered_without_the_process_table() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn a pid we can then make dead");
+        let pid = child.id();
+        child.kill().expect("signal the stand-in");
+        child.wait().expect("reap it, so the pid is genuinely free");
+
+        assert_eq!(
+            crate::session::liveness(pid),
+            crate::session::Liveness::Dead,
+            "the fixture did not produce a dead pid"
+        );
+        assert_eq!(kill_pid(pid), KillOutcome::Gone);
     }
 
     #[test]

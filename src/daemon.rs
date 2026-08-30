@@ -44,9 +44,18 @@ pub async fn run_daemon(socket_path: &Path) -> Result<(), DaemonError> {
         let mut interval = tokio::time::interval(HEARTBEAT_INTERVAL);
         loop {
             interval.tick().await;
-            // Heartbeat logic: try to load session and verify browser PIDs
-            let Ok(mut store) = session::load_session() else {
-                continue;
+            // Heartbeat logic: try to load session and verify browser PIDs.
+            // A store that will not load is reported, not swallowed: this loop's whole job
+            // is to keep the registry honest, and a silent `continue` every two seconds is
+            // a daemon that looks healthy while doing nothing. `eprintln!` is the whole
+            // remedy available — a heartbeat has no client to answer and launches no
+            // browser, so there is nothing to refuse.
+            let mut store = match session::load_session() {
+                Ok(store) => store,
+                Err(e) => {
+                    eprintln!("daemon heartbeat: could not read the session store: {e}");
+                    continue;
+                }
             };
             let before = store.browsers.len();
             session::cleanup_stale(&mut store);
@@ -155,7 +164,14 @@ fn process_command(line: &str) -> (serde_json::Value, bool) {
         "ping" => (serde_json::json!({"ok": true, "data": "pong"}), false),
 
         "status" => {
-            let store = session::load_session().unwrap_or_default();
+            // A store that would not load answers an empty browser list, which reads as
+            // "this daemon knows of no browser" — a statement about the machine made by a
+            // read that failed. The list stays empty (there is nothing truthful to put in
+            // it) and the reason goes to stderr, where the daemon's other diagnostics go.
+            let store = session::load_session().unwrap_or_else(|e| {
+                eprintln!("daemon status: could not read the session store: {e}");
+                session::SessionStore::default()
+            });
             let browsers: Vec<&str> = store.browsers.keys().map(std::string::String::as_str).collect();
             (
                 serde_json::json!({
