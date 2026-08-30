@@ -12,12 +12,11 @@ pub async fn run(client: &CdpClient, target: &str) -> Result<String, crate::BoxE
         // child frame.
         let js = format!(
             r"(() => {{
-                const el = document.querySelector({sel});
-                if (!el) throw new Error('No element matches selector: ' + {sel});
+                {bind}
                 if (el.tagName !== 'IFRAME') throw new Error('Element is not an <iframe>');
                 return el;
             }})()",
-            sel = serde_json::to_string(target).unwrap_or_default()
+            bind = crate::element_selector::bind_element_js(target)
         );
         let mut params = serde_json::json!({"expression": js});
         // Resolve inside the currently bound frame, so nested iframes can be descended into.
@@ -26,36 +25,40 @@ pub async fn run(client: &CdpClient, target: &str) -> Result<String, crate::BoxE
         }
         let result: serde_json::Value = client.call("Runtime.evaluate", params).await?;
 
-        if let Some(exc) = result.get("exceptionDetails") {
-            let msg = exc.get("exception")
-                .and_then(|ex| ex.get("description"))
-                .and_then(|d| d.as_str())
-                .or_else(|| exc.get("text").and_then(|t| t.as_str()))
-                .unwrap_or("unknown error");
-            return Err(msg.into());
+        if let Some(thrown) = crate::element::js_exception(&result) {
+            return Err(thrown.into());
         }
 
-        let object_id = result.get("result")
+        let object_id = result
+            .get("result")
             .and_then(|r| r.get("objectId"))
             .and_then(|id| id.as_str())
             .ok_or("Could not resolve iframe element")?;
 
         // Map the iframe element to the frameId of the document it hosts.
         let described: serde_json::Value = client
-            .call("DOM.describeNode", serde_json::json!({"objectId": object_id}))
+            .call(
+                "DOM.describeNode",
+                serde_json::json!({"objectId": object_id}),
+            )
             .await?;
-        let frame_id = described.get("node")
+        let frame_id = described
+            .get("node")
             .and_then(|n| n.get("frameId"))
             .and_then(|id| id.as_str())
             .ok_or("Could not determine the iframe's frameId")?
             .to_string();
 
         let world: serde_json::Value = client
-            .call("Page.createIsolatedWorld", serde_json::json!({
-                "frameId": frame_id,
-            }))
+            .call(
+                "Page.createIsolatedWorld",
+                serde_json::json!({
+                    "frameId": frame_id,
+                }),
+            )
             .await?;
-        let context_id = world.get("executionContextId")
+        let context_id = world
+            .get("executionContextId")
             .and_then(serde_json::Value::as_i64)
             .ok_or("Could not get execution context for iframe")?;
 
@@ -64,6 +67,8 @@ pub async fn run(client: &CdpClient, target: &str) -> Result<String, crate::BoxE
             context_id,
         }));
 
-        Ok(format!("Switched to iframe '{target}' (frameId={frame_id})"))
+        Ok(format!(
+            "Switched to iframe '{target}' (frameId={frame_id})"
+        ))
     }
 }

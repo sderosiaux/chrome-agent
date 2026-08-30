@@ -89,12 +89,14 @@ fn a_save_removes_only_the_unreferenced_unheld_and_idle_profile() {
     profile(&home, "orphan-fresh");
     // Orphaned and idle, but its SingletonLock names a running process.
     let locked = profile(&home, "orphan-locked");
-    let mut child = Command::new("sleep").arg("30").spawn().expect("stand-in for a live Chrome");
-    let host = String::from_utf8_lossy(
-        &Command::new("hostname").output().expect("hostname").stdout,
-    )
-    .trim()
-    .to_string();
+    let mut child = Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .expect("stand-in for a live Chrome");
+    let host =
+        String::from_utf8_lossy(&Command::new("hostname").output().expect("hostname").stdout)
+            .trim()
+            .to_string();
     std::os::unix::fs::symlink(
         format!("{host}-{}", child.id()),
         locked.join("chromium-profile").join("SingletonLock"),
@@ -107,7 +109,10 @@ fn a_save_removes_only_the_unreferenced_unheld_and_idle_profile() {
     assert_eq!(code, 0, "close should succeed");
 
     let left = present(&home);
-    assert!(!left.contains("orphan-old"), "the idle orphan survived: {left:?}");
+    assert!(
+        !left.contains("orphan-old"),
+        "the idle orphan survived: {left:?}"
+    );
     for kept in ["in-store", "orphan-fresh", "orphan-locked"] {
         assert!(left.contains(kept), "{kept} was removed; left = {left:?}");
     }
@@ -161,7 +166,10 @@ fn concurrent_saves_do_not_delete_each_others_fresh_profiles() {
 
     let left = present(&home);
     for fresh in ["agent-a", "agent-b"] {
-        assert!(left.contains(fresh), "{fresh}'s fresh profile was deleted; left = {left:?}");
+        assert!(
+            left.contains(fresh),
+            "{fresh}'s fresh profile was deleted; left = {left:?}"
+        );
     }
 
     std::fs::remove_dir_all(&home).ok();
@@ -184,7 +192,9 @@ fn purge_orphans_sweeps_the_whole_backlog_at_once() {
     let left = present(&home);
     assert_eq!(
         left,
-        ["in-store".to_string(), "fresh".to_string()].into_iter().collect::<HashSet<_>>(),
+        ["in-store".to_string(), "fresh".to_string()]
+            .into_iter()
+            .collect::<HashSet<_>>(),
         "purge-orphans removed the wrong set"
     );
 
@@ -198,14 +208,24 @@ fn a_directory_that_is_not_a_profile_survives() {
     let notes = browsers(&home).join("notes");
     std::fs::create_dir_all(&notes).unwrap();
     std::fs::write(notes.join("keep.txt"), "mine").unwrap();
-    Command::new("touch").args(["-m", "-t", "202001010000"]).arg(&notes).status().unwrap();
+    Command::new("touch")
+        .args(["-m", "-t", "202001010000"])
+        .arg(&notes)
+        .status()
+        .unwrap();
     age(&profile(&home, "orphan-old"));
 
     let (_, code) = run_in(&home, &["close", "--purge-orphans"]);
     assert_eq!(code, 0);
 
-    assert!(notes.join("keep.txt").exists(), "a foreign directory was deleted");
-    assert!(!browsers(&home).join("orphan-old").exists(), "the orphan survived");
+    assert!(
+        notes.join("keep.txt").exists(),
+        "a foreign directory was deleted"
+    );
+    assert!(
+        !browsers(&home).join("orphan-old").exists(),
+        "the orphan survived"
+    );
 
     std::fs::remove_dir_all(&home).ok();
 }

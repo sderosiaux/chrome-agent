@@ -9,13 +9,15 @@ mod common;
 use common::TestBrowser;
 
 fn run_cli(args: &[&str]) -> (String, i32) {
-    let output = Command::new(common::binary()).args(args).output().expect("Failed to run chrome-agent");
+    let output = Command::new(common::binary())
+        .args(args)
+        .output()
+        .expect("Failed to run chrome-agent");
     (
         String::from_utf8_lossy(&output.stdout).to_string(),
         output.status.code().unwrap_or(-1),
     )
 }
-
 
 fn open(browser: &str, fixture: &str) -> bool {
     if !common::browser_ready() {
@@ -47,13 +49,22 @@ fn guard_dispatches_through_an_inert_overlay() {
     }
     let _ = eval(b.name(), "window.receiver = null; 1");
     let (stdout, code) = run_cli(&[
-        "--browser", b.name(), "--json", "--on-intercept", "guard",
-        "click", "--selector", "#target",
+        "--browser",
+        b.name(),
+        "--json",
+        "--on-intercept",
+        "guard",
+        "click",
+        "--selector",
+        "#target",
     ]);
     assert_eq!(code, 0, "guard must not refuse an inert receiver: {stdout}");
     let response: Value = serde_json::from_str(&stdout).expect("JSON click response");
     assert_eq!(response["ok"], Value::Bool(true));
-    assert_eq!(response["delivery"], "intercepted", "the scrim still occupies the point");
+    assert_eq!(
+        response["delivery"], "intercepted",
+        "the scrim still occupies the point"
+    );
     assert_eq!(
         response["intercepted_by"]["actionable"],
         Value::Bool(false),
@@ -77,15 +88,27 @@ fn guard_refuses_an_actionable_overlay() {
     }
     let _ = eval(b.name(), "window.receiver = null; 1");
     let (stdout, code) = run_cli(&[
-        "--browser", b.name(), "--json", "--on-intercept", "guard",
-        "click", "--selector", "#target",
+        "--browser",
+        b.name(),
+        "--json",
+        "--on-intercept",
+        "guard",
+        "click",
+        "--selector",
+        "#target",
     ]);
-    assert_ne!(code, 0, "a refusal is a failure the caller has to handle: {stdout}");
+    assert_ne!(
+        code, 0,
+        "a refusal is a failure the caller has to handle: {stdout}"
+    );
     let response: Value = serde_json::from_str(&stdout).expect("JSON error response");
     assert_eq!(response["ok"], Value::Bool(false));
     assert_eq!(response["dispatched"], Value::Bool(false));
     let error = response["error"].as_str().unwrap_or_default();
-    assert!(error.contains("button#accept"), "the refusal names the receiver: {error}");
+    assert!(
+        error.contains("button#accept"),
+        "the refusal names the receiver: {error}"
+    );
     assert!(
         error.contains("--on-intercept guard judged it a control"),
         "the reason is guard's own, not a hardcoded 'refuse was set': {error}"
@@ -109,7 +132,12 @@ fn dispatch_accepts_the_consent_wall_on_the_callers_behalf() {
     }
     let _ = eval(b.name(), "window.receiver = null; 1");
     let (stdout, code) = run_cli(&[
-        "--browser", b.name(), "--json", "click", "--selector", "#target",
+        "--browser",
+        b.name(),
+        "--json",
+        "click",
+        "--selector",
+        "#target",
     ]);
     assert_eq!(code, 0, "{stdout}");
     assert_eq!(
@@ -131,10 +159,19 @@ fn guard_refuses_an_iframe_receiver_even_when_its_content_is_inert() {
     }
     let _ = eval(b.name(), "window.receiver = null; 1");
     let (stdout, code) = run_cli(&[
-        "--browser", b.name(), "--json", "--on-intercept", "guard",
-        "click", "--selector", "#target",
+        "--browser",
+        b.name(),
+        "--json",
+        "--on-intercept",
+        "guard",
+        "click",
+        "--selector",
+        "#target",
     ]);
-    assert_ne!(code, 0, "an iframe receiver refuses under guard regardless of actionable: {stdout}");
+    assert_ne!(
+        code, 0,
+        "an iframe receiver refuses under guard regardless of actionable: {stdout}"
+    );
     let response: Value = serde_json::from_str(&stdout).expect("JSON error response");
     assert_eq!(response["ok"], Value::Bool(false));
     assert_eq!(response["intercepted_by"]["iframe"], Value::Bool(true));
@@ -153,16 +190,33 @@ fn dispatch_and_refuse_are_unchanged_by_guards_arrival() {
         return;
     }
     let (_, code) = run_cli(&[
-        "--browser", b.name(), "--json", "--on-intercept", "refuse",
-        "click", "--selector", "#target",
+        "--browser",
+        b.name(),
+        "--json",
+        "--on-intercept",
+        "refuse",
+        "click",
+        "--selector",
+        "#target",
     ]);
     assert_ne!(code, 0, "refuse still refuses an iframe receiver");
 
     let (stdout, code) = run_cli(&[
-        "--browser", b.name(), "--json", "click", "--selector", "#target",
+        "--browser",
+        b.name(),
+        "--json",
+        "click",
+        "--selector",
+        "#target",
     ]);
-    assert_eq!(code, 0, "dispatch (default) still sends the click: {stdout}");
+    assert_eq!(
+        code, 0,
+        "dispatch (default) still sends the click: {stdout}"
+    );
     let response: Value = serde_json::from_str(&stdout).expect("JSON response");
     assert_eq!(response["ok"], Value::Bool(true));
-    assert!(response["dispatched"].is_null(), "a successful dispatch says nothing here");
+    assert!(
+        response["dispatched"].is_null(),
+        "a successful dispatch says nothing here"
+    );
 }

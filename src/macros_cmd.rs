@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::cli::{Cli, MacroAction};
 use crate::macros::Macro;
@@ -16,8 +16,10 @@ pub async fn run_cli(cli: &Cli, action: &MacroAction) -> Result<(), crate::BoxEr
         MacroAction::List => {
             let names = crate::macros::list();
             if json_mode {
-                let summaries: Vec<Value> =
-                    names.iter().map(|name| crate::macros::summary(name)).collect();
+                let summaries: Vec<Value> = names
+                    .iter()
+                    .map(|name| crate::macros::summary(name))
+                    .collect();
                 println!("{}", json!({"ok": true, "macros": summaries}));
             } else if names.is_empty() {
                 println!(
@@ -44,7 +46,11 @@ pub async fn run_cli(cli: &Cli, action: &MacroAction) -> Result<(), crate::BoxEr
                 print!("{}", render(&macro_file));
             }
         }
-        MacroAction::Record { name, from_recording, from } => {
+        MacroAction::Record {
+            name,
+            from_recording,
+            from,
+        } => {
             let report = record_from_recording(name, from_recording, *from)?;
             if json_mode {
                 println!("{report}");
@@ -62,8 +68,10 @@ pub async fn run_cli(cli: &Cli, action: &MacroAction) -> Result<(), crate::BoxEr
                     print!("{}", crate::macros_run::render_run(&report));
                 }
             } else {
-                // A guard that did not hold fails the run, so a chaining shell sees it. Exit
-                // `1`, not `2`: `2` belongs to `assert`.
+                // A guard that did not hold fails the run, so a chaining shell sees it. Which
+                // code it fails with is `Stopped`'s to answer, off the report's own
+                // `stopped_by`: `2` when a guard ran and the page disagreed (the same claim
+                // class as `assert`), `1` when the run never got that far.
                 return Err(Box::new(crate::macros_run::Stopped::new(report, json_mode)));
             }
         }
@@ -75,9 +83,9 @@ pub async fn run_cli(cli: &Cli, action: &MacroAction) -> Result<(), crate::BoxEr
 pub fn parse_vars(pairs: &[String]) -> Result<BTreeMap<String, String>, crate::BoxError> {
     let mut vars = BTreeMap::new();
     for pair in pairs {
-        let (key, value) = pair.split_once('=').ok_or_else(|| {
-            format!("--var expects name=value, got '{pair}'. Nothing was run.")
-        })?;
+        let (key, value) = pair
+            .split_once('=')
+            .ok_or_else(|| format!("--var expects name=value, got '{pair}'. Nothing was run."))?;
         if key.is_empty() {
             return Err(format!("--var '{pair}' has no name. Nothing was run.").into());
         }
@@ -99,10 +107,16 @@ pub fn record_from_recording(
     let mut snapshot: Option<String> = None;
     let mut history: Vec<Observed> = Vec::new();
     for line in text.lines().filter(|line| !line.trim().is_empty()) {
-        let Ok(entry) = serde_json::from_str::<Value>(line) else { continue };
+        let Ok(entry) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
         let cmd = entry.get("cmd").unwrap_or(&Value::Null);
         let response = entry.get("response").unwrap_or(&Value::Null);
-        history.push(Observed::read_with_snapshot(cmd, response, snapshot.as_deref()));
+        history.push(Observed::read_with_snapshot(
+            cmd,
+            response,
+            snapshot.as_deref(),
+        ));
         if let Some(fresh) = response.get("snapshot").and_then(Value::as_str) {
             snapshot = Some(fresh.to_string());
         }
@@ -127,7 +141,12 @@ pub fn save_distilled(
     let start = from.unwrap_or_else(|| macros_record::default_start(history));
     let distilled = macros_record::distil(name, history, start)?;
     let path = distilled.macro_file.save()?;
-    let unguarded = distilled.macro_file.steps.iter().filter(|s| s.expect.is_empty()).count();
+    let unguarded = distilled
+        .macro_file
+        .steps
+        .iter()
+        .filter(|s| s.expect.is_empty())
+        .count();
     Ok(json!({
         "ok": true,
         "macro": distilled.macro_file.name,
@@ -148,7 +167,10 @@ pub fn save_distilled(
 /// `{"cmd":"macro", …}` inside a pipe session, distilling the session's own history — which is
 /// what lets an agent ask for a task to be kept only after finding out that it worked.
 pub fn dispatch_pipe(cmd: &Value, history: &[Observed]) -> Result<Value, crate::BoxError> {
-    let action = cmd.get("action").and_then(Value::as_str).unwrap_or("record");
+    let action = cmd
+        .get("action")
+        .and_then(Value::as_str)
+        .unwrap_or("record");
     match action {
         "record" => {
             let name = cmd
@@ -163,7 +185,10 @@ pub fn dispatch_pipe(cmd: &Value, history: &[Observed]) -> Result<Value, crate::
             "macros": crate::macros::list().iter().map(|n| crate::macros::summary(n)).collect::<Vec<_>>()
         })),
         "show" => {
-            let name = cmd.get("name").and_then(Value::as_str).ok_or("macro show: give it a \"name\".")?;
+            let name = cmd
+                .get("name")
+                .and_then(Value::as_str)
+                .ok_or("macro show: give it a \"name\".")?;
             Ok(json!({"ok": true, "macro": Macro::load(name)?}))
         }
         other => Err(format!(
@@ -185,13 +210,24 @@ fn render(macro_file: &Macro) -> String {
         out.push_str(&format!(
             "param: {name}{}{}\n",
             if param.required { " (required)" } else { "" },
-            if param.secret { " SECRET — never stored, pass it every run" } else { "" }
+            if param.secret {
+                " SECRET — never stored, pass it every run"
+            } else {
+                ""
+            }
         ));
     }
     for (index, step) in macro_file.steps.iter().enumerate() {
-        let verb = step.action.get("cmd").and_then(Value::as_str).unwrap_or("?");
+        let verb = step
+            .action
+            .get("cmd")
+            .and_then(Value::as_str)
+            .unwrap_or("?");
         let guards = serde_json::to_string(&step.expect).unwrap_or_default();
-        out.push_str(&format!("{index}. {verb} {}\n", compact_action(&step.action)));
+        out.push_str(&format!(
+            "{index}. {verb} {}\n",
+            compact_action(&step.action)
+        ));
         if let Some(reason) = &step.unguarded {
             out.push_str(&format!("   UNGUARDED — {reason}\n"));
         } else {
@@ -214,7 +250,9 @@ fn compact_action(action: &Value) -> String {
 fn render_record(report: &Value) -> String {
     let mut out = format!(
         "Recorded {} step(s) as '{}' ({})\n",
-        report["steps"], report["macro"], report["path"].as_str().unwrap_or_default()
+        report["steps"],
+        report["macro"],
+        report["path"].as_str().unwrap_or_default()
     );
     out.push_str(&format!(
         "started at entry {} ({})\n",
@@ -230,12 +268,12 @@ fn render_record(report: &Value) -> String {
     for refusal in report["refused"].as_array().into_iter().flatten() {
         out.push_str(&format!(
             "REFUSED entry {}: {}\n",
-            refusal["index"], refusal["reason"].as_str().unwrap_or_default()
+            refusal["index"],
+            refusal["reason"].as_str().unwrap_or_default()
         ));
     }
     out
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -243,7 +281,9 @@ mod tests {
 
     #[test]
     fn a_var_without_an_equals_is_refused_before_anything_runs() {
-        let error = parse_vars(&["email".to_string()]).expect_err("no =").to_string();
+        let error = parse_vars(&["email".to_string()])
+            .expect_err("no =")
+            .to_string();
         assert!(error.contains("name=value"), "{error}");
         assert!(error.contains("Nothing was run"), "{error}");
         let vars = parse_vars(&["email=a@b.c".to_string(), "q=x=y".to_string()]).unwrap();

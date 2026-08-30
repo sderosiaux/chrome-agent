@@ -10,7 +10,10 @@ mod common;
 use common::TestBrowser;
 
 fn run_cli(args: &[&str]) -> (String, i32) {
-    let output = Command::new(common::binary()).args(args).output().expect("Failed to run chrome-agent");
+    let output = Command::new(common::binary())
+        .args(args)
+        .output()
+        .expect("Failed to run chrome-agent");
     (
         String::from_utf8_lossy(&output.stdout).to_string(),
         output.status.code().unwrap_or(-1),
@@ -46,7 +49,10 @@ fn uid_for(browser: &str, needles: &[&str]) -> String {
     let (stdout, code) = run_cli(&["--browser", browser, "--json", "inspect"]);
     assert_eq!(code, 0, "{stdout}");
     let snapshot: Value = serde_json::from_str(&stdout).expect("JSON inspect");
-    let text = snapshot["snapshot"].as_str().unwrap_or_default().to_string();
+    let text = snapshot["snapshot"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
     text.lines()
         .find(|line| needles.iter().all(|n| line.contains(n)))
         .and_then(|line| line.trim_start().strip_prefix("uid="))
@@ -65,7 +71,10 @@ fn click(browser: &str, args: &[&str]) -> Value {
 
 /// Reset focus, so two clicks are compared from the same starting state.
 fn blur(browser: &str) {
-    let _ = eval(browser, "document.activeElement && document.activeElement.blur(); 1");
+    let _ = eval(
+        browser,
+        "document.activeElement && document.activeElement.blur(); 1",
+    );
 }
 
 // --- The overlay -----------------------------------------------------------
@@ -83,8 +92,15 @@ fn a_covered_button_reports_the_element_that_took_the_click() {
         let _ = eval(b.name(), "window.receiver = null; 1");
         let response = click(b.name(), &aim);
 
-        assert_eq!(response["ok"], Value::Bool(true), "the click is still delivered: {response}");
-        assert_eq!(response["verdict"], "intercepted", "aimed via {aim:?}: {response}");
+        assert_eq!(
+            response["ok"],
+            Value::Bool(true),
+            "the click is still delivered: {response}"
+        );
+        assert_eq!(
+            response["verdict"], "intercepted",
+            "aimed via {aim:?}: {response}"
+        );
         assert_eq!(response["verdict_reason"], "hit_test_receiver");
         assert_eq!(response["delivery"], "intercepted");
         assert_eq!(
@@ -97,7 +113,10 @@ fn a_covered_button_reports_the_element_that_took_the_click() {
             "the response still names the node that was aimed at: {response}"
         );
         assert!(
-            response["verdict_hint"].as_str().unwrap_or_default().contains("div#scrim"),
+            response["verdict_hint"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("div#scrim"),
             "the hint has to say which element to deal with: {response}"
         );
         assert_eq!(
@@ -117,14 +136,70 @@ fn refusing_an_interception_dispatches_nothing() {
     }
     let _ = eval(b.name(), "window.receiver = null; 1");
     let (stdout, code) = run_cli(&[
-        "--browser", b.name(), "--json", "--on-intercept", "refuse",
-        "click", "--selector", "#target",
+        "--browser",
+        b.name(),
+        "--json",
+        "--on-intercept",
+        "refuse",
+        "click",
+        "--selector",
+        "#target",
     ]);
-    assert_ne!(code, 0, "a refusal is a failure the caller has to handle: {stdout}");
+    assert_ne!(
+        code, 0,
+        "a refusal is a failure the caller has to handle: {stdout}"
+    );
     let response: Value = serde_json::from_str(&stdout).expect("JSON error response");
     assert_eq!(response["ok"], Value::Bool(false));
     let error = response["error"].as_str().unwrap_or_default();
-    assert!(error.contains("div#scrim"), "the refusal names the receiver: {error}");
+    assert!(
+        error.contains("div#scrim"),
+        "the refusal names the receiver: {error}"
+    );
+    assert_eq!(
+        eval(b.name(), "window.receiver"),
+        Value::Null,
+        "refuse means nothing was dispatched — not even to the overlay"
+    );
+}
+
+/// `dblclick` aims through the SAME path as `click` (`element::aim_and_dispatch`), so it must
+/// refuse on the same measurement — and say so in its own word. The two verbs were two copies of
+/// the aim path, which is how one of them could have kept a rule the other lost.
+#[test]
+fn a_double_click_refuses_on_the_same_interception_and_in_its_own_word() {
+    let b = TestBrowser::new("hit-overlay-refuse-dblclick");
+    if !open(b.name(), "click_overlay.html") {
+        return;
+    }
+    let _ = eval(b.name(), "window.receiver = null; 1");
+    let (stdout, code) = run_cli(&[
+        "--browser",
+        b.name(),
+        "--json",
+        "--on-intercept",
+        "refuse",
+        "dblclick",
+        "--selector",
+        "#target",
+    ]);
+    assert_ne!(
+        code, 0,
+        "a refusal is a failure the caller has to handle: {stdout}"
+    );
+    let response: Value = serde_json::from_str(&stdout).expect("JSON error response");
+    assert_eq!(response["ok"], Value::Bool(false));
+    let error = response["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("div#scrim"),
+        "the refusal names the receiver: {error}"
+    );
+    assert!(
+        error.contains("double-click"),
+        "the refusal is written in the verb that was refused: {error}"
+    );
+    assert_eq!(response["delivery"], "intercepted", "{response}");
+    assert_eq!(response["dispatched"], Value::Bool(false), "{response}");
     assert_eq!(
         eval(b.name(), "window.receiver"),
         Value::Null,
@@ -151,7 +226,10 @@ fn a_smooth_scrolling_page_lands_or_says_it_could_not_aim() {
         );
         assert_eq!(response["delivery"], "not_settled");
         assert!(
-            response["message"].as_str().unwrap_or_default().starts_with("Did not click"),
+            response["message"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("Did not click"),
             "an action that dispatched nothing must not answer \"Clicked\": {response}"
         );
     }
@@ -192,7 +270,10 @@ fn a_button_inside_an_open_shadow_root_is_hit_not_intercepted() {
     let response = click(b.name(), &[uid.as_str()]);
     assert_eq!(response["delivery"], "target_hit", "{response}");
     assert_ne!(response["verdict"], "intercepted");
-    assert_eq!(eval(b.name(), "document.title"), Value::String("inner clicked".into()));
+    assert_eq!(
+        eval(b.name(), "document.title"),
+        Value::String("inner clicked".into())
+    );
 }
 
 /// A modal gets the `modal_dialog` reason, not `blocked`: the recovery is to close it.
@@ -253,7 +334,10 @@ fn a_synthetic_click_reports_that_it_was_synthetic() {
         response["verdict"], "no_effect",
         "and it cannot prove delivery either: {response}"
     );
-    assert_eq!(eval(b.name(), "document.title"), Value::String("js clicked".into()));
+    assert_eq!(
+        eval(b.name(), "document.title"),
+        Value::String("js clicked".into())
+    );
 }
 
 // --- `no_effect` and the limits on it ---------------------------------------
@@ -272,15 +356,24 @@ fn an_uncovered_listenerless_button_reports_no_effect_by_either_route() {
         // Focus is state and a click moves it: both aims start from none.
         blur(b.name());
         let response = click(b.name(), &aim);
-        assert_eq!(response["delivery"], "target_hit", "aimed via {aim:?}: {response}");
-        assert_eq!(response["verdict"], "no_effect", "aimed via {aim:?}: {response}");
+        assert_eq!(
+            response["delivery"], "target_hit",
+            "aimed via {aim:?}: {response}"
+        );
+        assert_eq!(
+            response["verdict"], "no_effect",
+            "aimed via {aim:?}: {response}"
+        );
         assert!(
             response["observed_after_ms"].as_u64().is_some(),
             "`no_effect` is a claim about a window and must carry it: {response}"
         );
         let hint = response["verdict_hint"].as_str().unwrap_or_default();
         for blind_spot in ["canvas", "CSS-only", "after the window"] {
-            assert!(hint.contains(blind_spot), "the hint omits {blind_spot}: {hint}");
+            assert!(
+                hint.contains(blind_spot),
+                "the hint omits {blind_spot}: {hint}"
+            );
         }
         verdicts.push(response["verdict"].clone());
     }
@@ -300,7 +393,10 @@ fn a_target_inside_an_iframe_is_clicked_but_not_judged() {
     session.send(&serde_json::json!({"cmd": "goto", "url": url}));
     session.send(&serde_json::json!({"cmd": "frame", "target": "#shop"}));
     let snapshot = session.send(&serde_json::json!({"cmd": "inspect"}));
-    let text = snapshot["snapshot"].as_str().unwrap_or_default().to_string();
+    let text = snapshot["snapshot"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
     let uid = text
         .lines()
         .find(|line| line.contains("button"))
@@ -378,7 +474,10 @@ impl PipeSession {
             .spawn()
             .expect("spawn pipe");
         let stdout = child.stdout.take().expect("pipe stdout");
-        Self { child, responses: std::io::BufReader::new(stdout).lines() }
+        Self {
+            child,
+            responses: std::io::BufReader::new(stdout).lines(),
+        }
     }
 
     fn send(&mut self, cmd: &Value) -> Value {

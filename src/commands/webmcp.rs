@@ -30,7 +30,11 @@ pub const NO_MODEL_CONTEXT_FRAME_MARKER: &str = "chrome-agent: document.modelCon
 pub const UNKNOWN_TOOL_PREFIX: &str = "chrome-agent: no WebMCP tool named";
 
 fn guard_js(frame_scoped: bool) -> String {
-    let marker = if frame_scoped { NO_MODEL_CONTEXT_FRAME_MARKER } else { NO_MODEL_CONTEXT_MARKER };
+    let marker = if frame_scoped {
+        NO_MODEL_CONTEXT_FRAME_MARKER
+    } else {
+        NO_MODEL_CONTEXT_MARKER
+    };
     format!(
         "if (typeof document.modelContext === 'undefined') {{ throw new Error({}); }}",
         serde_json::to_string(marker).expect("string literal always encodes")
@@ -82,8 +86,14 @@ pub async fn list_tools(client: &CdpClient) -> Result<ToolList, crate::BoxError>
         guard = guard_js(frame_scoped),
     );
     let raw = eval::run_raw(client, &expr).await?;
-    let tools = raw.as_array().map(|arr| arr.iter().map(tool_summary).collect()).unwrap_or_default();
-    Ok(ToolList { tools, frame_scoped })
+    let tools = raw
+        .as_array()
+        .map(|arr| arr.iter().map(tool_summary).collect())
+        .unwrap_or_default();
+    Ok(ToolList {
+        tools,
+        frame_scoped,
+    })
 }
 
 /// What `executeTool` returned — the tool's own claim. Whether the page moved is a separate
@@ -132,15 +142,58 @@ pub async fn call_tool(
         guard = guard_js(frame_scoped),
     );
     let raw = eval::run_raw(client, &expr).await?;
-    let tool = raw.get("name").and_then(Value::as_str).unwrap_or(name).to_string();
+    let tool = raw
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or(name)
+        .to_string();
     let declared_result = raw
         .get("result")
         .and_then(Value::as_str)
         .ok_or("webmcp call: executeTool() produced no readable result")?
         .to_string();
-    let declared_result_was_string = raw.get("wasString").and_then(Value::as_bool).unwrap_or(false);
-    Ok(ToolCallOutcome { tool, declared_result, declared_result_was_string, frame_scoped })
+    let declared_result_was_string = raw
+        .get("wasString")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    Ok(ToolCallOutcome {
+        tool,
+        declared_result,
+        declared_result_was_string,
+        frame_scoped,
+    })
 }
+
+/// What one `webmcp call` reports, in every mode. The tool's own claim (`declared_result`,
+/// parsed beside it when it happens to be JSON) and the two facts qualifying it; whether the page
+/// actually moved is the change report's answer, attached by the caller.
+///
+/// One builder: the CLI arm and `dispatch_webmcp_call` each constructed this object, down to the
+/// order of the three conditional keys.
+#[must_use]
+pub fn call_report(outcome: &ToolCallOutcome) -> Value {
+    let mut out = serde_json::json!({
+        "ok": true,
+        "message": format!("Called WebMCP tool '{}'", outcome.tool),
+        "tool": outcome.tool,
+        "declared_result": outcome.declared_result,
+    });
+    if let Ok(parsed) = serde_json::from_str::<Value>(&outcome.declared_result) {
+        out["declared_result_parsed"] = parsed;
+    }
+    if !outcome.declared_result_was_string {
+        out["declared_result_was_string"] = Value::Bool(false);
+    }
+    if outcome.frame_scoped {
+        out["frame_scoped"] = Value::Bool(true);
+    }
+    out
+}
+
+/// The note a `list` scoped to a bound frame carries: an empty result there is unproven, not
+/// "this frame has none".
+pub const FRAME_SCOPED_LIST_NOTE: &str = "note: scoped to the bound frame's isolated world — a tool the frame registered from its own \
+     main-world script is invisible here; an empty list is not proof this frame has none.";
 
 /// Text-mode `webmcp list`: one line per tool, with the absent `outputSchema` stated once.
 #[must_use]
@@ -194,7 +247,10 @@ mod tests {
         });
         let summary = tool_summary(&raw);
         assert_eq!(summary["input_schema_raw"], "{not json");
-        assert!(summary.get("input_schema").is_none(), "an unparseable schema must not fabricate one");
+        assert!(
+            summary.get("input_schema").is_none(),
+            "an unparseable schema must not fabricate one"
+        );
     }
 
     #[test]
@@ -202,11 +258,18 @@ mod tests {
         let tools = vec![json!({"name": "a", "description": "d"})];
         let text = render_list_text(&tools);
         assert!(text.contains("tool=a \"d\""));
-        assert_eq!(text.matches("outputSchema").count(), 1, "stated once, not per tool: {text}");
+        assert_eq!(
+            text.matches("outputSchema").count(),
+            1,
+            "stated once, not per tool: {text}"
+        );
     }
 
     #[test]
     fn render_list_text_names_an_empty_page_plainly() {
-        assert_eq!(render_list_text(&[]), "No WebMCP tools registered on this page.");
+        assert_eq!(
+            render_list_text(&[]),
+            "No WebMCP tools registered on this page."
+        );
     }
 }

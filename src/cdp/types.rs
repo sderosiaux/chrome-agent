@@ -377,7 +377,10 @@ mod serde_proof {
         let err = serde_json::from_str::<BoxModel>(r#"{"border":[0,0,1,0,1,1,0,1]}"#)
             .expect_err("content is read, so it is still demanded")
             .to_string();
-        assert!(err.contains("content"), "expected a missing-field error naming content: {err}");
+        assert!(
+            err.contains("content"),
+            "expected a missing-field error naming content: {err}"
+        );
 
         // Same on the other three, whose unread fields were required too.
         assert!(serde_json::from_str::<ExceptionDetails>(r#"{"text":"ReferenceError"}"#).is_ok());

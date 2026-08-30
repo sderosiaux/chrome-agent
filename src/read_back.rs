@@ -4,8 +4,44 @@
 //! All four write ONE key, `value`, as `{requested, actual, verbatim}`, because
 //! `pipe_report::postcondition_from_response` reads exactly that key to decide whether an action
 //! has evidence about its own target (rung 11 of the `verdict` ladder).
+//!
+//! It also owns [`SECRET_FIELD`], the predicate deciding whether those fields may carry a value
+//! at all, so the rule and the reports it gates sit in one file. Split from `element.rs` for the
+//! 1000-line cap and re-exported as `element::SECRET_FIELD`, so no call site moved.
 
 use serde_json::json;
+
+/// Whether a field holds something that must never be printed, as a JS expression over `el`.
+/// Shared by `fill` (uid and selector), `type`, `select`, `assert value`, the accessibility-tree
+/// redaction and the `values_lost` report, because it gates what reaches stdout, the transcript
+/// and any `--record` file. Every caller inlines it where `el` is already bound, so it stays one
+/// self-contained expression.
+///
+/// Four rules, because `type === 'password'` alone is a STRUCTURAL claim and three families of
+/// secret never make it:
+///
+/// 1. **`type === 'password'`** — no false positives, and the only one Chrome also masks in the accessibility tree.
+/// 2. **The `autocomplete` credential/payment tokens**, matched as whole tokens against the WHATWG list. `cc-exp`/`cc-name` were missing; a card's expiry and holder are part of the same card. A page that spells one of these has declared the field's purpose itself, so a false positive needs the page to be wrong about its own form.
+/// 3. **`inputMode === 'numeric'` with `maxLength` 4–8 and no `autocomplete`** — the OTP/PIN widget that ships `type=text inputmode=numeric autocomplete="off"`. The two side conditions keep it precise: below 4 digits is a CVC (already rule 2) or a quantity spinner, above 8 is a phone or account number that rule 4 catches when it names itself, and a field that DID declare a purpose (`postal-code`, `cc-exp-month`) is judged by rule 2 rather than by its shape. Residual false positive: an undeclared 5-digit numeric ZIP, which loses a read-back and costs nothing else.
+/// 4. **A word match on `name`/`id`/`aria-label`**, over a string normalised to lowercase words (camelCase split, every other character a separator). The only rule that catches the three families the DOM never declares — a "show password" toggle that flipped `type` to `text`, an IBAN or account number, a national ID — because in every one of them the field names itself. It is a keyword list, so it is incomplete by construction; the `asserted_secret` argument on `element::fill_with`/`type_text_with` is the escape hatch for a field that names nothing.
+///
+/// Fails towards redaction: a value wrongly withheld costs the caller a read-back (`verbatim`
+/// and the lengths still classify it), a value wrongly printed cannot be taken back.
+pub const SECRET_FIELD: &str = r"(() => {
+    if (String(el.type || '').toLowerCase() === 'password') return true;
+    const auto = String(el.autocomplete || '').toLowerCase();
+    if (/(^| )(current-password|new-password|one-time-code|cc-number|cc-csc|cc-exp|cc-exp-month|cc-exp-year|cc-name|cc-given-name|cc-additional-name|cc-family-name)( |$)/.test(auto)) return true;
+    const max = typeof el.maxLength === 'number' ? el.maxLength : -1;
+    if (String(el.inputMode || '').toLowerCase() === 'numeric'
+        && max >= 4 && max <= 8
+        && (auto === '' || auto === 'off')) return true;
+    const words = (String(el.name || '') + ' ' + String(el.id || '') + ' '
+            + String(el.getAttribute('aria-label') || ''))
+        .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, ' ');
+    return /(^| )(password|passwd|passphrase|pwd|secret|otp|totp|mfa|2fa|pin|cvv|cvc|csc|iban|bic|routing|ssn|mnemonic|one ?time ?code|sort ?code|account ?number|card ?number|security ?code|social ?security|national ?id|tax ?id|api ?key|private ?key|seed ?phrase)( |$)/.test(words);
+})()";
 
 /// What a fill put in and what the page kept, so a reformatted or truncated value is visible.
 pub fn fill_value_report(outcome: &crate::element::FillOutcome) -> serde_json::Value {
@@ -121,7 +157,10 @@ mod tests {
         );
         assert_eq!(out["value"]["requested"], "Beta");
         assert_eq!(out["value"]["actual"], "Beta");
-        assert_eq!(out["observed_after_ms"], 60, "the window stays where it was");
+        assert_eq!(
+            out["observed_after_ms"], 60,
+            "the window stays where it was"
+        );
     }
 
     /// A secret `<select>` reports lengths and no option text — still classifiable.
@@ -144,7 +183,10 @@ mod tests {
     /// The message is the other place the text would reach stdout.
     #[test]
     fn a_secret_selection_keeps_its_option_out_of_the_message() {
-        assert_eq!(selected("Sesame", Some("Sesame"), true).label(), "(redacted)");
+        assert_eq!(
+            selected("Sesame", Some("Sesame"), true).label(),
+            "(redacted)"
+        );
         assert_eq!(selected("Beta", Some("Beta"), false).label(), "Beta");
     }
 

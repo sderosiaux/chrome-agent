@@ -35,7 +35,9 @@ impl Paint {
     /// Colour if and only if stdout is a terminal.
     #[must_use]
     pub fn for_stdout() -> Self {
-        Self { enabled: std::io::stdout().is_terminal() }
+        Self {
+            enabled: std::io::stdout().is_terminal(),
+        }
     }
 
     /// Never colour. What every pipe and file gets, and what the tests render with.
@@ -90,7 +92,10 @@ impl Paint {
 /// A string as it should appear on a line: quoted, and cut if it is longer than a line.
 #[must_use]
 pub fn quote(text: &str) -> String {
-    format!("{:?}", crate::truncate::truncate_str(text, LINE_BUDGET, "…"))
+    format!(
+        "{:?}",
+        crate::truncate::truncate_str(text, LINE_BUDGET, "…")
+    )
 }
 
 /// A JSON scalar rendered for a human-readable line. Shared with `assert`.
@@ -134,7 +139,12 @@ fn value_lines(obj: &Value, paint: Paint, lines: &mut Vec<String>) -> bool {
     if let Some(value) = obj.get("value") {
         push_value_line(value, None, paint, lines);
     }
-    for field in obj.get("values").and_then(Value::as_array).into_iter().flatten() {
+    for field in obj
+        .get("values")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
         let label = field
             .get("uid")
             .or_else(|| field.get("selector"))
@@ -149,7 +159,8 @@ fn value_lines(obj: &Value, paint: Paint, lines: &mut Vec<String>) -> bool {
 fn push_value_line(value: &Value, label: Option<&str>, paint: Paint, lines: &mut Vec<String>) {
     let named = label.map_or_else(String::new, |l| format!("{l}: "));
     if value.get("verbatim").and_then(Value::as_bool) == Some(false) {
-        let (state, wrote, holds) = if value.get("redacted").and_then(Value::as_bool) == Some(true) {
+        let (state, wrote, holds) = if value.get("redacted").and_then(Value::as_bool) == Some(true)
+        {
             // A secret reports two lengths and no strings: this line reaches stdout, the agent
             // transcript and any `--record` file.
             (
@@ -185,7 +196,11 @@ fn push_value_line(value: &Value, label: Option<&str>, paint: Paint, lines: &mut
 /// A redacted field's state from the lengths alone — the same classification
 /// `pipe_report::field_postcondition` makes, without reading the value.
 fn lengths_state(value: &Value) -> &'static str {
-    if length_of(value, "actual_length") == 0 { "NOT KEPT" } else { "REWRITTEN" }
+    if length_of(value, "actual_length") == 0 {
+        "NOT KEPT"
+    } else {
+        "REWRITTEN"
+    }
 }
 
 fn length_of(value: &Value, key: &str) -> u64 {
@@ -242,7 +257,10 @@ fn lost_value_lines(obj: &Value, paint: Paint, lines: &mut Vec<String>) {
     }
     let shown = lost.len() as u64;
     // The list is capped at ten entries; the count never is.
-    let total = obj.get("values_lost_total").and_then(Value::as_u64).unwrap_or(shown);
+    let total = obj
+        .get("values_lost_total")
+        .and_then(Value::as_u64)
+        .unwrap_or(shown);
     lines.push(format!(
         "{}: {total} field{} held a value before this action and hold{} none now",
         paint.bad("values lost"),
@@ -307,11 +325,19 @@ mod tests {
     use serde_json::json;
 
     fn changed() -> Assessment {
-        Assessment { verdict: Verdict::Changed, reason: "tree_delta", page: PageSight::Readable }
+        Assessment {
+            verdict: Verdict::Changed,
+            reason: "tree_delta",
+            page: PageSight::Readable,
+        }
     }
 
     fn not_kept() -> Assessment {
-        Assessment { verdict: Verdict::NotKept, reason: "value_reverted", page: PageSight::Readable }
+        Assessment {
+            verdict: Verdict::NotKept,
+            reason: "value_reverted",
+            page: PageSight::Readable,
+        }
     }
 
     fn rendered(obj: &Value, assessment: Assessment) -> String {
@@ -339,9 +365,19 @@ mod tests {
             "ok": true,
             "value": {"requested": "5551234567", "actual": "(555) 123-4567", "verbatim": false, "observed_after_ms": 60},
         });
-        let out = rendered(&obj, Assessment { verdict: Verdict::NotKept, reason: "value_rewritten", page: PageSight::Readable });
+        let out = rendered(
+            &obj,
+            Assessment {
+                verdict: Verdict::NotKept,
+                reason: "value_rewritten",
+                page: PageSight::Readable,
+            },
+        );
         assert!(out.contains("value: REWRITTEN"), "{out}");
-        assert!(!out.contains("NOT KEPT"), "a mask is not an empty field: {out}");
+        assert!(
+            !out.contains("NOT KEPT"),
+            "a mask is not an empty field: {out}"
+        );
         assert!(out.contains("page holds \"(555) 123-4567\""), "{out}");
     }
 
@@ -354,7 +390,11 @@ mod tests {
         });
         let out = rendered(&obj, changed());
         assert!(!out.contains("value:"), "a kept value is not news: {out}");
-        assert_eq!(out.lines().count(), 2, "verdict and next, nothing else: {out}");
+        assert_eq!(
+            out.lines().count(),
+            2,
+            "verdict and next, nothing else: {out}"
+        );
     }
 
     /// A value over `maxlength` is verbatim and the form will still reject it: the one clean
@@ -394,7 +434,10 @@ mod tests {
         ]});
         let out = rendered(&obj, not_kept());
         assert!(out.contains("value: n12: NOT KEPT"), "{out}");
-        assert!(!out.contains("n11"), "the field that held needs no line: {out}");
+        assert!(
+            !out.contains("n11"),
+            "the field that held needs no line: {out}"
+        );
     }
 
     /// The submit worked AND cleared the field. Both facts, one report.
@@ -404,9 +447,19 @@ mod tests {
             "ok": true,
             "values_lost": [{"uid": "n12", "role": "textbox", "name": "Coupon", "was": "SAVE20"}],
         });
-        let out = rendered(&obj, Assessment { verdict: Verdict::Changed, reason: "values_lost", page: PageSight::Readable });
+        let out = rendered(
+            &obj,
+            Assessment {
+                verdict: Verdict::Changed,
+                reason: "values_lost",
+                page: PageSight::Readable,
+            },
+        );
         assert!(out.contains("values lost: 1 field"), "{out}");
-        assert!(out.contains("n12 textbox \"Coupon\" held \"SAVE20\""), "{out}");
+        assert!(
+            out.contains("n12 textbox \"Coupon\" held \"SAVE20\""),
+            "{out}"
+        );
         // Not a plain success: the caller must establish which of two things happened.
         assert!(out.contains("next: confirm"), "{out}");
     }
@@ -417,8 +470,18 @@ mod tests {
             "ok": true,
             "values_lost": [{"uid": "n9", "role": "textbox", "redacted": true}],
         });
-        let out = rendered(&obj, Assessment { verdict: Verdict::Changed, reason: "values_lost", page: PageSight::Readable });
-        assert!(out.contains("n9 textbox held a secret (not shown)"), "{out}");
+        let out = rendered(
+            &obj,
+            Assessment {
+                verdict: Verdict::Changed,
+                reason: "values_lost",
+                page: PageSight::Readable,
+            },
+        );
+        assert!(
+            out.contains("n9 textbox held a secret (not shown)"),
+            "{out}"
+        );
     }
 
     /// The cap is on the list, not on the count.
@@ -429,7 +492,14 @@ mod tests {
             "values_lost": [{"uid": "n1", "role": "textbox", "was": "x"}],
             "values_lost_total": 40,
         });
-        let out = rendered(&obj, Assessment { verdict: Verdict::Changed, reason: "values_lost", page: PageSight::Readable });
+        let out = rendered(
+            &obj,
+            Assessment {
+                verdict: Verdict::Changed,
+                reason: "values_lost",
+                page: PageSight::Readable,
+            },
+        );
         assert!(out.contains("values lost: 40 fields"), "{out}");
     }
 
@@ -444,13 +514,23 @@ mod tests {
         });
         let out = rendered(
             &obj,
-            Assessment { verdict: Verdict::Intercepted, reason: "hit_test_receiver", page: PageSight::Readable },
+            Assessment {
+                verdict: Verdict::Intercepted,
+                reason: "hit_test_receiver",
+                page: PageSight::Readable,
+            },
         );
         assert!(out.contains("received by: div#scrim (n11)"), "{out}");
         assert!(out.contains("next: dismiss"), "{out}");
         // The short hint points at the `received by:` line rather than repeating the receiver.
-        assert!(out.contains("hint: Deal with the element named above first"), "{out}");
-        assert!(out.lines().all(|l| l.len() < 200), "no line is a paragraph: {out}");
+        assert!(
+            out.contains("hint: Deal with the element named above first"),
+            "{out}"
+        );
+        assert!(
+            out.lines().all(|l| l.len() < 200),
+            "no line is a paragraph: {out}"
+        );
     }
 
     /// A wait a person noticed gets a line; a wait nobody noticed does not.
@@ -458,7 +538,10 @@ mod tests {
     fn only_a_wait_worth_noticing_reaches_the_terminal() {
         let mut lines = Vec::new();
         waited_line(&json!({"waited_ms": 10_100}), &mut lines);
-        assert_eq!(lines, vec!["waited: 10.1s for the page to finish loading after this action"]);
+        assert_eq!(
+            lines,
+            vec!["waited: 10.1s for the page to finish loading after this action"]
+        );
 
         let mut quiet = Vec::new();
         waited_line(&json!({"waited_ms": 90}), &mut quiet);
@@ -471,11 +554,24 @@ mod tests {
     fn the_verdict_line_carries_its_gloss() {
         let out = rendered(
             &json!({"ok": true}),
-            Assessment { verdict: Verdict::Unchanged, reason: "identical_tree", page: PageSight::Readable },
+            Assessment {
+                verdict: Verdict::Unchanged,
+                reason: "identical_tree",
+                page: PageSight::Readable,
+            },
         );
-        let line = out.lines().find(|l| l.starts_with("verdict:")).expect("a verdict line");
-        assert!(line.starts_with("verdict: unchanged (identical_tree) — "), "{line}");
-        assert!(line.contains("identical"), "the gloss states the observation: {line}");
+        let line = out
+            .lines()
+            .find(|l| l.starts_with("verdict:"))
+            .expect("a verdict line");
+        assert!(
+            line.starts_with("verdict: unchanged (identical_tree) — "),
+            "{line}"
+        );
+        assert!(
+            line.contains("identical"),
+            "the gloss states the observation: {line}"
+        );
     }
 
     /// A check states what the box holds; only this line states when that was true.
@@ -510,7 +606,10 @@ mod tests {
         // Rule 1: every top-level line starts with its keyword. Indented continuations under
         // `values lost:` belong to the line above them.
         for line in coloured.lines().filter(|l| !l.starts_with("  ")) {
-            assert!(line.contains(": "), "a top-level line with no keyword: {line}");
+            assert!(
+                line.contains(": "),
+                "a top-level line with no keyword: {line}"
+            );
         }
     }
 
@@ -523,7 +622,10 @@ mod tests {
         });
         let out = rendered(&obj, not_kept());
         assert!(out.contains('…'), "{out}");
-        let value_line = out.lines().find(|l| l.starts_with("value:")).expect("a value line");
+        let value_line = out
+            .lines()
+            .find(|l| l.starts_with("value:"))
+            .expect("a value line");
         assert!(
             value_line.len() < 200,
             "the whole 400-char string stays in --json: {}",

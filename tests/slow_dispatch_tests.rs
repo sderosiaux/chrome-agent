@@ -16,7 +16,10 @@ use common::TestBrowser;
 const CEILING_SECS: f64 = 3.0;
 
 fn run_cli(args: &[&str]) -> (String, i32) {
-    let output = Command::new(common::binary()).args(args).output().expect("Failed to run chrome-agent");
+    let output = Command::new(common::binary())
+        .args(args)
+        .output()
+        .expect("Failed to run chrome-agent");
     (
         String::from_utf8_lossy(&output.stdout).to_string(),
         output.status.code().unwrap_or(-1),
@@ -49,7 +52,10 @@ impl PipeSession {
             .spawn()
             .expect("spawn pipe");
         let stdout = child.stdout.take().expect("pipe stdout");
-        Self { child, responses: std::io::BufReader::new(stdout).lines() }
+        Self {
+            child,
+            responses: std::io::BufReader::new(stdout).lines(),
+        }
     }
 
     fn send(&mut self, cmd: &Value) -> Value {
@@ -57,7 +63,11 @@ impl PipeSession {
         let stdin = self.child.stdin.as_mut().expect("pipe stdin");
         writeln!(stdin, "{cmd}").expect("write command");
         stdin.flush().expect("flush command");
-        let line = self.responses.next().expect("a response per command").expect("readable");
+        let line = self
+            .responses
+            .next()
+            .expect("a response per command")
+            .expect("readable");
         serde_json::from_str(&line).unwrap_or_else(|e| panic!("bad pipe line {line}: {e}"))
     }
 }
@@ -73,7 +83,10 @@ fn uid_for(browser: &str, needles: &[&str]) -> String {
     let (stdout, code) = run_cli(&["--browser", browser, "--json", "inspect"]);
     assert_eq!(code, 0, "{stdout}");
     let snapshot: Value = serde_json::from_str(&stdout).expect("JSON inspect");
-    let text = snapshot["snapshot"].as_str().unwrap_or_default().to_string();
+    let text = snapshot["snapshot"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
     text.lines()
         .find(|line| needles.iter().all(|n| line.contains(n)))
         .and_then(|line| line.trim_start().strip_prefix("uid="))
@@ -108,7 +121,14 @@ fn a_click_that_only_navigates_a_subframe_does_not_wait_for_a_load() {
     let _ = run_cli(&["--browser", b.name(), "--json", "eval", "1"]);
 
     let (response, secs) = timed(&[
-        "--browser", b.name(), "--verdict", "off", "--json", "click", "--selector", "#go",
+        "--browser",
+        b.name(),
+        "--verdict",
+        "off",
+        "--json",
+        "click",
+        "--selector",
+        "#go",
     ]);
     assert!(
         secs < CEILING_SECS,
@@ -122,13 +142,19 @@ fn a_click_that_only_navigates_a_subframe_does_not_wait_for_a_load() {
 
     // The click really was delivered — otherwise this test would pass by not clicking.
     let (state, _) = timed(&[
-        "--browser", b.name(), "--json", "eval",
+        "--browser",
+        b.name(),
+        "--json",
+        "eval",
         "document.getElementById('state').textContent",
     ]);
     assert_eq!(state["result"], "tracked", "the handler ran: {state}");
     let (url, _) = timed(&["--browser", b.name(), "--json", "eval", "location.pathname"]);
     assert!(
-        url["result"].as_str().unwrap_or_default().ends_with("click_spawns_subframe.html"),
+        url["result"]
+            .as_str()
+            .unwrap_or_default()
+            .ends_with("click_spawns_subframe.html"),
         "the top frame never navigated: {url}"
     );
 }
@@ -142,9 +168,19 @@ fn a_click_that_navigates_the_page_still_waits_and_says_how_long() {
     let _ = run_cli(&["--browser", b.name(), "--json", "eval", "1"]);
 
     let (response, secs) = timed(&[
-        "--browser", b.name(), "--verdict", "off", "--json", "click", "--selector", "#leave",
+        "--browser",
+        b.name(),
+        "--verdict",
+        "off",
+        "--json",
+        "click",
+        "--selector",
+        "#leave",
     ]);
-    assert!(secs < CEILING_SECS, "a local navigation took {secs:.2}s: {response}");
+    assert!(
+        secs < CEILING_SECS,
+        "a local navigation took {secs:.2}s: {response}"
+    );
     assert!(
         response["waited_ms"].is_u64(),
         "the action waited for a load, and a wait a caller paid for is a wait it may read: \
@@ -153,7 +189,10 @@ fn a_click_that_navigates_the_page_still_waits_and_says_how_long() {
 
     let (url, _) = timed(&["--browser", b.name(), "--json", "eval", "location.pathname"]);
     assert!(
-        url["result"].as_str().unwrap_or_default().ends_with("click_spawns_subframe.html"),
+        url["result"]
+            .as_str()
+            .unwrap_or_default()
+            .ends_with("click_spawns_subframe.html"),
         "the click did navigate the top frame: {url}"
     );
 }
@@ -171,10 +210,13 @@ fn a_wait_belongs_to_the_action_that_paid_it_and_to_no_other() {
     session.send(&serde_json::json!({"cmd": "goto", "url": navigates}));
     session.send(&serde_json::json!({"cmd": "inspect"}));
 
-    let navigated = session.send(&serde_json::json!({
-        "cmd": "click", "selector": "#leave", "verdict": "off"
-    }));
-    assert!(navigated["waited_ms"].is_u64(), "the navigation was waited for: {navigated}");
+    // No per-command `"verdict"` key: it was never read, and the protocol now says so by
+    // refusing it. `--verdict` is a session flag, and this test does not need it off.
+    let navigated = session.send(&serde_json::json!({"cmd": "click", "selector": "#leave"}));
+    assert!(
+        navigated["waited_ms"].is_u64(),
+        "the navigation was waited for: {navigated}"
+    );
 
     // On the page it landed on, this click spawns a subframe and waits for nothing.
     session.send(&serde_json::json!({"cmd": "inspect"}));
@@ -198,14 +240,29 @@ fn a_pointer_action_on_a_backgrounded_page_is_not_charged_five_seconds() {
     let (out, code) = run_cli(&["--browser", b.name(), "--page", "second", "goto", &second]);
     assert_eq!(code, 0, "a second page could not be opened: {out}");
 
-    let (hidden, _) = timed(&["--browser", b.name(), "--json", "eval", "document.visibilityState"]);
-    assert_eq!(hidden["result"], "hidden", "the page under test must be backgrounded: {hidden}");
+    let (hidden, _) = timed(&[
+        "--browser",
+        b.name(),
+        "--json",
+        "eval",
+        "document.visibilityState",
+    ]);
+    assert_eq!(
+        hidden["result"], "hidden",
+        "the page under test must be backgrounded: {hidden}"
+    );
 
     // `hover` is one mouse event: a click sends two and the second rides on the first's hit
     // test, which can hide the stall.
     let uid = uid_for(b.name(), &["button"]);
     let (response, secs) = timed(&[
-        "--browser", b.name(), "--verdict", "off", "--json", "hover", &uid,
+        "--browser",
+        b.name(),
+        "--verdict",
+        "off",
+        "--json",
+        "hover",
+        &uid,
     ]);
     assert!(
         secs < CEILING_SECS,
@@ -214,6 +271,14 @@ fn a_pointer_action_on_a_backgrounded_page_is_not_charged_five_seconds() {
     );
 
     // A keyboard event was never affected and must not have acquired the foregrounding either.
-    let (_, keys) = timed(&["--browser", b.name(), "--verdict", "off", "--json", "press", "Escape"]);
+    let (_, keys) = timed(&[
+        "--browser",
+        b.name(),
+        "--verdict",
+        "off",
+        "--json",
+        "press",
+        "Escape",
+    ]);
     assert!(keys < CEILING_SECS, "press took {keys:.2}s");
 }

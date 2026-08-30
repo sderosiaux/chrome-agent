@@ -38,7 +38,9 @@ fn spawn_server() -> u16 {
         for stream in listener.incoming() {
             let Ok(mut stream) = stream else { continue };
             let mut request = [0u8; 2048];
-            let Ok(n) = stream.read(&mut request) else { continue };
+            let Ok(n) = stream.read(&mut request) else {
+                continue;
+            };
             let request = String::from_utf8_lossy(&request[..n]);
             let (mime, body): (&str, Vec<u8>) = if request.starts_with("GET /config.yaml") {
                 (
@@ -88,8 +90,15 @@ fn a_filter_is_a_selection_and_a_binary_body_is_counted_not_printed() {
 
     // application/yaml is not on the allowlist, and the filter overrides it.
     let filtered = run_json(&[
-        "--browser", &browser, "--json",
-        "network", "--live", "6", "--body", "--filter", "config.yaml",
+        "--browser",
+        &browser,
+        "--json",
+        "network",
+        "--live",
+        "6",
+        "--body",
+        "--filter",
+        "config.yaml",
     ]);
     let yaml = entry_for(&filtered, "/config.yaml");
     assert_eq!(yaml["contentType"], "application/yaml");
@@ -100,8 +109,15 @@ fn a_filter_is_a_selection_and_a_binary_body_is_counted_not_printed() {
 
     // Filtered binary: selected, fetched, counted — never printed.
     let blob = run_json(&[
-        "--browser", &browser, "--json",
-        "network", "--live", "6", "--body", "--filter", "blob.bin",
+        "--browser",
+        &browser,
+        "--json",
+        "network",
+        "--live",
+        "6",
+        "--body",
+        "--filter",
+        "blob.bin",
     ]);
     let bin = entry_for(&blob, "/blob.bin");
     assert!(bin["body"].is_null(), "binary body was printed: {bin}");
@@ -113,13 +129,17 @@ fn a_filter_is_a_selection_and_a_binary_body_is_counted_not_printed() {
 
     // Unfiltered: the allowlist still guards --body, so the yaml body stays out.
     let unfiltered = run_json(&[
-        "--browser", &browser, "--json",
-        "network", "--live", "4", "--body",
+        "--browser",
+        &browser,
+        "--json",
+        "network",
+        "--live",
+        "4",
+        "--body",
     ]);
     let yaml = entry_for(&unfiltered, "/config.yaml");
     assert!(
         yaml["body"].is_null(),
         "unfiltered --body fetched a non-allowlisted type: {yaml}"
     );
-
 }

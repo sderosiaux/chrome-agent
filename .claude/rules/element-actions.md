@@ -1,17 +1,17 @@
 ---
 paths:
   - "src/element.rs"
+  - "src/element_pointer.rs"
   - "src/element_controls.rs"
   - "src/read_back.rs"
   - "src/commands/click.rs"
   - "src/commands/dblclick.rs"
-  - "src/commands/select.rs"
-  - "src/commands/check.rs"
-  - "src/commands/upload.rs"
-  - "src/commands/drag.rs"
+  - "src/commands/fill.rs"
+  - "src/element_selector.rs"
   - "tests/observation_window_tests.rs"
   - "tests/selector_uid_tests.rs"
   - "tests/bulk_fill_tests.rs"
+  - "tests/secret_field_tests.rs"
   - "tests/checkable_tests.rs"
   - "tests/select_readback_tests.rs"
   - "tests/press_key_tests.rs"
@@ -45,10 +45,62 @@ response, which carries the reading to the classifier.
 
 `value: {requested, actual, verbatim, observed_after_ms, caveat?}`.
 
-- Secret fields (`type=password`, or `autocomplete` naming a password/card/CVC/one-time code) report `{redacted:true, requested_length, actual_length, verbatim}` instead: the response reaches stdout, the agent transcript and any `_record` file.
+- Secret fields report `{redacted:true, requested_length, actual_length, verbatim}` instead: the response reaches stdout, the agent transcript and any `_record` file. What counts as one is below.
 - Both strings are returned rather than reduced to one word. Masks reformat, controlled components rewrite, number inputs discard — a currency mask turns `1000` into `10.00`, which a digits-only comparison would call preserved.
 - Refuses on `:disabled` (this catches an ancestor `<fieldset disabled>`, which `el.disabled` does not) and on `readOnly`.
 - `caveat` when the write exceeded `maxlength`: that constrains the editing pipeline, not the value setter, so the field holds something the form will reject.
+
+## What counts as a secret
+
+`read_back::SECRET_FIELD` (re-exported as `element::SECRET_FIELD`), one JS expression over `el`,
+inlined by `fill` (uid and selector), `type`, `select`, `assert value`, `snapshot_secret` and
+`values_lost` — so the six cannot disagree about the same element.
+
+It was `type === 'password'` plus three `autocomplete` tokens, which is a STRUCTURAL claim, and
+three families of secret never make it: a "show password" toggle sets `type = 'text'` (that IS
+the toggle), an OTP widget ships `type=text inputmode=numeric autocomplete="off"`, and an IBAN,
+an account number or a national ID name nothing in any autocomplete list. All three reached
+stdout, the transcript and any `--record` file in clear.
+
+Four rules now, and the precision argument for each:
+
+| Rule | Catches | Why it does not over-match |
+|---|---|---|
+| `type === 'password'` | the ordinary case | no false positives; the only one Chrome also masks in the a11y tree |
+| whole-token `autocomplete` match, widened to the full credential/payment list (`cc-exp`, `cc-exp-month`/`-year`, `cc-name` and the holder-name tokens were missing — a card's expiry and holder are part of the same card) | a declared field | the page declared the purpose itself, so a false positive needs the page to be wrong about its own form |
+| `inputMode === 'numeric'` ∧ `maxLength` 4–8 ∧ `autocomplete` empty or `off` | the OTP/PIN widget that declares nothing | below 4 is a CVC (rule 2) or a quantity spinner; above 8 is a phone or account number rule 4 catches; a field that DID declare a purpose (`postal-code`) is judged by rule 2 |
+| word match on `name`/`id`/`aria-label`, normalised (camelCase split, then every non-alphanumeric a separator) | the toggle, the IBAN, the national ID | WORDS, not substrings: `pin` inside `pinterestUrl` does not match, which a bare `test()` would |
+
+Fails towards redaction: a value wrongly withheld costs a read-back (`verbatim` and the two
+lengths still classify it), a value wrongly printed cannot be taken back. The residual false
+positive measured is an undeclared 5-digit numeric ZIP.
+
+Rule 4 is a keyword list, so it is incomplete by construction. The escape hatch is
+`asserted_secret: bool` on `element::fill_with` / `fill_selector_with` / `type_text_with` — the
+caller stating what the DOM does not. It only ever ADDS redaction: there is deliberately no
+override that turns redaction OFF, since that would be a way to print a password.
+
+The caller reaches it as `fill --secret` / `type --secret`, and `{"cmd":"fill","secret":true}` /
+`{"cmd":"type","secret":true}`. `select` does NOT take it: it reads secrecy off the element and
+has no plumbing to honour an asserted one, so `SelectArgs` would be accepting a key that does
+nothing — which is why `fill` has its own `FillArgs` rather than a field on the `ValueArgs` the
+two used to share.
+
+Both directions are pinned by `tests/secret_field_tests.rs` over
+`tests/fixtures/secret_field_shapes.html`, including the four fields that must NOT be redacted.
+
+## `type`
+
+`element::type_text_with` reads the FOCUSED element through the same predicate, before the
+insert (afterwards `document.activeElement` may be somewhere else), and returns the message the
+response should carry: `Typed N chars`, or `Typed into a secret field (length withheld)`. Unlike
+`fill` there is no `verbatim` to classify, so the length buys the caller nothing and only narrows
+the value.
+
+That message is what the response carries. Both front ends used to discard it and rebuild
+`Typed {text.len()} chars` at the call site, which made the redaction inert — and counted BYTES
+where this module counts characters. `pipe_dispatch::dispatch_type` is now the one caller, for
+CLI, pipe and batch alike; it appends the `into selector '…'` clause and nothing else.
 
 ## Bulk fill
 
@@ -88,8 +140,8 @@ re-reads, bound to the same node throughout.
 
 ## Other verbs
 
-- **`press`** — a single printable character is sent with `text` so it actually types. Unmapped names are refused rather than dispatched with virtual key code 0.
-- **`dblclick`** — 4 mouse events (pressed/released twice, `click_count` 1 then 2), with a JS `dblclick` MouseEvent fallback. `--selector` resolves the viewport-centre coords then runs the native CDP double-click (`dblclick_selector`); it is a real double-click, not a single `click_selector`.
+- **`press`** — a single printable character is sent with `text` so it actually types. Unmapped names are refused rather than dispatched with virtual key code 0. It has no secrecy notion: `press Enter` carries no value, and `press <char>` one character.
+- **`dblclick`** — 4 mouse events (pressed/released twice, `click_count` 1 then 2), with a JS `dblclick` MouseEvent fallback. `--selector` resolves the viewport-centre coords then runs the native CDP double-click; it is a real double-click, not a single click. It aims through `element::aim_and_dispatch` exactly as `click` does, parameterised by `element::PointerVerb` — the rule and its refusals are written once (`.claude/rules/hit-test.md`).
 - **`upload`** — validates that file paths exist before the CDP call. Uses `DOM.setFileInputFiles` with `backendNodeId` (uid) or `nodeId` (selector).
 - **`drag`** — 5-step linear interpolation between source and destination centres, 16 ms between moves.
 - **JS click fallback** — when the a11y tree reports "disabled" but the DOM does not, `click` falls back to `.click()`.

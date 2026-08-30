@@ -54,7 +54,11 @@ pub fn chrome_available() -> bool {
         if std::path::Path::new(candidate).exists() {
             return true;
         }
-        if Command::new("which").arg(candidate).output().is_ok_and(|o| o.status.success()) {
+        if Command::new("which")
+            .arg(candidate)
+            .output()
+            .is_ok_and(|o| o.status.success())
+        {
             return true;
         }
     }

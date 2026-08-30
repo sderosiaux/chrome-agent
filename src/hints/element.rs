@@ -99,7 +99,10 @@ pub fn intercepted_refusal_hint(
     mode: crate::hit_test::OnIntercept,
 ) -> String {
     let run = invocation(browser);
-    let who = receiver.map_or_else(|| "Another element".to_string(), crate::hit_test::Hit::describe);
+    let who = receiver.map_or_else(
+        || "Another element".to_string(),
+        crate::hit_test::Hit::describe,
+    );
     if receiver.is_some_and(|hit| hit.modal) {
         return format!(
             "{who} is a modal dialog: it holds the top layer, so every pointer event outside it \
@@ -164,7 +167,24 @@ pub fn error_hint(msg: &str, browser: &str) -> Option<String> {
     // Matched before the generic "Connection refused" branch so the actionable hint wins.
     } else if msg.contains("Failed to connect to page") || msg.contains("DevToolsActivePort") {
         Some("Could not attach over CDP. Chrome 136+ disables remote debugging on the default profile: drop --connect to let chrome-agent launch its own dedicated profile, or relaunch your Chrome with a separate --user-data-dir.".to_string())
-    } else if msg.contains("Connection refused") || msg.contains("No such file") {
+    // The two file-reading failures, before the CDP branch below. Both carry the OS `No such
+    // file or directory` in their tail, which that branch used to claim — so `macro run` on an
+    // unknown name was answered with "the browser it named is gone", contradicting its own
+    // message. Neither reached a browser, so both are recognised by their own prefix instead.
+    } else if msg.contains("No macro named") {
+        Some(format!(
+            "Nothing was opened and nothing ran, so the page is exactly as it was: that name is \
+             not in this machine's macro store. Run `{run} macro list` for the names that are."
+        ))
+    } else if msg.contains("Cannot read replay file") {
+        let path = super::single_quoted(msg).unwrap_or("the path");
+        Some(format!(
+            "Nothing was read, so no command in the file ran and the page is exactly as it was. \
+             A replay file is the JSONL transcript `--record` writes, one JSON command per line. \
+             Run `ls -l {path}` to see whether it exists and is readable, then replay a path that \
+             does."
+        ))
+    } else if msg.contains("Connection refused") {
         Some(format!(
             "Nothing answered CDP at the endpoint this session recorded, so the browser it \
              named is gone — crashed, or killed from outside this tool. chrome-agent starts \
@@ -187,7 +207,13 @@ pub fn error_hint(msg: &str, browser: &str) -> Option<String> {
         }
     } else if msg.contains("Navigation failed") {
         Some(super::navigation::navigation_failure(msg, &run))
-    } else if msg.contains("No snapshot") || msg.contains("No inspect") || msg.contains("uid_map is empty") {
+    // `No previous snapshot` is what `run` and `pipe_dispatch` actually emit for `diff`; it does
+    // not contain `No snapshot`, so matching only that spelling left the message hintless.
+    } else if msg.contains("No snapshot")
+        || msg.contains("No previous snapshot")
+        || msg.contains("No inspect")
+        || msg.contains("uid_map is empty")
+    {
         Some(format!(
             "No snapshot is stored for this page, so there are no uids to resolve and no \
              baseline to report a change against. Run `{run} inspect` first: it is what \
@@ -274,7 +300,9 @@ pub fn error_hint(msg: &str, browser: &str) -> Option<String> {
              `{run} webmcp list` to see the registered tools, then `{run} webmcp call` with the \
              name from that list; it resolves the tool object for you before calling executeTool()."
         ))
-    } else if msg.contains("executeTool") && (msg.contains("is not valid JSON") || msg.contains("Failed to parse input arguments")) {
+    } else if msg.contains("executeTool")
+        && (msg.contains("is not valid JSON") || msg.contains("Failed to parse input arguments"))
+    {
         // Also unreachable through `webmcp call`, which always passes a validated JSON string.
         // Two spellings: a polyfill's `JSON.parse` throws the first, native WebMCP the second.
         Some(format!(
@@ -282,8 +310,26 @@ pub fn error_hint(msg: &str, browser: &str) -> Option<String> {
              results from passing one directly. Run `{run} webmcp call` instead and give --args \
              a JSON object or string; chrome-agent serializes it before it ever reaches executeTool()."
         ))
-    } else if msg.contains("Evaluation error") || msg.contains("TypeError") || msg.contains("ReferenceError") || msg.contains("SyntaxError") {
+    } else if msg.contains("Evaluation error")
+        || msg.contains("TypeError")
+        || msg.contains("ReferenceError")
+        || msg.contains("SyntaxError")
+    {
         Some("JS error in page context. Check expression syntax. Use --selector to scope to an element.".to_string())
+    } else if msg.contains("CDP message exceeded") {
+        // Before the lost-transport branch: the connection did end, but the size is the cause
+        // and "the connection dropped" would send the reader looking for a dead browser.
+        Some(format!(
+            "Chrome's answer was larger than the ceiling this connection reads, so it was not \
+             read and the connection ended. That ceiling is this tool's own bound on how much \
+             one reply may allocate here, not a failure of the page or of the browser, which is \
+             still running. Do not repeat the command blind: it reached Chrome and Chrome \
+             answered, so anything it changed on the page is already changed. Ask for less \
+             instead — when the answer was a document, `{run} text --selector \"main\"` returns \
+             one region rather than the whole page; when it was a file, downloading it by click \
+             (download --uid or --selector) streams it to disk through Chrome instead of \
+             carrying it over CDP."
+        ))
     } else if msg.contains("dispatcher task exited") || msg.contains("transport closed") {
         Some(format!(
             "The connection to Chrome dropped, so whether this command reached the page is \
@@ -294,11 +340,17 @@ pub fn error_hint(msg: &str, browser: &str) -> Option<String> {
              so start a new one."
         ))
     } else if msg.contains("not an <iframe>") || msg.contains("not an <IFRAME>") {
-        Some("Only <iframe> is supported. For <frame>/<frameset>, use eval to access frame content.".to_string())
+        Some(
+            "Only <iframe> is supported. For <frame>/<frameset>, use eval to access frame content."
+                .to_string(),
+        )
     } else if msg.contains("No child frame found") {
         Some("Iframe not found. Check the selector matches an <iframe> element.".to_string())
     } else if msg.contains("not a <select>") {
-        Some("Element is not a <select>. For custom dropdowns, click to open then click the option.".to_string())
+        Some(
+            "Element is not a <select>. For custom dropdowns, click to open then click the option."
+                .to_string(),
+        )
     } else if msg.contains("No option matching") {
         Some("No dropdown option matched. Use inspect --uid to check available options, or try the visible text.".to_string())
     } else if msg.contains("File not found") {
@@ -306,7 +358,10 @@ pub fn error_hint(msg: &str, browser: &str) -> Option<String> {
     } else if msg.contains("invalid regular expression") {
         Some("--matches takes a Rust regex (regex-lite): \\d \\w \\s are ASCII-only, and there is no \\p{...} or lookaround. For a plain substring use --contains.".to_string())
     } else if msg.contains("expected a JSON array") {
-        Some("Batch expects a JSON array of commands on stdin: [{\"cmd\":\"inspect\"}, ...]".to_string())
+        Some(
+            "Batch expects a JSON array of commands on stdin: [{\"cmd\":\"inspect\"}, ...]"
+                .to_string(),
+        )
     } else {
         None
     }
@@ -319,8 +374,8 @@ mod tests {
     /// The uid is in the message, so the hint substitutes it instead of printing `<uid>`.
     #[test]
     fn the_hint_for_an_unaimable_element_names_the_element() {
-        let hint = error_hint("Element uid=n47 has no visible box model.", "default")
-            .expect("a hint");
+        let hint =
+            error_hint("Element uid=n47 has no visible box model.", "default").expect("a hint");
         assert!(hint.contains("chrome-agent scroll n47"), "{hint}");
         // Rule 1: state the measurement, do not hedge about it.
         assert!(!hint.contains("may be hidden"), "{hint}");
@@ -335,8 +390,41 @@ mod tests {
                    have reached the page.";
         let hint = error_hint(msg, "agent-7").expect("a hint");
         assert!(hint.contains("Do not repeat the action"), "{hint}");
-        assert!(hint.contains("`chrome-agent --browser agent-7 inspect`"), "{hint}");
-        assert!(!hint.contains("--timeout N"), "the generic branch must not swallow this: {hint}");
+        assert!(
+            hint.contains("`chrome-agent --browser agent-7 inspect`"),
+            "{hint}"
+        );
+        assert!(
+            !hint.contains("--timeout N"),
+            "the generic branch must not swallow this: {hint}"
+        );
+    }
+
+    /// A reply past the wire ceiling is a size, and used to arrive as `transport closed` —
+    /// which reads as a dead browser and sends the reader to `close`, on a browser that is
+    /// running fine.
+    #[test]
+    fn an_oversized_reply_is_not_read_as_a_dropped_connection() {
+        let oversize = error_hint(
+            "transport: a CDP message exceeded the 100663296-byte ceiling this connection reads",
+            "agent-7",
+        )
+        .expect("a hint");
+        let dropped = error_hint("transport closed", "agent-7").expect("a hint");
+        assert_ne!(oversize, dropped);
+        assert!(
+            oversize.contains("larger than the ceiling"),
+            "the fact: {oversize}"
+        );
+        assert!(oversize.contains("still running"), "{oversize}");
+        assert!(
+            !oversize.contains("start a new one"),
+            "the dropped-connection advice: {oversize}"
+        );
+        assert!(
+            oversize.contains("`chrome-agent --browser agent-7 text --selector \"main\"`"),
+            "one command, on this browser: {oversize}"
+        );
     }
 
     /// A lost transport may have landed the command, so repeating it is a second real action.
@@ -355,8 +443,14 @@ mod tests {
     fn a_refused_connection_does_not_ask_whether_chrome_is_running() {
         let hint = error_hint("Connection refused", "default").expect("a hint");
         assert!(!hint.contains("Is Chrome running"), "{hint}");
-        assert!(hint.contains("chrome-agent close"), "the recovery is one command: {hint}");
-        assert!(!hint.contains("136"), "the Chrome 136 branch must not swallow this one: {hint}");
+        assert!(
+            hint.contains("chrome-agent close"),
+            "the recovery is one command: {hint}"
+        );
+        assert!(
+            !hint.contains("136"),
+            "the Chrome 136 branch must not swallow this one: {hint}"
+        );
     }
 
     #[test]
@@ -367,8 +461,14 @@ mod tests {
             "DevToolsActivePort file doesn't exist",
         ] {
             let hint = error_hint(msg, "default").expect("connect failure should have a hint");
-            assert!(hint.contains("136"), "hint should mention Chrome 136: {hint}");
-            assert!(hint.contains("--connect"), "hint should mention --connect: {hint}");
+            assert!(
+                hint.contains("136"),
+                "hint should mention Chrome 136: {hint}"
+            );
+            assert!(
+                hint.contains("--connect"),
+                "hint should mention --connect: {hint}"
+            );
         }
     }
 
@@ -380,7 +480,10 @@ mod tests {
             .expect("a hint");
         let parse = error_hint("response parse: invalid type", "default").expect("a hint");
         assert_ne!(node, parse);
-        assert!(node.contains("--selector"), "the route past a generated node: {node}");
+        assert!(
+            node.contains("--selector"),
+            "the route past a generated node: {node}"
+        );
         assert!(parse.contains("CDP"), "the cause has to be named: {parse}");
         for hint in [&node, &parse] {
             assert!(!hint.contains("Page structure issue"), "{hint}");
@@ -394,8 +497,14 @@ mod tests {
     fn an_anonymous_uid_is_explained_rather_than_sent_round_a_re_inspect() {
         let printed = "Element uid=e12 not found. Run 'chrome-agent inspect' to get fresh uids.";
         let anonymous = error_hint(printed, "default").expect("a hint");
-        assert!(anonymous.contains("no DOM element behind it"), "{anonymous}");
-        assert!(anonymous.contains("--selector"), "the route past it: {anonymous}");
+        assert!(
+            anonymous.contains("no DOM element behind it"),
+            "{anonymous}"
+        );
+        assert!(
+            anonymous.contains("--selector"),
+            "the route past it: {anonymous}"
+        );
         assert!(
             !anonymous.contains("uids change when the document is replaced"),
             "an `e…` uid is not a stale uid: {anonymous}"
@@ -413,7 +522,10 @@ mod tests {
         )
         .expect("a hint");
         assert_ne!(stale, anonymous);
-        assert!(stale.contains("uids change when the document is replaced"), "{stale}");
+        assert!(
+            stale.contains("uids change when the document is replaced"),
+            "{stale}"
+        );
     }
 
     /// An acknowledgement this tool could not read is still an acknowledgement: for anything
@@ -421,9 +533,18 @@ mod tests {
     #[test]
     fn an_unreadable_acknowledgement_does_not_claim_the_command_never_ran() {
         let hint = error_hint("response parse: invalid type", "default").expect("a hint");
-        assert!(!hint.contains("never ran"), "the false claim survived: {hint}");
-        assert!(hint.contains("Do not repeat it"), "rule 3, in words: {hint}");
-        assert!(hint.contains("dispatched and answered"), "the fact it got wrong: {hint}");
+        assert!(
+            !hint.contains("never ran"),
+            "the false claim survived: {hint}"
+        );
+        assert!(
+            hint.contains("Do not repeat it"),
+            "rule 3, in words: {hint}"
+        );
+        assert!(
+            hint.contains("dispatched and answered"),
+            "the fact it got wrong: {hint}"
+        );
         // Rule 2 allows two routes when the criterion is stated, and the caller can evaluate
         // this one without the CDP method the message has already lost.
         assert!(hint.contains("If the command acts on the page"), "{hint}");
@@ -466,7 +587,10 @@ mod tests {
         .unwrap();
         assert_ne!(no_context, generic);
         assert!(no_context.contains("--chrome-arg"), "{no_context}");
-        assert!(no_context.contains("--enable-features=WebMCP"), "{no_context}");
+        assert!(
+            no_context.contains("--enable-features=WebMCP"),
+            "{no_context}"
+        );
 
         let unknown_tool = error_hint(
             "Evaluation error: Error: chrome-agent: no WebMCP tool named \"foo\". Known tools: bar.",
@@ -474,7 +598,10 @@ mod tests {
         )
         .unwrap();
         assert_ne!(unknown_tool, generic);
-        assert!(unknown_tool.contains("chrome-agent webmcp list"), "{unknown_tool}");
+        assert!(
+            unknown_tool.contains("chrome-agent webmcp list"),
+            "{unknown_tool}"
+        );
 
         let bare_name = error_hint(
             "Evaluation error: TypeError: The provided value is not of type 'RegisteredTool'.",
@@ -482,7 +609,10 @@ mod tests {
         )
         .unwrap();
         assert_ne!(bare_name, generic);
-        assert!(bare_name.contains("chrome-agent webmcp call"), "{bare_name}");
+        assert!(
+            bare_name.contains("chrome-agent webmcp call"),
+            "{bare_name}"
+        );
 
         let object_args = error_hint(
             "Evaluation error: SyntaxError: \"[object Object]\" is not valid JSON\n    at executeTool (x)",
@@ -498,7 +628,10 @@ mod tests {
             "default",
         )
         .unwrap();
-        assert_eq!(native_args, object_args, "one cause, one hint: {native_args}");
+        assert_eq!(
+            native_args, object_args,
+            "one cause, one hint: {native_args}"
+        );
     }
 
     /// The frame-scoped absence and the plain absence share the substring "document.modelContext
@@ -522,7 +655,62 @@ mod tests {
         .unwrap();
         assert_ne!(plain, frame);
         assert!(frame.contains("frame main"), "{frame}");
-        assert!(!frame.contains("--chrome-arg"), "a frame binding is not a launch-flag problem: {frame}");
+        assert!(
+            !frame.contains("--chrome-arg"),
+            "a frame binding is not a launch-flag problem: {frame}"
+        );
+    }
+
+    /// A file this tool could not open is not a browser that died. The ENOENT tail used to send
+    /// both of these to the dead-browser hint, which told a `macro run` to `close` its browser —
+    /// contradicting the message's own "`macro list` shows what exists".
+    #[test]
+    fn a_missing_file_is_not_reported_as_a_dead_browser() {
+        let dead = error_hint("Connection refused", "default").expect("a hint");
+
+        let macro_run = error_hint(
+            "No macro named 'checkout' (/home/a/.chrome-agent/macros/checkout.json): No such \
+             file or directory (os error 2). `macro list` shows what exists.",
+            "default",
+        )
+        .expect("a hint");
+        assert_ne!(macro_run, dead);
+        assert!(!macro_run.contains("chrome-agent close"), "{macro_run}");
+        assert!(macro_run.contains("chrome-agent macro list"), "{macro_run}");
+        assert!(
+            macro_run.contains("nothing ran"),
+            "rule 1, the fact: {macro_run}"
+        );
+
+        let replay = error_hint(
+            "Cannot read replay file '/tmp/nope.jsonl': No such file or directory (os error 2)",
+            "default",
+        )
+        .expect("a hint");
+        assert_ne!(replay, dead);
+        assert_ne!(replay, macro_run, "two files, two stores, two recoveries");
+        assert!(!replay.contains("chrome-agent close"), "{replay}");
+        assert!(
+            replay.contains("/tmp/nope.jsonl"),
+            "the path is in the message: {replay}"
+        );
+    }
+
+    /// The message `diff` emits in both modes is `No previous snapshot`, which does not contain
+    /// `No snapshot` — so the branch matched nothing and the error travelled hintless.
+    #[test]
+    fn the_message_diff_actually_emits_reaches_the_missing_snapshot_hint() {
+        let canonical = error_hint("No snapshot stored for this page", "default").expect("a hint");
+        for emitted in [
+            "No previous snapshot. Run 'chrome-agent inspect' first.",
+            "No previous snapshot. Run inspect first.",
+        ] {
+            assert_eq!(
+                error_hint(emitted, "default").expect("a hint"),
+                canonical,
+                "{emitted}"
+            );
+        }
     }
 
     /// A missing snapshot gets one command and the reason it is needed.
@@ -531,7 +719,10 @@ mod tests {
         let hint = error_hint("No snapshot stored for this page", "default").expect("a hint");
         assert!(hint.contains("chrome-agent inspect"), "{hint}");
         assert!(hint.contains("uids"), "no snapshot means no uids: {hint}");
-        assert!(hint.contains("baseline"), "and no baseline to compare against: {hint}");
+        assert!(
+            hint.contains("baseline"),
+            "and no baseline to compare against: {hint}"
+        );
     }
 
     /// A message this module does not recognise gets no hint, rather than a generic one.
@@ -560,7 +751,10 @@ mod tests {
         assert!(!safe.contains("Do not click again"), "{safe}");
         // Raising the wait is not clicking again, and the hint has to say which one it means.
         let unfinished = download_unfinished_hint("default");
-        assert!(unfinished.contains("raise the wait instead of clicking again"), "{unfinished}");
+        assert!(
+            unfinished.contains("raise the wait instead of clicking again"),
+            "{unfinished}"
+        );
     }
 
     /// Rule 1: with no measured receiver, the hint states the wait window and claims nothing more.
@@ -587,8 +781,15 @@ mod tests {
             actionable: true,
             uid: Some("n210".into()),
         };
-        let hint = intercepted_refusal_hint("agent-7", Some(&receiver), crate::hit_test::OnIntercept::Refuse);
-        assert!(hint.starts_with("div#gdpr-wall.wall"), "rule 1, the fact first: {hint}");
+        let hint = intercepted_refusal_hint(
+            "agent-7",
+            Some(&receiver),
+            crate::hit_test::OnIntercept::Refuse,
+        );
+        assert!(
+            hint.starts_with("div#gdpr-wall.wall"),
+            "rule 1, the fact first: {hint}"
+        );
         assert!(
             hint.contains("`chrome-agent --browser agent-7 inspect`"),
             "rule 2, one command, on this invocation's browser: {hint}"
@@ -623,7 +824,10 @@ mod tests {
         let modal = intercepted_refusal_hint("default", Some(&dialog), refuse);
         assert!(modal.contains("`chrome-agent press Escape`"), "{modal}");
         dialog.modal = false;
-        assert_ne!(modal, intercepted_refusal_hint("default", Some(&dialog), refuse));
+        assert_ne!(
+            modal,
+            intercepted_refusal_hint("default", Some(&dialog), refuse)
+        );
         // With nothing to name, it is still a hint rather than a silence.
         let anonymous = intercepted_refusal_hint("default", None, refuse);
         assert!(anonymous.starts_with("Another element"), "{anonymous}");

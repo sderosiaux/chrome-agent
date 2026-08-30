@@ -13,7 +13,10 @@ mod common;
 use common::TestBrowser;
 
 fn run_cli(args: &[&str]) -> (String, i32) {
-    let output = Command::new(common::binary()).args(args).output().expect("Failed to run chrome-agent");
+    let output = Command::new(common::binary())
+        .args(args)
+        .output()
+        .expect("Failed to run chrome-agent");
     (
         String::from_utf8_lossy(&output.stdout).to_string(),
         output.status.code().unwrap_or(-1),
@@ -75,7 +78,10 @@ fn wait_answers_with_the_same_shape_in_cli_and_batch() {
     let cli: Value = serde_json::from_str(&stdout).expect("JSON response");
     assert_no_observation(&cli, "CLI wait");
 
-    let batch = run_batch(b.name(), r#"[{"cmd":"wait","what":"selector","pattern":"body"}]"#);
+    let batch = run_batch(
+        b.name(),
+        r#"[{"cmd":"wait","what":"selector","pattern":"body"}]"#,
+    );
     let results = batch["results"].as_array().expect("batch results");
     assert_no_observation(&results[0], "batch wait");
 }
@@ -116,5 +122,8 @@ fn forward_answers_with_the_same_shape_in_cli_and_batch() {
 
     // uid_map hygiene: the document was replaced, so an old uid must answer "not found".
     let (stdout, code) = run_cli(&["--browser", b.name(), "--json", "click", "n999999"]);
-    assert!(code != 0 || stdout.contains("not found"), "stale uid must not survive forward: {stdout}");
+    assert!(
+        code != 0 || stdout.contains("not found"),
+        "stale uid must not survive forward: {stdout}"
+    );
 }

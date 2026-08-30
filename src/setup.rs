@@ -22,9 +22,10 @@ impl DialogPolicy {
             "accept" => Ok(Self::Accept),
             "dismiss" => Ok(Self::Dismiss),
             "manual" => Ok(Self::Manual),
-            other => {
-                Err(format!("Unknown --dialog {other:?}. Use \"accept\", \"dismiss\", or \"manual\".").into())
-            }
+            other => Err(format!(
+                "Unknown --dialog {other:?}. Use \"accept\", \"dismiss\", or \"manual\"."
+            )
+            .into()),
         }
     }
 
@@ -48,15 +49,20 @@ pub struct DialogResponse {
 /// `Accept` confirms every dialog (for `beforeunload`, "proceed") and supplies
 /// `--dialog-text` to a `prompt`, empty if none. `Dismiss` and `Manual` cancel.
 #[must_use]
-pub fn dialog_decision(policy: DialogPolicy, dialog_type: &str, text: Option<&str>) -> DialogResponse {
+pub fn dialog_decision(
+    policy: DialogPolicy,
+    dialog_type: &str,
+    text: Option<&str>,
+) -> DialogResponse {
     match policy {
         DialogPolicy::Accept => DialogResponse {
             accept: true,
             prompt_text: (dialog_type == "prompt").then(|| text.unwrap_or("").to_string()),
         },
-        DialogPolicy::Dismiss | DialogPolicy::Manual => {
-            DialogResponse { accept: false, prompt_text: None }
-        }
+        DialogPolicy::Dismiss | DialogPolicy::Manual => DialogResponse {
+            accept: false,
+            prompt_text: None,
+        },
     }
 }
 
@@ -69,7 +75,10 @@ pub fn dialog_decision(policy: DialogPolicy, dialog_type: &str, text: Option<&st
 pub async fn apply_stealth(client: &CdpClient) {
     // Named per patch: which one failed decides which fingerprint is still exposed.
     if let Err(e) = client.enable("Network").await {
-        warn_patch("Network.enable (required by the user-agent override)", &e.to_string());
+        warn_patch(
+            "Network.enable (required by the user-agent override)",
+            &e.to_string(),
+        );
     }
 
     // 1. navigator.webdriver + chrome.runtime, Permissions, WebGL/WebGL2 and the
@@ -200,12 +209,15 @@ const STEALTH_PATCHES_JS: &str = r#"
 
 #[cfg(test)]
 mod tests {
-    use super::{dialog_decision, DialogPolicy, DialogResponse, STEALTH_PATCHES_JS};
+    use super::{DialogPolicy, DialogResponse, STEALTH_PATCHES_JS, dialog_decision};
 
     #[test]
     fn policy_parse_is_case_insensitive() {
         assert_eq!(DialogPolicy::parse("Accept").unwrap(), DialogPolicy::Accept);
-        assert_eq!(DialogPolicy::parse("DISMISS").unwrap(), DialogPolicy::Dismiss);
+        assert_eq!(
+            DialogPolicy::parse("DISMISS").unwrap(),
+            DialogPolicy::Dismiss
+        );
         assert_eq!(DialogPolicy::parse("manual").unwrap(), DialogPolicy::Manual);
         assert!(DialogPolicy::parse("nope").is_err());
     }
@@ -222,7 +234,10 @@ mod tests {
         for t in ["alert", "confirm"] {
             assert_eq!(
                 dialog_decision(DialogPolicy::Accept, t, Some("ignored")),
-                DialogResponse { accept: true, prompt_text: None }
+                DialogResponse {
+                    accept: true,
+                    prompt_text: None
+                }
             );
         }
     }
@@ -231,12 +246,18 @@ mod tests {
     fn accept_supplies_prompt_text() {
         assert_eq!(
             dialog_decision(DialogPolicy::Accept, "prompt", Some("hello")),
-            DialogResponse { accept: true, prompt_text: Some("hello".into()) }
+            DialogResponse {
+                accept: true,
+                prompt_text: Some("hello".into())
+            }
         );
         // prompt with no --dialog-text defaults to empty string, still accepted.
         assert_eq!(
             dialog_decision(DialogPolicy::Accept, "prompt", None),
-            DialogResponse { accept: true, prompt_text: Some(String::new()) }
+            DialogResponse {
+                accept: true,
+                prompt_text: Some(String::new())
+            }
         );
     }
 
@@ -245,7 +266,10 @@ mod tests {
         // "proceed with navigation" == accept=true, no prompt text.
         assert_eq!(
             dialog_decision(DialogPolicy::Accept, "beforeunload", None),
-            DialogResponse { accept: true, prompt_text: None }
+            DialogResponse {
+                accept: true,
+                prompt_text: None
+            }
         );
     }
 
@@ -254,7 +278,10 @@ mod tests {
         for t in ["alert", "confirm", "prompt", "beforeunload"] {
             assert_eq!(
                 dialog_decision(DialogPolicy::Dismiss, t, Some("x")),
-                DialogResponse { accept: false, prompt_text: None }
+                DialogResponse {
+                    accept: false,
+                    prompt_text: None
+                }
             );
         }
     }
@@ -264,7 +291,10 @@ mod tests {
         // Handler is gated out for Manual, but the arm is live: pin it to "cancel".
         assert_eq!(
             dialog_decision(DialogPolicy::Manual, "confirm", Some("x")),
-            DialogResponse { accept: false, prompt_text: None }
+            DialogResponse {
+                accept: false,
+                prompt_text: None
+            }
         );
     }
 

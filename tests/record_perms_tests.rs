@@ -11,7 +11,6 @@ use std::process::{Command, Stdio};
 mod common;
 use common::TestBrowser;
 
-
 fn temp_path(name: &str) -> std::path::PathBuf {
     let path = common::temp_path(name, "jsonl");
     let _ = std::fs::remove_file(&path);
@@ -37,7 +36,12 @@ fn record_a_session(label: &str, path: &std::path::Path) -> bool {
         .stderr(Stdio::null())
         .spawn()
         .expect("spawn pipe");
-    child.stdin.as_mut().unwrap().write_all(script.as_bytes()).unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(script.as_bytes())
+        .unwrap();
     drop(child.stdin.take());
     let _ = child.wait();
     true
@@ -49,7 +53,8 @@ fn a_recording_is_not_world_readable() {
     if !record_a_session("record-perms", &path) {
         return;
     }
-    let metadata = std::fs::metadata(&path).unwrap_or_else(|e| panic!("no recording at {}: {e}", path.display()));
+    let metadata = std::fs::metadata(&path)
+        .unwrap_or_else(|e| panic!("no recording at {}: {e}", path.display()));
     let mode = metadata.permissions().mode() & 0o777;
     let _ = std::fs::remove_file(&path);
 
@@ -74,7 +79,10 @@ fn appending_to_an_existing_recording_keeps_it_private() {
     let mode = metadata.permissions().mode() & 0o777;
     let _ = std::fs::remove_file(&path);
 
-    assert_eq!(mode, 0o600, "an already-open recording is narrowed too, got {mode:o}");
+    assert_eq!(
+        mode, 0o600,
+        "an already-open recording is narrowed too, got {mode:o}"
+    );
 }
 
 /// An unwritable recording path must not read as a recorded session.
@@ -99,7 +107,12 @@ fn an_unwritable_record_path_is_reported_not_swallowed() {
         .stderr(Stdio::null())
         .spawn()
         .expect("spawn pipe");
-    child.stdin.as_mut().unwrap().write_all(script.as_bytes()).unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(script.as_bytes())
+        .unwrap();
     drop(child.stdin.take());
     let output = child.wait_with_output().expect("pipe output");
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();

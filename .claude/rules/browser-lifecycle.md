@@ -2,6 +2,8 @@
 paths:
   - "src/browser.rs"
   - "src/session.rs"
+  - "src/session_load.rs"
+  - "src/session_save.rs"
   - "src/profiles.rs"
   - "src/orphans.rs"
   - "src/kill.rs"
@@ -23,8 +25,13 @@ paths:
 `global = true`, so it parses on either side of the verb. No env var: nothing else in this
 project is env-configured.
 
-**Five flags are refused outright**, because chrome-agent depends on its own values to find and
-reconnect to the browser it just launched:
+**Eleven flags are refused outright, for two different reasons**, and the reason is in the data
+(`chrome_args::Refusal`) rather than in a comment — a caller told "chrome-agent could not
+reconnect" about a flag that publishes CDP to the network has been told the smaller half. The
+refusal message states the kind first, then the flag's own reason.
+
+`Refusal::BreaksReconnect` — chrome-agent could not find or reconnect to the browser it launches.
+Costs this invocation, nothing outside it:
 
 | Flag | Why |
 |---|---|
@@ -34,8 +41,26 @@ reconnect to the browser it just launched:
 | `--proxy-server` | the dedicated flag already validates and persists it |
 | `--headless` | the stored `headless` mode that detects a mismatch on reconnect would silently disagree with Chrome's actual mode |
 
+`Refusal::WidensExposure` — the flag widens what the launched browser exposes, and no chrome-agent
+flag narrows it again. `--chrome-arg` is `global = true` and `managed_launch_args` appends caller
+args **last**, so they win over everything above them; a value composed by an agent reading a page
+is not the caller's own judgement the way a hand-typed launch flag is:
+
+| Flag | Why |
+|---|---|
+| `--remote-debugging-address` | with the mandated `--remote-debugging-port=0` this decides only which interfaces the CDP endpoint answers on. CDP has no permissions: whoever reaches the port reads any file through `file://`, reads every cookie in the profile, evaluates JS in any page |
+| `--disable-web-security` | same-origin policy off for every page in the browser, so a page reached on a link this tool followed can read any other origin's credentialed responses |
+| `--load-extension` | code that is not this tool's, with the browser's privileges, on every page it matches, for the life of the profile |
+| `--host-resolver-rules` | silently remaps hostnames, so `landed.final`, a screenshot and an extracted price all name a host that is not what answered |
+| `--remote-allow-origins` | lets a web page's own JS open the CDP WebSocket that drives this browser; with `*`, any page in any browser on the machine |
+| `--auth-server-allowlist` | Chrome hands the OS user's Kerberos/NTLM credentials to a listed server with no prompt |
+
 Each refusal names the fact and the real value the caller passed, never a placeholder, and
 suggests no rewrite — there is none for "don't send this flag" except dropping it.
+
+**A deny-list is not a boundary.** It names the flags measured to be dangerous, not every flag
+that is. `--chrome-arg` is still a way to change how Chrome behaves, and an invocation that
+composes it from page content is trusting that page with the browser.
 
 Under `--connect` it is refused rather than silently ignored: that Chrome is already running and
 reads no command line from this invocation. Mirrors the `--proxy-server` + `--connect` refusal.
@@ -101,6 +126,19 @@ independently of the registry. It rejects helper processes on `--type=` — Chro
 flag to every renderer, and matching the dir alone reported 39 browsers where 5 were running.
 Matched by pid rather than name, so a relaunch leaves the previous process visible under a name
 the registry still holds.
+
+**The guard reaches its tools by absolute path, never through `PATH`.** `kill::process_name` is
+what stops chrome-agent signalling a recycled pid, and it resolved `ps` through the inherited
+`PATH` — a safety guard only as trustworthy as whoever set an environment variable. On Linux it
+now reads `/proc/<pid>/comm` and spawns nothing at all; elsewhere `ps` and `kill` come from
+`kill::PS_PATHS`/`KILL_PATHS` (`/bin`, then `/usr/bin`), and `orphans::process_table` takes the
+same list. `browser.rs`'s Chrome lookup dropped `which`/`where` entirely — both are themselves
+resolved through `PATH`, and reading the variable and joining it is the whole of what they did.
+A unit test scans the three sources for a `Command::new("…")` naming a bare binary.
+
+Where nothing resolves, `kill_pid` answers `Unverified` rather than claiming a signal it could
+not send — the status of the `kill` is now read instead of discarded, so "Closed" is never
+printed over a kill that did not happen.
 
 `kill_pid` used to return `()`, so `close` printed `Closed browser=…` in all three outcomes:
 signalled, pid gone, pid reused. The reused case reached a user as `Closed browser=s9 (pid=80548)`

@@ -1,8 +1,10 @@
 # chrome-agent
 
-Browser automation for AI agents. One 3 MB Rust binary (~23.2K lines of Rust in `src/`, blank and
-comment-only lines excluded) drives Chrome over CDP — no Node runtime, no Playwright, no daemon.
-Every action reports whether the page actually complied, in JSON an agent can branch on.
+Browser automation for AI agents. One Rust binary drives Chrome over CDP — no Node runtime, no
+Playwright, no daemon. Every action reports whether the page actually complied, in JSON an agent
+can branch on.
+
+chrome-agent v0.15.0 (~28.2K lines of Rust in `src/`, blank and comment-only lines excluded; 3 MB binary)
 
 Full documentation: [github.com/sderosiaux/chrome-agent](https://github.com/sderosiaux/chrome-agent).
 
@@ -110,8 +112,8 @@ each parallel agent its own `--browser <name>`, or they corrupt each other's ses
 | `unchanged` | The tree was identical while the tool watched. Delivery not proven. |
 | `unknown` | Nothing could be compared. Never repeat the action — it may already have landed. |
 
-Exit codes: `0` success, `1` error, `2` an assertion did not hold, `130` Ctrl+C. Only `assert`
-returns `2`.
+Exit codes: `0` success, `1` error, `2` a claim this tool made did not hold, `130` Ctrl+C. `2` is
+a failed `assert`, or a `macro run` guard that was checked and did not hold — nothing else.
 
 ## uids
 
@@ -121,8 +123,12 @@ that changes route. CSS selectors and coordinates work where a uid is impractica
 
 ## Pipe mode
 
-One process, one connection, one JSON line per response. About 10x faster than spawning a process
-per command, and uids stay stable across the whole sequence.
+One process, one connection, one JSON line per response, and uids stay stable across the whole
+sequence — which is the reason to reach for it. The speed-up is real and small: pipe removes about
+12 ms of per-command overhead, worth 1.5x on a stream of reads (nine commands, 352 ms → 228 ms) and
+1.1x on a stream of fills and clicks (2029 ms → 1908 ms), where the settle window and the tree
+re-read pipe does not touch are most of the cost. Measured on 2026-08-30, M4 Max, Chrome 152,
+median of 9 runs (`scripts/measure-pipe.sh` in the repo).
 
 ```bash
 echo '{"cmd":"goto","url":"https://example.com","inspect":true}
@@ -159,14 +165,14 @@ chrome-agent --stealth --copy-cookies goto x.com/home --inspect
 |---|---|---|---|
 | Language | Rust | Rust | TypeScript |
 | Runtime deps | none | none (CLI) | Node + Playwright |
-| Startup | ~10ms (session reuse) | daemon | cold start |
+| Startup | 12 ms measured, one command on a running browser | daemon | cold start |
 | UID stability | `backendNodeId`, stable across inspects | sequential, reassigned per snapshot | N/A |
 | Compliance reporting | `verdict`/`next` on every action | no | no |
 | Stealth | 7 CDP patches | delegated to cloud providers | none |
 | Reader mode | `read` (Readability.js) | none | none |
 | Record extraction | `extract`, structural, no LLM call | none | none |
 | MCP server | none | yes | yes |
-| Code | ~23.2K lines of Rust in `src/` (blank and comment-only lines excluded; a test re-measures it) | ~40K lines (their figure, unverified here) | Playwright |
+| Code | ~28.2K lines of Rust in `src/` (blank and comment-only lines excluded; a test re-measures it) | ~40K lines (their figure, unverified here) | Playwright |
 
 ## Using it from an agent
 

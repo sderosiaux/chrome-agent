@@ -115,7 +115,8 @@ chrome-agent assert exists --selector ".result" --count 10     # --min N, or --c
 
 - **0** it held · **2** the page is not in that state (report or repair) · **1** nothing was
   compared: no browser, a selector matching nothing, an unparseable regex, a CDP timeout (retry).
-  No other command exits 2; a bad flag exits 1. Inside `pipe`/`batch` an assertion has no exit
+  The only other thing that exits 2 is a `macro run` guard that was checked and did not hold — the
+  same kind of claim. A bad flag exits 1. Inside `pipe`/`batch` an assertion has no exit
   code of its own: it is `ok:false` with the same `assertion` object, and a `batch` that stopped
   on it exits 1, not 2.
 - `assert` is a read: no change report, no verdict, and it never clicks. Secrets are compared but
@@ -137,8 +138,8 @@ a pointer does, and what `intercepted_by` tells you.
 ```bash
 # Navigation
 chrome-agent goto <url> [--inspect] [--wait-for "selector"] [--header "K: V"]
-chrome-agent back
-chrome-agent forward
+chrome-agent back [--inspect]                                # answers {url, title}
+chrome-agent forward [--inspect]                             # at either end: a message, no url
 chrome-agent scroll down|up|<uid>
 chrome-agent wait network-idle [--idle-ms N] [--timeout N]   # deterministic SPA/XHR settle
 chrome-agent wait text|url|selector "pattern" [--timeout N]
@@ -155,9 +156,11 @@ chrome-agent dblclick <uid> [--inspect]
 chrome-agent hover <uid>
 chrome-agent drag <from-uid> <to-uid>                     # mouse events; NOT HTML5 DnD
 # Writes
-chrome-agent fill --uid <uid> <value>                     # or --selector "css"
+chrome-agent fill --uid <uid> <value> [--secret]           # or --selector "css"
 chrome-agent fill-form n20="a@b.com" n30="password"       # one value report per field
-chrome-agent type "text" [--selector "input.search"]
+chrome-agent type "text" [--selector "input.search"] [--secret]
+# --secret reports lengths instead of the value. It only ADDS to what the element declares;
+# there is no flag that turns redaction off.
 chrome-agent press Enter|Tab|Escape                       # a single printable char types it
 chrome-agent select --uid <uid> "Option text"             # option.value first, then visible text
 chrome-agent check <uid> | chrome-agent uncheck <uid>     # idempotent; refuse what they cannot check
@@ -218,8 +221,11 @@ verdict **word**, `value.verbatim`, a `url_matches` on the path — never counte
 durations. A step aimed by uid is recorded by role + accessible name, or refused. A secret field
 becomes a declared parameter and is never stored, so `macro run` refuses without `--var`. A guard
 that does not hold **stops** the run, naming the step index, the guard, what was observed and the
-action's own `next`. Steps that could promise nothing are marked `unguarded` and counted in both
-reports — read that number before trusting a green run.
+action's own `next`, and exits **2** with `stopped_by: "guard"` — the same code as a failed
+assertion, because it is the same kind of claim. A run that stopped for any other reason (the step
+failed, the page could not be read, no such macro) exits **1** with `stopped_by: "error"`. Steps
+that could promise nothing are marked `unguarded` and counted in both reports — read that number
+before trusting a green run.
 
 ## Global flags
 
@@ -252,8 +258,8 @@ Refused outright: `--user-data-dir`, `--remote-debugging-port`, `--remote-debugg
 `--proxy-server` (use the global one), `--headless` (use `--headed`).
 
 Exit codes: **0** success · **1** error (including a bad flag, and a `batch --stop-on-error` that
-stopped) · **2** an assertion did not hold · **130** Ctrl+C. JS dialogs auto-accept so the page
-never hangs.
+stopped) · **2** a claim this tool made did not hold — an assertion, or a `macro run` guard ·
+**130** Ctrl+C. JS dialogs auto-accept so the page never hangs.
 
 ### Bot protection
 
@@ -345,4 +351,6 @@ Budget: prefer `inspect` over `screenshot` (a screenshot gives no uids, so you i
 narrow with `--filter "button,link"`, `--max-depth 2`, `read --truncate 1000`,
 `text --selector "main" --truncate 500`; `--budget N` caps the change report and `--verdict off`
 removes the post-action read entirely, and every guarantee at the top of this file with it; use
-`pipe`/`batch` for multi-step flows — one connection, ~10x faster, uids stay valid.
+`pipe`/`batch` for multi-step flows — one connection, uids stay valid, and about 12 ms of
+per-command overhead goes away (measured 1.5x on a read stream, 1.1x on fills and clicks). Reach
+for it for the stable uids, not for the speed.

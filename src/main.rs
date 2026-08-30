@@ -9,22 +9,25 @@ mod connect_cli;
 #[cfg(unix)]
 mod daemon;
 mod element;
+mod element_controls;
+mod element_pointer;
 mod element_ref;
 mod element_selector;
-mod element_controls;
 mod emulation;
 mod geometry;
+mod hints;
 mod hit_test;
 mod hit_test_report;
-mod hints;
 mod kill;
 mod landing;
 mod macros;
-mod macros_record;
 mod macros_cmd;
+mod macros_record;
 mod macros_run;
 mod orphans;
+mod page_ctx;
 mod pipe;
+mod pipe_command;
 mod pipe_dispatch;
 mod pipe_dispatch_actions;
 mod pipe_emulation;
@@ -37,6 +40,7 @@ mod run_helpers;
 mod serving;
 mod session;
 mod session_load;
+mod session_save;
 mod setup;
 mod snapshot;
 mod snapshot_render;
@@ -57,8 +61,9 @@ use crate::run_helpers::error_hint;
 
 #[tokio::main]
 async fn main() {
-    // Not `Cli::parse()`: clap exits 2 on a usage error, and 2 is reserved for "assertion did
-    // not hold" (`commands::assert`). Usage errors exit 1; `--help`/`--version` exit 0.
+    // Not `Cli::parse()`: clap exits 2 on a usage error, and 2 is reserved for "a claim this
+    // tool made did not hold" — an assertion (`commands::assert`) or a macro guard
+    // (`macros_run`). Usage errors exit 1; `--help`/`--version` exit 0.
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
         Err(e) => {
@@ -93,14 +98,16 @@ async fn main() {
     // On Ctrl+C, clean up this invocation's managed Chrome and only this one; other agents
     // share sessions.json. Installed after parsing, because `--browser` is global and a
     // command like `daemon start` carries a name for a browser it never launched.
-    let interrupted_browser = run_helpers::interrupt_owns_browser(&cli.command).then(|| cli.browser.clone());
+    let interrupted_browser =
+        run_helpers::interrupt_owns_browser(&cli.command).then(|| cli.browser.clone());
     tokio::spawn(async move {
         if matches!(tokio::signal::ctrl_c().await, Ok(())) {
             if let Some(name) = interrupted_browser
                 && let Ok(store) = session::load_session()
-                && let Some(pid) = run_helpers::interrupt_kill_target(&store, &name) {
-                    run_helpers::kill_pid(pid);
-                }
+                && let Some(pid) = run_helpers::interrupt_kill_target(&store, &name)
+            {
+                run_helpers::kill_pid(pid);
+            }
             // The store only knows browsers that reached it: interrupting a cold start
             // before its first save leaves a Chrome no later command could name.
             kill::reap_unpersisted();
@@ -112,13 +119,15 @@ async fn main() {
         // Same window, reached by returning rather than by signal: the launch succeeded and
         // the connect failed. A browser that DID reach the store is left alone.
         kill::reap_unpersisted();
-        // Exit 2 for "the page is not in that state", distinct from 1 "the browser never
+        // Exit 2 for "a claim this tool made did not hold", distinct from 1 "the browser never
         // started". Checked before the generic handler, which would exit 1.
         if let Some(not_held) = e.downcast_ref::<commands::assert::NotHeld>() {
             std::process::exit(not_held.report());
         }
         // A stopped macro has its own report (step, guard, observation, `next`). Printed
-        // here so the handler below does not flatten it to its first sentence.
+        // here so the handler below does not flatten it to its first sentence. A macro guard
+        // is the same claim class as an assertion, so a guard that ran and did not hold exits
+        // 2 as well; a step that never ran exits 1. `Stopped` reads that off its report.
         if let Some(stopped) = e.downcast_ref::<macros_run::Stopped>() {
             std::process::exit(stopped.report());
         }

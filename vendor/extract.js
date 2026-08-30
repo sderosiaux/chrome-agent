@@ -1,16 +1,13 @@
-// chrome-agent extract algorithm
-// Detects repeating data records in a page using MDR/DEPTA-inspired heuristics.
-// Called with: extract(_scope, _limit) where _scope is document or a scoped element.
-// Returns JSON string: { items, count, pattern } or { items: [], hint: "..." }
+// Detects repeating data records using MDR/DEPTA-inspired heuristics. `_scope` is a document
+// or a scoped element; returns a JSON string, { items, count, pattern } or { items: [], hint }.
 
 function extract(_scope, _limit) {
   function childSignature(el) {
-    // Filter out classes that look unique/dynamic (contain digits, hashes, or UUIDs)
+    // A class carrying a digit, or longer than 30 chars, is per-instance noise not a type name.
     const classes = [...el.classList]
       .filter(c => !/\d/.test(c) && c.length < 30)
       .sort().join('.');
-    // Don't include childTags in signature — items with same tag+class but different
-    // internal structure (e.g. featured card with extra badges) should still group together
+    // Child tags stay out: a featured card with extra badges is still the same record type.
     return el.tagName + '|' + classes;
   }
 
@@ -65,21 +62,18 @@ function extract(_scope, _limit) {
 
   const DATA_CLASS_RE = /item|card|product|result|row|entry|record|listing|post|article|story|repo|thread|comment/i;
 
-  // Skip elements that are hidden or inside a hidden ancestor
   function isVisible(el) {
     return !el.closest('[hidden],[aria-hidden="true"]');
   }
 
-  // What disqualifies a group of elements from being records, whichever pass found them:
-  // it sits in chrome rather than content, or it is a strip of short links.
+  // Disqualifiers shared by both passes: the group sits in chrome, or is a strip of short links.
   function penalise(score, parent, rich) {
     const parentTag = parent ? parent.tagName : '';
     if (parentTag === 'BODY' || parentTag === 'HTML') score *= 0.5;
     if (parentTag === 'NAV' || (parent && parent.closest('nav,header,footer'))) score *= 0.3;
 
-    // Link density flags navigation, where every link is a short label. A listing row
-    // whose headline is itself a link is legitimately link-heavy, so only penalise
-    // groups where no record carries a link with real text in it.
+    // Link density means navigation only when the links are short labels. A listing row
+    // whose headline is a link is legitimately link-heavy, hence the longest-link guard.
     const avgLinkRatio = rich.reduce((s, e) => s + linkTextRatio(e), 0) / rich.length;
     const avgLongestLink = rich.reduce((s, e) => s + longestLinkText(e), 0) / rich.length;
     if (avgLongestLink < HEADLINE_LINK_CHARS) {
@@ -107,11 +101,8 @@ function extract(_scope, _limit) {
       const rich = els.filter(e => richness(e) >= 1);
       if (rich.length < 3) continue;
       const avgRich = rich.reduce((s, e) => s + richness(e), 0) / rich.length;
-      // The x2 is for "this class name says data". It is not a licence to skip the
-      // navigation rules: a <nav> whose <li>s carry class "nav-item" matches
-      // DATA_CLASS_RE, and without these penalties it outscored the real product list
-      // and suppressed it from `alternatives` too. Same penalties as phase 2, one
-      // function, so the two passes cannot drift apart again.
+      // x2 for "this class name says data", but the nav rules still apply: a <nav> whose <li>s
+      // carry "nav-item" matches DATA_CLASS_RE and otherwise outscores the real product list.
       const score = penalise(avgRich * rich.length * 2.0, rich[0].parentElement, rich);
       candidates.push({ parent: rich[0].parentElement, elements: rich, sig, score });
     }
@@ -125,20 +116,14 @@ function extract(_scope, _limit) {
     const kids = [...parent.children];
     if (kids.length < 3) continue;
 
-    // Two-pass grouping: first by tagName only, then merge groups
-    // whose signatures differ only by modifier classes (e.g. "featured")
     const groups = {};
     for (const kid of kids) {
       const sig = childSignature(kid);
       if (!groups[sig]) groups[sig] = [];
       groups[sig].push(kid);
     }
-    // Merge groups with same tagName — a "featured" variant should join the base group
-    // but skip hidden elements during merge
-    // A modifier variant shares the base class and adds to it ("item" vs "item featured").
-    // Rows that merely share a tag with no class in common are different record types
-    // (HN's story rows vs its subtext rows) and must stay apart, or the merged group wins
-    // on sheer count and mixes two kinds of record into one list.
+    // Merge only variants sharing a class ("item" vs "item featured"). Same tag with no class in
+    // common is a different record type (HN story rows vs subtext rows) and must stay apart.
     const classesOf = (sig) => new Set(sig.split('|')[1].split('.').filter(Boolean));
     const tagGroups = {};
     for (const [sig, els] of Object.entries(groups)) {
@@ -199,10 +184,8 @@ function extract(_scope, _limit) {
   candidates.sort((a, b) => b.score - a.score);
   const best = candidates[0];
 
-  // A page can hold two lists that both look like data: products and posts, results and
-  // related items. We return the higher-scoring one, and when the runner-up is close and
-  // covers different nodes, the caller has to be told — otherwise it silently receives one
-  // of two plausible answers with no way to know a choice was made.
+  // Two lists can both look like data. The higher-scoring one wins; a runner-up within 60% of it
+  // covering different nodes is named, so the caller knows a choice was made.
   function selectorFor(el) {
     if (!el || !el.tagName) return null;
     if (el.id) return '#' + el.id;
@@ -224,22 +207,19 @@ function extract(_scope, _limit) {
     if (alternatives.length >= 3) break;
   }
 
-  // Helper: check if element or ancestor is sr-only/visually-hidden
   function isSrOnly(el) {
     const cl = el.className || '';
     return /sr-only|visually-hidden|screen-reader/i.test(cl);
   }
 
-  // Helper: clean text by removing CSS leaks and UI chrome noise
   function cleanText(txt) {
-    // Remove inline CSS that leaks from style elements
+    // Strips CSS rules that leak into textContent from a <style> descendant.
     let cleaned = txt.replace(/\.[a-zA-Z_-]+\{[^}]*\}/g, '').trim();
-    // Collapse whitespace
     cleaned = cleaned.replace(/\s+/g, ' ');
     return cleaned;
   }
 
-  // Filter to elements with actual extractable content (skip spacer rows)
+  // Drops spacer rows: too little text, or no element children.
   const meaningfulElements = best.elements.filter(el => {
     const text = el.textContent.trim();
     if (text.length < 3) return false;
@@ -252,14 +232,12 @@ function extract(_scope, _limit) {
     const heading = el.querySelector('h1,h2,h3,h4,h5,h6,[role=heading]');
     if (heading) item.title = heading.textContent.trim().replace(/\s+/g, ' ');
 
-    // Prefer link inside heading/th, then link with class containing "title",
-    // then first link that isn't a short domain-only link, then longest link
+    // Title link preference: inside a heading or th, then a "title"-classed link, then the longest.
     const headingLink = el.querySelector('h1 a[href],h2 a[href],h3 a[href],h4 a[href],h5 a[href],h6 a[href],th a[href]');
     const titleClassLink = el.querySelector('[class*=title] > a[href],[class*=Title] > a[href],.titleline > a[href]');
     const links = [...el.querySelectorAll('a[href]')].filter(a => {
       const t = a.textContent.trim();
       if (t.length === 0) return false;
-      // Skip sr-only links
       if (isSrOnly(a) || a.closest('[aria-hidden="true"]')) return false;
       return true;
     });
@@ -284,19 +262,18 @@ function extract(_scope, _limit) {
 
     const fields = [];
     for (const child of el.children) {
-      // Skip hidden/sr-only children
+      // No computed style here, so display/visibility are matched textually on the attribute.
       const style = (child.getAttribute('style') || '').toLowerCase();
       if (style.includes('display:none') || style.includes('display: none') ||
           style.includes('visibility:hidden') || style.includes('visibility: hidden')) continue;
       if (child.hidden || child.getAttribute('aria-hidden') === 'true') continue;
       if (isSrOnly(child)) continue;
-      // Skip script/style tags
       if (child.tagName === 'SCRIPT' || child.tagName === 'STYLE') continue;
       let txt = cleanText(child.textContent);
       if (txt && txt.length > 2 && txt.length < 200) {
         if (item.title && txt === item.title) continue;
         if (item.price && txt === item.price) continue;
-        // Skip UI chrome noise (single-word button labels, etc.)
+        // Single-word action labels are chrome, not fields.
         if (/^(Star|Sponsor|Share|Like|Save|Follow|Built by|Unstar)$/i.test(txt)) continue;
         fields.push(txt);
       }
@@ -312,7 +289,6 @@ function extract(_scope, _limit) {
     return item;
   });
 
-  // Only count items that produced at least one useful field
   const nonEmpty = items.filter(i => i.title || i.url || i.text || i.fields);
 
   const patternParts = best.sig.split('|');

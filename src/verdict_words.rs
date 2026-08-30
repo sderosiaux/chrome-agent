@@ -19,8 +19,10 @@ pub fn gloss(assessment: Assessment) -> &'static str {
         "focus_only" => "nothing moved but focus, which is the only sign the action arrived",
         // Names its evidence: the one `changed` with no delta to point at, so the claim rests on
         // the read-back. "the element", not "the field" — select and check reach this rung too.
-        "value_kept" => "the element held what was asked of it when it was read back, and the \
-                         tree could not show it",
+        "value_kept" => {
+            "the element held what was asked of it when it was read back, and the \
+                         tree could not show it"
+        }
         "values_lost" => "the page moved, and a field that held a value now holds none",
         "document_replaced" => "the document was replaced, so every stored uid is dead",
         "hit_test_receiver" => "another element occupied the point aimed at and received the event",
@@ -31,13 +33,13 @@ pub fn gloss(assessment: Assessment) -> &'static str {
             "the event reached the target and the tree stayed still while it was watched"
         }
         // The word an agent most easily over-reads; the gloss carries the limit it cannot.
-        "identical_tree" => "the tree was identical while the tool watched — which is not the \
-                             same as the action having no effect",
+        "identical_tree" => {
+            "the tree was identical while the tool watched — which is not the \
+                             same as the action having no effect"
+        }
         "no_baseline" => "unverified — there was no earlier snapshot to compare against",
         "read_failed" => "unverified — the action ran and the page could not be read afterwards",
-        "identity_unreadable" => {
-            "unverified — the two trees may not belong to the same document"
-        }
+        "identity_unreadable" => "unverified — the two trees may not belong to the same document",
         "scroll_not_settled" => "nothing was dispatched: the aim point was still moving",
         "aim_point_off_target" => {
             "nothing was dispatched: no point on the element could be aimed at, and the \
@@ -141,7 +143,6 @@ fn next_when_the_page_was_read(assessment: Assessment) -> Next {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -197,7 +198,11 @@ mod tests {
             ] {
                 for modal_receiver in [false, true] {
                     for observed_after_ms in [None, Some(60)] {
-                        let delivered = Delivered { how, modal_receiver, observed_after_ms };
+                        let delivered = Delivered {
+                            how,
+                            modal_receiver,
+                            observed_after_ms,
+                        };
                         for postcondition in [
                             Postcondition::NotRead,
                             Postcondition::Kept,
@@ -251,7 +256,11 @@ mod tests {
         let mut seen = std::collections::HashSet::new();
         for assessment in every_assessment() {
             let text = gloss(assessment);
-            let floor = gloss(Assessment { verdict: assessment.verdict, reason: "unwritten", page: PageSight::Readable });
+            let floor = gloss(Assessment {
+                verdict: assessment.verdict,
+                reason: "unwritten",
+                page: PageSight::Readable,
+            });
             assert_ne!(
                 text, floor,
                 "{} / {} falls back to the per-verdict floor",
@@ -282,7 +291,11 @@ mod tests {
     /// forbids.
     #[test]
     fn the_unchanged_gloss_refuses_to_conclude_no_effect() {
-        let text = gloss(Assessment { verdict: Verdict::Unchanged, reason: "identical_tree", page: PageSight::Readable });
+        let text = gloss(Assessment {
+            verdict: Verdict::Unchanged,
+            reason: "identical_tree",
+            page: PageSight::Readable,
+        });
         assert!(text.contains("not the same as"), "{text}");
         assert!(!text.contains("no effect having"), "{text}");
     }
@@ -290,13 +303,23 @@ mod tests {
     /// The tokens mislead: `unknown` reads as a broken tool, `not_checked` as a missing feature.
     #[test]
     fn the_uncertain_verdicts_are_glossed_in_plain_words() {
-        for (reason, word) in
-            [("no_baseline", "unverified"), ("read_failed", "unverified"), ("identity_unreadable", "unverified")]
-        {
-            let text = gloss(Assessment { verdict: Verdict::Unknown, reason, page: PageSight::Readable });
+        for (reason, word) in [
+            ("no_baseline", "unverified"),
+            ("read_failed", "unverified"),
+            ("identity_unreadable", "unverified"),
+        ] {
+            let text = gloss(Assessment {
+                verdict: Verdict::Unknown,
+                reason,
+                page: PageSight::Readable,
+            });
             assert!(text.starts_with(word), "{reason}: {text}");
         }
-        let text = gloss(Assessment { verdict: Verdict::NotChecked, reason: "reporting_disabled", page: PageSight::Readable });
+        let text = gloss(Assessment {
+            verdict: Verdict::NotChecked,
+            reason: "reporting_disabled",
+            page: PageSight::Readable,
+        });
         assert!(text.starts_with("not checked"), "{text}");
     }
 
@@ -321,7 +344,11 @@ mod tests {
             (Verdict::Changed, "values_lost", Next::Confirm),
             (Verdict::Changed, "value_kept", Next::Proceed),
         ] {
-            let assessment = Assessment { verdict, reason, page: PageSight::Readable };
+            let assessment = Assessment {
+                verdict,
+                reason,
+                page: PageSight::Readable,
+            };
             assert_eq!(next_for(assessment), expected, "{verdict} / {reason}");
         }
     }
@@ -334,7 +361,11 @@ mod tests {
                 continue;
             }
             if assessment.reason == "scroll_not_settled" {
-                assert_eq!(next_for(assessment), Next::Retry, "nothing was dispatched here");
+                assert_eq!(
+                    next_for(assessment),
+                    Next::Retry,
+                    "nothing was dispatched here"
+                );
                 continue;
             }
             assert_eq!(
@@ -354,19 +385,34 @@ mod tests {
             .filter(|a| next_for(*a) == Next::Retry)
             .map(|a| a.reason)
             .collect();
-        assert!(retriable.iter().all(|r| *r == "scroll_not_settled"), "{retriable:?}");
-        assert!(!retriable.is_empty(), "the token must stay reachable, or it is not a vocabulary");
+        assert!(
+            retriable.iter().all(|r| *r == "scroll_not_settled"),
+            "{retriable:?}"
+        );
+        assert!(
+            !retriable.is_empty(),
+            "the token must stay reachable, or it is not a vocabulary"
+        );
     }
 
     /// A closed vocabulary of six, and no token spelled two ways.
     #[test]
     fn the_vocabulary_is_six_tokens_and_round_trips() {
-        let all = [Next::Proceed, Next::Inspect, Next::Retry, Next::Confirm, Next::Dismiss, Next::Stop];
+        let all = [
+            Next::Proceed,
+            Next::Inspect,
+            Next::Retry,
+            Next::Confirm,
+            Next::Dismiss,
+            Next::Stop,
+        ];
         let spelled: std::collections::BTreeSet<&str> = all.iter().map(|n| n.as_str()).collect();
         assert_eq!(spelled.len(), 6);
         assert_eq!(
             spelled,
-            ["confirm", "dismiss", "inspect", "proceed", "retry", "stop"].into_iter().collect()
+            ["confirm", "dismiss", "inspect", "proceed", "retry", "stop"]
+                .into_iter()
+                .collect()
         );
         for next in all {
             assert_eq!(next.to_string(), next.as_str());
@@ -413,9 +459,18 @@ mod guide {
                 let (reason, next) = (cols.next()?, cols.next()?);
                 // The `delivery` table shares the word "intercepted" in its first column. A row
                 // of this table always names a vocabulary token third.
-                let vocabulary =
-                    [Next::Proceed, Next::Inspect, Next::Retry, Next::Confirm, Next::Dismiss, Next::Stop];
-                vocabulary.iter().any(|n| n.as_str() == next).then_some((verdict, reason, next))
+                let vocabulary = [
+                    Next::Proceed,
+                    Next::Inspect,
+                    Next::Retry,
+                    Next::Confirm,
+                    Next::Dismiss,
+                    Next::Stop,
+                ];
+                vocabulary
+                    .iter()
+                    .any(|n| n.as_str() == next)
+                    .then_some((verdict, reason, next))
             })
             .collect()
     }
@@ -423,9 +478,17 @@ mod guide {
     #[test]
     fn the_guide_table_is_the_mapping_this_module_implements() {
         let rows = rows();
-        assert_eq!(rows.len(), 18, "the guide lost rows, or grew columns: {rows:?}");
+        assert_eq!(
+            rows.len(),
+            18,
+            "the guide lost rows, or grew columns: {rows:?}"
+        );
         for (verdict, reason, next) in rows {
-            let assessment = Assessment { verdict: parse_verdict(verdict), reason: leak(reason), page: PageSight::Readable };
+            let assessment = Assessment {
+                verdict: parse_verdict(verdict),
+                reason: leak(reason),
+                page: PageSight::Readable,
+            };
             assert_eq!(
                 next_for(assessment).as_str(),
                 next,
@@ -443,7 +506,11 @@ mod guide {
             reason: "value_kept",
             page: PageSight::Unreadable,
         };
-        assert_eq!(next_for(blind), Next::Inspect, "the exception this note is about");
+        assert_eq!(
+            next_for(blind),
+            Next::Inspect,
+            "the exception this note is about"
+        );
         assert!(
             GUIDE.contains("next=inspect"),
             "the guide must name the token the exception answers"
@@ -474,7 +541,10 @@ mod guide {
     /// several into one. So a cell is read as a LIST, of which the one-reason case is an instance.
     fn markdown_rows(doc: &str) -> Vec<(String, Vec<String>, Vec<String>)> {
         const HEADER: &str = "| `verdict` | `verdict_reason` | `next` |";
-        let table = doc.split_once(HEADER).expect("the verdict table's header row").1;
+        let table = doc
+            .split_once(HEADER)
+            .expect("the verdict table's header row")
+            .1;
         table
             .lines()
             .map(str::trim)
@@ -483,8 +553,15 @@ mod guide {
             .take_while(|line| line.starts_with('|'))
             .map(|line| {
                 let cells: Vec<&str> = line.trim_matches('|').split('|').collect();
-                assert!(cells.len() >= 3, "a verdict row needs three columns: {line}");
-                (bare(cells[0]), cell_list(cells[1], ','), cell_list(cells[2], '/'))
+                assert!(
+                    cells.len() >= 3,
+                    "a verdict row needs three columns: {line}"
+                );
+                (
+                    bare(cells[0]),
+                    cell_list(cells[1], ','),
+                    cell_list(cells[2], '/'),
+                )
             })
             .collect()
     }
@@ -495,7 +572,10 @@ mod guide {
     }
 
     fn cell_list(cell: &str, separator: char) -> Vec<String> {
-        cell.split(separator).map(bare).filter(|token| !token.is_empty()).collect()
+        cell.split(separator)
+            .map(bare)
+            .filter(|token| !token.is_empty())
+            .collect()
     }
 
     /// The same re-borrow `leak` does, from markdown, where backticks separate the token.
@@ -509,11 +589,16 @@ mod guide {
     /// `confirm` are opposite branches, so a single wrong cell makes an agent do another thing.
     #[test]
     fn every_markdown_copy_of_the_table_is_the_mapping_this_module_implements() {
-        for (name, doc, expected) in
-            [("skills/chrome-agent/SKILL.md", SKILL, 18), ("README.md", README, 12)]
-        {
+        for (name, doc, expected) in [
+            ("skills/chrome-agent/SKILL.md", SKILL, 18),
+            ("README.md", README, 12),
+        ] {
             let rows = markdown_rows(doc);
-            assert_eq!(rows.len(), expected, "{name} lost rows, or grew columns: {rows:?}");
+            assert_eq!(
+                rows.len(),
+                expected,
+                "{name} lost rows, or grew columns: {rows:?}"
+            );
             for (verdict, reasons, nexts) in rows {
                 assert!(!reasons.is_empty(), "{name}: {verdict} names no reason");
                 for reason in &reasons {
@@ -538,7 +623,10 @@ mod guide {
                                 "{name}: only a confirmed write on a page that could not be \
                                  read has two answers, not {verdict}/{reason}"
                             );
-                            let blind = Assessment { page: PageSight::Unreadable, ..seen };
+                            let blind = Assessment {
+                                page: PageSight::Unreadable,
+                                ..seen
+                            };
                             assert_eq!(
                                 next_for(blind).as_str(),
                                 nexts[1],
@@ -595,7 +683,14 @@ mod guide {
             .skip_while(|line| !line.starts_with('|'))
             .skip(1)
             .take_while(|line| line.starts_with('|'))
-            .map(|line| bare(line.trim_matches('|').split('|').next().expect("a first cell")))
+            .map(|line| {
+                bare(
+                    line.trim_matches('|')
+                        .split('|')
+                        .next()
+                        .expect("a first cell"),
+                )
+            })
             .collect()
     }
 
@@ -614,11 +709,14 @@ mod guide {
             Delivery::JsDispatch,
             Delivery::NotProbed,
         ];
-        let guide: Vec<String> =
-            delivery_rows_in_the_guide().into_iter().map(str::to_string).collect();
-        for (name, rows) in
-            [("llm-guide.txt", guide), ("skills/chrome-agent/SKILL.md", delivery_rows_in_the_skill())]
-        {
+        let guide: Vec<String> = delivery_rows_in_the_guide()
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        for (name, rows) in [
+            ("llm-guide.txt", guide),
+            ("skills/chrome-agent/SKILL.md", delivery_rows_in_the_skill()),
+        ] {
             assert_eq!(
                 rows.len(),
                 expected.len(),
@@ -803,15 +901,25 @@ mod short {
     #[test]
     fn a_short_hint_is_short_and_ends_where_a_sentence_ends() {
         for assessment in super::tests::every_assessment() {
-            let Some(hint) = short_hint(assessment) else { continue };
+            let Some(hint) = short_hint(assessment) else {
+                continue;
+            };
             assert!(
                 hint.len() <= LINE_PAIR,
                 "{} is {} chars, over the two-line budget: {hint}",
                 assessment.reason,
                 hint.len()
             );
-            assert!(hint.ends_with('.'), "{} is cut mid-sentence: {hint}", assessment.reason);
-            assert!(!hint.contains('…'), "{} was truncated, not written: {hint}", assessment.reason);
+            assert!(
+                hint.ends_with('.'),
+                "{} is cut mid-sentence: {hint}",
+                assessment.reason
+            );
+            assert!(
+                !hint.contains('…'),
+                "{} was truncated, not written: {hint}",
+                assessment.reason
+            );
         }
     }
 
@@ -831,7 +939,9 @@ mod short {
             }
             // Softer half: a full hint warning about a duplicate leaves the short one warning too.
             let warns = |text: &str| {
-                ["repeat", "again", "twice", "second"].iter().any(|w| text.contains(w))
+                ["repeat", "again", "twice", "second"]
+                    .iter()
+                    .any(|w| text.contains(w))
             };
             if warns(full) {
                 assert!(
@@ -846,7 +956,11 @@ mod short {
     /// `scroll_not_settled` is the one rung where the repeat IS the advice.
     #[test]
     fn the_safe_retry_still_says_to_retry() {
-        let assessment = Assessment { verdict: Verdict::Unknown, reason: "scroll_not_settled", page: PageSight::Readable };
+        let assessment = Assessment {
+            verdict: Verdict::Unknown,
+            reason: "scroll_not_settled",
+            page: PageSight::Readable,
+        };
         let short = short_hint(assessment).expect("a short hint");
         assert!(short.contains("again"), "{short}");
         assert!(!short.contains("Do not"), "{short}");

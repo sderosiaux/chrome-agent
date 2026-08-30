@@ -16,6 +16,37 @@ Hints are owned `String`s for rule 2. The rules are enforced by tests over every
 module recognises: no unresolved placeholder, no retry wording, no command aimed at the wrong
 browser.
 
+## Rule 2 has a second half: the value in the command is not the tool's
+
+A hint hands back a command an agent may paste into a shell, and the URL in one is
+`landing::Landing`'s `final_url` — where the **site** sent the navigation, not where the caller
+aimed it. Unquoted, a redirect to a URL carrying a backtick, `;`, `$(…)` or a newline turned this
+tool's own suggestion into a different command.
+
+So every page-controlled value inside backticks goes through `landing::shell_quoted`: POSIX
+single quotes, `'` closed and re-opened around an escaped one, ASCII control characters
+percent-encoded. Applied unconditionally, never "when the URL looks dangerous" — one rule with no
+predicate to get wrong, and `'https://example.com/'` runs identically to the bare form.
+
+A host is a different case, because `landing::host_and_path` splits a string rather than
+validating one: a crafted authority is not quoted back at all. `landing::is_plain_host` gates it,
+and a "host" that fails is named as `the host`, which is the fallback that branch already had.
+It also gates the `www.` guess, since a suggestion built out of a hostname that is not one is
+nonsense in any case.
+
+Quoted (page-controlled, inside backticks): `serving::Assessment::hint`'s challenge command,
+`serving::error_hint`'s 404/410 site root, and in `hints::navigation` the `www.` guess, the
+`http://` retry and the two `goto <origin>` branches. Gated by `is_plain_host`: the bare-backtick
+host in every `navigation` branch, and the `www.` guess, which is nonsense for a string that is
+not a hostname anyway.
+
+Left alone, each for a reason:
+
+- `hit_test::Hit::describe` in `intercepted_refusal_hint`, and `challenge_from` in the `serving` gloss — page-controlled, but in prose, outside any backtick.
+- The uid in `error_hint`'s `scroll <uid>` — `hints::uid_in` stops at the first non-alphanumeric character, so it is safe by construction rather than by quoting.
+- `landing`'s auth-wall segment — from a fixed const list. `download::evidence_lost_hint`'s path — created by this invocation. `download_cap_hint`'s byte count — a `usize`.
+- `usage_error`'s reordered `argv`, and the `--browser` name in every `run` prefix — the caller's own command line, echoed back. A metacharacter there is one the caller already ran, so quoting it would hide a mistake rather than remove a capability.
+
 A node with no `backendDOMNodeId` (an `e{n}` uid, no DOM element behind it) and a CDP reply we
 could not parse used to share "Page structure issue" — two causes, neither named. They are split.
 

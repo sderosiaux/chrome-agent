@@ -11,7 +11,10 @@ mod common;
 use common::TestBrowser;
 
 fn run_cli(args: &[&str]) -> (String, i32) {
-    let output = Command::new(common::binary()).args(args).output().expect("Failed to run chrome-agent");
+    let output = Command::new(common::binary())
+        .args(args)
+        .output()
+        .expect("Failed to run chrome-agent");
     (
         String::from_utf8_lossy(&output.stdout).to_string(),
         output.status.code().unwrap_or(-1),
@@ -53,19 +56,45 @@ fn a_value_the_page_did_not_keep_exits_2_and_names_what_it_kept() {
     if !open(b.name(), "form_value_microtask_revert.html") {
         return;
     }
-    let (fill, code) = cli(b.name(), &["fill", "--selector", "#micro", "hello@example.com"]);
+    let (fill, code) = cli(
+        b.name(),
+        &["fill", "--selector", "#micro", "hello@example.com"],
+    );
     assert_eq!(code, 0, "the fill itself succeeds: {fill}");
 
-    let (v, code) = assert_cmd(b.name(), &["value", "--selector", "#micro", "--equals", "hello@example.com"]);
-    assert_eq!(code, 2, "a claim the page contradicts is exit 2, not 1: {v}");
+    let (v, code) = assert_cmd(
+        b.name(),
+        &[
+            "value",
+            "--selector",
+            "#micro",
+            "--equals",
+            "hello@example.com",
+        ],
+    );
+    assert_eq!(
+        code, 2,
+        "a claim the page contradicts is exit 2, not 1: {v}"
+    );
     assert_eq!(v["ok"], false, "{v}");
     assert_eq!(v["assertion"]["held"], false, "{v}");
     assert_eq!(v["assertion"]["kind"], "value");
     assert_eq!(v["assertion"]["expected"], "hello@example.com");
-    assert_eq!(v["assertion"]["actual"], "", "the page kept nothing, and the report says so: {v}");
-    assert!(v["hint"].is_string(), "a failed assertion says what to do next: {v}");
+    assert_eq!(
+        v["assertion"]["actual"], "",
+        "the page kept nothing, and the report says so: {v}"
+    );
+    assert!(
+        v["hint"].is_string(),
+        "a failed assertion says what to do next: {v}"
+    );
     // The node it read is named, whichever way the caller aimed.
-    assert!(v["assertion"]["uid"].as_str().is_some_and(|u| u.starts_with('n')), "{v}");
+    assert!(
+        v["assertion"]["uid"]
+            .as_str()
+            .is_some_and(|u| u.starts_with('n')),
+        "{v}"
+    );
 
     // The complement: what the page does hold, holds.
     let (v, code) = assert_cmd(b.name(), &["value", "--selector", "#micro", "--equals", ""]);
@@ -82,10 +111,22 @@ fn an_unanswerable_claim_exits_1_not_2() {
         return;
     }
     for (args, expect) in [
-        (vec!["value", "--selector", "#nope", "--equals", "x"], "No element matches selector"),
-        (vec!["value", "--selector", "#(", "--equals", "x"], "not a valid selector"),
-        (vec!["text", "--matches", "(unclosed"], "invalid regular expression"),
-        (vec!["value", "--uid", "n99999", "--equals", "x"], "not found"),
+        (
+            vec!["value", "--selector", "#nope", "--equals", "x"],
+            "No element matches selector",
+        ),
+        (
+            vec!["value", "--selector", "#(", "--equals", "x"],
+            "not a valid selector",
+        ),
+        (
+            vec!["text", "--matches", "(unclosed"],
+            "invalid regular expression",
+        ),
+        (
+            vec!["value", "--uid", "n99999", "--equals", "x"],
+            "not found",
+        ),
     ] {
         let (v, code) = assert_cmd(b.name(), &args);
         assert_eq!(code, 1, "{args:?} could not be checked, so it is 1: {v}");
@@ -94,7 +135,10 @@ fn an_unanswerable_claim_exits_1_not_2() {
             v["error"].as_str().unwrap_or_default().contains(expect),
             "{args:?} should say why it could not be checked: {v}"
         );
-        assert!(v.get("assertion").is_none(), "nothing was compared, so there is no assertion to report: {v}");
+        assert!(
+            v.get("assertion").is_none(),
+            "nothing was compared, so there is no assertion to report: {v}"
+        );
     }
 }
 
@@ -113,14 +157,20 @@ fn what_check_did_is_what_assert_reads_by_uid_and_by_selector() {
     // Native checkbox: turn it on, then assert it both ways.
     let (checked, code) = cli(b.name(), &["check", "--selector", "#native"]);
     assert_eq!(code, 0, "{checked}");
-    let uid = checked["uid"].as_str().expect("check names the node it hit").to_string();
+    let uid = checked["uid"]
+        .as_str()
+        .expect("check names the node it hit")
+        .to_string();
 
     for args in [
         vec!["state", "--selector", "#native", "--checked"],
         vec!["state", "--uid", uid.as_str(), "--checked"],
     ] {
         let (v, code) = assert_cmd(b.name(), &args);
-        assert_eq!(code, 0, "{args:?} must agree with the check that just ran: {v}");
+        assert_eq!(
+            code, 0,
+            "{args:?} must agree with the check that just ran: {v}"
+        );
         assert_eq!(v["assertion"]["actual"], "true", "{v}");
         assert_eq!(v["assertion"]["reading"], "native", "{v}");
     }
@@ -131,7 +181,10 @@ fn what_check_did_is_what_assert_reads_by_uid_and_by_selector() {
     assert_eq!(v["assertion"]["reading"], "aria", "{v}");
 
     // The one that starts off: --unchecked holds, --checked is exit 2.
-    let (v, code) = assert_cmd(b.name(), &["state", "--selector", "#aria_off", "--unchecked"]);
+    let (v, code) = assert_cmd(
+        b.name(),
+        &["state", "--selector", "#aria_off", "--unchecked"],
+    );
     assert_eq!(code, 0, "{v}");
     let (v, code) = assert_cmd(b.name(), &["state", "--selector", "#aria_off", "--checked"]);
     assert_eq!(code, 2, "{v}");
@@ -146,10 +199,16 @@ fn a_state_the_element_cannot_hold_is_refused_not_answered() {
         return;
     }
     let (v, code) = assert_cmd(b.name(), &["state", "--selector", "#text", "--checked"]);
-    assert_eq!(code, 1, "an unanswerable state is not a failed assertion: {v}");
+    assert_eq!(
+        code, 1,
+        "an unanswerable state is not a failed assertion: {v}"
+    );
     let err = v["error"].as_str().unwrap_or_default();
     assert!(err.contains("has no checked state"), "{v}");
-    assert!(err.contains("checkbox"), "the message names what would be checkable: {v}");
+    assert!(
+        err.contains("checkbox"),
+        "the message names what would be checkable: {v}"
+    );
 }
 
 #[test]
@@ -163,14 +222,23 @@ fn what_select_chose_is_what_assert_reads() {
 
     // Both spellings `select` accepts, `assert` accepts.
     for expected in ["California", "CA"] {
-        let (v, code) = assert_cmd(b.name(), &["state", "--selector", "#state", "--selected", expected]);
+        let (v, code) = assert_cmd(
+            b.name(),
+            &["state", "--selector", "#state", "--selected", expected],
+        );
         assert_eq!(code, 0, "selected by {expected}: {v}");
         assert_eq!(v["assertion"]["actual"], "California", "{v}");
         assert_eq!(v["assertion"]["selected_value"], "CA", "{v}");
     }
-    let (v, code) = assert_cmd(b.name(), &["state", "--selector", "#state", "--selected", "New York"]);
+    let (v, code) = assert_cmd(
+        b.name(),
+        &["state", "--selector", "#state", "--selected", "New York"],
+    );
     assert_eq!(code, 2, "{v}");
-    assert_eq!(v["assertion"]["actual"], "California", "the report names what IS selected: {v}");
+    assert_eq!(
+        v["assertion"]["actual"], "California",
+        "the report names what IS selected: {v}"
+    );
 }
 
 /// Disabled is `:disabled` plus `aria-disabled`, not `el.disabled`, which is false inside a
@@ -205,7 +273,10 @@ fn visible_names_which_flavour_of_hidden_it_found() {
     let (v, code) = assert_cmd(b.name(), &["state", "--selector", "#shown", "--visible"]);
     assert_eq!(code, 0, "{v}");
     assert!(
-        v["assertion"]["means"].as_str().unwrap_or_default().contains("not 'in the viewport'"),
+        v["assertion"]["means"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("not 'in the viewport'"),
         "the response must refuse to be read as 'clickable': {v}"
     );
     for (selector, actual) in [
@@ -252,14 +323,32 @@ fn text_and_url_after_a_navigation() {
     }
     let (v, code) = assert_cmd(b.name(), &["text", "--contains", "Order 4815"]);
     assert_eq!(code, 0, "whole-page text by default: {v}");
-    let (v, code) = assert_cmd(b.name(), &["text", "--selector", "#status", "--matches", r"Shipped on \d{4}-\d{2}-\d{2}"]);
+    let (v, code) = assert_cmd(
+        b.name(),
+        &[
+            "text",
+            "--selector",
+            "#status",
+            "--matches",
+            r"Shipped on \d{4}-\d{2}-\d{2}",
+        ],
+    );
     assert_eq!(code, 0, "scoped to an element, matched by pattern: {v}");
-    let (v, code) = assert_cmd(b.name(), &["text", "--selector", "#status", "--contains", "Delivered"]);
+    let (v, code) = assert_cmd(
+        b.name(),
+        &["text", "--selector", "#status", "--contains", "Delivered"],
+    );
     assert_eq!(code, 2, "{v}");
 
     let (v, code) = assert_cmd(b.name(), &["url", "--matches", r"assert_page\.html$"]);
     assert_eq!(code, 0, "{v}");
-    assert!(v["assertion"]["actual"].as_str().unwrap_or_default().ends_with("assert_page.html"), "{v}");
+    assert!(
+        v["assertion"]["actual"]
+            .as_str()
+            .unwrap_or_default()
+            .ends_with("assert_page.html"),
+        "{v}"
+    );
     let (v, code) = assert_cmd(b.name(), &["url", "--equals", "https://example.com/"]);
     assert_eq!(code, 2, "{v}");
 }
@@ -270,18 +359,30 @@ fn a_secret_field_is_compared_without_echoing_the_secret() {
     if !open(b.name(), "assert_page.html") {
         return;
     }
-    let (v, code) = assert_cmd(b.name(), &["value", "--selector", "#secret", "--equals", "hunter2"]);
+    let (v, code) = assert_cmd(
+        b.name(),
+        &["value", "--selector", "#secret", "--equals", "hunter2"],
+    );
     assert_eq!(code, 0, "the comparison still happens: {v}");
     assert_eq!(v["assertion"]["redacted"], true, "{v}");
     let printed = serde_json::to_string(&v).unwrap();
-    assert!(!printed.contains("hunter2"), "the secret must not appear anywhere in the response: {printed}");
+    assert!(
+        !printed.contains("hunter2"),
+        "the secret must not appear anywhere in the response: {printed}"
+    );
     // Lengths separate "the mask reformatted it" from "empty".
     assert_eq!(v["assertion"]["actual_length"], 7, "{v}");
 
-    let (v, code) = assert_cmd(b.name(), &["value", "--selector", "#secret", "--equals", "wrong"]);
+    let (v, code) = assert_cmd(
+        b.name(),
+        &["value", "--selector", "#secret", "--equals", "wrong"],
+    );
     assert_eq!(code, 2, "{v}");
     let printed = serde_json::to_string(&v).unwrap();
-    assert!(!printed.contains("hunter2"), "not even on the failure path: {printed}");
+    assert!(
+        !printed.contains("hunter2"),
+        "not even on the failure path: {printed}"
+    );
 }
 
 /// `assert value` on an element with no `value` property is refused and names `assert text`.
@@ -291,13 +392,28 @@ fn a_value_assertion_on_something_that_holds_no_value_is_refused() {
     if !open(b.name(), "assert_page.html") {
         return;
     }
-    let (v, code) = assert_cmd(b.name(), &["value", "--selector", "#editable", "--equals", "typed here"]);
+    let (v, code) = assert_cmd(
+        b.name(),
+        &["value", "--selector", "#editable", "--equals", "typed here"],
+    );
     assert_eq!(code, 1, "{v}");
     let err = v["error"].as_str().unwrap_or_default();
     assert!(err.contains("no value property"), "{v}");
-    assert!(err.contains("assert text"), "the refusal names what to use instead: {v}");
+    assert!(
+        err.contains("assert text"),
+        "the refusal names what to use instead: {v}"
+    );
     // The text of that same element does hold.
-    let (v, code) = assert_cmd(b.name(), &["text", "--selector", "#editable", "--contains", "typed here"]);
+    let (v, code) = assert_cmd(
+        b.name(),
+        &[
+            "text",
+            "--selector",
+            "#editable",
+            "--contains",
+            "typed here",
+        ],
+    );
     assert_eq!(code, 0, "{v}");
 }
 
@@ -320,29 +436,56 @@ fn batch_stops_at_the_first_failed_assertion_only_when_asked() {
         .spawn()
         .and_then(|mut child| {
             use std::io::Write as _;
-            child.stdin.as_mut().unwrap().write_all(commands.as_bytes())?;
+            child
+                .stdin
+                .as_mut()
+                .unwrap()
+                .write_all(commands.as_bytes())?;
             child.wait_with_output()
         })
         .expect("run batch");
     let v: Value = serde_json::from_slice(&out.stdout).unwrap_or(Value::Null);
-    assert_eq!(v["ok"], false, "one failed assertion makes the batch not ok: {v}");
-    assert_eq!(v["results"].as_array().map(Vec::len), Some(2), "both commands ran: {v}");
+    assert_eq!(
+        v["ok"], false,
+        "one failed assertion makes the batch not ok: {v}"
+    );
+    assert_eq!(
+        v["results"].as_array().map(Vec::len),
+        Some(2),
+        "both commands ran: {v}"
+    );
     assert!(v.get("stopped_at").is_none(), "nothing was skipped: {v}");
 
     // Opt in, and the second command never runs.
     let out = Command::new(common::binary())
-        .args(["--browser", b.name(), "--verdict", "off", "--json", "batch", "--stop-on-error"])
+        .args([
+            "--browser",
+            b.name(),
+            "--verdict",
+            "off",
+            "--json",
+            "batch",
+            "--stop-on-error",
+        ])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .spawn()
         .and_then(|mut child| {
             use std::io::Write as _;
-            child.stdin.as_mut().unwrap().write_all(commands.as_bytes())?;
+            child
+                .stdin
+                .as_mut()
+                .unwrap()
+                .write_all(commands.as_bytes())?;
             child.wait_with_output()
         })
         .expect("run batch");
     let v: Value = serde_json::from_slice(&out.stdout).unwrap_or(Value::Null);
-    assert_eq!(v["results"].as_array().map(Vec::len), Some(1), "it stopped: {v}");
+    assert_eq!(
+        v["results"].as_array().map(Vec::len),
+        Some(1),
+        "it stopped: {v}"
+    );
     assert_eq!(v["stopped_at"], 0, "{v}");
     assert_eq!(v["skipped"], 1, "{v}");
     assert_eq!(v["results"][0]["assertion"]["held"], false, "{v}");
@@ -355,11 +498,22 @@ fn an_assertion_reports_no_verdict_and_no_change() {
         return;
     }
     // No `--verdict off` here: reporting is on by default and the read must still stay silent.
-    let (out, code) = run_cli(&["--browser", b.name(), "--json", "assert", "exists", "--selector", ".row"]);
+    let (out, code) = run_cli(&[
+        "--browser",
+        b.name(),
+        "--json",
+        "assert",
+        "exists",
+        "--selector",
+        ".row",
+    ]);
     let v: Value = serde_json::from_str(&out).unwrap_or(Value::Null);
     assert_eq!(code, 0, "{v}");
     for absent in ["verdict", "verdict_reason", "changed", "delta"] {
-        assert!(v.get(absent).is_none(), "an assertion is a read, so it carries no {absent}: {v}");
+        assert!(
+            v.get(absent).is_none(),
+            "an assertion is a read, so it carries no {absent}: {v}"
+        );
     }
 }
 
@@ -371,11 +525,22 @@ fn text_mode_puts_a_failed_assertion_on_stderr() {
         return;
     }
     let out = Command::new(common::binary())
-        .args(["--browser", b.name(), "assert", "url", "--equals", "https://example.com/"])
+        .args([
+            "--browser",
+            b.name(),
+            "assert",
+            "url",
+            "--equals",
+            "https://example.com/",
+        ])
         .output()
         .expect("run assert");
     assert_eq!(out.status.code(), Some(2));
-    assert!(out.stdout.is_empty(), "stdout must stay clean: {:?}", String::from_utf8_lossy(&out.stdout));
+    assert!(
+        out.stdout.is_empty(),
+        "stdout must stay clean: {:?}",
+        String::from_utf8_lossy(&out.stdout)
+    );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("did NOT hold"), "{stderr}");
     assert!(stderr.contains("hint:"), "{stderr}");

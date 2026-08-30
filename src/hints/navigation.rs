@@ -8,8 +8,15 @@
 pub(super) fn navigation_failure(msg: &str, run: &str) -> String {
     let url = failed_url(msg);
     let code = msg.split("net::").nth(1).map_or("", str::trim);
-    let host = url.and_then(|url| crate::landing::host_and_path(url).map(|(host, _)| host));
-    let origin = url.and_then(crate::landing::origin_of);
+    // Backticks are how a hint marks something to run, and `host_and_path` splits rather than
+    // validates, so a "host" that is not one is neither quoted back nor rewritten into a
+    // suggested command: it is named as "the host".
+    let host = url
+        .and_then(|url| crate::landing::host_and_path(url).map(|(host, _)| host))
+        .filter(|host| crate::landing::is_plain_host(host));
+    let origin = url
+        .and_then(crate::landing::origin_of)
+        .map(|origin| crate::landing::shell_quoted(&origin));
     let named = host.unwrap_or("the host");
 
     match code {
@@ -20,7 +27,11 @@ pub(super) fn navigation_failure(msg: &str, run: &str) -> String {
                 (Some(host), Some(url)) if !host.starts_with("www.") => {
                     format!(
                         " If it is missing a subdomain, `{run} goto {}` is the usual form.",
-                        url.replacen(host, &format!("www.{host}"), 1)
+                        crate::landing::shell_quoted(&url.replacen(
+                            host,
+                            &format!("www.{host}"),
+                            1
+                        ))
                     )
                 }
                 _ => String::new(),
@@ -40,7 +51,7 @@ pub(super) fn navigation_failure(msg: &str, run: &str) -> String {
                     " `goto` prefixes `https://` when the URL carries no scheme — if that \
                      server speaks plain HTTP, `{run} goto {}` is the same address with the \
                      scheme it actually serves.",
-                    url.replacen("https://", "http://", 1)
+                    crate::landing::shell_quoted(&url.replacen("https://", "http://", 1))
                 ),
                 _ => String::new(),
             };
@@ -132,7 +143,10 @@ mod tests {
                 "default",
             )
             .expect("a hint");
-            assert!(hint.contains(fact), "{code} does not state its stage: {hint}");
+            assert!(
+                hint.contains(fact),
+                "{code} does not state its stage: {hint}"
+            );
             assert!(
                 !hint.contains("Check the URL is valid"),
                 "the one-size sentence survived: {hint}"
@@ -152,8 +166,14 @@ mod tests {
         .expect("a hint");
         assert!(hint.contains("akamai.net"), "{hint}");
         // Rule 2: the guess, with the criterion that chooses it.
-        assert!(hint.contains("chrome-agent goto https://www.akamai.net"), "{hint}");
-        assert!(hint.contains("If it is missing a subdomain"), "the criterion: {hint}");
+        assert!(
+            hint.contains("chrome-agent goto 'https://www.akamai.net'"),
+            "{hint}"
+        );
+        assert!(
+            hint.contains("If it is missing a subdomain"),
+            "the criterion: {hint}"
+        );
     }
 
     /// `goto` prefixes `https://` itself, so the `http://` recovery is the tool's to name.
@@ -165,7 +185,7 @@ mod tests {
         )
         .expect("a hint");
         assert!(
-            hint.contains("`chrome-agent --browser agent-7 goto http://localhost:3000/a`"),
+            hint.contains("`chrome-agent --browser agent-7 goto 'http://localhost:3000/a'`"),
             "{hint}"
         );
         // Not offered when the caller chose http themselves.
@@ -174,7 +194,10 @@ mod tests {
             "default",
         )
         .expect("a hint");
-        assert!(!plain.contains("goto http://"), "nothing to change: {plain}");
+        assert!(
+            !plain.contains("goto 'http://"),
+            "nothing to change: {plain}"
+        );
     }
 
     /// The two failures with no recovery say so; repeating the navigation gets the same answer.
@@ -185,7 +208,10 @@ mod tests {
             "default",
         )
         .expect("a hint");
-        assert!(cert.contains("no chrome-agent flag makes Chrome accept it"), "{cert}");
+        assert!(
+            cert.contains("no chrome-agent flag makes Chrome accept it"),
+            "{cert}"
+        );
 
         let reset = error_hint(
             "Navigation failed for https://x.test/a: net::ERR_CONNECTION_RESET",
@@ -205,10 +231,78 @@ mod tests {
         )
         .expect("a hint");
         assert!(unknown.contains("ERR_SOCKS_CONNECTION_FAILED"), "{unknown}");
-        assert!(unknown.contains("chrome-agent goto https://x.test:8443/"), "the port survives: {unknown}");
+        assert!(
+            unknown.contains("chrome-agent goto 'https://x.test:8443/'"),
+            "the port survives: {unknown}"
+        );
 
         let codeless = error_hint("Navigation failed", "default").expect("a hint");
         assert!(codeless.contains("no `net::` code"), "{codeless}");
+    }
+
+    /// A hint hands the caller a command to run, and the URL in it came from a redirect the
+    /// SITE chose. Unquoted, a `;` or a `$(…)` in that URL made the tool's own suggestion into
+    /// something else — so every URL inside backticks is single-quoted, and a "host" that is
+    /// not a host is not quoted back at all.
+    #[test]
+    fn a_hostile_url_cannot_break_out_of_the_command_a_hint_suggests() {
+        let hostile = "https://evil.test/a';$(id);echo '";
+        let hint = error_hint(
+            &format!("Navigation failed for {hostile}: net::ERR_CONNECTION_REFUSED"),
+            "default",
+        )
+        .expect("a hint");
+
+        for quoted in hint.split('`').skip(1).step_by(2) {
+            let Some(command) = quoted.strip_prefix("chrome-agent ") else {
+                continue;
+            };
+            // Everything after `goto ` is one single-quoted word: no unescaped quote inside it
+            // can end the run, so nothing in the URL is ever read as shell syntax.
+            let argument = command.split_once("goto ").expect("a goto command").1;
+            assert!(
+                argument.starts_with('\'') && argument.ends_with('\''),
+                "{argument}"
+            );
+            assert_eq!(
+                argument.replace("'\\''", "").matches('\'').count(),
+                2,
+                "an unescaped quote closes the argument early: {argument}"
+            );
+        }
+
+        // A crafted authority is not a host, so it is not printed back as one.
+        let injected = error_hint(
+            "Navigation failed for https://x.test`rm -rf ~`/a: net::ERR_NAME_NOT_RESOLVED",
+            "default",
+        )
+        .expect("a hint");
+        assert!(
+            !injected.contains("rm -rf"),
+            "a crafted authority reached the hint: {injected}"
+        );
+        assert!(
+            injected.contains("`the host`"),
+            "and it is named as unknown instead: {injected}"
+        );
+    }
+
+    /// A control character in a URL would split one suggested command across two lines.
+    #[test]
+    fn a_newline_in_a_url_does_not_reach_the_hint() {
+        let hint = error_hint(
+            "Navigation failed for https://x.test/a\nrm -rf ~: net::ERR_CONNECTION_REFUSED",
+            "default",
+        )
+        .expect("a hint");
+        assert!(
+            !hint.contains('\n'),
+            "the hint runs onto a second line: {hint:?}"
+        );
+        assert!(
+            hint.contains("%0A"),
+            "the control character is encoded, not dropped: {hint}"
+        );
     }
 
     #[test]

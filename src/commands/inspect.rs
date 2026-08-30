@@ -13,7 +13,8 @@ pub async fn run(
     focus_uid: Option<&str>,
     role_filter: Option<&[&str]>,
 ) -> Result<Snapshot, crate::BoxError> {
-    let snapshot = crate::snapshot::take_snapshot(client, verbose, max_depth, focus_uid, role_filter).await?;
+    let snapshot =
+        crate::snapshot::take_snapshot(client, verbose, max_depth, focus_uid, role_filter).await?;
     Ok(snapshot)
 }
 
@@ -59,7 +60,8 @@ pub async fn scroll_collect(
             ran_out_of_time = true;
             break;
         }
-        let snapshot = crate::snapshot::take_snapshot(client, verbose, None, focus_uid, role_filter).await?;
+        let snapshot =
+            crate::snapshot::take_snapshot(client, verbose, None, focus_uid, role_filter).await?;
         let prev_len = collected.len();
         for line in snapshot.text.lines() {
             let trimmed = line.trim();
@@ -69,12 +71,16 @@ pub async fn scroll_collect(
         }
         uid_map.extend(snapshot.uid_map);
 
-        if collected.len() >= limit { break; }
+        if collected.len() >= limit {
+            break;
+        }
 
         // Three scrolls with no new item means the end of the list.
         if collected.len() == prev_len {
             stale_count += 1;
-            if stale_count >= 3 { break; }
+            if stale_count >= 3 {
+                break;
+            }
         } else {
             stale_count = 0;
         }
@@ -118,27 +124,42 @@ pub async fn scroll_collect(
 }
 
 /// Append resolved `href` URLs to the link nodes of a rendered snapshot.
+///
+/// Two CDP calls whatever the link count, and one when every href is already absolute. It used to
+/// be a `DOM.resolveNode` + `Runtime.callFunctionOn` pair per link node — 240 serial round trips
+/// on a 120-link page, unbounded and the highest count in this codebase. `DOM.getDocument` carries
+/// every `backendNodeId` with its `href` attribute in one reading; a single `Runtime.evaluate`
+/// then absolutises the relative ones against the base URL of the document each came from.
 pub async fn resolve_urls(
     client: &CdpClient,
     text: &str,
     uid_map: &HashMap<String, ElementRef>,
 ) -> String {
+    let link_backend = |line: &str| -> Option<i64> {
+        let (uid, role) = crate::snapshot_render::uid_and_role(line)?;
+        if role != "link" {
+            return None;
+        }
+        uid_map.get(uid).and_then(ElementRef::backend_node_id)
+    };
+
+    let wanted: HashSet<i64> = text.lines().filter_map(link_backend).collect();
+    let hrefs = if wanted.is_empty() {
+        HashMap::new()
+    } else {
+        link_hrefs(client, &wanted).await.unwrap_or_default()
+    };
+
     let mut result = String::with_capacity(text.len());
     for line in text.lines() {
         result.push_str(line);
-        // Matches `uid=n42 link "Some text"`.
-        let trimmed = line.trim();
-        if let Some(rest) = trimmed.strip_prefix("uid=")
-            && let Some((uid, after_uid)) = rest.split_once(' ') {
-                let role = after_uid.split([' ', '"']).next().unwrap_or("");
-                if role == "link"
-                    && let Some(element_ref) = uid_map.get(uid)
-                        && let Some(backend_id) = element_ref.backend_node_id()
-                            && let Ok(href) = resolve_href(client, backend_id).await
-                                && !href.is_empty() {
-                                    result.push_str(&format!(" url=\"{href}\""));
-                                }
-            }
+        if let Some(backend_id) = link_backend(line)
+            && let Some(href) = hrefs.get(&backend_id)
+            && !href.is_empty()
+        {
+            result.push_str(" url=");
+            result.push_str(&crate::snapshot_render::quote(href));
+        }
         result.push('\n');
     }
     result
@@ -163,17 +184,28 @@ pub fn paginate(text: &str, offset: usize, max_chars: Option<usize>) -> Paged {
     let total_chars = text.chars().count();
 
     if offset == 0 && max_chars.is_none() {
-        return Paged { text: text.to_string(), total_chars, truncated: false, next_offset: None };
+        return Paged {
+            text: text.to_string(),
+            total_chars,
+            truncated: false,
+            next_offset: None,
+        };
     }
 
     // Byte index of the offset-th char, clamped to the end.
-    let start_byte = text.char_indices().nth(offset).map_or(text.len(), |(i, _)| i);
+    let start_byte = text
+        .char_indices()
+        .nth(offset)
+        .map_or(text.len(), |(i, _)| i);
     let window = &text[start_byte..];
     let window_chars = total_chars.saturating_sub(offset);
 
     let (shown, kept) = match max_chars {
         Some(max) if window_chars > max => {
-            let end_byte = window.char_indices().nth(max).map_or(window.len(), |(i, _)| i);
+            let end_byte = window
+                .char_indices()
+                .nth(max)
+                .map_or(window.len(), |(i, _)| i);
             (&window[..end_byte], max)
         }
         _ => (window, window_chars),
@@ -197,28 +229,132 @@ pub fn paginate(text: &str, offset: usize, max_chars: Option<usize>) -> Paged {
     }
 }
 
-async fn resolve_href(client: &CdpClient, backend_node_id: i64) -> Result<String, crate::BoxError> {
-    let resolved: crate::cdp::types::ResolveNodeResult = client
-        .call("DOM.resolveNode", crate::cdp::types::ResolveNodeParams {
-            node_id: None,
-            backend_node_id: Some(backend_node_id),
-            object_group: Some("chrome-agent-urls".into()),
-            execution_context_id: None,
+/// `backendNodeId → absolute href` for the wanted nodes.
+async fn link_hrefs(
+    client: &CdpClient,
+    wanted: &HashSet<i64>,
+) -> Result<HashMap<i64, String>, crate::BoxError> {
+    let doc: serde_json::Value = client
+        .call("DOM.getDocument", json!({"depth": -1, "pierce": true}))
+        .await?;
+    let root = doc.get("root").ok_or("DOM.getDocument returned no root")?;
+    let mut found: Vec<(i64, String, String)> = Vec::new();
+    collect_links(root, "", None, wanted, &mut found);
+
+    // Only relative hrefs need the page; a site writing absolute ones costs one call in total.
+    let relative: Vec<usize> = (0..found.len())
+        .filter(|&i| !is_absolute(&found[i].2))
+        .collect();
+    if !relative.is_empty() {
+        let pairs: Vec<[&str; 2]> = relative
+            .iter()
+            .map(|&i| [found[i].1.as_str(), found[i].2.as_str()])
+            .collect();
+        if let Some(absolute) = absolutise(client, &pairs).await {
+            for (&slot, url) in relative.iter().zip(absolute) {
+                if !url.is_empty() {
+                    found[slot].2 = url;
+                }
+            }
+        }
+    }
+
+    Ok(found.into_iter().map(|(id, _, href)| (id, href)).collect())
+}
+
+/// Walk a `DOM.getDocument` tree collecting `(backendNodeId, base URL, raw href)` for the wanted
+/// nodes. `anchor` carries the enclosing `<a>`'s href down, which is what the old
+/// `this.closest('a')` did for a link node pointing at an element inside the anchor.
+fn collect_links(
+    node: &serde_json::Value,
+    base: &str,
+    anchor: Option<&str>,
+    wanted: &HashSet<i64>,
+    out: &mut Vec<(i64, String, String)>,
+) {
+    // A document node — the page's, or an iframe's — carries the base its hrefs resolve against.
+    let base = node
+        .get("baseURL")
+        .or_else(|| node.get("documentURL"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(base);
+    let anchor = href_attribute(node).or(anchor);
+
+    if let Some(href) = anchor
+        && let Some(id) = node
+            .get("backendNodeId")
+            .and_then(serde_json::Value::as_i64)
+        && wanted.contains(&id)
+    {
+        out.push((id, base.to_string(), href.to_string()));
+    }
+
+    for key in ["children", "shadowRoots", "pseudoElements"] {
+        if let Some(list) = node.get(key).and_then(serde_json::Value::as_array) {
+            for child in list {
+                collect_links(child, base, anchor, wanted, out);
+            }
+        }
+    }
+    if let Some(content) = node.get("contentDocument") {
+        collect_links(content, base, None, wanted, out);
+    }
+}
+
+/// The `href` of an `<a>`/`<area>`. `DOM.getDocument` hands attributes back flat.
+fn href_attribute(node: &serde_json::Value) -> Option<&str> {
+    let name = node.get("nodeName").and_then(serde_json::Value::as_str)?;
+    if !name.eq_ignore_ascii_case("a") && !name.eq_ignore_ascii_case("area") {
+        return None;
+    }
+    node.get("attributes")?
+        .as_array()?
+        .chunks(2)
+        .find_map(|pair| {
+            let key = pair.first()?.as_str()?;
+            key.eq_ignore_ascii_case("href")
+                .then(|| pair.get(1)?.as_str())
+                .flatten()
         })
-        .await?;
-    let object_id = resolved.object.object_id.ok_or("no objectId")?;
+}
+
+/// Whether an href already carries a scheme (RFC 3986 `scheme:`), so no base is needed.
+fn is_absolute(href: &str) -> bool {
+    let mut chars = href.chars();
+    if !chars.next().is_some_and(|c| c.is_ascii_alphabetic()) {
+        return false;
+    }
+    for c in chars {
+        if c == ':' {
+            return true;
+        }
+        if !c.is_ascii_alphanumeric() && !matches!(c, '+' | '-' | '.') {
+            return false;
+        }
+    }
+    false
+}
+
+/// Resolve `[base, href]` pairs against each other in one call. `None` on any failure, which
+/// leaves the raw attribute in place rather than dropping the link.
+async fn absolutise(client: &CdpClient, pairs: &[[&str; 2]]) -> Option<Vec<String>> {
+    // U+2028/U+2029 are legal inside a JSON string and were illegal inside a JS one before ES2019.
+    let payload = serde_json::to_string(pairs)
+        .ok()?
+        .replace('\u{2028}', "\\u2028")
+        .replace('\u{2029}', "\\u2029");
+    let expression = format!(
+        "JSON.stringify({payload}.map(p => {{ try {{ return new URL(p[1], p[0]).href }} catch (e) {{ return \"\"; }} }}))"
+    );
     let result: serde_json::Value = client
-        .call("Runtime.callFunctionOn", json!({
-            "objectId": object_id,
-            "functionDeclaration": "function() { return this.href || this.closest('a')?.href || ''; }",
-            "returnByValue": true,
-        }))
-        .await?;
-    let href = result.get("result")
-        .and_then(|r| r.get("value"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    Ok(href.to_string())
+        .call(
+            "Runtime.evaluate",
+            json!({"expression": expression, "returnByValue": true}),
+        )
+        .await
+        .ok()?;
+    let text = result.get("result")?.get("value")?.as_str()?;
+    serde_json::from_str(text).ok()
 }
 
 #[cfg(test)]
@@ -308,20 +444,74 @@ mod tests {
         assert!(!p.truncated);
     }
 
+    use super::{collect_links, href_attribute, is_absolute};
+    use serde_json::json;
+    use std::collections::HashSet;
+
     #[test]
-    fn url_append_only_on_links() {
-        let text = "uid=n1 heading \"Title\"\nuid=n2 link \"Click me\"\nuid=n3 button \"OK\"\n";
-        // No CDP here: only the line-parsing that picks out link rows.
-        for line in text.lines() {
-            let trimmed = line.trim();
-            if let Some(rest) = trimmed.strip_prefix("uid=")
-                && let Some((_uid, after_uid)) = rest.split_once(' ')
-            {
-                let role = after_uid.split([' ', '"']).next().unwrap_or("");
-                if role == "link" {
-                    assert!(line.contains("Click me"));
-                }
-            }
+    fn a_scheme_is_what_makes_an_href_absolute() {
+        for absolute in [
+            "https://e.com/a",
+            "mailto:a@b.c",
+            "javascript:void(0)",
+            "data:,x",
+        ] {
+            assert!(is_absolute(absolute), "{absolute}");
         }
+        for relative in ["/a", "a/b", "//host/p", "#frag", "?q=1", "", "1x:y"] {
+            assert!(!is_absolute(relative), "{relative}");
+        }
+    }
+
+    #[test]
+    fn only_anchors_carry_an_href() {
+        let anchor = json!({"nodeName": "A", "attributes": ["class", "c", "href", "/x"]});
+        assert_eq!(href_attribute(&anchor), Some("/x"));
+        let link_tag = json!({"nodeName": "LINK", "attributes": ["href", "/style.css"]});
+        assert_eq!(href_attribute(&link_tag), None);
+        let bare = json!({"nodeName": "A", "attributes": ["class", "c"]});
+        assert_eq!(href_attribute(&bare), None);
+    }
+
+    /// One walk replaces the `DOM.resolveNode` + `Runtime.callFunctionOn` pair per link: the base
+    /// comes from the enclosing document, and a node INSIDE an anchor inherits its href — what
+    /// `this.closest('a')` used to do.
+    #[test]
+    fn one_walk_finds_every_wanted_href_with_its_base() {
+        let doc = json!({
+            "nodeName": "#document",
+            "baseURL": "https://e.com/dir/page",
+            "children": [{
+                "nodeName": "A",
+                "backendNodeId": 10,
+                "attributes": ["href", "../other"],
+                "children": [
+                    {"nodeName": "SPAN", "backendNodeId": 11, "attributes": []},
+                    {"nodeName": "#text", "backendNodeId": 12}
+                ]
+            }, {
+                "nodeName": "IFRAME",
+                "backendNodeId": 20,
+                "contentDocument": {
+                    "nodeName": "#document",
+                    "baseURL": "https://inner.example/sub/",
+                    "children": [{"nodeName": "A", "backendNodeId": 21, "attributes": ["href", "deep"]}]
+                }
+            }]
+        });
+        let wanted: HashSet<i64> = [10, 11, 21, 99].into_iter().collect();
+        let mut found = Vec::new();
+        collect_links(&doc, "", None, &wanted, &mut found);
+
+        assert_eq!(found.len(), 3, "{found:?}");
+        assert!(found.contains(&(10, "https://e.com/dir/page".into(), "../other".into())));
+        assert!(
+            found.contains(&(11, "https://e.com/dir/page".into(), "../other".into())),
+            "a node inside the anchor inherits it: {found:?}"
+        );
+        assert!(
+            found.contains(&(21, "https://inner.example/sub/".into(), "deep".into())),
+            "an iframe's links resolve against the iframe's base: {found:?}"
+        );
     }
 }

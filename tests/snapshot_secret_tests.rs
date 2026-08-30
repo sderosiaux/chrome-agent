@@ -11,10 +11,19 @@ mod common;
 use common::TestBrowser;
 
 /// Every string the fixture holds in a secret field. None may appear in any output.
-const SECRETS: &[&str] = &["4111111111111111", "4242424242424242", "7391", "903214", "hunter2secret"];
+const SECRETS: &[&str] = &[
+    "4111111111111111",
+    "4242424242424242",
+    "7391",
+    "903214",
+    "hunter2secret",
+];
 
 fn run_cli(args: &[&str]) -> (String, i32) {
-    let output = Command::new(common::binary()).args(args).output().expect("Failed to run chrome-agent");
+    let output = Command::new(common::binary())
+        .args(args)
+        .output()
+        .expect("Failed to run chrome-agent");
     (
         String::from_utf8_lossy(&output.stdout).to_string(),
         output.status.code().unwrap_or(-1),
@@ -60,8 +69,17 @@ fn inspect_names_every_secret_field_without_printing_one() {
     assert_eq!(code, 0, "{text}");
     assert_no_secret("inspect", &text);
 
-    for label in ["Card number", "Security code", "One-time code", "Password", "Note for the courier"] {
-        assert!(text.contains(label), "the field must still be named ({label}):\n{text}");
+    for label in [
+        "Card number",
+        "Security code",
+        "One-time code",
+        "Password",
+        "Note for the courier",
+    ] {
+        assert!(
+            text.contains(label),
+            "the field must still be named ({label}):\n{text}"
+        );
     }
     // Four secret fields in the fixture; each keeps a value token saying it was withheld.
     assert_eq!(
@@ -86,15 +104,24 @@ fn an_action_delta_never_quotes_a_secret() {
     assert_no_secret("baseline inspect", &base);
 
     // A fill that replaces the card number, so the delta holds both numbers.
-    let v = json_cli(b.name(), &["fill", "--selector", "#card", "4242424242424242"]);
+    let v = json_cli(
+        b.name(),
+        &["fill", "--selector", "#card", "4242424242424242"],
+    );
     assert_no_secret("fill response", &v.to_string());
-    assert_eq!(v["value"]["redacted"], true, "the fill's own report agrees: {v}");
+    assert_eq!(
+        v["value"]["redacted"], true,
+        "the fill's own report agrees: {v}"
+    );
     assert_eq!(v["value"]["verbatim"], true, "and the write landed: {v}");
 
     let clicked = json_cli(b.name(), &["click", "--selector", "#pay-submit"]);
     assert_no_secret("click response", &clicked.to_string());
     assert!(
-        clicked["delta"].as_str().unwrap_or_default().contains("paid"),
+        clicked["delta"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("paid"),
         "the change it did cause is still reported: {clicked}"
     );
 }
@@ -113,12 +140,18 @@ fn two_snapshots_of_an_unchanged_secret_compare_equal() {
     assert_eq!(v["added"], 0, "{v}");
     assert_eq!(v["removed"], 0, "{v}");
     assert!(
-        v["diff"].as_str().unwrap_or_default().contains("No changes detected"),
+        v["diff"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("No changes detected"),
         "and it says so: {v}"
     );
 
     let (second, _) = run_cli(&["--browser", b.name(), "inspect"]);
-    assert_eq!(first, second, "two reads of the same page must render identically");
+    assert_eq!(
+        first, second,
+        "two reads of the same page must render identically"
+    );
 }
 
 /// The accepted trade-off: a replaced secret compares equal, since both sides render the same
@@ -130,7 +163,10 @@ fn a_changed_secret_is_invisible_to_the_diff_but_a_lost_one_is_not() {
         return;
     }
     run_cli(&["--browser", b.name(), "inspect"]);
-    let v = json_cli(b.name(), &["fill", "--selector", "#card", "4242424242424242"]);
+    let v = json_cli(
+        b.name(),
+        &["fill", "--selector", "#card", "4242424242424242"],
+    );
     let delta = v["delta"].as_str().unwrap_or_default();
     assert!(
         !delta.contains("uid=n2 ") || !delta.contains("value="),
@@ -142,10 +178,15 @@ fn a_changed_secret_is_invisible_to_the_diff_but_a_lost_one_is_not() {
     if !open(b2.name(), "form_value_secret_lost_on_submit.html") {
         return;
     }
-    json_cli(b2.name(), &["fill", "--selector", "#card", "4111111111111111"]);
+    json_cli(
+        b2.name(),
+        &["fill", "--selector", "#card", "4111111111111111"],
+    );
     let lost = json_cli(b2.name(), &["click", "--selector", "#pay-submit"]);
     assert_no_secret("values_lost response", &lost.to_string());
-    let entries = lost["values_lost"].as_array().unwrap_or_else(|| panic!("no values_lost: {lost}"));
+    let entries = lost["values_lost"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no values_lost: {lost}"));
     assert!(
         entries.iter().any(|e| e["redacted"] == true),
         "a lost secret is still named, and still redacted: {lost}"

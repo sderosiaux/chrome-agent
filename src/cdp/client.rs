@@ -1,11 +1,11 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use serde::de::DeserializeOwned;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use serde_json::Value;
-use tokio::sync::{broadcast, oneshot, Mutex};
+use tokio::sync::{Mutex, broadcast, oneshot};
 
 use super::transport::{self, CdpSender, CdpTransportError};
 use super::types::{CdpEvent, CdpMessage, CdpRequest, CdpResponse};
@@ -20,6 +20,9 @@ enum PendingReply {
     /// mismatch and position) plus the message's key names, so the call fails instead of
     /// waiting out its deadline.
     Unreadable(String),
+    /// The transport died under this call and said why. Dropping the slot instead would
+    /// answer `dispatcher task exited`, which names the symptom rather than the cause.
+    Transport(CdpTransportError),
 }
 
 /// Deadline applied to a CDP response when the caller sets none. Matches the CLI's
@@ -107,6 +110,9 @@ pub struct CdpClient {
     /// Whether to synthesize taps instead of mouse clicks. Connection-local, so the target's
     /// persisted `--touch` setting does not leak into sibling pages.
     touch_emulation: AtomicBool,
+    /// Whether this connection already enabled the accessibility domain — see
+    /// `ensure_accessibility`.
+    accessibility_enabled: AtomicBool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -156,6 +162,7 @@ impl CdpClient {
             foregrounded: AtomicBool::new(false),
             settle_wait: std::sync::Mutex::new(None),
             touch_emulation: AtomicBool::new(false),
+            accessibility_enabled: AtomicBool::new(false),
         })
     }
 
@@ -184,6 +191,22 @@ impl CdpClient {
         // that frame past clippy's ceiling.
         let call = Box::pin(self.call::<_, Value>("Page.bringToFront", serde_json::json!({})));
         let _: Result<Value, _> = call.await;
+    }
+
+    /// Enable the accessibility domain, once per connection.
+    ///
+    /// A domain enable is idempotent and connection-scoped, and a navigation does not undo it —
+    /// but under the default `--verdict auto` a snapshot is taken on every mutating action, so
+    /// re-sending it cost one round trip per action. The flag is set only on `Ok`, so a first
+    /// failure is retried by the next caller rather than remembered as success.
+    pub async fn ensure_accessibility(&self) -> Result<(), CdpClientError> {
+        if self.accessibility_enabled.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+        self.send("Accessibility.enable", serde_json::json!({}))
+            .await?;
+        self.accessibility_enabled.store(true, Ordering::Relaxed);
+        Ok(())
     }
 
     pub fn note_settle_wait(&self, waited: std::time::Duration) {
@@ -240,7 +263,8 @@ impl CdpClient {
         params: P,
         session_id: Option<String>,
     ) -> Result<R, CdpClientError> {
-        self.call_within(method, params, session_id, self.call_timeout()).await
+        self.call_within(method, params, session_id, self.call_timeout())
+            .await
     }
 
     /// Dispatch an input event and wait for Chrome to acknowledge it, under
@@ -251,7 +275,9 @@ impl CdpClient {
         method: &'static str,
         params: P,
     ) -> Result<(), CdpClientError> {
-        let _: Value = self.call_within(method, params, None, INPUT_ACK_DEADLINE).await?;
+        let _: Value = self
+            .call_within(method, params, None, INPUT_ACK_DEADLINE)
+            .await?;
         Ok(())
     }
 
@@ -263,8 +289,7 @@ impl CdpClient {
         deadline: std::time::Duration,
     ) -> Result<R, CdpClientError> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let params_value =
-            serde_json::to_value(params).map_err(CdpClientError::Serialization)?;
+        let params_value = serde_json::to_value(params).map_err(CdpClientError::Serialization)?;
 
         let request = CdpRequest {
             id,
@@ -289,8 +314,9 @@ impl CdpClient {
                 PendingReply::Unreadable(detail) => {
                     return Err(CdpClientError::Unreadable(unreadable_message(
                         method, &detail,
-                    )))
+                    )));
                 }
+                PendingReply::Transport(error) => return Err(CdpClientError::Transport(error)),
             },
             Err(_) => {
                 // Drop the slot: keeping it leaks an entry per timed-out call and would
@@ -323,7 +349,9 @@ impl CdpClient {
 
     #[must_use]
     pub fn call_timeout(&self) -> std::time::Duration {
-        self.call_timeout.lock().map_or(DEFAULT_CALL_TIMEOUT, |d| *d)
+        self.call_timeout
+            .lock()
+            .map_or(DEFAULT_CALL_TIMEOUT, |d| *d)
     }
 
     /// Set the deadline for every subsequent call, from the caller's `--timeout`.
@@ -388,7 +416,11 @@ impl CdpClient {
                         let _ = sender.send(request.to_string()).await;
                         eprintln!(
                             "dialog auto-{}: {dtype} {message:?}",
-                            if decision.accept { "accepted" } else { "dismissed" }
+                            if decision.accept {
+                                "accepted"
+                            } else {
+                                "dismissed"
+                            }
                         );
                     }
                     Ok(_) => {}
@@ -406,15 +438,6 @@ impl CdpClient {
         });
     }
 
-    pub async fn wait_for_event(
-        &self,
-        method: &str,
-        timeout: std::time::Duration,
-    ) -> Result<CdpEvent, CdpClientError> {
-        let mut rx = self.events();
-        Self::wait_for_event_on(&mut rx, method, timeout).await
-    }
-
     /// Wait for a specific CDP event on an already-subscribed receiver.
     ///
     /// Subscribe with [`Self::events`] *before* issuing the triggering command: a fast (e.g.
@@ -429,10 +452,9 @@ impl CdpClient {
             loop {
                 match rx.recv().await {
                     Ok(event) if event.method == method => return Ok(event),
-                    Ok(_)
-                    | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                        return Err(CdpClientError::DispatcherGone)
+                        return Err(CdpClientError::DispatcherGone);
                     }
                 }
             }
@@ -458,7 +480,7 @@ impl CdpClient {
                 return Err(CdpClientError::Protocol {
                     code: -1,
                     message: format!("Unknown domain: {domain}"),
-                })
+                });
             }
         };
 
@@ -483,15 +505,28 @@ async fn dispatch_loop(
     pending: PendingMap,
     events_tx: broadcast::Sender<CdpEvent>,
 ) {
+    let mut cause = None;
     loop {
-        let Ok(Some(message)) = receiver.recv().await else {
-            break;
-        };
-        route_message(&message, &pending, &events_tx).await;
+        match receiver.recv().await {
+            Ok(Some(message)) => route_message(&message, &pending, &events_tx).await,
+            Ok(None) => break,
+            // The transport knows why it stopped. Carry it: clearing `pending` silently makes
+            // every waiting call answer `dispatcher task exited`, which names no cause.
+            Err(error) => {
+                cause = Some(error);
+                break;
+            }
+        }
     }
 
-    // Transport closed — clear pending so callers get RecvError.
-    pending.lock().await.clear();
+    // Transport closed. With a cause, every waiting call is told it; without one they get
+    // RecvError, which `call_within` reads as `DispatcherGone`.
+    let waiting = std::mem::take(&mut *pending.lock().await);
+    if let Some(cause) = cause {
+        for (_, tx) in waiting {
+            let _ = tx.send(PendingReply::Transport(cause.clone()));
+        }
+    }
 }
 
 /// Route one raw message from Chrome: to the call waiting on its `id`, to the event
@@ -586,10 +621,22 @@ mod tests {
     #[test]
     fn an_input_that_went_unacknowledged_never_reads_as_a_slow_page() {
         let input = timeout_message("Input.dispatchMouseEvent", INPUT_ACK_DEADLINE);
-        assert!(input.starts_with("Input.dispatchMouseEvent was dispatched"), "{input}");
-        assert!(input.contains("may already have reached the page"), "{input}");
-        assert!(!input.contains("--timeout"), "raising the budget is not the recovery: {input}");
-        assert!(input.contains("8s"), "the deadline it actually waited: {input}");
+        assert!(
+            input.starts_with("Input.dispatchMouseEvent was dispatched"),
+            "{input}"
+        );
+        assert!(
+            input.contains("may already have reached the page"),
+            "{input}"
+        );
+        assert!(
+            !input.contains("--timeout"),
+            "raising the budget is not the recovery: {input}"
+        );
+        assert!(
+            input.contains("8s"),
+            "the deadline it actually waited: {input}"
+        );
 
         let evaluate = timeout_message("Runtime.evaluate", DEFAULT_CALL_TIMEOUT);
         assert!(evaluate.contains("--timeout"), "{evaluate}");
@@ -600,7 +647,10 @@ mod tests {
     /// delivered click becomes an error.
     #[test]
     fn the_input_deadline_clears_the_background_tab_stall_and_undercuts_the_default() {
-        assert!(INPUT_ACK_DEADLINE > Duration::from_secs(5), "the measured stall is 5.00 s");
+        assert!(
+            INPUT_ACK_DEADLINE > Duration::from_secs(5),
+            "the measured stall is 5.00 s"
+        );
         assert!(INPUT_ACK_DEADLINE < DEFAULT_CALL_TIMEOUT);
     }
 
@@ -615,8 +665,12 @@ mod tests {
         pending.lock().await.insert(7, tx);
         let (events_tx, _events_rx) = broadcast::channel::<CdpEvent>(16);
 
-        route_message(r#"{"id":7,"error":{"code":"-32000","message":"x"}}"#, &pending, &events_tx)
-            .await;
+        route_message(
+            r#"{"id":7,"error":{"code":"-32000","message":"x"}}"#,
+            &pending,
+            &events_tx,
+        )
+        .await;
 
         // Under a second: nothing here may wait on a deadline.
         let reply = tokio::time::timeout(Duration::from_secs(1), rx)
@@ -642,7 +696,10 @@ mod tests {
         // The sentence the caller sees says Chrome answered, not that the page was slow.
         let message = unreadable_message("Target.getTargets", &detail);
         assert!(message.contains("Target.getTargets"), "{message}");
-        assert!(message.contains("Chrome replied; the page is not slow"), "{message}");
+        assert!(
+            message.contains("Chrome replied; the page is not slow"),
+            "{message}"
+        );
         assert!(
             !message.contains("timeout") && !message.contains("--timeout"),
             "the old failure blamed the caller's patience: {message}"
@@ -659,7 +716,10 @@ mod tests {
     fn an_unreadable_input_ack_never_reads_as_an_event_that_did_not_land() {
         let input = unreadable_message("Input.dispatchMouseEvent", "invalid type: map");
         assert!(input.contains("was dispatched"), "{input}");
-        assert!(input.contains("may already have reached the page"), "{input}");
+        assert!(
+            input.contains("may already have reached the page"),
+            "{input}"
+        );
         assert!(!input.contains("produced nothing"), "{input}");
 
         let other = unreadable_message("Runtime.evaluate", "invalid type: map");
@@ -707,7 +767,10 @@ mod tests {
     /// message that is not JSON.
     #[tokio::test]
     async fn an_unreadable_message_with_no_id_fails_nothing() {
-        assert_eq!(unreadable_reply(r#"{"method":"Page.loadEventFired"}"#), None);
+        assert_eq!(
+            unreadable_reply(r#"{"method":"Page.loadEventFired"}"#),
+            None
+        );
         assert_eq!(unreadable_reply("not json at all"), None);
 
         let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
@@ -717,7 +780,11 @@ mod tests {
 
         route_message("not json at all", &pending, &events_tx).await;
 
-        assert_eq!(pending.lock().await.len(), 1, "an unrelated call must be untouched");
+        assert_eq!(
+            pending.lock().await.len(),
+            1,
+            "an unrelated call must be untouched"
+        );
         drop(rx);
     }
 
@@ -735,9 +802,16 @@ mod tests {
         };
         assert_eq!(response.id, 7);
 
-        route_message(r#"{"method":"Page.loadEventFired","params":{}}"#, &pending, &events_tx)
-            .await;
-        assert_eq!(events_rx.recv().await.unwrap().method, "Page.loadEventFired");
+        route_message(
+            r#"{"method":"Page.loadEventFired","params":{}}"#,
+            &pending,
+            &events_tx,
+        )
+        .await;
+        assert_eq!(
+            events_rx.recv().await.unwrap().method,
+            "Page.loadEventFired"
+        );
     }
 
     /// A response whose `error.data` is an object is an ordinary protocol error: typed
@@ -779,13 +853,10 @@ mod tests {
         // Event arrives before we begin waiting; the receiver buffers it.
         tx.send(event("Page.loadEventFired")).unwrap();
 
-        let got = CdpClient::wait_for_event_on(
-            &mut rx,
-            "Page.loadEventFired",
-            Duration::from_secs(5),
-        )
-        .await
-        .expect("buffered event should be returned without timing out");
+        let got =
+            CdpClient::wait_for_event_on(&mut rx, "Page.loadEventFired", Duration::from_secs(5))
+                .await
+                .expect("buffered event should be returned without timing out");
         assert_eq!(got.method, "Page.loadEventFired");
     }
 
@@ -797,13 +868,10 @@ mod tests {
         tx.send(event("Page.loadEventFired")).unwrap();
         let mut rx = tx.subscribe(); // too late — event is gone for this receiver
 
-        let err = CdpClient::wait_for_event_on(
-            &mut rx,
-            "Page.loadEventFired",
-            Duration::from_millis(50),
-        )
-        .await
-        .expect_err("late subscriber must miss the event and time out");
+        let err =
+            CdpClient::wait_for_event_on(&mut rx, "Page.loadEventFired", Duration::from_millis(50))
+                .await
+                .expect_err("late subscriber must miss the event and time out");
         assert!(matches!(err, CdpClientError::Timeout(_)));
     }
 
@@ -815,13 +883,10 @@ mod tests {
         tx.send(event("Page.frameNavigated")).unwrap();
         tx.send(event("Page.loadEventFired")).unwrap();
 
-        let got = CdpClient::wait_for_event_on(
-            &mut rx,
-            "Page.loadEventFired",
-            Duration::from_secs(5),
-        )
-        .await
-        .unwrap();
+        let got =
+            CdpClient::wait_for_event_on(&mut rx, "Page.loadEventFired", Duration::from_secs(5))
+                .await
+                .unwrap();
         assert_eq!(got.method, "Page.loadEventFired");
     }
 }

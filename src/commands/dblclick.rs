@@ -1,7 +1,7 @@
-use std::collections::HashMap;
 use crate::cdp::client::CdpClient;
 use crate::element_ref::ElementRef;
 use crate::hit_test::{Dispatched, OnIntercept};
+use std::collections::HashMap;
 
 pub async fn run(
     client: &CdpClient,

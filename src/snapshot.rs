@@ -22,7 +22,10 @@ pub struct Snapshot {
 /// Polls `Page.getFrameTree` rather than subscribing: `CdpClient::events()` only delivers
 /// messages received after subscribing, and several commands never subscribe.
 pub async fn document_identity(client: &CdpClient) -> Option<(String, String)> {
-    let tree: serde_json::Value = client.call("Page.getFrameTree", serde_json::json!({})).await.ok()?;
+    let tree: serde_json::Value = client
+        .call("Page.getFrameTree", serde_json::json!({}))
+        .await
+        .ok()?;
     let root = tree.get("frameTree")?;
     let wanted = client.frame_context().map(|c| c.frame_id);
     find_frame(root, wanted.as_deref())
@@ -118,11 +121,22 @@ pub async fn take_snapshot(
     role_filter: Option<&[&str]>,
 ) -> Result<Snapshot, CdpClientError> {
     let (nodes, redaction) = fetch_tree(client).await?;
-    let (text, uid_map, _) =
-        format_ax_tree(&nodes, verbose, max_depth, focus_uid, role_filter, &redaction, None);
+    let (text, uid_map, _) = format_ax_tree(
+        &nodes,
+        verbose,
+        max_depth,
+        focus_uid,
+        role_filter,
+        &redaction,
+        None,
+    );
     let identity = document_identity(client).await;
 
-    Ok(Snapshot { text, uid_map, identity })
+    Ok(Snapshot {
+        text,
+        uid_map,
+        identity,
+    })
 }
 
 /// Take one tree and render both the baseline and the caller's view of it.
@@ -139,32 +153,41 @@ pub async fn take_views(
     role_filter: Option<&[&str]>,
 ) -> Result<Views, CdpClientError> {
     let (nodes, redaction) = fetch_tree(client).await?;
-    let (text, uid_map, anon) =
-        format_ax_tree(&nodes, verbose, None, None, None, &redaction, None);
+    let (text, uid_map, anon) = format_ax_tree(&nodes, verbose, None, None, None, &redaction, None);
     let identity = document_identity(client).await;
-    let full = Snapshot { text, uid_map, identity };
+    let full = Snapshot {
+        text,
+        uid_map,
+        identity,
+    };
 
     let reduced = max_depth.is_some() || focus_uid.is_some() || role_filter.is_some();
     let shown = reduced.then(|| {
-        format_ax_tree(&nodes, verbose, max_depth, focus_uid, role_filter, &redaction, Some(&anon)).0
+        format_ax_tree(
+            &nodes,
+            verbose,
+            max_depth,
+            focus_uid,
+            role_filter,
+            &redaction,
+            Some(&anon),
+        )
+        .0
     });
     Ok(Views { full, shown })
 }
 
 /// Read the accessibility tree and the secret-field redaction that applies to it.
 async fn fetch_tree(client: &CdpClient) -> Result<(Vec<AXNode>, Redaction), CdpClientError> {
-    client
-        .send("Accessibility.enable", serde_json::json!({}))
-        .await?;
+    // Once per connection: see `CdpClient::ensure_accessibility`.
+    client.ensure_accessibility().await?;
 
     // Scope to the frame bound by `frame`, if any. Omitting `frameId` yields the root frame.
     let mut params = serde_json::json!({});
     if let Some(ctx) = client.frame_context() {
         params["frameId"] = serde_json::json!(ctx.frame_id);
     }
-    let result: GetFullAXTreeResult = client
-        .call("Accessibility.getFullAXTree", params)
-        .await?;
+    let result: GetFullAXTreeResult = client.call("Accessibility.getFullAXTree", params).await?;
 
     // Must happen before any line is rendered: the tree alone cannot say whether a field
     // holds a secret, and a value printed once is on stdout and in any `--record` file.
@@ -177,7 +200,7 @@ mod tests {
     fn bug_content_center_empty_quad() {
         use crate::cdp::types::BoxModel;
         let model = BoxModel {
-            content: vec![],  // empty quad
+            content: vec![], // empty quad
             border: vec![],
         };
         let (x, y) = model.content_center();

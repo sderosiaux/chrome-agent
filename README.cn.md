@@ -65,8 +65,8 @@ Chrome 在两次调用之间保持存活，所以一条命令的开销是一次�
 | 命令 | 作用 |
 |---|---|
 | `goto <url> [--inspect] [--max-depth N] [--header "K: V"]` | 导航。自动补 `https://`。返回 `landed`（见下文）。`--header` 可重复。 |
-| `back` | 后退。 |
-| `forward` | 前进。 |
+| `back [--inspect]` | 后退。返回 `url` 与 `title`；无处可退时返回一条消息。 |
+| `forward [--inspect]` | 前进。同一实现，符号相反。 |
 | `history [--filter pattern]` | 该浏览器访问过的页面。 |
 | `tabs` | 列出打开的标签页。 |
 | `status` | 会话库中的浏览器、它们的 pid，以及没有条目认领的运行中实例（`orphan=`）。 |
@@ -92,14 +92,14 @@ Chrome 在两次调用之间保持存活，所以一条命令的开销是一次�
 |---|---|
 | `click <uid> [--selector "css"] [--xy X,Y] [--inspect]` | 点击。没有 box model 时回退到 JS `.click()`。 |
 | `dblclick <uid>` | 双击，同样三种定位方式。 |
-| `fill --uid <uid> <value> [--inspect]` | 填写输入框，也支持 `--selector "css"`。会报告页面实际保留的值。 |
+| `fill --uid <uid> <value> [--secret] [--inspect]` | 填写输入框，也支持 `--selector "css"`。会报告页面实际保留的值；`--secret` 只报告长度。 |
 | `fill-form <uid=val>...` | 一次填多个字段，每个字段各有一份保留值报告。 |
 | `select --uid <uid> <value>` | 按 value 或可见文本选择 `<select>` 选项。 |
 | `check <uid>` | 确保复选框或单选框被勾选。幂等。 |
 | `uncheck <uid>` | 确保复选框被取消勾选。幂等。 |
 | `upload --uid <uid> <file>...` | 上传到文件输入框。路径先校验。 |
 | `drag <from-uid> <to-uid>` | 基于鼠标事件的拖拽。不适用于 HTML5 Drag and Drop API。 |
-| `type <text> [--selector "css"]` | 向获得焦点的元素输入文本。 |
+| `type <text> [--selector "css"] [--secret]` | 向获得焦点的元素输入文本。`--secret` 连长度也不报告。 |
 | `press <key>` | Enter、Tab、Escape 等。 |
 | `scroll <down\|up\|uid>` | 滚动页面，或把某个元素滚入视口。 |
 | `hover <uid>` | 悬停。 |
@@ -218,7 +218,8 @@ inspect。`goto` 清空 uid 映射但保留快照，所以 `diff` 会报 `docume
 
 ### 退出码
 
-`0` 成功 · `1` 错误，包括参数写错 · `2` 断言不成立 · `130` Ctrl+C。只有 `assert` 会返回 `2`，所以 CI
+`0` 成功 · `1` 错误，包括参数写错 · `2` 本工具做出的某个断言不成立 · `130` Ctrl+C。`2` 只有两个来源：
+`assert`，以及 `macro run` 里被检查过却不成立的 guard——这两者都是本工具对页面许下的承诺，所以 CI
 能区分「页面不对」和「工具坏了」。
 
 ```bash
@@ -234,7 +235,11 @@ chrome-agent assert exists --selector ".result" --min 1
 
 ### pipe 与 batch 模式
 
-一个进程、一条连接、每个响应一行 JSON。比每条命令起一个进程快约 10 倍，而且整段序列里 uid 保持稳定。
+一个进程、一条连接、每个响应一行 JSON，而且整段序列里 uid 保持稳定——后者才是选它的理由。加速是真的，但很小：
+pipe 省掉的是每条命令约 12 ms 的固定开销，**一串读取快 1.5 倍**（九条命令，352 ms → 228 ms），
+**一串填写与点击只快 1.1 倍**（2029 ms → 1908 ms）——那里的大头是 pipe 碰不到的沉降窗口和树的重读。
+测量于 2026-08-30，M4 Max，Chrome 152，9 次运行取中位数；用 `./scripts/measure-pipe.sh` 复现，
+记录在 `docs/design/pipe-latency.md`。
 
 ```bash
 echo '{"cmd":"goto","url":"https://example.com","inspect":true}
@@ -245,7 +250,8 @@ echo '{"cmd":"goto","url":"https://example.com","inspect":true}
 `batch` 改为从 stdin 读一个 JSON 数组，其余走同一套分发逻辑，并且只回一个包含全部结果的响应对象，而不是
 每条命令一行。加 `--json` 才会把它打印成 JSON；不加时 CLI 每条结果打印一行文本。
 
-当 `--stop-on-error` 中途截断整批时，CLI 的 `batch` 进程退出 `1`——绝不会是 `2`，`2` 只留给"断言不成立"。
+当 `--stop-on-error` 中途截断整批时，CLI 的 `batch` 进程退出 `1`——绝不会是 `2`：进程是在报告这一批停下了，
+而不是在对页面做任何主张，`2` 只留给「本工具做出的主张不成立」。
 不加 `--stop-on-error` 时它执行完了被交代的每条命令，即使其中一条失败也退出 `0`：请读 `ok`，批次上的和每条
 结果上的。
 
@@ -303,6 +309,10 @@ chrome-agent macro run cancel --var email=ada@example.com
 守卫是 `delivery: target_hit`、verdict 词、`value.verbatim`，以及一条由路径构造的 `url_matches`——绝不包括
 变更计数、uid 或耗时。按 uid 瞄准的步骤会以角色加无障碍名称记录，否则被拒绝。密文字段变成声明的参数，
 绝不写入文件。
+
+一个被检查过却不成立的守卫，退出码是 **2**——和断言失败同一个码，因为它们是同一类主张。报告里带
+`stopped_by: "guard"`，以及是哪个守卫、期望什么、实际看到什么。因其他原因停下的运行——步骤本身失败、
+页面读不出来、宏文件不存在——退出 `1`，带 `stopped_by: "error"`。
 
 ### 落盘文件
 
@@ -368,7 +378,7 @@ API 测试，或者对一个自带 polyfill 的页面测试。在 `frame` 绑定
 |---|---|---|---|
 | 语言 | Rust | Rust | TypeScript |
 | 体积 | 3 MB，零运行时 | 3 MB CLI + 面板 + 云服务商 | Node + Playwright |
-| 启动 | ~10ms（复用会话） | 守护进程（首次之后快） | 冷启动 |
+| 启动 | 实测 12 ms，浏览器已在跑时的一条命令 | 守护进程（首次之后快） | 冷启动 |
 | UID 稳定性 | `backendNodeId`，多次 inspect 之间稳定 | 顺序 `@e1`，每次快照重新分配 | 无（用选择器） |
 | 操作 + 观察 | `--inspect` 参数，一次调用 | 另外调一次快照 | 另外调一次 |
 | 合规性报告 | 每个操作都有 `verdict`/`next` | 无 | 无 |
@@ -378,7 +388,7 @@ API 测试，或者对一个自带 polyfill 的页面测试。在 `frame` 绑定
 | PDF 导出 | `pdf` | 无 | 无 |
 | MCP server | 无 | 有 | 有 |
 | 云服务商、iOS/Safari | 无（可 `--connect` 到任何东西） | 有 | 无 |
-| 代码量 | ~23.2K 行 Rust 代码（src/ 下，不含空行与纯注释行；有测试重新测量） | ~40K 行（他们的数字，此处未核实） | Playwright |
+| 代码量 | ~28.2K 行 Rust 代码（src/ 下，不含空行与纯注释行；有测试重新测量） | ~40K 行（他们的数字，此处未核实） | Playwright |
 
 `extract` 用 MDR/DEPTA 风格的启发式（兄弟节点相似度、内容异质性、文本/链接比）在结构上找出重复记录，而不是
 让模型去读 DOM。在 Hacker News 首页，它用 1,571 tokens 交出 30 条记录，无障碍树要 5,652，原始 HTML 要
@@ -400,7 +410,7 @@ API 测试，或者对一个自带 polyfill 的页面测试。在 `frame` 绑定
 `{"permissions": {"allow": ["Bash(chrome-agent *)"]}}`。
 
 ```
-chrome-agent（3 MB Rust 二进制，~23.2K 行 Rust 代码（src/ 下））
+chrome-agent（3 MB Rust 二进制，~28.2K 行 Rust 代码（src/ 下））
     | CDP over WebSocket
     v
 Chrome（默认无头，无 Node.js，无运行时）

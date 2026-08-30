@@ -204,9 +204,8 @@ pub async fn run(
 
     // Absent rather than defaulted: a zero-valued shape would read as "an empty document",
     // the strongest thing `serving` can say, from having measured nothing.
-    let shape = crate::serving::PageShape::from_probe(
-        page_state.and_then(|state| state.get("shape")),
-    );
+    let shape =
+        crate::serving::PageShape::from_probe(page_state.and_then(|state| state.get("shape")));
 
     // `url`, not the caller's raw argument: comparing against the pre-normalised form would
     // report a redirect on every `goto example.com`.

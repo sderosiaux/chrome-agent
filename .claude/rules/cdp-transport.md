@@ -75,6 +75,33 @@ pipe and batch reuse one connection and the wait belongs to the action that paid
 Text mode prints it at 1 s and above (`render::waited_line`): one second is where a person starts
 wondering whether the tool is stuck. `--json` carries it whatever its size.
 
+## The wire has a ceiling, and it is not the one the defaults gave
+
+`cdp::transport::MAX_MESSAGE_BYTES`, 96 MiB, set on both `max_message_size` and `max_frame_size`.
+
+`connect_async` was called with tungstenite's defaults: 64 MiB per message and **16 MiB per
+frame**. Chrome does not fragment a CDP reply, so the frame limit was the one that applied and it
+sat four times below the number the rest of the code reasoned about. Both are now one constant.
+
+The ceiling and `download`'s advertised cap used to be chosen apart, and disagreed: `download`
+permitted 64 MiB and `download::run` returns the file **base64-encoded** (+33 %), so a download
+the tool said it allowed produced a reply the transport refused. They are tied now —
+`commands::download::MAX_FETCH_BYTES` is `(MAX_MESSAGE_BYTES − 64 KiB) × 3/4` = **75,448,320
+bytes (71.95 MiB)**, and a `const` assertion beside it fails the build if `DEFAULT_MAX_BYTES`
+(64 MiB, `cli.rs`'s default) ever stops fitting. `download --max-bytes` above the derived ceiling
+is refused up front rather than discovered on the wire.
+
+Raised rather than lowered, deliberately: the fetch path is the one place this tool promises a
+size, it promises 64 MiB, and cutting the promise to fit an incidental library default is the
+wrong direction. 96 MiB is still a hard bound on what one reply may allocate here.
+
+**A message past the ceiling is a size, not a silence.** tungstenite's `Error::Capacity` used to
+end `io_loop` like any other read error, so every waiting call answered `dispatcher task exited`
+and the rest of a pipe session answered `transport closed` — a browser that is running fine reads
+as a dead one. `CdpReceiver` now carries the reason out (`CdpTransportError::MessageTooLarge`),
+`dispatch_loop` hands it to every call still waiting, and `hints` gives it its own recovery: ask
+for less (`text --selector`), or download by click, which streams to disk instead of crossing CDP.
+
 ## Every CDP call has a deadline
 
 `CdpClient::call_timeout`, wired from `--timeout`, default 30 s.

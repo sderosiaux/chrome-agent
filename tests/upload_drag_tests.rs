@@ -30,7 +30,11 @@ fn stderr_of(output: &Output) -> String {
 /// What the page itself says, read through `text --selector`.
 fn text(browser: &str, selector: &str) -> String {
     let output = run(browser, &["text", "--selector", selector]);
-    assert!(output.status.success(), "text {selector}: {}", stderr_of(&output));
+    assert!(
+        output.status.success(),
+        "text {selector}: {}",
+        stderr_of(&output)
+    );
     stdout_of(&output)
 }
 
@@ -72,25 +76,50 @@ fn upload_hands_the_file_to_the_page_by_selector_and_by_uid() {
 
     let page = common::fixture_url("upload_form.html");
     assert!(run(&browser, &["goto", &page]).status.success());
-    assert_eq!(text(&browser, "#picked"), "no file", "the fixture starts empty");
+    assert_eq!(
+        text(&browser, "#picked"),
+        "no file",
+        "the fixture starts empty"
+    );
 
     // By selector.
-    let output = run(&browser, &["upload", one.to_str().unwrap(), "--selector", "#picker"]);
+    let output = run(
+        &browser,
+        &["upload", one.to_str().unwrap(), "--selector", "#picker"],
+    );
     assert!(output.status.success(), "{}", stderr_of(&output));
     let name = one.file_name().unwrap().to_string_lossy().into_owned();
-    assert_eq!(text(&browser, "#picked"), format!("{name}:6"), "the page read a different file");
-    assert_eq!(text(&browser, "#events"), "1", "the input never fired `change`");
+    assert_eq!(
+        text(&browser, "#picked"),
+        format!("{name}:6"),
+        "the page read a different file"
+    );
+    assert_eq!(
+        text(&browser, "#events"),
+        "1",
+        "the input never fired `change`"
+    );
 
     // By uid, which needs a stored snapshot: the file input is a `button` in the a11y tree.
     let uid = uid_of(&inspect(&browser), "Attachment\" value=");
     let output = run(
         &browser,
-        &["upload", one.to_str().unwrap(), two.to_str().unwrap(), "--uid", &uid, "--json"],
+        &[
+            "upload",
+            one.to_str().unwrap(),
+            two.to_str().unwrap(),
+            "--uid",
+            &uid,
+            "--json",
+        ],
     );
     assert!(output.status.success(), "{}", stderr_of(&output));
     let value: serde_json::Value = serde_json::from_str(&stdout_of(&output)).expect("JSON");
     assert_eq!(value["ok"], true, "{value}");
-    assert_eq!(value["uid"], uid, "the node acted on is named back: {value}");
+    assert_eq!(
+        value["uid"], uid,
+        "the node acted on is named back: {value}"
+    );
     assert!(
         value["message"].as_str().unwrap().contains("2 file(s)"),
         "the count is the caller's own: {value}"
@@ -118,15 +147,24 @@ fn upload_refuses_a_missing_file_or_an_unclear_target_without_touching_the_page(
     let browser = guard.name().to_string();
     let real = file_with("upload-real", "hello\n");
     let absent = common::temp_path("upload-absent", "txt");
-    assert!(!absent.exists(), "the fixture path must not exist for this to prove anything");
+    assert!(
+        !absent.exists(),
+        "the fixture path must not exist for this to prove anything"
+    );
 
     let page = common::fixture_url("upload_form.html");
     assert!(run(&browser, &["goto", &page]).status.success());
-    let output = run(&browser, &["upload", real.to_str().unwrap(), "--selector", "#picker"]);
+    let output = run(
+        &browser,
+        &["upload", real.to_str().unwrap(), "--selector", "#picker"],
+    );
     assert!(output.status.success(), "{}", stderr_of(&output));
     let held = text(&browser, "#picked");
 
-    let refused = run(&browser, &["upload", absent.to_str().unwrap(), "--selector", "#picker"]);
+    let refused = run(
+        &browser,
+        &["upload", absent.to_str().unwrap(), "--selector", "#picker"],
+    );
     assert_eq!(refused.status.code(), Some(1), "{}", stdout_of(&refused));
     let message = stderr_of(&refused);
     assert!(
@@ -138,18 +176,38 @@ fn upload_refuses_a_missing_file_or_an_unclear_target_without_touching_the_page(
         held,
         "the input was changed by an upload that failed, so the refusal came too late"
     );
-    assert_eq!(text(&browser, "#events"), "1", "a refused upload fired `change`");
+    assert_eq!(
+        text(&browser, "#events"),
+        "1",
+        "a refused upload fired `change`"
+    );
 
-    // Neither target, and both: named by argument, not by machine state.
+    // Neither target, and both: refused by the clap `ArgGroup`, so named by argument and before
+    // a browser is resolved. The wording is clap's now, not the sentence the seven verbs shared.
     let none = run(&browser, &["upload", real.to_str().unwrap()]);
     assert_eq!(none.status.code(), Some(1));
-    assert!(stderr_of(&none).contains("--uid or --selector"), "{}", stderr_of(&none));
+    assert!(
+        stderr_of(&none).contains("--uid <UID>|--selector <SELECTOR>"),
+        "{}",
+        stderr_of(&none)
+    );
     let both = run(
         &browser,
-        &["upload", real.to_str().unwrap(), "--uid", "n10", "--selector", "#picker"],
+        &[
+            "upload",
+            real.to_str().unwrap(),
+            "--uid",
+            "n10",
+            "--selector",
+            "#picker",
+        ],
     );
     assert_eq!(both.status.code(), Some(1));
-    assert!(stderr_of(&both).contains("Only one of"), "{}", stderr_of(&both));
+    assert!(
+        stderr_of(&both).contains("cannot be used with"),
+        "{}",
+        stderr_of(&both)
+    );
 
     std::fs::remove_file(&real).ok();
 }
@@ -210,9 +268,23 @@ fn drag_refuses_a_uid_no_snapshot_holds_and_moves_nothing() {
     let refused = run(&browser, &["drag", "n999999", &destination]);
     assert_eq!(refused.status.code(), Some(1), "{}", stdout_of(&refused));
     let message = stderr_of(&refused);
-    assert!(message.contains("n999999"), "the refusal names the uid it could not resolve: {message}");
-    assert!(message.contains("inspect"), "and how to get a live one: {message}");
+    assert!(
+        message.contains("n999999"),
+        "the refusal names the uid it could not resolve: {message}"
+    );
+    assert!(
+        message.contains("inspect"),
+        "and how to get a live one: {message}"
+    );
 
-    assert_eq!(text(&browser, "#order"), "alpha,bravo,charlie", "a refused drag reordered the list");
-    assert_eq!(text(&browser, "#moves"), "0", "a refused drag still moved the mouse");
+    assert_eq!(
+        text(&browser, "#order"),
+        "alpha,bravo,charlie",
+        "a refused drag reordered the list"
+    );
+    assert_eq!(
+        text(&browser, "#moves"),
+        "0",
+        "a refused drag still moved the mouse"
+    );
 }

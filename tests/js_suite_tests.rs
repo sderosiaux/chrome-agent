@@ -56,8 +56,11 @@ fn the_extraction_engine_suite_passes() {
         .lines()
         .find_map(|l| l.strip_prefix("# pass ")?.trim().parse().ok())
         .expect("node --test should report a pass count");
+    // 142 pass today: 139 extraction plus the 3 in `postinstall.test.js`. The floor counts all
+    // of them because the runner is given every `*.test.js` in one invocation and reports one
+    // total — a floor over a subset could not be checked against this number.
     assert!(
-        passed >= 100,
-        "expected the full extraction suite (100+ tests), got {passed} — did the runner match the files?"
+        passed >= 140,
+        "expected the full node suite (140+ tests), got {passed} — did a test file stop matching?"
     );
 }

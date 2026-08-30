@@ -2,21 +2,68 @@
 paths:
   - "src/commands/download.rs"
   - "src/commands/download_click.rs"
+  - "src/commands/download_fetch.rs"
   - "src/commands/screenshot.rs"
   - "src/commands/pdf.rs"
+  - "src/commands/history.rs"
+  - "src/daemon.rs"
   - "src/geometry.rs"
   - "src/base64.rs"
   - "tests/download_click_tests.rs"
   - "tests/download_limit_tests.rs"
+  - "tests/history_privacy_tests.rs"
 ---
 
 # Every file this tool writes, and how it gets there
 
-Every file is written 0600.
+Every file is written 0600, and `~/.chrome-agent` itself 0700.
+
+`history.jsonl` was the exception that proved the sentence was not being checked: it was the one
+writer in the tree with no `set_permissions`, so it landed at 0644 holding every URL a session
+ever navigated to. Its `create_dir_all` was also the one that created `~/.chrome-agent` with no
+mode — only `session::save_to` set 0700, so a first run whose command errored before the save
+left the whole directory at 0755. Both are set now, on every append, since the file may already
+exist wider from a run that predates the rule. `daemon.rs` did the same thing to the same
+directory and now takes the same path (`prepare_dir`), plus 0600 on the pid file and on the
+socket right after `bind` — `process_command` answers `status` (every browser name) and `stop`
+to whoever connects, so the socket's mode is the whole access control.
+
+## `history` stores a path, never a query string
+
+`commands::history::without_credentials`. The single-use credentials are after the `?` or the
+`#`: an OAuth `?code=`, a password-reset token, a pre-signed S3 signature, an implicit-flow
+`#access_token=`. This file is permanent — unlike the session store, which prunes — so it keeps
+everything up to the first `?`/`#` and appends `…` so an entry reads as truncated rather than as
+a path that never had one. Applied on READ as well as on write, so a file written before the
+rule cannot print its tokens either. Consequence, deliberate: history is still "where did this
+agent go" and is no longer enough to replay a navigation, which is what `macro`/`replay` are for.
+
+It is also capped: `rotate_if_large` keeps the newest 2000 entries once the file passes 512 KB,
+written to a per-pid temp file and renamed. Unbounded was the other half of the defect —
+`history::run` reads the whole file into memory. One `metadata` call per navigation on the
+ordinary path; the rewrite happens once per ~2000 entries.
+
+**Rotation and append share one exclusive lock** (`session::FileLock`, the store's), on
+`history.jsonl.lock`. This file is the one thing every browser on the machine writes to, and
+rotation replaces it by rename — so an append made during another process's rewrite landed in a
+copy that was then renamed over, and the navigation was simply gone. Not hypothetical: the test
+suite reproduced it the moment the file grew past 512 KB, with one navigation of a parallel run
+missing from `history --filter`. Taking the lock is best effort, as every branch here is: a lock
+that cannot be acquired is not a reason to drop the entry.
 
 - **`screenshot`** — `--format jpeg`/`--quality`, `--max-width` (downscale via CDP `clip.scale`, no image crate), `--uid`/`--selector` clip via `DOM.getBoxModel` (`geometry::clip_for_*`). Never emits base64 on stdout.
 - **`pdf`** — `Page.printToPDF` (`transferMode: ReturnAsBase64`) → `base64::decode` → file. Mirrors screenshot.
 - **`download <url>`** — in-page `fetch(url,{credentials:'include'})` → base64 in page → `base64::decode` → file. Auth-preserving. Filename from Content-Disposition (including RFC 5987 `filename*`), then the URL.
+
+`--max-bytes` on this path is bounded by the wire, because the file crosses CDP base64-encoded:
+`download_fetch::MAX_FETCH_BYTES` = `(cdp::transport::MAX_MESSAGE_BYTES − 64 KiB) × 3/4` = **75,448,320
+bytes (71.95 MiB)**, with a `const` assertion pinning that the advertised 64 MiB default fits
+inside it. A larger `--max-bytes` is refused with the ceiling named, instead of being accepted and
+then killing the connection when the reply arrives. See `.claude/rules/cdp-transport.md`.
+
+The click path is not bound by it — Chrome streams those bytes to disk and only the events cross
+CDP — so `--max-bytes` above the ceiling is a reason to click the link rather than fetch the URL,
+and the refusal says so.
 
 ## `download --uid` / `--selector`: the download a click produces
 

@@ -30,6 +30,18 @@ impl std::ops::Deref for ConsoleReading {
     }
 }
 
+/// The response every mode carries. `installed` rides beside the messages because an empty list
+/// means two different things without it.
+#[must_use]
+pub fn to_json(reading: &ConsoleReading) -> serde_json::Value {
+    let messages: Vec<serde_json::Value> = reading
+        .entries
+        .iter()
+        .map(|e| json!({"level": e.level, "message": e.message, "timestamp": e.timestamp}))
+        .collect();
+    json!({"ok": true, "installed": reading.installed, "messages": messages})
+}
+
 /// The shape the read script returns: the probe and the buffer in one round trip.
 #[derive(Debug, Deserialize)]
 struct RawReading {
@@ -37,67 +49,86 @@ struct RawReading {
     entries: Vec<ConsoleEntry>,
 }
 
+/// Entries the in-page buffer keeps. Oldest are shifted out, so a read always answers the most
+/// recent messages, which are the ones the agent's own action produced.
+const BUFFER_ENTRIES: usize = 200;
+
+/// Characters one captured message may carry. A stack trace, a serialised DOM node or a base64
+/// data URL passed to `console.log` is a single entry that can be megabytes on its own.
+const MESSAGE_CHARS: usize = 2000;
+
 /// Monkey-patches console.log/warn/error/info and captures unhandled errors and promise
-/// rejections into `window.__chrome_agent_console`, capped at 200 entries.
-const INTERCEPTOR_JS: &str = r"
-    if (!window.__chrome_agent_console_installed) {
+/// rejections into `window.__chrome_agent_console`.
+///
+/// All three producers go through ONE `__push`: the `console[level]` wrapper carried the cap and
+/// the two `addEventListener` producers below it did not, so a page throwing in a loop grew the
+/// array without bound — and `run` pulls the whole thing back in one `JSON.stringify`. The clamp
+/// is on the same helper for the same reason: the cap bounds the COUNT and says nothing about
+/// the size of one entry.
+///
+/// `__push` is a block-scoped `const` captured by the three closures, not a property on
+/// `window`: the interceptor already adds two globals a page can see, and a third buys nothing.
+fn interceptor_js() -> String {
+    format!(
+        r"
+    if (!window.__chrome_agent_console_installed) {{
     window.__chrome_agent_console_installed = true;
     window.__chrome_agent_console = window.__chrome_agent_console || [];
-    const __origConsole = {
+    const __clamp = (s) => {{
+        const text = String(s);
+        return text.length <= {MESSAGE_CHARS}
+            ? text
+            : text.slice(0, {MESSAGE_CHARS}) + '… (+' + (text.length - {MESSAGE_CHARS}) + ' chars)';
+    }};
+    const __push = (level, message) => {{
+        const buffer = window.__chrome_agent_console;
+        if (!buffer) return;
+        buffer.push({{ level, message: __clamp(message), timestamp: Date.now() }});
+        while (buffer.length > {BUFFER_ENTRIES}) buffer.shift();
+    }};
+    const __origConsole = {{
         log: console.log.bind(console),
         warn: console.warn.bind(console),
         error: console.error.bind(console),
         info: console.info.bind(console),
-    };
-    ['log','warn','error','info'].forEach(level => {
-        console[level] = (...args) => {
-            window.__chrome_agent_console.push({
-                level,
-                message: args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' '),
-                timestamp: Date.now(),
-            });
-            if (window.__chrome_agent_console.length > 200) window.__chrome_agent_console.shift();
+    }};
+    ['log','warn','error','info'].forEach(level => {{
+        console[level] = (...args) => {{
+            __push(level, args.map(a => {{
+                try {{ return typeof a === 'object' && a !== null ? JSON.stringify(a) : String(a); }}
+                catch (e) {{ return String(a); }}
+            }}).join(' '));
             __origConsole[level](...args);
-        };
-    });
-    window.addEventListener('error', (e) => {
-        window.__chrome_agent_console.push({
-            level: 'exception',
-            message: e.message + (e.filename ? ' at ' + e.filename + ':' + e.lineno : ''),
-            timestamp: Date.now(),
-        });
-    });
-    window.addEventListener('unhandledrejection', (e) => {
-        window.__chrome_agent_console.push({
-            level: 'exception',
-            message: 'Unhandled rejection: ' + String(e.reason),
-            timestamp: Date.now(),
-        });
-    });
-    } // end guard: __chrome_agent_console_installed
-";
+        }};
+    }});
+    window.addEventListener('error', (e) => {{
+        __push('exception', e.message + (e.filename ? ' at ' + e.filename + ':' + e.lineno : ''));
+    }});
+    window.addEventListener('unhandledrejection', (e) => {{
+        __push('exception', 'Unhandled rejection: ' + String(e.reason));
+    }});
+    }} // end guard: __chrome_agent_console_installed
+"
+    )
+}
 
 /// Inject the console interceptor: `addScriptToEvaluateOnNewDocument` for future navigations,
 /// plus a guarded `Runtime.evaluate` for the current page. No `Runtime.enable`, so
 /// stealth-safe. Errors are discarded on purpose; [`run`] probes at read time instead, which
 /// also catches a JS exception in the snippet and a page that dropped the buffer later.
 pub async fn inject(client: &CdpClient) {
+    let source = interceptor_js();
     let _ = client
         .send(
             "Page.addScriptToEvaluateOnNewDocument",
-            json!({ "source": INTERCEPTOR_JS }),
+            json!({ "source": source }),
         )
         .await;
 
     // Bootstrap on the current page; the guard prevents double-init.
-    let guarded = format!(
-        "if (!window.__chrome_agent_console) {{ {INTERCEPTOR_JS} }}"
-    );
+    let guarded = format!("if (!window.__chrome_agent_console) {{ {source} }}");
     let _ = client
-        .send(
-            "Runtime.evaluate",
-            json!({ "expression": guarded }),
-        )
+        .send("Runtime.evaluate", json!({ "expression": guarded }))
         .await;
 }
 
@@ -143,8 +174,8 @@ pub async fn run(
         .and_then(|v| v.as_str())
         .ok_or("Failed to read console buffer: the page returned no value")?;
 
-    let RawReading { installed, entries } = serde_json::from_str(raw)
-        .map_err(|e| format!("Failed to parse console buffer: {e}"))?;
+    let RawReading { installed, entries } =
+        serde_json::from_str(raw).map_err(|e| format!("Failed to parse console buffer: {e}"))?;
 
     if !installed {
         // stderr, never stdout, so `--json` stays clean.
@@ -166,7 +197,10 @@ pub async fn run(
         clear_buffer(client, installed).await;
     }
 
-    Ok(ConsoleReading { installed, entries: limited })
+    Ok(ConsoleReading {
+        installed,
+        entries: limited,
+    })
 }
 
 /// Empty the page's buffer, saying on stderr when that did not happen — a failed clear
@@ -194,9 +228,12 @@ async fn clear_buffer(client: &CdpClient, installed: bool) {
         .await;
 
     let emptied = match result {
-        Ok(r) if r.exception_details.is_none() => {
-            r.result.value.as_ref().and_then(serde_json::Value::as_bool).unwrap_or(false)
-        }
+        Ok(r) if r.exception_details.is_none() => r
+            .result
+            .value
+            .as_ref()
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
         _ => false,
     };
 
@@ -264,6 +301,36 @@ mod tests {
         }
     }
 
+    /// One helper carries the cap and the clamp, and all three producers reach it. The three
+    /// used to be three pushes, two of them unbounded.
+    #[test]
+    fn every_producer_pushes_through_the_one_capped_helper() {
+        let js = interceptor_js();
+        assert_eq!(
+            js.matches("buffer.push(").count(),
+            1,
+            "the buffer is written in exactly one place, or the cap is optional again: {js}"
+        );
+        assert_eq!(
+            js.matches("const __push =").count(),
+            1,
+            "one definition: {js}"
+        );
+        assert_eq!(
+            js.matches("__push(").count(),
+            3,
+            "three producers, all of them: {js}"
+        );
+        assert!(
+            js.contains(&format!("buffer.length > {BUFFER_ENTRIES}")),
+            "{js}"
+        );
+        assert!(
+            js.contains(&format!("text.slice(0, {MESSAGE_CHARS})")),
+            "{js}"
+        );
+    }
+
     #[test]
     fn keep_recent_returns_newest_n_in_order() {
         // Oldest ("m0") → newest ("m4").
@@ -285,8 +352,14 @@ mod tests {
 
     #[test]
     fn text_output_tells_the_two_silences_apart() {
-        let quiet = ConsoleReading { installed: true, entries: vec![] };
-        let blind = ConsoleReading { installed: false, entries: vec![] };
+        let quiet = ConsoleReading {
+            installed: true,
+            entries: vec![],
+        };
+        let blind = ConsoleReading {
+            installed: false,
+            entries: vec![],
+        };
 
         assert_eq!(format_text(&quiet), "No console messages captured.");
         assert_ne!(
@@ -304,7 +377,11 @@ mod tests {
     #[test]
     fn the_blind_report_claims_nothing_about_what_the_page_logged() {
         // The measurement is "nothing was listening", not "you missed messages".
-        let text = format_text(&ConsoleReading { installed: false, entries: vec![] }).to_lowercase();
+        let text = format_text(&ConsoleReading {
+            installed: false,
+            entries: vec![],
+        })
+        .to_lowercase();
         for forbidden in ["missed", "lost", "were logged"] {
             assert!(!text.contains(forbidden), "over-claims: {text}");
         }
@@ -316,7 +393,11 @@ mod tests {
             installed: true,
             entries: vec![entry("boom", 0)],
         };
-        assert!(format_text(&reading).contains("LOG: boom"), "{}", format_text(&reading));
+        assert!(
+            format_text(&reading).contains("LOG: boom"),
+            "{}",
+            format_text(&reading)
+        );
         // Still usable as a slice.
         assert_eq!(reading.len(), 1);
     }

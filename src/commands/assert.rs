@@ -5,19 +5,24 @@
 //! selector matching nothing is `1`, not `2`; only under `assert exists` is a count of zero
 //! a `2`.
 //!
+//! [`EXIT_NOT_HELD`] is not `assert`'s alone: a macro guard is the same claim class — it ran,
+//! and the page disagreed with what was promised — so `macros_run` exits with it too. `2` means
+//! a claim this tool made did not hold, and nothing else.
+//!
 //! State readers are the actions' own — `element_controls::CHECKABLE_PROBE` and
 //! `SELECT_READ` — so an assertion cannot disagree with the action about "checked".
 
 use std::collections::HashMap;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::cdp::client::CdpClient;
 use crate::element_ref::ElementRef;
 
 pub use super::assert_args::{from_cli, from_json};
 
-/// Exit code for an assertion that ran and did not hold.
+/// Exit code for a claim that ran and did not hold — an assertion, or a macro guard
+/// (`macros_run::exit_code`).
 pub const EXIT_NOT_HELD: i32 = 2;
 
 /// How much of a text read travels in the report — enough to recognise the page, not to
@@ -137,7 +142,10 @@ pub enum Kind {
     Text(Comparator),
     Url(Comparator),
     State(Want),
-    Exists { count: Option<usize>, min: Option<usize> },
+    Exists {
+        count: Option<usize>,
+        min: Option<usize>,
+    },
 }
 
 impl Kind {
@@ -164,9 +172,11 @@ impl Assertion {
     /// Reject an assertion whose target is missing or doubly specified, before any CDP call.
     fn require_target(&self) -> Result<(), crate::BoxError> {
         match (self.selector.as_deref(), self.uid.as_deref()) {
-            (Some(_), Some(_)) => {
-                Err(format!("assert {}: only one of --uid or --selector can be provided.", self.kind.name()).into())
-            }
+            (Some(_), Some(_)) => Err(format!(
+                "assert {}: only one of --uid or --selector can be provided.",
+                self.kind.name()
+            )
+            .into()),
             (None, None) => Err(format!(
                 "assert {}: Provide --uid or --selector to identify the element.",
                 self.kind.name()
@@ -195,8 +205,22 @@ pub struct Outcome {
 }
 
 impl Outcome {
-    const fn new(kind: &'static str, comparator: &'static str, expected: Value, actual: Value, held: bool) -> Self {
-        Self { kind, comparator, expected, actual, held, target: None, details: None }
+    const fn new(
+        kind: &'static str,
+        comparator: &'static str,
+        expected: Value,
+        actual: Value,
+        held: bool,
+    ) -> Self {
+        Self {
+            kind,
+            comparator,
+            expected,
+            actual,
+            held,
+            target: None,
+            details: None,
+        }
     }
 
     fn with_target(mut self, target: Option<Value>) -> Self {
@@ -220,7 +244,9 @@ impl Outcome {
             "held": self.held,
         });
         for extra in [self.target.as_ref(), self.details.as_ref()] {
-            if let (Some(map), Some(fields)) = (obj.as_object_mut(), extra.and_then(Value::as_object)) {
+            if let (Some(map), Some(fields)) =
+                (obj.as_object_mut(), extra.and_then(Value::as_object))
+            {
                 for (key, value) in fields {
                     map.insert(key.clone(), value.clone());
                 }
@@ -266,11 +292,21 @@ impl Outcome {
     /// What to do next when the claim did not hold.
     fn hint(&self) -> &'static str {
         match self.kind {
-            "value" => "The page holds something else. Re-read it (`eval --selector \"…\" \"el.value\"`), or `wait` and assert again — a controlled component can rewrite a value after the write returns.",
-            "text" => "Read what the page actually says: `text --selector \"…\"` for a region, `read` for article content. If the content loads late, `wait text \"…\"` first.",
-            "url" => "Read the current location with `eval \"location.href\"`. A redirect or a pushState may have landed somewhere else.",
-            "state" => "Read the element: `inspect --uid <uid>` for its a11y state, or `eval --selector \"…\" \"el.outerHTML\"` for the DOM truth.",
-            _ => "Count the matches yourself with `eval \"document.querySelectorAll('…').length\"`, or `inspect` to see what the page renders.",
+            "value" => {
+                "The page holds something else. Re-read it (`eval --selector \"…\" \"el.value\"`), or `wait` and assert again — a controlled component can rewrite a value after the write returns."
+            }
+            "text" => {
+                "Read what the page actually says: `text --selector \"…\"` for a region, `read` for article content. If the content loads late, `wait text \"…\"` first."
+            }
+            "url" => {
+                "Read the current location with `eval \"location.href\"`. A redirect or a pushState may have landed somewhere else."
+            }
+            "state" => {
+                "Read the element: `inspect --uid <uid>` for its a11y state, or `eval --selector \"…\" \"el.outerHTML\"` for the DOM truth."
+            }
+            _ => {
+                "Count the matches yourself with `eval \"document.querySelectorAll('…').length\"`, or `inspect` to see what the page renders."
+            }
         }
     }
 }
@@ -368,7 +404,10 @@ async fn probe(
              return ({body})(el); }})()"
         );
         client
-            .call("Runtime.evaluate", json!({"expression": expression, "returnByValue": true}))
+            .call(
+                "Runtime.evaluate",
+                json!({"expression": expression, "returnByValue": true}),
+            )
             .await?
     } else {
         let uid = assertion.uid.as_deref().unwrap_or_default();
@@ -385,16 +424,27 @@ async fn probe(
             .await?
     };
     crate::element::check_js_exception(&result)?;
-    Ok(result.get("result").and_then(|r| r.get("value")).cloned().unwrap_or_default())
+    Ok(result
+        .get("result")
+        .and_then(|r| r.get("value"))
+        .cloned()
+        .unwrap_or_default())
 }
 
 /// Evaluate an expression in the page and return its value.
 async fn evaluate(client: &CdpClient, expression: &str) -> Result<Value, crate::BoxError> {
     let result: Value = client
-        .call("Runtime.evaluate", json!({"expression": expression, "returnByValue": true}))
+        .call(
+            "Runtime.evaluate",
+            json!({"expression": expression, "returnByValue": true}),
+        )
         .await?;
     crate::element::check_js_exception(&result)?;
-    Ok(result.get("result").and_then(|r| r.get("value")).cloned().unwrap_or_default())
+    Ok(result
+        .get("result")
+        .and_then(|r| r.get("value"))
+        .cloned()
+        .unwrap_or_default())
 }
 
 /// Read the page, compare, report. Decides nothing about exit codes; both front ends call it.
@@ -410,7 +460,13 @@ pub async fn run(
             let url = evaluate(client, "location.href").await?;
             let actual = url.as_str().unwrap_or_default();
             let held = cmp.holds(actual)?;
-            Ok(Outcome::new("url", cmp.name(), json!(cmp.expected()), json!(actual), held))
+            Ok(Outcome::new(
+                "url",
+                cmp.name(),
+                json!(cmp.expected()),
+                json!(actual),
+                held,
+            ))
         }
         Kind::State(want) => assert_state(client, uid_map, assertion, want).await,
         Kind::Exists { count, min } => {
@@ -428,9 +484,17 @@ pub async fn run(
                 (None, Some(at_least)) => json!(format!(">= {at_least}")),
                 (None, None) => json!(">= 1"),
             };
-            let comparator = if count.is_some() { "count" } else if min.is_some() { "min" } else { "present" };
-            Ok(Outcome::new("exists", comparator, expected, json!(found), held)
-                .with_target(Some(json!({"selector": selector}))))
+            let comparator = if count.is_some() {
+                "count"
+            } else if min.is_some() {
+                "min"
+            } else {
+                "present"
+            };
+            Ok(
+                Outcome::new("exists", comparator, expected, json!(found), held)
+                    .with_target(Some(json!({"selector": selector}))),
+            )
         }
     }
 }
@@ -446,7 +510,10 @@ async fn assert_value(
     let read = probe(client, uid_map, assertion, &value_probe()).await?;
     if read.get("kind").and_then(Value::as_str) == Some("novalue") {
         let tag = read.get("tag").and_then(Value::as_str).unwrap_or("element");
-        let editable = read.get("editable").and_then(Value::as_bool).unwrap_or(false);
+        let editable = read
+            .get("editable")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         let alternative = if editable {
             "It is contenteditable, which has no value property — assert its text instead: `assert text --selector \"…\" --contains \"…\"`."
         } else {
@@ -459,16 +526,33 @@ async fn assert_value(
 
     // A secret is compared but never echoed. Both lengths travel, since they separate "the
     // mask reformatted it" from "the field is empty".
-    if read.get("sensitive").and_then(Value::as_bool).unwrap_or(false) {
-        return Ok(Outcome::new("value", cmp.name(), json!("redacted"), json!("redacted"), held)
-            .with_target(target)
-            .with_details(json!({
-                "redacted": true,
-                "expected_length": cmp.expected().chars().count(),
-                "actual_length": actual.map(|a| a.chars().count()),
-            })));
+    if read
+        .get("sensitive")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Ok(Outcome::new(
+            "value",
+            cmp.name(),
+            json!("redacted"),
+            json!("redacted"),
+            held,
+        )
+        .with_target(target)
+        .with_details(json!({
+            "redacted": true,
+            "expected_length": cmp.expected().chars().count(),
+            "actual_length": actual.map(|a| a.chars().count()),
+        })));
     }
-    Ok(Outcome::new("value", cmp.name(), json!(cmp.expected()), json!(actual), held).with_target(target))
+    Ok(Outcome::new(
+        "value",
+        cmp.name(),
+        json!(cmp.expected()),
+        json!(actual),
+        held,
+    )
+    .with_target(target))
 }
 
 async fn assert_text(
@@ -486,7 +570,13 @@ async fn assert_text(
         None
     };
     // The same reader the `text` command uses, so "what the page says" means one thing.
-    let text = crate::commands::text::run(client, assertion.uid.as_deref(), assertion.selector.as_deref(), uid_map).await?;
+    let text = crate::commands::text::run(
+        client,
+        assertion.uid.as_deref(),
+        assertion.selector.as_deref(),
+        uid_map,
+    )
+    .await?;
     let held = cmp.holds(&text)?;
     let full = text.chars().count();
     let excerpt = crate::truncate::truncate_str(&text, ACTUAL_TEXT_BUDGET, "…");
@@ -494,11 +584,15 @@ async fn assert_text(
     if full > ACTUAL_TEXT_BUDGET {
         details["actual_truncated"] = json!(true);
     }
-    Ok(
-        Outcome::new("text", cmp.name(), json!(cmp.expected()), json!(excerpt.as_ref()), held)
-            .with_target(target)
-            .with_details(details),
+    Ok(Outcome::new(
+        "text",
+        cmp.name(),
+        json!(cmp.expected()),
+        json!(excerpt.as_ref()),
+        held,
     )
+    .with_target(target)
+    .with_details(details))
 }
 
 async fn assert_state(
@@ -512,16 +606,34 @@ async fn assert_state(
     let outcome = match want {
         Want::Checked | Want::Unchecked => {
             // The classification check/uncheck apply before clicking, verbatim.
-            let read = probe(client, uid_map, assertion, crate::element_controls::CHECKABLE_PROBE).await?;
+            let read = probe(
+                client,
+                uid_map,
+                assertion,
+                crate::element_controls::CHECKABLE_PROBE,
+            )
+            .await?;
             let probe_result = crate::element_controls::parse_probe_value(&read);
             crate::element_controls::refuse_uncheckable(&probe_result, true)?;
             let state = probe_result.state.as_str();
-            Outcome::new("state", want.name(), want.expected(), json!(state), checked_holds(state, want))
-                .with_details(json!({"reading": probe_result.kind}))
+            Outcome::new(
+                "state",
+                want.name(),
+                want.expected(),
+                json!(state),
+                checked_holds(state, want),
+            )
+            .with_details(json!({"reading": probe_result.kind}))
         }
         Want::Selected(option) => {
             // The reading `select` takes for its own read-back.
-            let read = probe(client, uid_map, assertion, crate::element_controls::SELECT_READ).await?;
+            let read = probe(
+                client,
+                uid_map,
+                assertion,
+                crate::element_controls::SELECT_READ,
+            )
+            .await?;
             let text = read.get("text").and_then(Value::as_str);
             let value = read.get("value").and_then(Value::as_str);
             let held = selected_holds(value, text, option);
@@ -530,7 +642,10 @@ async fn assert_state(
         }
         Want::Enabled | Want::Disabled => {
             let read = probe(client, uid_map, assertion, RENDER_PROBE).await?;
-            let state = read.get("enabled").and_then(Value::as_str).unwrap_or("enabled");
+            let state = read
+                .get("enabled")
+                .and_then(Value::as_str)
+                .unwrap_or("enabled");
             // `aria-disabled` counts as disabled and never as enabled.
             let held = match want {
                 Want::Enabled => state == "enabled",
@@ -540,7 +655,10 @@ async fn assert_state(
         }
         Want::Visible => {
             let read = probe(client, uid_map, assertion, RENDER_PROBE).await?;
-            let state = read.get("visibility").and_then(Value::as_str).unwrap_or("no-box");
+            let state = read
+                .get("visibility")
+                .and_then(Value::as_str)
+                .unwrap_or("no-box");
             Outcome::new("state", "visible", want.expected(), json!(state), state == "visible")
                 .with_details(json!({
                     "means": "rendered, opaque and not visibility:hidden — not 'in the viewport' and not 'nothing on top of it'"
@@ -610,8 +728,14 @@ mod tests {
     fn contains_is_a_substring_test_not_a_word_test() {
         let cmp = Comparator::Contains("order".into());
         assert!(cmp.holds("Your order shipped").unwrap());
-        assert!(cmp.holds("reorder").unwrap(), "substring, deliberately not word-bounded");
-        assert!(!cmp.holds("ORDER").unwrap(), "case-sensitive; use --matches \"(?i)order\" instead");
+        assert!(
+            cmp.holds("reorder").unwrap(),
+            "substring, deliberately not word-bounded"
+        );
+        assert!(
+            !cmp.holds("ORDER").unwrap(),
+            "case-sensitive; use --matches \"(?i)order\" instead"
+        );
     }
 
     #[test]
@@ -620,15 +744,26 @@ mod tests {
         assert!(cmp.holds("555-1234").unwrap());
         assert!(!cmp.holds("x555-1234").unwrap());
         // Unanchored by default.
-        assert!(Comparator::Matches("total".into()).holds("Subtotal: 12").unwrap());
+        assert!(
+            Comparator::Matches("total".into())
+                .holds("Subtotal: 12")
+                .unwrap()
+        );
         // `(?i)` works.
-        assert!(Comparator::Matches("(?i)total".into()).holds("TOTAL").unwrap());
+        assert!(
+            Comparator::Matches("(?i)total".into())
+                .holds("TOTAL")
+                .unwrap()
+        );
     }
 
     #[test]
     fn a_malformed_pattern_is_an_error_not_a_failed_assertion() {
         // Nothing was compared, so this must reach the caller as exit 1, not held:false.
-        let err = Comparator::Matches("(unclosed".into()).holds("anything").unwrap_err().to_string();
+        let err = Comparator::Matches("(unclosed".into())
+            .holds("anything")
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("invalid regular expression"), "{err}");
     }
 
@@ -636,9 +771,17 @@ mod tests {
     fn regex_lite_classes_are_ascii_only() {
         // `\w` does not cover accented letters in this engine.
         assert!(Comparator::Matches(r"^\w+$".into()).holds("Jean").unwrap());
-        assert!(!Comparator::Matches(r"^\w+$".into()).holds("Jean-Sébastien").unwrap());
+        assert!(
+            !Comparator::Matches(r"^\w+$".into())
+                .holds("Jean-Sébastien")
+                .unwrap()
+        );
         // A literal accented character still matches.
-        assert!(Comparator::Matches("Sébastien".into()).holds("Jean-Sébastien").unwrap());
+        assert!(
+            Comparator::Matches("Sébastien".into())
+                .holds("Jean-Sébastien")
+                .unwrap()
+        );
     }
 
     #[test]
@@ -678,7 +821,10 @@ mod tests {
         // Value first, then trimmed text.
         assert!(selected_holds(Some("CA"), Some("California"), "CA"));
         assert!(selected_holds(Some("CA"), Some("California"), "California"));
-        assert!(selected_holds(Some("CA"), Some("  California  "), "California"), "text is trimmed");
+        assert!(
+            selected_holds(Some("CA"), Some("  California  "), "California"),
+            "text is trimmed"
+        );
         assert!(!selected_holds(Some("CA"), Some("California"), "NY"));
         // Nothing selected at all.
         assert!(!selected_holds(None, None, "CA"));
@@ -689,18 +835,27 @@ mod tests {
         let outcome = Outcome::new("value", "equals", json!("a@b.c"), json!(""), false)
             .with_target(Some(json!({"uid": "n12", "selector": "#email"})));
         let v = outcome.to_json();
-        assert_eq!(v["ok"], false, "ok mirrors held so batch/stop_on_error need no second rule");
+        assert_eq!(
+            v["ok"], false,
+            "ok mirrors held so batch/stop_on_error need no second rule"
+        );
         assert_eq!(v["assertion"]["kind"], "value");
         assert_eq!(v["assertion"]["comparator"], "equals");
         assert_eq!(v["assertion"]["expected"], "a@b.c");
         assert_eq!(v["assertion"]["actual"], "");
         assert_eq!(v["assertion"]["held"], false);
         assert_eq!(v["assertion"]["uid"], "n12");
-        assert!(v["hint"].is_string(), "a failed assertion tells the caller what to do next");
+        assert!(
+            v["hint"].is_string(),
+            "a failed assertion tells the caller what to do next"
+        );
 
         let held = Outcome::new("exists", "count", json!(3), json!(3), true);
         assert_eq!(held.to_json()["ok"], true);
-        assert!(held.to_json().get("hint").is_none(), "nothing to advise when it held");
+        assert!(
+            held.to_json().get("hint").is_none(),
+            "nothing to advise when it held"
+        );
     }
 
     #[test]
@@ -711,7 +866,10 @@ mod tests {
             uid: None,
         };
         let err = no_target.require_target().unwrap_err().to_string();
-        assert!(err.contains("Provide --uid"), "must hit the existing hint branch: {err}");
+        assert!(
+            err.contains("Provide --uid"),
+            "must hit the existing hint branch: {err}"
+        );
         let both = Assertion {
             kind: Kind::State(Want::Checked),
             selector: Some("#a".into()),

@@ -3,11 +3,10 @@
 //!
 //! The central hook: adding a mutating command means adding it to `mutates_page` and nothing else.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::cdp::client::CdpClient;
 use crate::commands;
-use crate::session::{self, SessionStore};
 
 /// What the action said about its own delivery, read back off the response it built. The hit test
 /// runs inside the action and the verdict is settled afterwards in three places, so the delivery
@@ -50,8 +49,12 @@ pub fn postcondition_from_response(out: &Value) -> crate::verdict::Postcondition
     let mut seen = crate::verdict::Postcondition::NotRead;
     for field in fields {
         match field_postcondition(field.get("value")) {
-            crate::verdict::Postcondition::Discarded => return crate::verdict::Postcondition::Discarded,
-            crate::verdict::Postcondition::Rewritten => seen = crate::verdict::Postcondition::Rewritten,
+            crate::verdict::Postcondition::Discarded => {
+                return crate::verdict::Postcondition::Discarded;
+            }
+            crate::verdict::Postcondition::Rewritten => {
+                seen = crate::verdict::Postcondition::Rewritten;
+            }
             crate::verdict::Postcondition::Kept
                 if seen == crate::verdict::Postcondition::NotRead =>
             {
@@ -68,7 +71,9 @@ pub fn postcondition_from_response(out: &Value) -> crate::verdict::Postcondition
 fn field_postcondition(value: Option<&Value>) -> crate::verdict::Postcondition {
     use crate::verdict::Postcondition;
 
-    let Some(value) = value else { return Postcondition::NotRead };
+    let Some(value) = value else {
+        return Postcondition::NotRead;
+    };
     match value.get("verbatim").and_then(Value::as_bool) {
         Some(true) => Postcondition::Kept,
         None => Postcondition::NotRead,
@@ -82,7 +87,11 @@ fn field_postcondition(value: Option<&Value>) -> crate::verdict::Postcondition {
                     .and_then(Value::as_str)
                     .is_none_or(str::is_empty),
             };
-            if empty { Postcondition::Discarded } else { Postcondition::Rewritten }
+            if empty {
+                Postcondition::Discarded
+            } else {
+                Postcondition::Rewritten
+            }
         }
     }
 }
@@ -155,7 +164,11 @@ async fn is_secret_field(
     else {
         return true;
     };
-    if result.get("exceptionDetails").is_some() {
+    // Discarded on purpose: this answers one bool and fails closed, so a throw redacts. Every
+    // other failure on this path (an unresolvable uid, an unreadable reply) is already silent for
+    // the same reason, and one of the three growing a message would only make the rule look
+    // conditional.
+    if crate::element::js_exception(&result).is_some() {
         return true;
     }
     result
@@ -203,28 +216,41 @@ pub fn attach_verdict_for(
 pub fn mutates_page(cmd: &str) -> bool {
     matches!(
         cmd,
-        "click" | "tap" | "dblclick" | "double_click" | "double-click"
-            | "fill" | "type" | "press" | "select" | "check" | "uncheck"
-            | "upload" | "drag" | "hover" | "scroll"
-            | "fill-form" | "fill_form" | "fillform"
-            | "fill_and_submit" | "fill-and-submit"
-            | "webmcp_call" | "webmcp-call"
+        "click"
+            | "tap"
+            | "dblclick"
+            | "double_click"
+            | "double-click"
+            | "fill"
+            | "type"
+            | "press"
+            | "select"
+            | "check"
+            | "uncheck"
+            | "upload"
+            | "drag"
+            | "hover"
+            | "scroll"
+            | "fill-form"
+            | "fill_form"
+            | "fillform"
+            | "fill_and_submit"
+            | "fill-and-submit"
+            | "webmcp_call"
+            | "webmcp-call"
     )
 }
 
 /// Re-read the page after an action and say what moved, mirroring the CLI default. Failures here
 /// are swallowed: the action succeeded, and losing the report beats turning it into an error.
 pub async fn attach_change_report(
-    client: &CdpClient,
-    store: &mut SessionStore,
-    browser_name: &str,
-    page_name: &str,
-    target_id: &str,
-    report: crate::run_helpers::ReportPolicy,
+    ctx: &mut crate::page_ctx::PageCtx<'_>,
     old_text: Option<&str>,
     stored: Option<(String, String)>,
     out: &mut Value,
 ) {
+    let client = ctx.client;
+    let report = ctx.report;
     crate::snapshot::settle(client, 100, 1000).await;
     let Ok(snapshot) = commands::inspect::run(client, false, None, None, None).await else {
         // The action landed and the read did not; silence would look like a page that did not move.
@@ -234,20 +260,16 @@ pub async fn attach_change_report(
     // Store the fresh snapshot whatever happens. Without this the first action of a session has
     // no baseline, so it writes none, so the session never acquires one.
     let Some(old_text) = old_text else {
-        if let Some(browser_s) = store.browsers.get_mut(browser_name) {
-            let page = session::ensure_page(browser_s, page_name, target_id);
-            page.uid_map = snapshot.uid_map;
-            page.last_snapshot = Some(snapshot.text);
-            let (f, l) = snapshot.identity.map_or((None, None), |(f, l)| (Some(f), Some(l)));
-            page.last_snapshot_frame = f;
-            page.last_snapshot_loader = l;
-        }
+        ctx.store_snapshot(snapshot);
         attach_verdict_for(client, out, crate::verdict::Observation::NoBaseline);
         return;
     };
     let identity = commands::diff::Identity::from_loader(
         stored.as_ref().map(|(f, l)| (f.as_str(), l.as_str())),
-        snapshot.identity.as_ref().map(|(f, l)| (f.as_str(), l.as_str())),
+        snapshot
+            .identity
+            .as_ref()
+            .map(|(f, l)| (f.as_str(), l.as_str())),
     );
     let cmp = commands::diff::compare(identity, old_text, &snapshot.text);
     let body = if report.budget == 0 {
@@ -276,7 +298,10 @@ pub async fn attach_change_report(
         );
         obj.insert("delta".into(), json!(body));
         if cmp.focus_from.is_some() || cmp.focus_to.is_some() {
-            obj.insert("focus".into(), json!({"from": cmp.focus_from, "to": cmp.focus_to}));
+            obj.insert(
+                "focus".into(),
+                json!({"from": cmp.focus_from, "to": cmp.focus_to}),
+            );
         }
         if let Some(hint) = cmp.hint {
             obj.entry("hint").or_insert_with(|| json!(hint));
@@ -303,14 +328,7 @@ pub async fn attach_change_report(
             values_lost,
         },
     );
-    if let Some(browser_s) = store.browsers.get_mut(browser_name) {
-        let page = session::ensure_page(browser_s, page_name, target_id);
-        page.uid_map = snapshot.uid_map;
-        page.last_snapshot = Some(snapshot.text);
-            let (f, l) = snapshot.identity.map_or((None, None), |(f, l)| (Some(f), Some(l)));
-            page.last_snapshot_frame = f;
-            page.last_snapshot_loader = l;
-    }
+    ctx.store_snapshot(snapshot);
 }
 
 #[cfg(test)]
@@ -362,11 +380,17 @@ mod tests {
         let emptied = json!({"ok": true, "value": {
             "redacted": true, "requested_length": 12, "actual_length": 0, "verbatim": false,
         }});
-        assert_eq!(postcondition_from_response(&emptied), Postcondition::Discarded);
+        assert_eq!(
+            postcondition_from_response(&emptied),
+            Postcondition::Discarded
+        );
         let rewritten = json!({"ok": true, "value": {
             "redacted": true, "requested_length": 12, "actual_length": 8, "verbatim": false,
         }});
-        assert_eq!(postcondition_from_response(&rewritten), Postcondition::Rewritten);
+        assert_eq!(
+            postcondition_from_response(&rewritten),
+            Postcondition::Rewritten
+        );
     }
 
     /// A form with one empty field is not filled, whatever the others kept.
@@ -382,13 +406,19 @@ mod tests {
             {"uid": "n1", "value": value("a", Some("a"))},
             {"uid": "n2", "value": value("5551234567", Some("(555) 123-4567"))},
         ]});
-        assert_eq!(postcondition_from_response(&one_masked), Postcondition::Rewritten);
+        assert_eq!(
+            postcondition_from_response(&one_masked),
+            Postcondition::Rewritten
+        );
 
         let one_emptied = json!({"ok": true, "values": [
             {"uid": "n1", "value": value("5551234567", Some("(555) 123-4567"))},
             {"uid": "n2", "value": value("b", Some(""))},
         ]});
-        assert_eq!(postcondition_from_response(&one_emptied), Postcondition::Discarded);
+        assert_eq!(
+            postcondition_from_response(&one_emptied),
+            Postcondition::Discarded
+        );
     }
 
     /// This rung outranks the page read, so an absence here must never read as a failure.
@@ -401,7 +431,11 @@ mod tests {
             json!({"ok": true, "values": []}),
             json!({"ok": true, "values": [{"uid": "n1"}]}),
         ] {
-            assert_eq!(postcondition_from_response(&out), Postcondition::NotRead, "for {out}");
+            assert_eq!(
+                postcondition_from_response(&out),
+                Postcondition::NotRead,
+                "for {out}"
+            );
         }
     }
 }

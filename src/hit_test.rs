@@ -10,10 +10,10 @@
 use std::time::Duration;
 
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::cdp::client::CdpClient;
-use crate::element::{check_js_exception, ElementError};
+use crate::element::{ElementError, check_js_exception};
 use crate::verdict::Delivery;
 
 /// What to do when the aim point turns out to belong to another element.
@@ -39,15 +39,6 @@ impl OnIntercept {
                 "Unknown --on-intercept value '{other}'. Use \"dispatch\" (default), \"refuse\", or \"guard\"."
             )),
         }
-    }
-
-    /// The per-command override, falling back to the session's policy.
-    #[must_use]
-    pub fn from_cmd(cmd: &Value, fallback: Self) -> Self {
-        cmd.get("on_intercept")
-            .and_then(Value::as_str)
-            .and_then(|v| Self::parse(v).ok())
-            .unwrap_or(fallback)
     }
 }
 
@@ -310,7 +301,11 @@ pub const fn classify(probe: &Probe, settle: Settle) -> Delivery {
     if probe.depth > 0 || !probe.offset_known {
         return Delivery::NotProbed;
     }
-    if probe.landed { Delivery::TargetHit } else { Delivery::Intercepted }
+    if probe.landed {
+        Delivery::TargetHit
+    } else {
+        Delivery::Intercepted
+    }
 }
 
 /// The result of aiming at a node.
@@ -350,7 +345,10 @@ async fn probe_once(client: &CdpClient, object_id: &str) -> Option<Probe> {
         )
         .await
         .ok()?;
-    if result.get("exceptionDetails").is_some() {
+    // Discarded on purpose: `None` here is `Aim::Unprobed`, which already has a defined recovery
+    // (the box model's centre, or the JS fallback). The probe's script is ours, so a throw names
+    // no page problem the caller could act on.
+    if crate::element::js_exception(&result).is_some() {
         return None;
     }
     serde_json::from_value(result.get("result")?.get("value")?.clone()).ok()
@@ -385,7 +383,11 @@ pub async fn aim(client: &CdpClient, object_id: &str) -> Aim {
         if !next.rendered {
             return Aim::NoBox;
         }
-        settle = if same_point(previous, next.aim) { Settle::Converged } else { Settle::Moving };
+        settle = if same_point(previous, next.aim) {
+            Settle::Converged
+        } else {
+            Settle::Moving
+        };
         probe = next;
         attempts += 1;
     }
@@ -401,11 +403,20 @@ pub async fn aim(client: &CdpClient, object_id: &str) -> Aim {
         Delivery::OffTarget => Some(Unaimable::StableOffViewport),
         _ => None,
     };
-    let mut receiver = if delivery == Delivery::Intercepted { probe.hit.clone() } else { None };
+    let mut receiver = if delivery == Delivery::Intercepted {
+        probe.hit.clone()
+    } else {
+        None
+    };
     if let Some(hit) = receiver.as_mut() {
         hit.uid = receiver_uid(client, object_id).await;
     }
-    Aim::At { point: (top[0], top[1]), delivery, receiver, unaimable }
+    Aim::At {
+        point: (top[0], top[1]),
+        delivery,
+        receiver,
+        unaimable,
+    }
 }
 
 /// The uid of the element that received the event, when it has one.
@@ -485,9 +496,7 @@ pub async fn resolve_selector(
         .get("result")
         .and_then(|r| r.get("objectId"))
         .and_then(Value::as_str)
-        .ok_or_else(|| {
-            ElementError::NotFound(format!("No element matches selector: {selector}"))
-        })?
+        .ok_or_else(|| ElementError::NotFound(format!("No element matches selector: {selector}")))?
         .to_string();
     let described = describe(client, &object_id).await;
     Ok(SelectorHandle {
@@ -514,17 +523,29 @@ pub async fn describe(client: &CdpClient, object_id: &str) -> Option<Described> 
         .await
         .ok()?;
     let node = described.get("node")?;
-    let uid = node.get("backendNodeId").and_then(Value::as_i64).map(|id| format!("n{id}"));
+    let uid = node
+        .get("backendNodeId")
+        .and_then(Value::as_i64)
+        .map(|id| format!("n{id}"));
     let attributes = attribute_pairs(node);
     let role = attributes
         .iter()
         .find(|(k, _)| k == "role")
         .map(|(_, v)| v.clone())
-        .or_else(|| node.get("localName").and_then(Value::as_str).map(str::to_string))
+        .or_else(|| {
+            node.get("localName")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
         .filter(|s| !s.is_empty());
     let name = ["aria-label", "title", "alt", "placeholder", "name"]
         .iter()
-        .find_map(|key| attributes.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone()))
+        .find_map(|key| {
+            attributes
+                .iter()
+                .find(|(k, _)| k == key)
+                .map(|(_, v)| v.clone())
+        })
         .filter(|s| !s.is_empty());
     Some(Described { uid, role, name })
 }
@@ -558,7 +579,10 @@ mod tests {
 
     #[test]
     fn a_clean_hit_is_the_only_reading_that_licenses_no_effect() {
-        assert_eq!(classify(&probe(CLEAN), Settle::Converged), Delivery::TargetHit);
+        assert_eq!(
+            classify(&probe(CLEAN), Settle::Converged),
+            Delivery::TargetHit
+        );
     }
 
     #[test]
@@ -582,7 +606,10 @@ mod tests {
             "hit":{"tag":"DIALOG","id":"terms","cls":null,"z":"auto","text":"Terms",
             "modal":true,"iframe":false,"sameDoc":true}}"#,
         );
-        assert_eq!(classify(&backdrop, Settle::Converged), Delivery::Intercepted);
+        assert_eq!(
+            classify(&backdrop, Settle::Converged),
+            Delivery::Intercepted
+        );
         assert!(backdrop.hit.expect("receiver").modal);
     }
 
@@ -594,7 +621,10 @@ mod tests {
             "depth":0,"offsetKnown":true,"aim":[200,3028],"top":[200,3028],"hit":null}"#,
         );
         assert_eq!(classify(&mid_scroll, Settle::Moving), Delivery::NotSettled);
-        assert_ne!(classify(&mid_scroll, Settle::Converged), Delivery::TargetHit);
+        assert_ne!(
+            classify(&mid_scroll, Settle::Converged),
+            Delivery::TargetHit
+        );
     }
 
     /// One probe, two `Settle` values, opposite `next` steps. Measured on a consent wall:
@@ -612,7 +642,10 @@ mod tests {
     /// On screen is not enough: a point still moving is the same case with a smaller offset.
     #[test]
     fn a_point_still_moving_is_refused_even_inside_the_viewport() {
-        assert_eq!(classify(&probe(CLEAN), Settle::Moving), Delivery::NotSettled);
+        assert_eq!(
+            classify(&probe(CLEAN), Settle::Moving),
+            Delivery::NotSettled
+        );
     }
 
     /// An off-viewport point outranks both the interception branch and the frame branch.
@@ -625,7 +658,10 @@ mod tests {
             "iframe":false,"sameDoc":true}}"#,
         );
         assert_eq!(classify(&mid_scroll, Settle::Moving), Delivery::NotSettled);
-        assert_eq!(classify(&mid_scroll, Settle::Converged), Delivery::OffTarget);
+        assert_eq!(
+            classify(&mid_scroll, Settle::Converged),
+            Delivery::OffTarget
+        );
     }
 
     #[test]
@@ -649,7 +685,11 @@ mod tests {
             "modal":false,"iframe":false,"sameDoc":true}}"#,
         );
         assert_eq!(classify(&inside, Settle::Converged), Delivery::NotProbed);
-        assert_eq!(inside.top, Some([52.0, 132.0]), "the dispatch point is still mapped");
+        assert_eq!(
+            inside.top,
+            Some([52.0, 132.0]),
+            "the dispatch point is still mapped"
+        );
     }
 
     #[test]
@@ -660,13 +700,19 @@ mod tests {
             "hit":{"tag":"DIV","id":"veil","cls":null,"z":"5","text":"","modal":false,
             "iframe":false,"sameDoc":true}}"#,
         );
-        assert_eq!(classify(&cross_origin, Settle::Converged), Delivery::NotProbed);
+        assert_eq!(
+            classify(&cross_origin, Settle::Converged),
+            Delivery::NotProbed
+        );
     }
 
     /// A zero-size element has no point to aim at; the caller falls back to a JS click.
     #[test]
     fn an_element_with_no_box_yields_no_claim() {
-        assert_eq!(classify(&probe(r#"{"rendered":false}"#), Settle::Converged), Delivery::NotProbed);
+        assert_eq!(
+            classify(&probe(r#"{"rendered":false}"#), Settle::Converged),
+            Delivery::NotProbed
+        );
     }
 
     /// A page still scrolling moves much further than the epsilon between two readings.
@@ -674,7 +720,10 @@ mod tests {
     fn point_equality_tolerates_subpixel_layout_but_not_a_moving_scroll() {
         assert!(same_point(Some([100.0, 200.0]), Some([100.2, 199.9])));
         assert!(!same_point(Some([100.0, 200.0]), Some([100.0, 260.0])));
-        assert!(!same_point(None, Some([100.0, 200.0])), "an absent reading agrees with nothing");
+        assert!(
+            !same_point(None, Some([100.0, 200.0])),
+            "an absent reading agrees with nothing"
+        );
     }
 
     #[test]
@@ -701,15 +750,6 @@ mod tests {
         assert_eq!(OnIntercept::parse("refuse"), Ok(OnIntercept::Refuse));
         assert_eq!(OnIntercept::parse("guard"), Ok(OnIntercept::Guard));
         assert!(OnIntercept::parse("maybe").is_err());
-        // A per-command override, and the session policy when there is none.
-        assert_eq!(
-            OnIntercept::from_cmd(&json!({"on_intercept": "refuse"}), OnIntercept::Dispatch),
-            OnIntercept::Refuse
-        );
-        assert_eq!(
-            OnIntercept::from_cmd(&json!({"cmd": "click"}), OnIntercept::Refuse),
-            OnIntercept::Refuse
-        );
     }
 
     fn hit(tag: &str, iframe: bool, actionable: bool) -> Hit {
@@ -734,11 +774,23 @@ mod tests {
         assert!(hit("HEADER", false, false).looks_inert());
         assert!(hit("DIV", false, false).looks_inert(), "plain banner text");
         assert!(hit("IMG", false, false).looks_inert());
-        assert!(!hit("BUTTON", false, true).looks_inert(), "consent accept button");
-        assert!(!hit("DIV", false, true).looks_inert(), "a div acting as a selector option");
+        assert!(
+            !hit("BUTTON", false, true).looks_inert(),
+            "consent accept button"
+        );
+        assert!(
+            !hit("DIV", false, true).looks_inert(),
+            "a div acting as a selector option"
+        );
         // An iframe may hold inert content, but that cannot be measured from outside.
-        assert!(!hit("IFRAME", true, false).looks_inert(), "opaque content refuses regardless");
-        assert!(!hit("IFRAME", true, true).looks_inert(), "a CMP iframe, doubly so");
+        assert!(
+            !hit("IFRAME", true, false).looks_inert(),
+            "opaque content refuses regardless"
+        );
+        assert!(
+            !hit("IFRAME", true, true).looks_inert(),
+            "a CMP iframe, doubly so"
+        );
     }
 
     #[test]
@@ -747,14 +799,29 @@ mod tests {
         let actionable = hit("BUTTON", false, true);
         let unknown_iframe = hit("IFRAME", true, false);
 
-        assert!(!should_refuse_intercept(OnIntercept::Dispatch, Some(&inert)));
-        assert!(!should_refuse_intercept(OnIntercept::Dispatch, Some(&actionable)));
+        assert!(!should_refuse_intercept(
+            OnIntercept::Dispatch,
+            Some(&inert)
+        ));
+        assert!(!should_refuse_intercept(
+            OnIntercept::Dispatch,
+            Some(&actionable)
+        ));
         assert!(should_refuse_intercept(OnIntercept::Refuse, Some(&inert)));
-        assert!(should_refuse_intercept(OnIntercept::Refuse, Some(&actionable)));
+        assert!(should_refuse_intercept(
+            OnIntercept::Refuse,
+            Some(&actionable)
+        ));
 
         assert!(!should_refuse_intercept(OnIntercept::Guard, Some(&inert)));
-        assert!(should_refuse_intercept(OnIntercept::Guard, Some(&actionable)));
-        assert!(should_refuse_intercept(OnIntercept::Guard, Some(&unknown_iframe)));
+        assert!(should_refuse_intercept(
+            OnIntercept::Guard,
+            Some(&actionable)
+        ));
+        assert!(should_refuse_intercept(
+            OnIntercept::Guard,
+            Some(&unknown_iframe)
+        ));
         // No receiver identified at all: still refuse under Guard rather than assume inert.
         assert!(should_refuse_intercept(OnIntercept::Guard, None));
     }

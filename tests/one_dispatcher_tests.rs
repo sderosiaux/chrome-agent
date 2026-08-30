@@ -10,7 +10,7 @@
 use std::io::{BufRead as _, Write as _};
 use std::process::{Command, Stdio};
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 mod common;
 use common::TestBrowser;
@@ -30,14 +30,21 @@ impl PipeSession {
             .spawn()
             .expect("spawn pipe");
         let stdout = child.stdout.take().expect("pipe stdout");
-        Self { child, responses: std::io::BufReader::new(stdout).lines() }
+        Self {
+            child,
+            responses: std::io::BufReader::new(stdout).lines(),
+        }
     }
 
     fn send(&mut self, cmd: &Value) -> Value {
         let stdin = self.child.stdin.as_mut().expect("pipe stdin");
         writeln!(stdin, "{cmd}").expect("write command");
         stdin.flush().expect("flush command");
-        let line = self.responses.next().expect("a response per command").expect("readable");
+        let line = self
+            .responses
+            .next()
+            .expect("a response per command")
+            .expect("readable");
         serde_json::from_str(&line).unwrap_or_else(|e| panic!("bad pipe line {line}: {e}"))
     }
 }
@@ -81,7 +88,10 @@ fn a_batch_nested_in_a_batch_answers_what_the_pipe_answers() {
 
     // The same object, sent to the pipe and then wrapped in a batch of one.
     let direct = session.send(&inner);
-    assert_eq!(direct["ok"], true, "a batch issued straight to the pipe runs: {direct}");
+    assert_eq!(
+        direct["ok"], true,
+        "a batch issued straight to the pipe runs: {direct}"
+    );
     assert_eq!(direct["results"][0]["result"], 42, "{direct}");
 
     let nested = session.send(&json!({"cmd": "batch", "commands": [inner.clone()]}));

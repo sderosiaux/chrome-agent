@@ -17,10 +17,26 @@ struct Doc {
 }
 
 const DOCS: &[Doc] = &[
-    Doc { name: "llm-guide.txt", text: include_str!("../llm-guide.txt"), fenced: false },
-    Doc { name: "README.md", text: include_str!("../README.md"), fenced: true },
-    Doc { name: "README.cn.md", text: include_str!("../README.cn.md"), fenced: true },
-    Doc { name: "npm/README.md", text: include_str!("../npm/README.md"), fenced: true },
+    Doc {
+        name: "llm-guide.txt",
+        text: include_str!("../llm-guide.txt"),
+        fenced: false,
+    },
+    Doc {
+        name: "README.md",
+        text: include_str!("../README.md"),
+        fenced: true,
+    },
+    Doc {
+        name: "README.cn.md",
+        text: include_str!("../README.cn.md"),
+        fenced: true,
+    },
+    Doc {
+        name: "npm/README.md",
+        text: include_str!("../npm/README.md"),
+        fenced: true,
+    },
     Doc {
         name: "skills/chrome-agent/SKILL.md",
         text: include_str!("../skills/chrome-agent/SKILL.md"),
@@ -137,7 +153,11 @@ fn command_lines(doc: &Doc) -> Vec<Example> {
         if continues {
             pending = Some((start, text));
         } else {
-            out.push(Example { doc: doc.name, line: start, text });
+            out.push(Example {
+                doc: doc.name,
+                line: start,
+                text,
+            });
         }
     }
     out
@@ -150,7 +170,11 @@ fn invocations() -> Vec<Example> {
         for example in command_lines(doc) {
             let text = command_only(&example.text).to_string();
             if text.starts_with("chrome-agent ") && !is_synopsis(&text) {
-                out.push(Example { doc: example.doc, line: example.line, text });
+                out.push(Example {
+                    doc: example.doc,
+                    line: example.line,
+                    text,
+                });
             }
         }
     }
@@ -188,7 +212,10 @@ fn every_command_line_the_documents_show_parses() {
                 example.doc,
                 example.line,
                 example.text,
-                String::from_utf8_lossy(&output.stderr).lines().next().unwrap_or("(no stderr)")
+                String::from_utf8_lossy(&output.stderr)
+                    .lines()
+                    .next()
+                    .unwrap_or("(no stderr)")
             ));
         }
     }
@@ -206,8 +233,13 @@ fn every_command_line_the_documents_show_parses() {
 fn help_for(path: &[String]) -> Option<String> {
     let mut args: Vec<&str> = path.iter().map(String::as_str).collect();
     args.push("--help");
-    let out = Command::new(common::binary()).args(&args).output().expect("run chrome-agent");
-    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).to_string())
+    let out = Command::new(common::binary())
+        .args(&args)
+        .output()
+        .expect("run chrome-agent");
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).to_string())
 }
 
 /// A flag named in a synopsis must exist on that command. The command is a *path*, not a word
@@ -217,10 +249,14 @@ fn every_flag_named_in_a_synopsis_exists_on_its_command() {
     let guide = &DOCS[0];
     let mut broken = Vec::new();
     for example in command_lines(guide) {
-        let Some(rest) = example.text.strip_prefix("chrome-agent ") else { continue };
+        let Some(rest) = example.text.strip_prefix("chrome-agent ") else {
+            continue;
+        };
         let rest = strip_comment(rest);
         let mut words = rest.split_whitespace();
-        let Some(command) = words.next() else { continue };
+        let Some(command) = words.next() else {
+            continue;
+        };
         if command.starts_with('-') || command.starts_with('<') || command.starts_with('[') {
             continue;
         }
@@ -256,7 +292,11 @@ fn every_flag_named_in_a_synopsis_exists_on_its_command() {
             }
         }
     }
-    assert!(broken.is_empty(), "the guide names flags that do not exist:\n{}", broken.join("\n"));
+    assert!(
+        broken.is_empty(),
+        "the guide names flags that do not exist:\n{}",
+        broken.join("\n")
+    );
 }
 
 /// The published codebase size matches the measurement, in every document that states it.
@@ -274,7 +314,9 @@ fn the_published_size_of_this_codebase_is_the_measured_one() {
     let mut found = 0;
     for (name, text) in published {
         for (index, line) in text.lines().enumerate() {
-            let Some(claim) = published_line_count(line) else { continue };
+            let Some(claim) = published_line_count(line) else {
+                continue;
+            };
             found += 1;
             let drift = claim.abs_diff(measured);
             assert!(
@@ -303,8 +345,11 @@ fn published_line_count(line: &str) -> Option<usize> {
     const MARKERS: [&str; 2] = ["K lines of Rust in src/", "K 行 Rust 代码（src/"];
     let line = line.replace('`', "");
     let end = MARKERS.iter().find_map(|marker| line.find(marker))?;
-    let reversed: String =
-        line[..end].chars().rev().take_while(|c| c.is_ascii_digit() || *c == '.').collect();
+    let reversed: String = line[..end]
+        .chars()
+        .rev()
+        .take_while(|c| c.is_ascii_digit() || *c == '.')
+        .collect();
     if !line[..end - reversed.len()].ends_with('~') {
         return None;
     }
@@ -338,6 +383,9 @@ fn measure_source_lines() -> usize {
         }
     }
     let mut total = 0;
-    walk(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut total);
+    walk(
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+        &mut total,
+    );
     total
 }

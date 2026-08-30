@@ -4,7 +4,10 @@ mod common;
 use common::TestBrowser;
 
 fn run_cli(args: &[&str]) -> (String, String, i32) {
-    let output = Command::new(common::binary()).args(args).output().expect("Failed to run chrome-agent");
+    let output = Command::new(common::binary())
+        .args(args)
+        .output()
+        .expect("Failed to run chrome-agent");
     (
         String::from_utf8_lossy(&output.stdout).to_string(),
         String::from_utf8_lossy(&output.stderr).to_string(),
@@ -52,7 +55,10 @@ fn diff_reports_document_change_instead_of_pairing_unrelated_uids() {
         json["document_changed"], true,
         "diff after navigating to a different document must say so, got {json}"
     );
-    assert_eq!(json["changed"], 0, "no element can be 'changed' across two different documents, got {json}");
+    assert_eq!(
+        json["changed"], 0,
+        "no element can be 'changed' across two different documents, got {json}"
+    );
 }
 
 #[test]

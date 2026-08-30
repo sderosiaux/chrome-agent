@@ -10,7 +10,10 @@ mod common;
 use common::TestBrowser;
 
 fn run_cli(args: &[&str]) -> (String, i32) {
-    let output = Command::new(common::binary()).args(args).output().expect("Failed to run chrome-agent");
+    let output = Command::new(common::binary())
+        .args(args)
+        .output()
+        .expect("Failed to run chrome-agent");
     (
         String::from_utf8_lossy(&output.stdout).to_string(),
         output.status.code().unwrap_or(-1),
@@ -73,7 +76,10 @@ fn the_reported_uid_can_be_matched_against_the_delta() {
     }
     let v = act(b.name(), &["fill", "--selector", "#plain", "hello"]);
     let uid = v["uid"].as_str().unwrap_or_default().to_string();
-    assert!(!uid.is_empty(), "a fill by selector names its node too: {v}");
+    assert!(
+        !uid.is_empty(),
+        "a fill by selector names its node too: {v}"
+    );
     let delta = v["delta"].as_str().unwrap_or_default();
     assert!(
         delta.contains(&uid),
@@ -116,7 +122,12 @@ fn pipe_echoes_the_resolved_uid_too() {
         .stderr(Stdio::null())
         .spawn()
         .expect("spawn pipe");
-    child.stdin.as_mut().unwrap().write_all(script.as_bytes()).unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(script.as_bytes())
+        .unwrap();
     drop(child.stdin.take());
     let out = child.wait_with_output().expect("pipe output");
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -176,7 +187,12 @@ fn pipe_names_the_node_for_every_targeted_command() {
         .stderr(Stdio::null())
         .spawn()
         .expect("spawn pipe");
-    child.stdin.as_mut().unwrap().write_all(script.as_bytes()).unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(script.as_bytes())
+        .unwrap();
     drop(child.stdin.take());
     let out = child.wait_with_output().expect("pipe output");
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -186,7 +202,11 @@ fn pipe_names_the_node_for_every_targeted_command() {
         .map(|l| serde_json::from_str(l).expect("JSON"))
         .collect();
 
-    assert_eq!(responses.len(), 3, "expected one response per command: {stdout}");
+    assert_eq!(
+        responses.len(),
+        3,
+        "expected one response per command: {stdout}"
+    );
     for (name, response) in [("select", &responses[1]), ("dblclick", &responses[2])] {
         assert_eq!(response["ok"], true, "{name} should succeed: {response}");
         assert!(

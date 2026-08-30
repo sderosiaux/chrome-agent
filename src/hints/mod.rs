@@ -34,8 +34,19 @@ fn invocation(browser: &str) -> String {
 /// The uid an error names, when it names one (`uid=n47 …` → `n47`).
 fn uid_in(msg: &str) -> Option<&str> {
     let rest = msg.split("uid=").nth(1)?;
-    let end = rest.find(|c: char| !c.is_ascii_alphanumeric()).unwrap_or(rest.len());
+    let end = rest
+        .find(|c: char| !c.is_ascii_alphanumeric())
+        .unwrap_or(rest.len());
     (end > 0).then(|| &rest[..end])
+}
+
+/// The first single-quoted run in an error message (`… file 'x.jsonl': …` → `x.jsonl`).
+///
+/// The messages that carry one put the caller's own path there, so a hint may echo it back
+/// unquoted — same rule as `usage_error`'s reordered argv.
+fn single_quoted(msg: &str) -> Option<&str> {
+    let rest = msg.split_once('\'')?.1;
+    rest.split_once('\'').map(|(inside, _)| inside)
 }
 
 /// Rewrite a clap usage error that is really about flag position. Clap's `tip: … use
@@ -54,7 +65,10 @@ pub fn usage_error(rendered: &str, argv: &[String]) -> String {
     let mut out = String::new();
     let mut skip_blank = false;
     for line in rendered.lines() {
-        if line.trim_start().starts_with(&format!("tip: to pass '{flag}'")) {
+        if line
+            .trim_start()
+            .starts_with(&format!("tip: to pass '{flag}'"))
+        {
             // Skip the blank line after it too, or the output grows a double gap.
             skip_blank = true;
             continue;
@@ -67,8 +81,10 @@ pub fn usage_error(rendered: &str, argv: &[String]) -> String {
         out.push_str(line);
         out.push('\n');
     }
-    let command = before_verb_form(argv, flag)
-        .map_or_else(|| format!("chrome-agent {flag} <value> …"), |line| format!("`{line}`"));
+    let command = before_verb_form(argv, flag).map_or_else(
+        || format!("chrome-agent {flag} <value> …"),
+        |line| format!("`{line}`"),
+    );
     out.push_str(&format!(
         "hint: {flag} is read before the verb: {command}. Same values, same command — only the \
          flag moves. ({why}.)\n"
@@ -81,9 +97,15 @@ pub fn usage_error(rendered: &str, argv: &[String]) -> String {
 /// Reordering rather than reconstructing keeps every other flag the caller passed (rule 2).
 fn before_verb_form(argv: &[String], flag: &str) -> Option<String> {
     let with_equals = format!("{flag}=");
-    let position = argv.iter().position(|arg| arg == flag || arg.starts_with(&with_equals))?;
+    let position = argv
+        .iter()
+        .position(|arg| arg == flag || arg.starts_with(&with_equals))?;
     // `--timeout=5` is one argv entry and carries its own value; `--timeout 5` is two.
-    let taken = if argv[position].starts_with(&with_equals) { 1 } else { 2 };
+    let taken = if argv[position].starts_with(&with_equals) {
+        1
+    } else {
+        2
+    };
     let moved: Vec<&str> = argv[position..]
         .iter()
         .take(taken)
@@ -114,7 +136,11 @@ mod tests {
         "Failed to connect to page after 8 attempts: Connection refused",
         "DevToolsActivePort file doesn't exist",
         "Connection refused",
-        "No such file or directory",
+        // Both carry the OS `No such file or directory` and neither reached a browser, which is
+        // what the CDP branch used to claim about them. `macros::load` and `pipe::run_replay`,
+        // verbatim.
+        "No macro named 'checkout' (/home/a/.chrome-agent/macros/checkout.json): No such file or directory (os error 2). `macro list` shows what exists.",
+        "Cannot read replay file '/tmp/nope.jsonl': No such file or directory (os error 2)",
         "Element uid=n5 not found. Run 'chrome-agent inspect' to get fresh uids.",
         // Same message, uid the snapshot printed but never stored: different recovery.
         "Element uid=e12 not found. Run 'chrome-agent inspect' to get fresh uids.",
@@ -129,6 +155,9 @@ mod tests {
         "Navigation failed for https://x.test/a: something with no code",
         "Navigation failed",
         "No snapshot stored for this page",
+        // What `diff` really says, in both modes. Neither contains `No snapshot`.
+        "No previous snapshot. Run 'chrome-agent inspect' first.",
+        "No previous snapshot. Run inspect first.",
         "uid_map is empty",
         "Timeout waiting for selector",
         // `CdpClientError::Timeout` prefixes a lowercase `timeout: ` and carries no capital
@@ -152,6 +181,8 @@ mod tests {
         "Evaluation error: TypeError: foo",
         "dispatcher task exited",
         "transport closed",
+        // `CdpTransportError::MessageTooLarge`, through `CdpClientError::Transport`.
+        "transport: a CDP message exceeded the 100663296-byte ceiling this connection reads, so it was not read and the connection ended",
         "Element is not an <iframe>",
         "No child frame found for selector",
         "Element is not a <select>",
@@ -264,7 +295,13 @@ mod tests {
             .map(|path| {
                 let text = std::fs::read_to_string(&path)
                     .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
-                (path.file_name().unwrap_or_default().to_string_lossy().into_owned(), text)
+                (
+                    path.file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into_owned(),
+                    text,
+                )
             })
             .collect();
         out.sort_by(|a, b| a.0.cmp(&b.0));
@@ -292,7 +329,9 @@ mod tests {
             declares_the_chain |= body.contains("pub fn error_hint");
             while let Some(at) = body.find(NEEDLE) {
                 let after = &body[at + NEEDLE.len()..];
-                let close = after.find('"').expect("an unterminated literal would not compile");
+                let close = after
+                    .find('"')
+                    .expect("an unterminated literal would not compile");
                 let literal = &after[..close];
                 assert!(
                     !literal.contains('\\'),
@@ -358,7 +397,9 @@ mod tests {
                 !prose.contains('?'),
                 "rule 1: a hint states a fact rather than asking the reader: {hint}"
             );
-            for hedge in ["might", "possibly", "perhaps", "maybe", "probably", "may be"] {
+            for hedge in [
+                "might", "possibly", "perhaps", "maybe", "probably", "may be",
+            ] {
                 assert!(
                     !prose.contains(hedge),
                     "rule 1: {hedge:?} hedges about something this tool measured: {hint}"
@@ -402,7 +443,10 @@ mod tests {
                 "try running the command again",
                 "run the command again",
             ] {
-                assert!(!hint.contains(forbidden), "the hint invites a blind retry: {hint}");
+                assert!(
+                    !hint.contains(forbidden),
+                    "the hint invites a blind retry: {hint}"
+                );
             }
         }
     }
@@ -425,9 +469,15 @@ mod tests {
 
     #[test]
     fn uid_extraction_stops_at_the_end_of_the_uid() {
-        assert_eq!(uid_in("Element uid=n47 has no visible box model."), Some("n47"));
+        assert_eq!(
+            uid_in("Element uid=n47 has no visible box model."),
+            Some("n47")
+        );
         assert_eq!(uid_in("Refused to click uid=n5: covered"), Some("n5"));
-        assert_eq!(uid_in("Element uid=e12 has no resolvable backend node."), Some("e12"));
+        assert_eq!(
+            uid_in("Element uid=e12 has no resolvable backend node."),
+            Some("e12")
+        );
         assert_eq!(uid_in("no uid here"), None);
         assert_eq!(uid_in("trailing uid="), None);
     }
@@ -449,10 +499,19 @@ mod tests {
         assert!(!out.contains("-- --timeout"), "clap's tip survived: {out}");
         assert!(!out.contains("as a value"), "{out}");
         // What clap got right stays: the error itself and the usage line.
-        assert!(out.contains("error: unexpected argument '--timeout' found"), "{out}");
+        assert!(
+            out.contains("error: unexpected argument '--timeout' found"),
+            "{out}"
+        );
         assert!(out.contains("Usage: chrome-agent click <UID>"), "{out}");
-        assert!(out.contains("hint: --timeout is read before the verb"), "{out}");
-        assert!(!out.contains("\n\n\n"), "removing the tip left a double gap: {out:?}");
+        assert!(
+            out.contains("hint: --timeout is read before the verb"),
+            "{out}"
+        );
+        assert!(
+            !out.contains("\n\n\n"),
+            "removing the tip left a double gap: {out:?}"
+        );
     }
 
     /// Rule 2, on the case it was written for: the caller's own line, reordered.
@@ -487,7 +546,11 @@ mod tests {
             // Names the flag, but not as a position problem: `wait --timeout 5` with no pattern.
             "error: the following required arguments were not provided:\n  <WHAT>\n\nUsage: chrome-agent wait <WHAT> [PATTERN] --timeout <TIMEOUT>\n",
         ] {
-            assert_eq!(usage_error(rendered, &argv(&["wait"])), rendered, "rewrote {rendered:?}");
+            assert_eq!(
+                usage_error(rendered, &argv(&["wait"])),
+                rendered,
+                "rewrote {rendered:?}"
+            );
         }
     }
 
@@ -499,9 +562,15 @@ mod tests {
             let rendered = format!("error: unexpected argument '{flag}' found\n");
             let out = usage_error(&rendered, &argv(&["click", "n1", flag, "2"]));
             assert!(out.contains(why), "{flag} lost its reason: {out}");
-            assert!(out.contains(&format!("`chrome-agent {flag} 2 click n1`")), "{out}");
+            assert!(
+                out.contains(&format!("`chrome-agent {flag} 2 click n1`")),
+                "{out}"
+            );
             for placeholder in ["<value>", "<uid>", "<n>"] {
-                assert!(!out.contains(placeholder), "{flag} hands back {placeholder}: {out}");
+                assert!(
+                    !out.contains(placeholder),
+                    "{flag} hands back {placeholder}: {out}"
+                );
             }
         }
     }

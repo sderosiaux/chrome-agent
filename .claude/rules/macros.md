@@ -17,6 +17,24 @@ dispatcher pipe and batch use, checks its guards, and stops at the first one tha
 **There is no repair, no retry and no branch.** That is the line between this and a compiler this
 project has not built.
 
+## A guard that did not hold exits 2
+
+`macros_run::exit_code`, off the report's own `stopped_by`. A macro guard is the same claim class
+as an assertion — it ran, the page disagreed with what the macro promised, and the recovery is to
+look at the page rather than to try again — so it exits with `commands::assert::EXIT_NOT_HELD`.
+It used to exit `1`, which collapsed "the guarantee this macro was recorded with failed" into "the
+browser never started": the exact conflation `EXIT_NOT_HELD` exists to remove.
+
+The distinction is in the data, written by `stopped()` from a `StopKind`, never inferred at the
+call site from which keys happen to be present:
+
+- `stopped_by: "guard"` → **2**. A response guard (`delivery`, `verdict`, `verbatim`) or a page guard (`url_matches`, `text_contains`, `exists`) was evaluated and did not hold. The report also carries `guard`, `expected` and `observed`.
+- `stopped_by: "error"` → **1**. The step itself failed or its locator did not resolve (no `guard` key at all), or a guard could not be EVALUATED — `guard: "page"`, when the read through `assert`'s own readers threw. Nothing was compared, so it says nothing about the page; the same rule as `assert`'s selector-matches-nothing being a `1`.
+
+Operational failures before any step — an unreadable or malformed macro file, a missing required
+`--var`, a browser that would not start — never reach `Stopped` and exit `1` through `main`'s
+generic handler.
+
 ## What becomes a guard
 
 `macros_record.rs`. An observation becomes an expectation only if it would still be true tomorrow

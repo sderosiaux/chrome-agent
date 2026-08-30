@@ -91,8 +91,16 @@ mod tests {
             let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
             out.push(ALPHABET[((n >> 18) & 63) as usize] as char);
             out.push(ALPHABET[((n >> 12) & 63) as usize] as char);
-            out.push(if chunk.len() > 1 { ALPHABET[((n >> 6) & 63) as usize] as char } else { '=' });
-            out.push(if chunk.len() > 2 { ALPHABET[(n & 63) as usize] as char } else { '=' });
+            out.push(if chunk.len() > 1 {
+                ALPHABET[((n >> 6) & 63) as usize] as char
+            } else {
+                '='
+            });
+            out.push(if chunk.len() > 2 {
+                ALPHABET[(n & 63) as usize] as char
+            } else {
+                '='
+            });
         }
         out
     }

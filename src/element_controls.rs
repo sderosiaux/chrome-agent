@@ -10,7 +10,9 @@ use crate::element_ref::ElementRef;
 
 use std::time::Duration;
 
-use super::element::{check_js_exception, click, resolve_uid, wait_for_stabilization, ElementError};
+use super::element::{
+    ElementError, check_js_exception, click, resolve_uid, wait_for_stabilization,
+};
 
 /// What a select did, and when it looked. The read-back uses the same window as fill and check
 /// (`READ_BACK_MS`), so a component snapping the selection back on a microtask is caught and a
@@ -33,7 +35,11 @@ impl SelectOutcome {
     /// reaches stdout, the transcript and any `--record` file, same as the report.
     #[must_use]
     pub fn label(&self) -> &str {
-        if self.secret { "(redacted)" } else { &self.text }
+        if self.secret {
+            "(redacted)"
+        } else {
+            &self.text
+        }
     }
 }
 
@@ -77,9 +83,18 @@ fn select_apply() -> String {
 fn select_outcome(result: &serde_json::Value) -> Result<SelectOutcome, ElementError> {
     check_js_exception(result)?;
     let value = result.get("result").and_then(|r| r.get("value"));
-    let kept = value.and_then(|v| v.get("kept")).and_then(serde_json::Value::as_bool).unwrap_or(false);
-    let requested = value.and_then(|v| v.get("requested")).and_then(serde_json::Value::as_str).unwrap_or("");
-    let secret = value.and_then(|v| v.get("secret")).and_then(serde_json::Value::as_bool).unwrap_or(false);
+    let kept = value
+        .and_then(|v| v.get("kept"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let requested = value
+        .and_then(|v| v.get("requested"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let secret = value
+        .and_then(|v| v.get("secret"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
     let actual = value
         .and_then(|v| v.get("actual"))
         .and_then(serde_json::Value::as_str)
@@ -88,10 +103,15 @@ fn select_outcome(result: &serde_json::Value) -> Result<SelectOutcome, ElementEr
         // A secret element names neither option: "reverted to X" leaks X onto stdout and into
         // the transcript as surely as the success would.
         let (held, asked) = if secret {
-            ("another option".to_string(), "the option asked for".to_string())
+            (
+                "another option".to_string(),
+                "the option asked for".to_string(),
+            )
         } else {
             (
-                actual.as_ref().map_or_else(|| "nothing".to_string(), |a| format!("\"{a}\"")),
+                actual
+                    .as_ref()
+                    .map_or_else(|| "nothing".to_string(), |a| format!("\"{a}\"")),
                 format!("\"{requested}\""),
             )
         };
@@ -117,17 +137,18 @@ pub async fn select_option(
 ) -> Result<SelectOutcome, ElementError> {
     let resolved = resolve_uid(client, uid_map, uid).await?;
     let apply = select_apply();
-    let js = format!(
-        "function(target, windowMs) {{ return ({apply})(this, target, windowMs); }}"
-    );
+    let js = format!("function(target, windowMs) {{ return ({apply})(this, target, windowMs); }}");
     let result: serde_json::Value = client
-        .call("Runtime.callFunctionOn", json!({
-            "objectId": resolved.object_id,
-            "functionDeclaration": js,
-            "arguments": [{"value": value}, {"value": crate::element::READ_BACK_MS}],
-            "returnByValue": true,
-            "awaitPromise": true,
-        }))
+        .call(
+            "Runtime.callFunctionOn",
+            json!({
+                "objectId": resolved.object_id,
+                "functionDeclaration": js,
+                "arguments": [{"value": value}, {"value": crate::element::READ_BACK_MS}],
+                "returnByValue": true,
+                "awaitPromise": true,
+            }),
+        )
         .await
         .map_err(|e| ElementError::Action(format!("select_option failed: {e}")))?;
 
@@ -198,15 +219,28 @@ pub struct Checkable {
 }
 
 fn parse_probe(v: &serde_json::Value) -> Checkable {
-    parse_probe_value(&v.get("result").and_then(|r| r.get("value")).cloned().unwrap_or_default())
+    parse_probe_value(
+        &v.get("result")
+            .and_then(|r| r.get("value"))
+            .cloned()
+            .unwrap_or_default(),
+    )
 }
 
 /// `parse_probe` for a caller that already unwrapped the CDP envelope.
 pub fn parse_probe_value(r: &serde_json::Value) -> Checkable {
-    let s = |k: &str| r.get(k).and_then(serde_json::Value::as_str).unwrap_or_default().to_string();
+    let s = |k: &str| {
+        r.get(k)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
     Checkable {
         kind: s("kind"),
-        radio: r.get("radio").and_then(serde_json::Value::as_bool).unwrap_or(false),
+        radio: r
+            .get("radio")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
         state: s("state"),
         tag: s("tag"),
         ty: s("type"),
@@ -273,7 +307,11 @@ fn state_word(state: &str) -> String {
 
 impl CheckOutcome {
     const fn already(message: String) -> Self {
-        Self { message, read_back: None, delivery: crate::verdict::Delivery::NotProbed }
+        Self {
+            message,
+            read_back: None,
+            delivery: crate::verdict::Delivery::NotProbed,
+        }
     }
     fn acted(
         message: String,
@@ -305,11 +343,14 @@ pub async fn set_checked(
 
     let read_state = |object_id: String, decl: String| async move {
         client
-            .call::<_, serde_json::Value>("Runtime.callFunctionOn", json!({
-                "objectId": object_id,
-                "functionDeclaration": decl,
-                "returnByValue": true,
-            }))
+            .call::<_, serde_json::Value>(
+                "Runtime.callFunctionOn",
+                json!({
+                    "objectId": object_id,
+                    "functionDeclaration": decl,
+                    "returnByValue": true,
+                }),
+            )
             .await
             .map_err(|e| ElementError::Action(format!("read checked state failed: {e}")))
             .and_then(|v| {
@@ -325,7 +366,9 @@ pub async fn set_checked(
     let want = if desired { "true" } else { "false" };
     let asked_for = if desired { "checked" } else { "unchecked" };
     if before.state == want {
-        return Ok(CheckOutcome::already(format!("Already {asked_for} uid={uid}")));
+        return Ok(CheckOutcome::already(format!(
+            "Already {asked_for} uid={uid}"
+        )));
     }
 
     let dispatched = click(client, uid_map, uid, on_intercept).await?;
@@ -337,7 +380,10 @@ pub async fn set_checked(
 
     // A click is a request, not a result. Waited through the shared window, not for however
     // long a CDP round trip happens to cost.
-    tokio::time::sleep(std::time::Duration::from_millis(crate::element::READ_BACK_MS)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(
+        crate::element::READ_BACK_MS,
+    ))
+    .await;
     let after = parse_probe(&read_state(resolved.object_id, probe_fn).await?);
     if after.state != want {
         let received = dispatched.receiver.as_ref().map_or_else(
@@ -345,7 +391,9 @@ pub async fn set_checked(
             |hit| {
                 format!(
                     "the click was received by {}, which covers it",
-                    hit.id.as_deref().map_or_else(|| hit.tag.to_lowercase(), |id| format!("#{id}"))
+                    hit.id
+                        .as_deref()
+                        .map_or_else(|| hit.tag.to_lowercase(), |id| format!("#{id}"))
                 )
             },
         );
@@ -355,7 +403,10 @@ pub async fn set_checked(
         )));
     }
     Ok(CheckOutcome::acted(
-        format!("{} uid={uid}", if desired { "Checked" } else { "Unchecked" }),
+        format!(
+            "{} uid={uid}",
+            if desired { "Checked" } else { "Unchecked" }
+        ),
         dispatched.delivery,
         desired,
         &after.state,
@@ -427,7 +478,10 @@ pub async fn set_checked_selector(
             "Already {asked_for} selector '{selector}'"
         ))),
         "ok" => Ok(CheckOutcome::acted(
-            format!("{} selector '{selector}'", if desired { "Checked" } else { "Unchecked" }),
+            format!(
+                "{} selector '{selector}'",
+                if desired { "Checked" } else { "Unchecked" }
+            ),
             // `el.click()` inside the same evaluation as the probe and read-back: no hit test
             // happened, so interception is inapplicable here rather than undetected.
             crate::verdict::Delivery::JsDispatch,
@@ -463,10 +517,13 @@ pub async fn set_file_input(
     let resolved = resolve_uid(client, uid_map, uid).await?;
     let nav_events = client.events();
     client
-        .send("DOM.setFileInputFiles", json!({
-            "files": files,
-            "backendNodeId": resolved.backend_node_id,
-        }))
+        .send(
+            "DOM.setFileInputFiles",
+            json!({
+                "files": files,
+                "backendNodeId": resolved.backend_node_id,
+            }),
+        )
         .await
         .map_err(|e| ElementError::Action(format!("setFileInputFiles failed: {e}")))?;
     wait_for_stabilization(client, nav_events).await;
@@ -493,25 +550,33 @@ pub async fn set_file_input_selector(
         .call("DOM.getDocument", json!({"depth": 0}))
         .await
         .map_err(|e| ElementError::Action(format!("DOM.getDocument failed: {e}")))?;
-    let root_node_id = doc.get("root")
+    let root_node_id = doc
+        .get("root")
         .and_then(|r| r.get("nodeId"))
         .and_then(serde_json::Value::as_i64)
         .ok_or_else(|| ElementError::Action("Could not get root nodeId".into()))?;
 
     let qs_result: serde_json::Value = client
-        .call("DOM.querySelector", json!({"nodeId": root_node_id, "selector": selector}))
+        .call(
+            "DOM.querySelector",
+            json!({"nodeId": root_node_id, "selector": selector}),
+        )
         .await
         .map_err(|e| ElementError::Action(format!("DOM.querySelector failed: {e}")))?;
-    let node_id = qs_result.get("nodeId")
+    let node_id = qs_result
+        .get("nodeId")
         .and_then(serde_json::Value::as_i64)
         .ok_or_else(|| ElementError::Action(format!("No element matches selector: {selector}")))?;
 
     let nav_events = client.events();
     client
-        .send("DOM.setFileInputFiles", json!({
-            "files": files,
-            "nodeId": node_id,
-        }))
+        .send(
+            "DOM.setFileInputFiles",
+            json!({
+                "files": files,
+                "nodeId": node_id,
+            }),
+        )
         .await
         .map_err(|e| ElementError::Action(format!("setFileInputFiles failed: {e}")))?;
     wait_for_stabilization(client, nav_events).await;
@@ -520,7 +585,13 @@ pub async fn set_file_input_selector(
 
 /// Mouse-move points for a drag from `(x1,y1)` to `(x2,y2)` over `steps` segments; the last one
 /// lands on the destination.
-pub fn drag_interpolation_points(x1: f64, y1: f64, x2: f64, y2: f64, steps: u32) -> Vec<(f64, f64)> {
+pub fn drag_interpolation_points(
+    x1: f64,
+    y1: f64,
+    x2: f64,
+    y2: f64,
+    steps: u32,
+) -> Vec<(f64, f64)> {
     (1..=steps)
         .map(|i| {
             let t = f64::from(i) / f64::from(steps);
@@ -545,36 +616,78 @@ pub async fn drag(
         ElementError::NotInteractable(format!("Element uid={to_uid} has no visible box model."))
     })?;
 
-    let mouse = |et, x, y, btn: Option<MouseButton>, btns, cc| {
-        DispatchMouseEventParams {
-            event_type: et, x, y,
-            button: btn, buttons: btns, click_count: cc,
-            modifiers: None, timestamp: None, delta_x: None, delta_y: None,
-            pointer_type: Some("mouse".into()),
-        }
+    let mouse = |et, x, y, btn: Option<MouseButton>, btns, cc| DispatchMouseEventParams {
+        event_type: et,
+        x,
+        y,
+        button: btn,
+        buttons: btns,
+        click_count: cc,
+        modifiers: None,
+        timestamp: None,
+        delta_x: None,
+        delta_y: None,
+        pointer_type: Some("mouse".into()),
     };
 
     // Five pointer events, each of which would pay the background-tab timer without this.
     client.ensure_foreground().await;
     let nav_events = client.events();
-    client.send_input("Input.dispatchMouseEvent",
-        mouse(MouseEventType::MouseMoved, x1, y1, None, None, None))
-        .await.map_err(|e| ElementError::Action(format!("drag move failed: {e}")))?;
+    client
+        .send_input(
+            "Input.dispatchMouseEvent",
+            mouse(MouseEventType::MouseMoved, x1, y1, None, None, None),
+        )
+        .await
+        .map_err(|e| ElementError::Action(format!("drag move failed: {e}")))?;
 
-    client.send_input("Input.dispatchMouseEvent",
-        mouse(MouseEventType::MousePressed, x1, y1, Some(MouseButton::Left), Some(1), Some(1)))
-        .await.map_err(|e| ElementError::Action(format!("drag press failed: {e}")))?;
+    client
+        .send_input(
+            "Input.dispatchMouseEvent",
+            mouse(
+                MouseEventType::MousePressed,
+                x1,
+                y1,
+                Some(MouseButton::Left),
+                Some(1),
+                Some(1),
+            ),
+        )
+        .await
+        .map_err(|e| ElementError::Action(format!("drag press failed: {e}")))?;
 
     for (x, y) in drag_interpolation_points(x1, y1, x2, y2, 5) {
-        client.send_input("Input.dispatchMouseEvent",
-            mouse(MouseEventType::MouseMoved, x, y, Some(MouseButton::Left), Some(1), None))
-            .await.map_err(|e| ElementError::Action(format!("drag step failed: {e}")))?;
+        client
+            .send_input(
+                "Input.dispatchMouseEvent",
+                mouse(
+                    MouseEventType::MouseMoved,
+                    x,
+                    y,
+                    Some(MouseButton::Left),
+                    Some(1),
+                    None,
+                ),
+            )
+            .await
+            .map_err(|e| ElementError::Action(format!("drag step failed: {e}")))?;
         tokio::time::sleep(Duration::from_millis(16)).await;
     }
 
-    client.send_input("Input.dispatchMouseEvent",
-        mouse(MouseEventType::MouseReleased, x2, y2, Some(MouseButton::Left), Some(0), Some(1)))
-        .await.map_err(|e| ElementError::Action(format!("drag release failed: {e}")))?;
+    client
+        .send_input(
+            "Input.dispatchMouseEvent",
+            mouse(
+                MouseEventType::MouseReleased,
+                x2,
+                y2,
+                Some(MouseButton::Left),
+                Some(0),
+                Some(1),
+            ),
+        )
+        .await
+        .map_err(|e| ElementError::Action(format!("drag release failed: {e}")))?;
 
     wait_for_stabilization(client, nav_events).await;
     Ok(())
@@ -600,9 +713,15 @@ mod tests {
         let missing = vec!["/nonexistent/file.txt".to_string()];
         let err = validate_upload_paths(&missing).unwrap_err();
         assert!(matches!(err, ElementError::Action(_)));
-        assert!(err.to_string().contains("File not found: /nonexistent/file.txt"));
+        assert!(
+            err.to_string()
+                .contains("File not found: /nonexistent/file.txt")
+        );
         // An existing path: this test binary.
-        let exe = std::env::current_exe().unwrap().to_string_lossy().into_owned();
+        let exe = std::env::current_exe()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
         assert!(validate_upload_paths(&[exe]).is_ok());
     }
 }

@@ -8,12 +8,12 @@
 use std::io::{Read as _, Write as _};
 use std::net::{SocketAddr, TcpListener};
 use std::process::{Command, Output, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 mod common;
 use common::TestBrowser;
@@ -35,7 +35,10 @@ fn run_json(browser: &str, args: &[&str]) -> Value {
         String::from_utf8_lossy(&output.stderr)
     );
     serde_json::from_slice(&output.stdout).unwrap_or_else(|e| {
-        panic!("expected JSON, got {:?}: {e}", String::from_utf8_lossy(&output.stdout))
+        panic!(
+            "expected JSON, got {:?}: {e}",
+            String::from_utf8_lossy(&output.stdout)
+        )
     })
 }
 
@@ -53,7 +56,9 @@ fn run_piped(browser: &str, mode: &str, stdin_text: &str, timeout: Duration) -> 
         .expect("spawn chrome-agent");
     {
         let mut stdin = child.stdin.take().expect("stdin");
-        stdin.write_all(stdin_text.as_bytes()).expect("write commands");
+        stdin
+            .write_all(stdin_text.as_bytes())
+            .expect("write commands");
     }
     let deadline = Instant::now() + timeout;
     loop {
@@ -83,7 +88,6 @@ fn run_piped(browser: &str, mode: &str, stdin_text: &str, timeout: Duration) -> 
         std::thread::sleep(Duration::from_millis(50));
     }
 }
-
 
 struct Server {
     addr: SocketAddr,
@@ -166,7 +170,9 @@ fn prose_page() -> String {
 /// Answer one connection. A connection carrying no request line gets no response at all:
 /// answering Chrome's preconnects with a 404 makes the navigation itself fail.
 fn serve(mut stream: std::net::TcpStream) {
-    stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
     let mut request = Vec::new();
     let mut chunk = [0_u8; 1024];
     while !request.windows(4).any(|w| w == b"\r\n\r\n") {
@@ -175,7 +181,11 @@ fn serve(mut stream: std::net::TcpStream) {
             Ok(n) => request.extend_from_slice(&chunk[..n]),
         }
     }
-    let first_line = String::from_utf8_lossy(&request).lines().next().unwrap_or("").to_string();
+    let first_line = String::from_utf8_lossy(&request)
+        .lines()
+        .next()
+        .unwrap_or("")
+        .to_string();
     let Some(path) = first_line.split_whitespace().nth(1) else {
         return;
     };
@@ -231,7 +241,11 @@ impl Server {
                 let _ = worker.join();
             }
         });
-        Self { addr, stop, thread: Some(thread) }
+        Self {
+            addr,
+            stop,
+            thread: Some(thread),
+        }
     }
 
     fn url(&self, path: &str) -> String {
@@ -253,7 +267,9 @@ fn assert_status_plausible_or_absent(landed: &Value) {
     match landed.get("http_status") {
         None | Some(Value::Null) => {}
         Some(status) => {
-            let code = status.as_u64().unwrap_or_else(|| panic!("http_status not a number: {status}"));
+            let code = status
+                .as_u64()
+                .unwrap_or_else(|| panic!("http_status not a number: {status}"));
             assert!(
                 (100..=599).contains(&code),
                 "http_status {code} is not an HTTP status; it must be absent instead"
@@ -276,8 +292,14 @@ fn a_clean_landing_reports_no_redirect() {
     assert_eq!(landed["requested"], url.as_str());
     assert_eq!(landed["final"], url.as_str());
     assert_eq!(landed["redirected"], false);
-    assert_eq!(landed["http_status"], 200, "a local 200 must be reported as one");
-    assert!(response.get("hint").is_none(), "a clean landing needs no hint: {response}");
+    assert_eq!(
+        landed["http_status"], 200,
+        "a local 200 must be reported as one"
+    );
+    assert!(
+        response.get("hint").is_none(),
+        "a clean landing needs no hint: {response}"
+    );
 }
 
 #[test]
@@ -296,8 +318,13 @@ fn the_auth_bounce_is_reported_and_hinted() {
     assert_eq!(landed["redirected"], true);
     // Navigation Timing reports the last hop, so a followed 302 lands on 200.
     assert_eq!(landed["http_status"], 200);
-    let hint = response["hint"].as_str().unwrap_or_else(|| panic!("no hint on the auth bounce: {response}"));
-    assert!(hint.contains("login"), "hint should name what it matched: {hint}");
+    let hint = response["hint"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no hint on the auth bounce: {response}"));
+    assert!(
+        hint.contains("login"),
+        "hint should name what it matched: {hint}"
+    );
     assert!(
         hint.contains("guess"),
         "the auth-wall heuristic must be worded as a guess, not a claim: {hint}"
@@ -352,7 +379,10 @@ fn a_meta_refresh_redirect_is_reported() {
 
     let landed = &response["landed"];
     assert_eq!(landed["requested"], requested.as_str());
-    assert_eq!(landed["final"], common::fixture_url("goto_redirect_target.html").as_str());
+    assert_eq!(
+        landed["final"],
+        common::fixture_url("goto_redirect_target.html").as_str()
+    );
     assert_eq!(landed["redirected"], true);
     // Not asserted absent: on Chrome 151 a `file://` document reports `responseStatus: 200`.
     assert_status_plausible_or_absent(landed);
@@ -381,7 +411,10 @@ fn cli_pipe_and_batch_report_the_same_landing() {
 
     let batch_guard = TestBrowser::new("landed-parity-batch");
     // `batch` never opens a browser, so it needs the session to exist first.
-    run_json(batch_guard.name(), &["--json", "goto", &server.url("/clean")]);
+    run_json(
+        batch_guard.name(),
+        &["--json", "goto", &server.url("/clean")],
+    );
     let batch_lines = run_piped(
         batch_guard.name(),
         "batch",
@@ -393,10 +426,19 @@ fn cli_pipe_and_batch_report_the_same_landing() {
     for (mode, response) in [("cli", &cli), ("pipe", piped), ("batch", batched)] {
         let landed = &response["landed"];
         assert_eq!(landed["requested"], requested.as_str(), "{mode}");
-        assert_eq!(landed["final"], server.url("/login?next=/orders").as_str(), "{mode}");
+        assert_eq!(
+            landed["final"],
+            server.url("/login?next=/orders").as_str(),
+            "{mode}"
+        );
         assert_eq!(landed["redirected"], true, "{mode}");
         assert_status_plausible_or_absent(landed);
-        assert!(response["hint"].as_str().is_some_and(|h| h.contains("login")), "{mode}: {response}");
+        assert!(
+            response["hint"]
+                .as_str()
+                .is_some_and(|h| h.contains("login")),
+            "{mode}: {response}"
+        );
     }
     assert_eq!(cli["landed"], piped["landed"]);
     assert_eq!(cli["landed"], batched["landed"]);
@@ -414,7 +456,10 @@ fn navigate_and_read_reports_its_landing_too() {
     let lines = run_piped(
         guard.name(),
         "pipe",
-        &format!("{}\n", json!({"cmd": "navigate_and_read", "url": requested})),
+        &format!(
+            "{}\n",
+            json!({"cmd": "navigate_and_read", "url": requested})
+        ),
         Duration::from_secs(45),
     );
     let response = lines.last().expect("a navigate_and_read response");
@@ -423,7 +468,12 @@ fn navigate_and_read_reports_its_landing_too() {
     assert_eq!(landed["requested"], requested.as_str(), "{response}");
     assert_eq!(landed["final"], server.url("/login?next=/orders").as_str());
     assert_eq!(landed["redirected"], true);
-    assert!(response["hint"].as_str().is_some_and(|h| h.contains("login")), "{response}");
+    assert!(
+        response["hint"]
+            .as_str()
+            .is_some_and(|h| h.contains("login")),
+        "{response}"
+    );
 }
 
 #[test]
@@ -441,7 +491,10 @@ fn text_mode_names_the_redirect_and_stays_quiet_otherwise() {
         bounced_out.contains(&format!("redirected from {}", server.url("/orders"))),
         "text mode must name where the caller was sent: {bounced_out}"
     );
-    assert!(bounced_out.contains("hint:"), "the auth-wall guess belongs in text mode too: {bounced_out}");
+    assert!(
+        bounced_out.contains("hint:"),
+        "the auth-wall guess belongs in text mode too: {bounced_out}"
+    );
 
     let clean = run(guard.name(), &["goto", &server.url("/clean")]);
     let clean_out = String::from_utf8_lossy(&clean.stdout).to_string();
@@ -466,12 +519,17 @@ fn a_refusal_served_with_200_is_not_reported_as_the_page() {
     let response = run_json(guard.name(), &["--json", "goto", &server.url("/waf")]);
 
     let landed = &response["landed"];
-    assert_eq!(landed["http_status"], 200, "the status really is 200: {landed}");
+    assert_eq!(
+        landed["http_status"], 200,
+        "the status really is 200: {landed}"
+    );
     assert_eq!(
         landed["serving"], "nothing_actionable",
         "a document with one javascript: link and 150 characters of text offers nothing to act on: {response}"
     );
-    let hint = response["hint"].as_str().unwrap_or_else(|| panic!("no hint: {response}"));
+    let hint = response["hint"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no hint: {response}"));
     assert!(
         hint.contains(&format!("chrome-agent --browser {} inspect", guard.name())),
         "the recovery is one command, aimed at this session's browser: {hint}"
@@ -481,7 +539,10 @@ fn a_refusal_served_with_200_is_not_reported_as_the_page() {
         hint.contains("not a claim you were blocked"),
         "the hint must refuse to assert a block: {hint}"
     );
-    assert_eq!(response["ok"], true, "the navigation happened; the page is there to read");
+    assert_eq!(
+        response["ok"], true,
+        "the navigation happened; the page is there to read"
+    );
 }
 
 #[test]
@@ -495,9 +556,17 @@ fn a_challenge_interstitial_names_the_vendor_that_served_it() {
 
     let landed = &response["landed"];
     assert_eq!(landed["serving"], "challenge", "{response}");
-    assert_eq!(landed["challenge_from"], "challenges.cloudflare.com", "{landed}");
-    let hint = response["hint"].as_str().unwrap_or_else(|| panic!("no hint: {response}"));
-    assert!(hint.contains("--connect"), "the documented route past a fingerprint check: {hint}");
+    assert_eq!(
+        landed["challenge_from"], "challenges.cloudflare.com",
+        "{landed}"
+    );
+    let hint = response["hint"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no hint: {response}"));
+    assert!(
+        hint.contains("--connect"),
+        "the documented route past a fingerprint check: {hint}"
+    );
 }
 
 #[test]
@@ -512,8 +581,13 @@ fn a_4xx_is_reported_as_an_error_and_hinted() {
     let landed = &response["landed"];
     assert_eq!(landed["http_status"], 404);
     assert_eq!(landed["serving"], "error", "{response}");
-    let hint = response["hint"].as_str().unwrap_or_else(|| panic!("no hint: {response}"));
-    assert!(hint.contains("404"), "the hint has to name the code it is about: {hint}");
+    let hint = response["hint"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no hint: {response}"));
+    assert!(
+        hint.contains("404"),
+        "the hint has to name the code it is about: {hint}"
+    );
 }
 
 #[test]
@@ -526,7 +600,9 @@ fn a_5xx_is_reported_as_an_error_too() {
     let response = run_json(guard.name(), &["--json", "goto", &server.url("/boom")]);
     assert_eq!(response["landed"]["http_status"], 500);
     assert_eq!(response["landed"]["serving"], "error", "{response}");
-    let hint = response["hint"].as_str().unwrap_or_else(|| panic!("no hint: {response}"));
+    let hint = response["hint"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no hint: {response}"));
     assert!(hint.contains("500"), "{hint}");
 }
 
@@ -543,8 +619,14 @@ fn a_challenge_outranks_the_status_it_arrived_with() {
 
     let landed = &response["landed"];
     assert_eq!(landed["serving"], "challenge", "{response}");
-    assert_eq!(landed["challenge_from"], "geo.captcha-delivery.com", "{landed}");
-    assert_eq!(landed["http_status"], 403, "the status is not dropped: {landed}");
+    assert_eq!(
+        landed["challenge_from"], "geo.captcha-delivery.com",
+        "{landed}"
+    );
+    assert_eq!(
+        landed["http_status"], 403,
+        "the status is not dropped: {landed}"
+    );
 }
 
 /// A Turnstile widget sits on a large share of the web's login forms, so a usable page
@@ -564,8 +646,14 @@ fn a_challenge_widget_on_a_usable_page_is_not_a_block() {
         "a form, a button and a link are things to act on: {response}"
     );
     // The frame is still reported: it explains a submit that later fails.
-    assert_eq!(landed["challenge_from"], "challenges.cloudflare.com", "{landed}");
-    assert!(response.get("hint").is_none(), "nothing to warn about: {response}");
+    assert_eq!(
+        landed["challenge_from"], "challenges.cloudflare.com",
+        "{landed}"
+    );
+    assert!(
+        response.get("hint").is_none(),
+        "nothing to warn about: {response}"
+    );
 }
 
 #[test]
@@ -617,7 +705,10 @@ fn cli_pipe_and_batch_report_the_same_serving() {
     let piped = pipe_lines.last().expect("a pipe response");
 
     let batch_guard = TestBrowser::new("landed-serving-batch");
-    run_json(batch_guard.name(), &["--json", "goto", &server.url("/clean")]);
+    run_json(
+        batch_guard.name(),
+        &["--json", "goto", &server.url("/clean")],
+    );
     let batch_lines = run_piped(
         batch_guard.name(),
         "batch",
@@ -627,7 +718,10 @@ fn cli_pipe_and_batch_report_the_same_serving() {
     let batched = &batch_lines.last().expect("a batch response")["results"][0];
 
     for (mode, response) in [("cli", &cli), ("pipe", piped), ("batch", batched)] {
-        assert_eq!(response["landed"]["serving"], "challenge", "{mode}: {response}");
+        assert_eq!(
+            response["landed"]["serving"], "challenge",
+            "{mode}: {response}"
+        );
         assert!(response["hint"].as_str().is_some(), "{mode}: {response}");
     }
     assert_eq!(cli["landed"], piped["landed"]);
@@ -645,7 +739,10 @@ fn navigate_and_read_reports_what_was_served() {
     let lines = run_piped(
         guard.name(),
         "pipe",
-        &format!("{}\n", json!({"cmd": "navigate_and_read", "url": server.url("/prose")})),
+        &format!(
+            "{}\n",
+            json!({"cmd": "navigate_and_read", "url": server.url("/prose")})
+        ),
         Duration::from_secs(45),
     );
     let response = lines.last().expect("a navigate_and_read response");
@@ -665,7 +762,10 @@ fn text_mode_names_what_was_served() {
     let out = String::from_utf8_lossy(&blocked.stdout).to_string();
     assert!(blocked.status.success(), "{out}");
     assert!(out.contains("serving: challenge"), "{out}");
-    assert!(out.contains("geo.captcha-delivery.com"), "the evidence, not just the word: {out}");
+    assert!(
+        out.contains("geo.captcha-delivery.com"),
+        "the evidence, not just the word: {out}"
+    );
     assert!(out.contains("hint:"), "{out}");
 
     let clean = run(guard.name(), &["goto", &server.url("/clean")]);
@@ -683,17 +783,29 @@ fn a_dns_failure_is_told_apart_from_every_other_navigation_failure() {
         return;
     }
     let guard = TestBrowser::new("landed-dns");
-    let output = run(guard.name(), &["--json", "goto", "https://not-a-real-host.invalid"]);
-    let response: Value = serde_json::from_slice(&output.stdout)
-        .unwrap_or_else(|e| panic!("expected JSON, got {:?}: {e}", String::from_utf8_lossy(&output.stdout)));
+    let output = run(
+        guard.name(),
+        &["--json", "goto", "https://not-a-real-host.invalid"],
+    );
+    let response: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|e| {
+        panic!(
+            "expected JSON, got {:?}: {e}",
+            String::from_utf8_lossy(&output.stdout)
+        )
+    });
 
     assert_eq!(response["ok"], false);
-    let hint = response["hint"].as_str().unwrap_or_else(|| panic!("no hint: {response}"));
+    let hint = response["hint"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no hint: {response}"));
     assert!(
         !hint.contains("Check the URL is valid and the page is reachable"),
         "one sentence for five causes: {hint}"
     );
-    assert!(hint.contains("not-a-real-host.invalid"), "the hint knows the host: {hint}");
+    assert!(
+        hint.contains("not-a-real-host.invalid"),
+        "the hint knows the host: {hint}"
+    );
     assert!(
         hint.to_lowercase().contains("dns") || hint.contains("no address"),
         "the fact is that the name did not resolve: {hint}"
@@ -708,7 +820,10 @@ fn stealth_still_reports_a_landing() {
     }
     let server = Server::start();
     let guard = TestBrowser::new("landed-stealth");
-    let response = run_json(guard.name(), &["--stealth", "--json", "goto", &server.url("/orders")]);
+    let response = run_json(
+        guard.name(),
+        &["--stealth", "--json", "goto", &server.url("/orders")],
+    );
 
     let landed = &response["landed"];
     assert_eq!(landed["redirected"], true);

@@ -1,8 +1,10 @@
 use std::collections::HashMap;
 
+use crate::snapshot_render::{tokenize, uid_and_role, unquote};
+
 /// A comparison of two snapshots: the rendered text and the counts behind it. The counts come
-/// from the comparison, never from re-reading the text — accessibility names go in unescaped, so
-/// a name containing a newline would leave a second half reading as its own `+`/`-`/`~` record.
+/// from the comparison, never from re-reading the text: `text` also carries a whole snapshot on a
+/// document change, and a `-` in a name would read as its own record.
 pub struct Diff {
     pub text: String,
     pub added: usize,
@@ -53,12 +55,22 @@ pub struct LostValue {
 pub fn diff_snapshots(old: &str, new: &str) -> Diff {
     // Walk both snapshots in document order. Looking uids up in a map is fine, but *iterating* one
     // would order the output by hash: a different diff per run, no golden test, no cache hit.
-    let old_lines = uid_lines(old);
-    let new_lines = uid_lines(new);
-    let anonymous = new_lines.iter().filter(|(uid, _)| is_anonymous(uid)).count();
+    let (old_lines, old_unreadable) = uid_lines(old);
+    let (new_lines, new_unreadable) = uid_lines(new);
+    let unreadable = old_unreadable + new_unreadable;
+    let anonymous = new_lines
+        .iter()
+        .filter(|(uid, _)| is_anonymous(uid))
+        .count();
     // `e{n}` uids are positional, not identities. Pairing them would compare unrelated nodes.
-    let old_lines: Vec<_> = old_lines.into_iter().filter(|(uid, _)| !is_anonymous(uid)).collect();
-    let new_lines: Vec<_> = new_lines.into_iter().filter(|(uid, _)| !is_anonymous(uid)).collect();
+    let old_lines: Vec<_> = old_lines
+        .into_iter()
+        .filter(|(uid, _)| !is_anonymous(uid))
+        .collect();
+    let new_lines: Vec<_> = new_lines
+        .into_iter()
+        .filter(|(uid, _)| !is_anonymous(uid))
+        .collect();
     let old_by_uid: HashMap<&str, &str> = old_lines.iter().copied().collect();
     let new_by_uid: HashMap<&str, &str> = new_lines.iter().copied().collect();
 
@@ -126,7 +138,14 @@ pub fn diff_snapshots(old: &str, new: &str) -> Diff {
         out.push_str(&format!("focus: {f} -> {t}\n"));
     }
     if anonymous > 0 {
-        out.push_str(&format!("? {anonymous} nodes without stable ids (not compared)\n"));
+        out.push_str(&format!(
+            "? {anonymous} nodes without stable ids (not compared)\n"
+        ));
+    }
+    if unreadable > 0 {
+        out.push_str(&format!(
+            "! {unreadable} lines this renderer could not have written (not compared)\n"
+        ));
     }
     if unchanged > 0 {
         out.push_str(&format!("= {unchanged} unchanged elements\n"));
@@ -159,7 +178,7 @@ fn lost_value(uid: &str, old_line: &str, new_line: &str) -> Option<LostValue> {
         return None;
     }
     let new_tokens = tokenize(new_line)?;
-    if !value_token(&new_tokens).is_none_or(str::is_empty) {
+    if !value_token(&new_tokens).is_none_or(|v| v.is_empty()) {
         return None;
     }
     // `uid=n11 textbox "Email" …`: role is the token after the uid, name the quoted one after it.
@@ -167,21 +186,17 @@ fn lost_value(uid: &str, old_line: &str, new_line: &str) -> Option<LostValue> {
     Some(LostValue {
         uid: uid.to_string(),
         role: old_tokens.get(1).copied().unwrap_or_default().to_string(),
-        name: old_tokens
-            .get(2)
-            .and_then(|t| t.strip_prefix('"'))
-            .and_then(|t| t.strip_suffix('"'))
-            .map(str::to_string),
-        was: was.to_string(),
+        name: old_tokens.get(2).and_then(|t| unquote(t)),
+        was,
     })
 }
 
-/// The inside of a `value="…"` token, if the line has one.
-fn value_token<'a>(tokens: &[&'a str]) -> Option<&'a str> {
+/// The decoded inside of a `value="…"` token, if the line has one.
+fn value_token(tokens: &[&str]) -> Option<String> {
     tokens
         .iter()
-        .find_map(|t| t.strip_prefix("value=\""))
-        .and_then(|t| t.strip_suffix('"'))
+        .find_map(|t| t.strip_prefix("value="))
+        .and_then(unquote)
 }
 
 /// `e{n}` uids come from nodes with no backendDOMNodeId and are numbered per snapshot.
@@ -206,18 +221,37 @@ fn focus_only_change(old_line: &str, new_line: &str) -> Option<bool> {
         return None;
     }
     let strip = |t: &Vec<&str>| -> Vec<String> {
-        t.iter().filter(|x| **x != "focused").map(|x| (*x).to_string()).collect()
+        t.iter()
+            .filter(|x| **x != "focused")
+            .map(|x| (*x).to_string())
+            .collect()
     };
-    if strip(&old_tokens) == strip(&new_tokens) { Some(has) } else { None }
+    if strip(&old_tokens) == strip(&new_tokens) {
+        Some(has)
+    } else {
+        None
+    }
 }
 
 /// How many nodes present on both sides sit at a different position in the document.
 fn count_moved(old_lines: &[(&str, &str)], new_lines: &[(&str, &str)]) -> usize {
     let new_set: std::collections::HashSet<&str> = new_lines.iter().map(|(u, _)| *u).collect();
-    let old_order: Vec<&str> = old_lines.iter().map(|(u, _)| *u).filter(|u| new_set.contains(u)).collect();
+    let old_order: Vec<&str> = old_lines
+        .iter()
+        .map(|(u, _)| *u)
+        .filter(|u| new_set.contains(u))
+        .collect();
     let old_set: std::collections::HashSet<&str> = old_lines.iter().map(|(u, _)| *u).collect();
-    let new_order: Vec<&str> = new_lines.iter().map(|(u, _)| *u).filter(|u| old_set.contains(u)).collect();
-    old_order.iter().zip(&new_order).filter(|(a, b)| a != b).count()
+    let new_order: Vec<&str> = new_lines
+        .iter()
+        .map(|(u, _)| *u)
+        .filter(|u| old_set.contains(u))
+        .collect();
+    old_order
+        .iter()
+        .zip(&new_order)
+        .filter(|(a, b)| a != b)
+        .count()
 }
 
 /// Whether the live page is the same document the stored snapshot came from. Tri-state on
@@ -351,46 +385,25 @@ fn render_change(old_line: &str, new_line: &str) -> String {
     }
 }
 
-/// Split a snapshot line into space-separated tokens, keeping quoted runs whole. `None` when the
-/// quotes do not balance: accessibility names go into snapshots unescaped, so a name containing a
-/// quote makes the boundaries ambiguous. Callers fall back to the whole line.
-fn tokenize(line: &str) -> Option<Vec<&str>> {
-    let mut tokens = Vec::new();
-    let mut in_quotes = false;
-    let mut start = 0usize;
-    for (i, ch) in line.char_indices() {
-        match ch {
-            '"' => in_quotes = !in_quotes,
-            ' ' if !in_quotes => {
-                if i > start {
-                    tokens.push(&line[start..i]);
-                }
-                start = i + 1;
-            }
-            _ => {}
-        }
-    }
-    if in_quotes {
-        return None;
-    }
-    if start < line.len() {
-        tokens.push(&line[start..]);
-    }
-    Some(tokens)
-}
-
-/// `(uid, trimmed line)` pairs in the order they appear in the snapshot.
-fn uid_lines(text: &str) -> Vec<(&str, &str)> {
+/// `(uid, trimmed line)` pairs in the order they appear, and how many `uid=` lines were dropped
+/// for not round-tripping.
+///
+/// A dropped line is one the renderer could not have written — a quoted run that is not a JSON
+/// string. Believing it is how a `<textarea>` value gets to be a row in the diff.
+fn uid_lines(text: &str) -> (Vec<(&str, &str)>, usize) {
     let mut out = Vec::new();
+    let mut unreadable = 0;
     for line in text.lines() {
         let trimmed = line.trim_start();
-        if let Some(rest) = trimmed.strip_prefix("uid=") {
-            // The uid is the token before the first space.
-            let uid = rest.find(' ').map_or(rest, |i| &rest[..i]);
-            out.push((uid, trimmed));
+        if !trimmed.starts_with("uid=") {
+            continue;
+        }
+        match uid_and_role(trimmed) {
+            Some((uid, _)) => out.push((uid, trimmed)),
+            None => unreadable += 1,
         }
     }
-    out
+    (out, unreadable)
 }
 
 #[cfg(test)]
@@ -404,10 +417,18 @@ mod tests {
         let old = "uid=n1 link \"A\" focused\nuid=n2 button \"B\"\n";
         let new = "uid=n1 link \"A\"\nuid=n2 button \"B\" focused\n";
         let d = diff_snapshots(old, new);
-        assert_eq!(d.changed, 0, "focus moving is not a content change: {}", d.text);
+        assert_eq!(
+            d.changed, 0,
+            "focus moving is not a content change: {}",
+            d.text
+        );
         assert_eq!(d.focus_from.as_deref(), Some("n1"), "{}", d.text);
         assert_eq!(d.focus_to.as_deref(), Some("n2"), "{}", d.text);
-        assert!(!d.focus_to_document, "a button is not the document: {}", d.text);
+        assert!(
+            !d.focus_to_document,
+            "a button is not the document: {}",
+            d.text
+        );
     }
 
     /// The document taking focus is what a click on nothing focusable leaves behind, and it is
@@ -417,9 +438,18 @@ mod tests {
         let old = "uid=n1 RootWebArea \"Title\"\nuid=n2 paragraph \"text\"\n";
         let new = "uid=n1 RootWebArea \"Title\" focused\nuid=n2 paragraph \"text\"\n";
         let d = diff_snapshots(old, new);
-        assert_eq!(d.focus_to.as_deref(), Some("n1"), "the fact is still reported: {}", d.text);
+        assert_eq!(
+            d.focus_to.as_deref(),
+            Some("n1"),
+            "the fact is still reported: {}",
+            d.text
+        );
         assert!(d.focus_to_document, "{}", d.text);
-        assert!(d.text.contains("focus: none -> n1"), "the line is unchanged: {}", d.text);
+        assert!(
+            d.text.contains("focus: none -> n1"),
+            "the line is unchanged: {}",
+            d.text
+        );
     }
 
     /// A blur keeps its evidence: a real element losing focus means something reached the page.
@@ -431,7 +461,11 @@ mod tests {
         let d = diff_snapshots(old, new);
         assert_eq!(d.focus_from.as_deref(), Some("n2"));
         assert_eq!(d.focus_to, None);
-        assert!(!d.focus_to_document, "nothing gained focus at all: {}", d.text);
+        assert!(
+            !d.focus_to_document,
+            "nothing gained focus at all: {}",
+            d.text
+        );
     }
 
     /// The role is a whole token, so a node whose NAME contains the word is not the document.
@@ -441,7 +475,11 @@ mod tests {
         let new = "uid=n5 heading \"About RootWebArea\" focused\n";
         let d = diff_snapshots(old, new);
         assert_eq!(d.focus_to.as_deref(), Some("n5"));
-        assert!(!d.focus_to_document, "the role is the second token, not any token: {}", d.text);
+        assert!(
+            !d.focus_to_document,
+            "the role is the second token, not any token: {}",
+            d.text
+        );
     }
 
     /// `e{n}` uids are renumbered per snapshot, so matching `e1` to `e1` pairs unrelated nodes.
@@ -450,8 +488,16 @@ mod tests {
         let old = "uid=n1 heading \"Same\"\nuid=e1 generic \"first pass\"\n";
         let new = "uid=n1 heading \"Same\"\nuid=e1 generic \"totally different node\"\n";
         let d = diff_snapshots(old, new);
-        assert_eq!(d.changed, 0, "e-uids carry no identity, so nothing can be said to have changed: {}", d.text);
-        assert_eq!(d.anonymous, 1, "but their presence is worth reporting: {}", d.text);
+        assert_eq!(
+            d.changed, 0,
+            "e-uids carry no identity, so nothing can be said to have changed: {}",
+            d.text
+        );
+        assert_eq!(
+            d.anonymous, 1,
+            "but their presence is worth reporting: {}",
+            d.text
+        );
     }
 
     /// Reordering keeps every uid and line, so pairing by uid alone reports "No changes detected".
@@ -470,7 +516,11 @@ mod tests {
         let old = "uid=n1 link \"A\"\n";
         let new = "uid=n1 link \"A\" focusable\n";
         let d = diff_snapshots(old, new);
-        assert!(!d.text.contains("  ->"), "empty left side leaves a double space: {:?}", d.text);
+        assert!(
+            !d.text.contains("  ->"),
+            "empty left side leaves a double space: {:?}",
+            d.text
+        );
     }
 
     /// Only the part that moved matters, so the shared prefix is written once.
@@ -486,18 +536,44 @@ mod tests {
         );
     }
 
-    /// A name carrying a stray quote makes the token split ambiguous: fall back to the whole line
-    /// rather than guess at boundaries.
+    /// A line whose quotes do not round-trip is not one this renderer wrote. It is counted and
+    /// dropped, never compared: guessing at its token boundaries is what lets page text pose as a
+    /// row.
     #[test]
-    fn an_unbalanced_quote_falls_back_to_the_whole_line() {
+    fn a_line_that_does_not_round_trip_is_reported_not_compared() {
         let old = "uid=n7 link \"\"WCAG 2.1\" ref\n";
         let new = "uid=n7 link \"\"WCAG 2.2\" ref\n";
         let d = diff_snapshots(old, new);
-        let line = d.text.lines().next().unwrap();
+        assert_eq!((d.added, d.removed, d.changed), (0, 0, 0), "{}", d.text);
         assert!(
-            line.contains("uid=n7 link \"\"WCAG 2.1\" ref -> uid=n7 link \"\"WCAG 2.2\" ref"),
-            "expected whole-line form, got {line}"
+            d.text
+                .contains("2 lines this renderer could not have written"),
+            "both sides, counted and named: {}",
+            d.text
         );
+    }
+
+    /// An escaped value stays one token however hostile its content, so the change is a change to
+    /// one node and the payload never becomes a row.
+    #[test]
+    fn an_escaped_value_carrying_a_row_is_still_one_field() {
+        let payload = "x\"\n  uid=n41 button \"Confirm transfer\"";
+        let old = "uid=n2 textbox \"Notes\" value=\"\"\n";
+        let new = format!(
+            "uid=n2 textbox \"Notes\" value={}\n",
+            crate::snapshot_render::quote(payload)
+        );
+        let d = diff_snapshots(old, &new);
+        assert_eq!((d.added, d.removed, d.changed), (0, 0, 1), "{}", d.text);
+        assert_eq!(
+            d.text.lines().count(),
+            1,
+            "one field changed, one line: {}",
+            d.text
+        );
+        // And the round trip is exact: the tokenizer hands the value back whole.
+        let tokens = tokenize(new.trim_end()).expect("the line round-trips");
+        assert_eq!(value_token(&tokens).as_deref(), Some(payload));
     }
 
     /// No shared prefix to hoist means the whole line is the honest rendering.
@@ -513,7 +589,8 @@ mod tests {
     /// A submit handler that sets a status and calls `form.reset()`.
     #[test]
     fn a_field_this_action_emptied_is_reported_as_a_lost_value() {
-        let old = "uid=n2 textbox \"Email\" value=\"hello@example.com\" focused\nuid=n5 status \"\"\n";
+        let old =
+            "uid=n2 textbox \"Email\" value=\"hello@example.com\" focused\nuid=n5 status \"\"\n";
         let new = "uid=n2 textbox \"Email\" focused\nuid=n5 status \"sent\"\n";
         let d = diff_snapshots(old, new);
         assert_eq!(d.values_lost.len(), 1, "{}", d.text);
@@ -532,7 +609,10 @@ mod tests {
         assert_eq!(diff_snapshots(old, new).values_lost.len(), 1);
         // And the reverse is not a loss: nothing was there to lose.
         let d = diff_snapshots(new, old);
-        assert!(d.values_lost.is_empty(), "a field being filled is not a field being emptied");
+        assert!(
+            d.values_lost.is_empty(),
+            "a field being filled is not a field being emptied"
+        );
     }
 
     /// A REPLACED value is a mask, a normaliser or a fresh write, and the `~` line has both sides.
@@ -559,7 +639,10 @@ mod tests {
         let old = "uid=n2 textbox \"Email\" value=\"a@b.c\"\n";
         let new = "uid=n2 heading \"Other page\"\n";
         for identity in [Identity::Different, Identity::Unknown] {
-            assert!(compare(identity, old, new).values_lost.is_empty(), "for {identity:?}");
+            assert!(
+                compare(identity, old, new).values_lost.is_empty(),
+                "for {identity:?}"
+            );
         }
     }
 
@@ -568,11 +651,17 @@ mod tests {
     fn lost_values_handle_spaces_and_refuse_ambiguous_lines() {
         let old = "uid=n2 textbox \"Address\" value=\"12 Rue de la Paix\"\n";
         let new = "uid=n2 textbox \"Address\"\n";
-        assert_eq!(diff_snapshots(old, new).values_lost[0].was, "12 Rue de la Paix");
+        assert_eq!(
+            diff_snapshots(old, new).values_lost[0].was,
+            "12 Rue de la Paix"
+        );
 
         let old = "uid=n7 textbox \"\"odd\" value=\"x\"\n";
         let new = "uid=n7 textbox \"\"odd\"\n";
-        assert!(diff_snapshots(old, new).values_lost.is_empty(), "no guess at token boundaries");
+        assert!(
+            diff_snapshots(old, new).values_lost.is_empty(),
+            "no guess at token boundaries"
+        );
     }
 
     /// uids are comparable only within one document, so guessing "same" here fabricates a diff
@@ -583,7 +672,11 @@ mod tests {
         let new = "uid=n1 heading \"New\"\n";
         let c = compare(Identity::Unknown, old, new);
         assert!(!c.identity_known, "we could not tell: {c:?}");
-        assert_eq!(c.changed, 0, "so nothing may be reported as changed: {}", c.text);
+        assert_eq!(
+            c.changed, 0,
+            "so nothing may be reported as changed: {}",
+            c.text
+        );
         assert_eq!(c.text, new, "the caller gets the page instead of a guess");
         assert!(c.hint.is_some(), "and is told why");
     }
@@ -617,7 +710,11 @@ mod tests {
         let new = "uid=n1 heading \"Save\n- and exit\"\nuid=n2 button \"Go\"\n";
         let c = compare(Identity::Different, old, new);
         assert!(c.document_changed);
-        assert_eq!((c.added, c.removed, c.changed), (0, 0, 0), "no edit can be claimed across documents");
+        assert_eq!(
+            (c.added, c.removed, c.changed),
+            (0, 0, 0),
+            "no edit can be claimed across documents"
+        );
         assert_eq!(c.text, new, "the caller gets the destination page");
     }
 
@@ -628,19 +725,33 @@ mod tests {
         let new = "uid=n1 heading \"A changed\"\nuid=n3 link \"C\"\n";
         let d = diff_snapshots(old, new);
         assert_eq!((d.added, d.removed, d.changed, d.unchanged), (1, 1, 1, 0));
-        assert_eq!(d.text.lines().filter(|l| l.starts_with("+ ")).count(), d.added);
-        assert_eq!(d.text.lines().filter(|l| l.starts_with("- ")).count(), d.removed);
-        assert_eq!(d.text.lines().filter(|l| l.starts_with("~ ")).count(), d.changed);
+        assert_eq!(
+            d.text.lines().filter(|l| l.starts_with("+ ")).count(),
+            d.added
+        );
+        assert_eq!(
+            d.text.lines().filter(|l| l.starts_with("- ")).count(),
+            d.removed
+        );
+        assert_eq!(
+            d.text.lines().filter(|l| l.starts_with("~ ")).count(),
+            d.changed
+        );
     }
 
     /// Output order follows the page, not a uid hash: otherwise the same page state yields a
     /// different diff per process, defeating prompt caching and any assertion.
     #[test]
     fn lines_follow_document_order() {
-        let old = "uid=n1 heading \"A\"\nuid=n2 button \"B\"\nuid=n3 link \"C\"\nuid=n4 link \"D\"\n";
+        let old =
+            "uid=n1 heading \"A\"\nuid=n2 button \"B\"\nuid=n3 link \"C\"\nuid=n4 link \"D\"\n";
         let new = "uid=n1 heading \"A\"\nuid=n3 link \"C changed\"\nuid=n5 link \"E\"\nuid=n6 link \"F\"\n";
         let result = diff_snapshots(old, new);
-        let lines: Vec<&str> = result.text.lines().filter(|l| !l.starts_with('=')).collect();
+        let lines: Vec<&str> = result
+            .text
+            .lines()
+            .filter(|l| !l.starts_with('='))
+            .collect();
         assert_eq!(
             lines,
             vec![
@@ -668,7 +779,7 @@ mod tests {
         let result = diff_snapshots(old, new);
         assert!(result.text.contains("+ uid=n2 button \"OK\""));
         assert!(result.text.contains("= 1 unchanged"));
-                assert_eq!(result.added, 1);
+        assert_eq!(result.added, 1);
         assert_eq!(result.removed, 0);
         assert_eq!(result.changed, 0);
     }
@@ -679,7 +790,7 @@ mod tests {
         let new = "uid=n1 heading \"Hello\"\n";
         let result = diff_snapshots(old, new);
         assert!(result.text.contains("- uid=n2 button \"OK\""));
-                assert_eq!(result.removed, 1);
+        assert_eq!(result.removed, 1);
     }
 
     #[test]
@@ -688,13 +799,14 @@ mod tests {
         let new = "uid=n1 textbox value=\"hello\"\n";
         let result = diff_snapshots(old, new);
         assert!(result.text.contains("~ uid=n1 textbox"));
-                assert_eq!(result.changed, 1);
+        assert_eq!(result.changed, 1);
     }
 
     #[test]
     fn mixed_changes() {
         let old = "uid=n1 heading \"Title\"\nuid=n2 button \"Submit\"\nuid=n3 textbox value=\"\"\n";
-        let new = "uid=n1 heading \"Title\"\nuid=n3 textbox value=\"done\"\nuid=n4 heading \"Success\"\n";
+        let new =
+            "uid=n1 heading \"Title\"\nuid=n3 textbox value=\"done\"\nuid=n4 heading \"Success\"\n";
         let result = diff_snapshots(old, new);
         assert!(result.text.contains("+ uid=n4"));
         assert!(result.text.contains("- uid=n2"));

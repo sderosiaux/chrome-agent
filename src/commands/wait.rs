@@ -115,7 +115,8 @@ pub async fn run(
         ),
         other => return Err(format!(
             "Unknown wait type: {other}. Use \"text\", \"url\", \"selector\", or \"network-idle\"."
-        ).into()),
+        )
+        .into()),
     };
 
     loop {
@@ -177,7 +178,9 @@ async fn wait_network_idle(
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
     let idle = Duration::from_millis(idle_ms);
     // Poll cap so we re-check the idle timer even when no events arrive.
-    let poll = idle.min(Duration::from_millis(100)).max(Duration::from_millis(10));
+    let poll = idle
+        .min(Duration::from_millis(100))
+        .max(Duration::from_millis(10));
 
     let mut tracker = InFlightTracker::new();
 
@@ -274,21 +277,42 @@ async fn document_complete(client: &CdpClient) -> Result<bool, crate::BoxError> 
 mod tests {
     use std::time::Instant;
 
-    use super::{eval_exception_message, is_quiet, refresh_idle_clock, InFlightTracker, Transition};
+    use super::{
+        InFlightTracker, Transition, eval_exception_message, is_quiet, refresh_idle_clock,
+    };
 
     #[test]
     fn text_exception_reports_invalid_regex() {
-        let msg = eval_exception_message("text", "cost($5)", "SyntaxError: Invalid regular expression");
-        assert!(msg.contains("Invalid regex"), "should name the regex problem: {msg}");
-        assert!(msg.contains("cost($5)"), "should echo the offending pattern: {msg}");
-        assert!(msg.contains("SyntaxError"), "should include the engine detail: {msg}");
-        assert!(msg.contains("RegExp"), "should explain regex semantics: {msg}");
+        let msg = eval_exception_message(
+            "text",
+            "cost($5)",
+            "SyntaxError: Invalid regular expression",
+        );
+        assert!(
+            msg.contains("Invalid regex"),
+            "should name the regex problem: {msg}"
+        );
+        assert!(
+            msg.contains("cost($5)"),
+            "should echo the offending pattern: {msg}"
+        );
+        assert!(
+            msg.contains("SyntaxError"),
+            "should include the engine detail: {msg}"
+        );
+        assert!(
+            msg.contains("RegExp"),
+            "should explain regex semantics: {msg}"
+        );
     }
 
     #[test]
     fn non_text_exception_is_generic() {
         let msg = eval_exception_message("selector", "div", "TypeError: boom");
-        assert!(!msg.contains("Invalid regex"), "non-text wait is not a regex: {msg}");
+        assert!(
+            !msg.contains("Invalid regex"),
+            "non-text wait is not a regex: {msg}"
+        );
         assert!(msg.contains("selector"));
         assert!(msg.contains("div"));
         assert!(msg.contains("TypeError: boom"));
@@ -315,7 +339,10 @@ mod tests {
         let t = InFlightTracker::new();
         assert!(refresh_idle_clock(false, &t, None).is_none());
         let started = refresh_idle_clock(true, &t, None);
-        assert!(started.is_some(), "load complete should start the idle clock");
+        assert!(
+            started.is_some(),
+            "load complete should start the idle clock"
+        );
         let kept = refresh_idle_clock(true, &t, started);
         assert_eq!(kept, started, "continuously-quiet must not reset the clock");
     }
@@ -408,19 +435,37 @@ mod tests {
     #[test]
     fn observe_reports_idle_transitions() {
         let mut t = InFlightTracker::new();
-        assert_eq!(t.observe("Network.requestWillBeSent", Some("a")), Transition::BecameBusy);
+        assert_eq!(
+            t.observe("Network.requestWillBeSent", Some("a")),
+            Transition::BecameBusy
+        );
         // A second concurrent request does not re-trigger "busy".
-        assert_eq!(t.observe("Network.requestWillBeSent", Some("b")), Transition::NoChange);
-        assert_eq!(t.observe("Network.loadingFinished", Some("a")), Transition::NoChange);
+        assert_eq!(
+            t.observe("Network.requestWillBeSent", Some("b")),
+            Transition::NoChange
+        );
+        assert_eq!(
+            t.observe("Network.loadingFinished", Some("a")),
+            Transition::NoChange
+        );
         // The last one flips to idle exactly once.
-        assert_eq!(t.observe("Network.loadingFinished", Some("b")), Transition::BecameIdle);
+        assert_eq!(
+            t.observe("Network.loadingFinished", Some("b")),
+            Transition::BecameIdle
+        );
     }
 
     #[test]
     fn observe_ignores_noise_without_transition() {
         let mut t = InFlightTracker::new();
-        assert_eq!(t.observe("Network.responseReceived", Some("x")), Transition::NoChange);
-        assert_eq!(t.observe("Network.requestWillBeSent", None), Transition::NoChange);
+        assert_eq!(
+            t.observe("Network.responseReceived", Some("x")),
+            Transition::NoChange
+        );
+        assert_eq!(
+            t.observe("Network.requestWillBeSent", None),
+            Transition::NoChange
+        );
         assert!(t.is_idle());
     }
 }

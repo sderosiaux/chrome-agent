@@ -10,7 +10,10 @@ mod common;
 use common::TestBrowser;
 
 fn run_cli(args: &[&str]) -> (String, i32) {
-    let output = Command::new(common::binary()).args(args).output().expect("Failed to run chrome-agent");
+    let output = Command::new(common::binary())
+        .args(args)
+        .output()
+        .expect("Failed to run chrome-agent");
     (
         String::from_utf8_lossy(&output.stdout).to_string(),
         output.status.code().unwrap_or(-1),
@@ -52,7 +55,11 @@ fn fill_select_and_check_report_the_same_evidence_on_a_fresh_session() {
         first_action("rb-select", &["select", "b", "--selector", "#dropdown"]).expect("a browser");
     let checked = first_action("rb-check", &["check", "--selector", "#box"]).expect("a browser");
 
-    for (verb, out) in [("fill", &filled), ("select", &selected), ("check", &checked)] {
+    for (verb, out) in [
+        ("fill", &filled),
+        ("select", &selected),
+        ("check", &checked),
+    ] {
         assert_eq!(out["verdict"], "changed", "{verb}: {out}");
         assert_eq!(out["verdict_reason"], "value_kept", "{verb}: {out}");
         assert_eq!(
@@ -76,8 +83,14 @@ fn fill_select_and_check_report_the_same_evidence_on_a_fresh_session() {
             "{verb} must still state the window it looked through: {out}"
         );
     }
-    assert_eq!(checked["value"]["actual"], "checked", "in the words the message uses: {checked}");
-    assert_eq!(selected["value"]["actual"], "Beta", "the option the page held: {selected}");
+    assert_eq!(
+        checked["value"]["actual"], "checked",
+        "in the words the message uses: {checked}"
+    );
+    assert_eq!(
+        selected["value"]["actual"], "Beta",
+        "the option the page held: {selected}"
+    );
 }
 
 /// The element already held the state, so nothing was dispatched and no write of ours could
@@ -87,13 +100,19 @@ fn a_check_that_dispatched_nothing_claims_no_read_back() {
     let Some(out) = first_action("rb-already", &["check", "--selector", "#box_on"]) else {
         return;
     };
-    assert!(out["value"].is_null(), "no postcondition without a post-action moment: {out}");
+    assert!(
+        out["value"].is_null(),
+        "no postcondition without a post-action moment: {out}"
+    );
     assert!(
         out["observed_after_ms"].is_null(),
         "and no window either — nothing was observed after anything: {out}"
     );
     assert_ne!(out["verdict_reason"], "value_kept", "{out}");
-    assert_eq!(out["verdict_reason"], "no_baseline", "the honest floor on a fresh session: {out}");
+    assert_eq!(
+        out["verdict_reason"], "no_baseline",
+        "the honest floor on a fresh session: {out}"
+    );
 }
 
 #[test]
@@ -101,8 +120,14 @@ fn uncheck_reports_the_state_it_read_back() {
     let Some(b) = fresh("rb-uncheck", "read_back_kinds.html") else {
         return;
     };
-    let (stdout, code) =
-        run_cli(&["--browser", b.name(), "--json", "uncheck", "--selector", "#box_on"]);
+    let (stdout, code) = run_cli(&[
+        "--browser",
+        b.name(),
+        "--json",
+        "uncheck",
+        "--selector",
+        "#box_on",
+    ]);
     assert_eq!(code, 0, "{stdout}");
     let out: Value = serde_json::from_str(&stdout).expect("JSON response");
     assert_eq!(out["value"]["requested"], "unchecked", "{out}");
@@ -115,9 +140,19 @@ fn a_reverted_selection_still_refuses() {
     let Some(b) = fresh("rb-revert", "select_controlled_revert.html") else {
         return;
     };
-    let (stdout, code) =
-        run_cli(&["--browser", b.name(), "--json", "select", "b", "--selector", "#controlled"]);
-    assert_ne!(code, 0, "a selection the page took away is not a selection: {stdout}");
+    let (stdout, code) = run_cli(&[
+        "--browser",
+        b.name(),
+        "--json",
+        "select",
+        "b",
+        "--selector",
+        "#controlled",
+    ]);
+    assert_ne!(
+        code, 0,
+        "a selection the page took away is not a selection: {stdout}"
+    );
     assert!(stdout.contains("revert"), "{stdout}");
     let out: Value = serde_json::from_str(&stdout).expect("JSON response");
     assert_eq!(out["ok"], false, "{out}");
@@ -155,8 +190,15 @@ fn a_dropdown_naming_a_secret_reports_lengths_and_never_the_option() {
     let Some(b) = fresh("rb-secret", "select_secret_autocomplete.html") else {
         return;
     };
-    let (stdout, code) =
-        run_cli(&["--browser", b.name(), "--json", "select", "b", "--selector", "#secret"]);
+    let (stdout, code) = run_cli(&[
+        "--browser",
+        b.name(),
+        "--json",
+        "select",
+        "b",
+        "--selector",
+        "#secret",
+    ]);
     assert_eq!(code, 0, "{stdout}");
     assert!(
         !stdout.contains("Sesame"),
@@ -169,8 +211,15 @@ fn a_dropdown_naming_a_secret_reports_lengths_and_never_the_option() {
     assert_eq!(out["verdict_reason"], "value_kept", "{out}");
 
     // It is the ELEMENT that is secret, not the page: a plain dropdown beside it still talks.
-    let (stdout, code) =
-        run_cli(&["--browser", b.name(), "--json", "select", "d", "--selector", "#plain"]);
+    let (stdout, code) = run_cli(&[
+        "--browser",
+        b.name(),
+        "--json",
+        "select",
+        "d",
+        "--selector",
+        "#plain",
+    ]);
     assert_eq!(code, 0, "{stdout}");
     let plain: Value = serde_json::from_str(&stdout).expect("JSON response");
     assert_eq!(plain["value"]["requested"], "Delta", "{plain}");

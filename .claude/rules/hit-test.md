@@ -13,13 +13,28 @@ paths:
 ## `click --selector` is the same verb as `click <uid>`
 
 Both resolve the element's viewport centre and dispatch native CDP input — mouse normally, a
-touch tap under `--touch` (`element_selector::click_selector`, mirroring `dblclick_selector`).
+touch tap under `--touch`.
 
 It used to call `el.click()`, which fires the handler whatever is stacked above the node: a click
 on a button under a modal scrim reported success with the same shape as a click a user could have
 made. Consequence, deliberate: a covered element now hands the click to whatever covers it, and
 the response says so. The JS `click()` survives only as the zero-size fallback, where there is no
 point to aim at.
+
+### And `dblclick` is the same path as `click`
+
+`element::aim_and_dispatch`, taking an `element::PointerVerb`. Both verbs × both targeting modes
+= four entry points (`click`, `dblclick`, `click_selector`, `dblclick_selector`), all four of them
+wrappers over that one function.
+
+It was two copies of ~42 lines — the same `Aim::NoBox`/`Unprobed`/`At` match, the same
+`NotSettled | OffTarget` early return down to the comment, the same `Intercepted` +
+`should_refuse_intercept` refusal — differing in three tokens. `PointerVerb` carries exactly those
+three: the JS fallback (`js_click`/`js_dblclick`), the native dispatch
+(`dispatch_click_at`/`dblclick_at_coords`), and the word a refusal is written in
+(`click`/`double-click`). A rule added to the aim path can no longer land on one verb and miss the
+other; `a_double_click_refuses_on_the_same_interception_and_in_its_own_word` pins both halves of
+that.
 
 ## The probe
 
@@ -160,3 +175,17 @@ was set". That is what made a third mode possible without a third refusal contra
 post-probe), which a re-render between round trips could bind to three different nodes while the
 response described one. Same call count as before. `run_helpers::target_details` is no longer
 called on those paths — the action reports the node it actually probed and clicked.
+
+### A malformed selector is named as one, on every path
+
+Two families, one sentence: `Selector '[' could not be used: SyntaxError: …`.
+
+`resolve_selector` says it in Rust, because it holds the reply (a throw still comes back with an
+`objectId` — for the thrown `DOMException`, which is why the handle must not be read before
+`check_js_exception`). The verbs that resolve IN the page instead — `fill --selector`,
+`type --selector` (via `focus_selector`), `frame` — say it in JS, from the shared prelude
+`element_selector::bind_element_js`, which try/catches the `querySelector` and rethrows in those
+words. Before, they surfaced Chrome's raw `SyntaxError: Failed to execute 'querySelector' on
+'Document': …`: true, and silent about the fact that the argument was the problem. The same
+prelude carries the `No element matches selector: …` throw, so the two failures stay two messages.
+`tests/selector_syntax_tests.rs` walks both families across all five verbs.

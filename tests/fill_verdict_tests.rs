@@ -6,7 +6,10 @@ mod common;
 use common::TestBrowser;
 
 fn run_cli(args: &[&str]) -> (String, i32) {
-    let output = Command::new(common::binary()).args(args).output().expect("Failed to run chrome-agent");
+    let output = Command::new(common::binary())
+        .args(args)
+        .output()
+        .expect("Failed to run chrome-agent");
     (
         String::from_utf8_lossy(&output.stdout).to_string(),
         output.status.code().unwrap_or(-1),
@@ -24,7 +27,15 @@ fn fill_on(browser: &str, fixture: &str, selector: &str, value: &str) -> Option<
         return None;
     }
     let (out, code) = run_cli(&[
-        "--browser", browser, "--verdict", "off", "--json", "fill", "--selector", selector, value,
+        "--browser",
+        browser,
+        "--verdict",
+        "off",
+        "--json",
+        "fill",
+        "--selector",
+        selector,
+        value,
     ]);
     Some((serde_json::from_str(&out).unwrap_or(Value::Null), code))
 }
@@ -42,7 +53,15 @@ fn fill_with_verdict(browser: &str, fixture: &str, selector: &str, value: &str) 
     }
     let (_, code) = run_cli(&["--browser", browser, "inspect"]);
     assert_eq!(code, 0, "inspect should establish the baseline");
-    let (out, _) = run_cli(&["--browser", browser, "--json", "fill", "--selector", selector, value]);
+    let (out, _) = run_cli(&[
+        "--browser",
+        browser,
+        "--json",
+        "fill",
+        "--selector",
+        selector,
+        value,
+    ]);
     Some(serde_json::from_str(&out).unwrap_or_else(|e| panic!("not JSON ({e}): {out}")))
 }
 
@@ -51,26 +70,43 @@ fn fill_with_verdict(browser: &str, fixture: &str, selector: &str, value: &str) 
 #[test]
 fn a_value_the_page_emptied_is_not_reported_as_a_change() {
     let b = TestBrowser::new("fill-verdict-micro");
-    let Some(v) = fill_with_verdict(b.name(), "form_value_microtask_revert.html", "#micro", "hello@example.com")
-    else {
+    let Some(v) = fill_with_verdict(
+        b.name(),
+        "form_value_microtask_revert.html",
+        "#micro",
+        "hello@example.com",
+    ) else {
         return;
     };
     assert_eq!(v["value"]["verbatim"], false, "the page did empty it: {v}");
     assert_eq!(v["verdict"], "not_kept", "{v}");
     assert_eq!(v["verdict_reason"], "value_reverted", "{v}");
     // The delta stays on the response.
-    assert!(v["changed"].is_object(), "the change report is still there to read: {v}");
+    assert!(
+        v["changed"].is_object(),
+        "the change report is still there to read: {v}"
+    );
     let hint = v["verdict_hint"].as_str().unwrap_or_default();
-    assert!(hint.contains("value.actual"), "the hint names the field to read: {v}");
-    assert!(hint.contains("Do not fill it again"), "and forbids the reflex: {v}");
+    assert!(
+        hint.contains("value.actual"),
+        "the hint names the field to read: {v}"
+    );
+    assert!(
+        hint.contains("Do not fill it again"),
+        "and forbids the reflex: {v}"
+    );
 }
 
 /// The other revert shape: this fixture rewrites the value inside the dispatched `input` event.
 #[test]
 fn a_controlled_component_that_takes_the_value_back_says_not_kept() {
     let b = TestBrowser::new("fill-verdict-controlled");
-    let Some(v) = fill_with_verdict(b.name(), "form_value_controlled_revert.html", "input", "typed by the agent")
-    else {
+    let Some(v) = fill_with_verdict(
+        b.name(),
+        "form_value_controlled_revert.html",
+        "input",
+        "typed by the agent",
+    ) else {
         return;
     };
     assert_eq!(v["verdict"], "not_kept", "{v}");
@@ -81,13 +117,21 @@ fn a_controlled_component_that_takes_the_value_back_says_not_kept() {
 #[test]
 fn a_mask_that_reformats_the_value_says_rewritten_not_reverted() {
     let b = TestBrowser::new("fill-verdict-mask");
-    let Some(v) = fill_with_verdict(b.name(), "form_value_phone_mask.html", "#phone", "5551234567") else {
+    let Some(v) = fill_with_verdict(
+        b.name(),
+        "form_value_phone_mask.html",
+        "#phone",
+        "5551234567",
+    ) else {
         return;
     };
     assert_eq!(v["verdict"], "not_kept", "{v}");
     assert_eq!(v["verdict_reason"], "value_rewritten", "{v}");
     assert!(
-        v["value"]["actual"].as_str().unwrap_or_default().contains("555"),
+        v["value"]["actual"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("555"),
         "and both strings are still on the response: {v}"
     );
 }
@@ -97,15 +141,25 @@ fn a_mask_that_reformats_the_value_says_rewritten_not_reverted() {
 #[test]
 fn a_fill_the_page_kept_still_reports_the_change() {
     let b = TestBrowser::new("fill-verdict-plain");
-    let Some(v) = fill_with_verdict(b.name(), "form_value_plain_input.html", "input", "hello@example.com")
-    else {
+    let Some(v) = fill_with_verdict(
+        b.name(),
+        "form_value_plain_input.html",
+        "input",
+        "hello@example.com",
+    ) else {
         return;
     };
     assert_eq!(v["value"]["verbatim"], true, "{v}");
     assert_eq!(v["verdict"], "changed", "{v}");
-    assert_eq!(v["verdict_reason"], "tree_delta", "the delta shows the value, so it wins: {v}");
+    assert_eq!(
+        v["verdict_reason"], "tree_delta",
+        "the delta shows the value, so it wins: {v}"
+    );
     assert!(
-        v["delta"].as_str().unwrap_or_default().contains("hello@example.com"),
+        v["delta"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("hello@example.com"),
         "and it names what changed and where: {v}"
     );
 }
@@ -116,19 +170,31 @@ fn a_fill_the_page_kept_still_reports_the_change() {
 fn a_secret_refill_the_tree_cannot_show_is_not_reported_as_focus_alone() {
     let b = TestBrowser::new("fill-verdict-secret-refill");
     // The fixture's fields are pre-filled, so this is a refill: marker before, marker after.
-    let Some(v) = fill_with_verdict(b.name(), "snapshot_secret_values.html", "#card", "4242424242424242")
-    else {
+    let Some(v) = fill_with_verdict(
+        b.name(),
+        "snapshot_secret_values.html",
+        "#card",
+        "4242424242424242",
+    ) else {
         return;
     };
     assert_eq!(v["value"]["redacted"], true, "{v}");
-    assert_eq!(v["value"]["verbatim"], true, "the write was read back and held: {v}");
-    assert_eq!(v["changed"]["changed"], 0, "and the tree could not show it: {v}");
+    assert_eq!(
+        v["value"]["verbatim"], true,
+        "the write was read back and held: {v}"
+    );
+    assert_eq!(
+        v["changed"]["changed"], 0,
+        "and the tree could not show it: {v}"
+    );
     assert_eq!(v["verdict"], "changed", "{v}");
     assert_eq!(v["verdict_reason"], "value_kept", "{v}");
     assert_ne!(v["verdict_reason"], "focus_only", "{v}");
     assert_eq!(v["next"], "proceed", "{v}");
     assert!(
-        !serde_json::to_string(&v).unwrap_or_default().contains("4242424242424242"),
+        !serde_json::to_string(&v)
+            .unwrap_or_default()
+            .contains("4242424242424242"),
         "and the verdict did not put the card number on stdout: {v}"
     );
 }
@@ -138,17 +204,23 @@ fn a_secret_refill_the_tree_cannot_show_is_not_reported_as_focus_alone() {
 #[test]
 fn filling_an_empty_secret_field_still_reports_the_tree_delta() {
     let b = TestBrowser::new("fill-verdict-secret-first");
-    let Some(v) = fill_with_verdict(b.name(), "form_value_password.html", "#p", "topsecret123") else {
+    let Some(v) = fill_with_verdict(b.name(), "form_value_password.html", "#p", "topsecret123")
+    else {
         return;
     };
     assert_eq!(v["value"]["verbatim"], true, "{v}");
     assert_eq!(v["verdict_reason"], "tree_delta", "{v}");
     assert!(
-        v["delta"].as_str().unwrap_or_default().contains("<redacted>"),
+        v["delta"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("<redacted>"),
         "the marker is what appeared, not the value: {v}"
     );
     assert!(
-        !serde_json::to_string(&v).unwrap_or_default().contains("topsecret123"),
+        !serde_json::to_string(&v)
+            .unwrap_or_default()
+            .contains("topsecret123"),
         "{v}"
     );
 }
@@ -191,14 +263,18 @@ fn a_bulk_fill_of_secret_fields_reports_the_write_it_confirmed() {
     assert_eq!(v["verdict"], "changed", "{v}");
     assert_eq!(v["verdict_reason"], "value_kept", "{v}");
     let printed = serde_json::to_string(&v).unwrap_or_default();
-    assert!(!printed.contains("4242424242424242") && !printed.contains("hunter3secret"), "{v}");
+    assert!(
+        !printed.contains("4242424242424242") && !printed.contains("hunter3secret"),
+        "{v}"
+    );
 }
 
 /// A secret is redacted to `verbatim` and two lengths, which is enough to classify it.
 #[test]
 fn a_password_the_page_discards_is_classified_without_being_printed() {
     let b = TestBrowser::new("fill-verdict-secret");
-    let Some(v) = fill_with_verdict(b.name(), "form_value_password.html", "#p", "topsecret123") else {
+    let Some(v) = fill_with_verdict(b.name(), "form_value_password.html", "#p", "topsecret123")
+    else {
         return;
     };
     // This fixture keeps the value, so the postcondition holds.
@@ -206,7 +282,9 @@ fn a_password_the_page_discards_is_classified_without_being_printed() {
     assert_eq!(v["value"]["verbatim"], true, "{v}");
     assert_ne!(v["verdict"], "not_kept", "the page kept it: {v}");
     assert!(
-        !serde_json::to_string(&v).unwrap_or_default().contains("topsecret123"),
+        !serde_json::to_string(&v)
+            .unwrap_or_default()
+            .contains("topsecret123"),
         "and nothing about the verdict put it on stdout: {v}"
     );
 }
@@ -216,8 +294,12 @@ fn a_password_the_page_discards_is_classified_without_being_printed() {
 #[test]
 fn a_reverted_value_is_reported_even_with_the_change_report_off() {
     let b = TestBrowser::new("fill-verdict-off");
-    let Some((v, _)) = fill_on(b.name(), "form_value_microtask_revert.html", "#micro", "hello@example.com")
-    else {
+    let Some((v, _)) = fill_on(
+        b.name(),
+        "form_value_microtask_revert.html",
+        "#micro",
+        "hello@example.com",
+    ) else {
         return;
     };
     assert_eq!(v["verdict"], "not_kept", "{v}");
@@ -294,7 +376,10 @@ fn pipe_says_value_kept_the_way_the_cli_does() {
     assert_eq!(last["value"]["verbatim"], true, "{last}");
     assert_eq!(last["verdict"], "changed", "{last}");
     assert_eq!(last["verdict_reason"], "value_kept", "{last}");
-    assert!(!stdout.contains("4242424242424242"), "and nothing leaked on the way: {stdout}");
+    assert!(
+        !stdout.contains("4242424242424242"),
+        "and nothing leaked on the way: {stdout}"
+    );
 }
 
 /// A control inside `<fieldset disabled>` is refused. `el.disabled` on the input reads false:
@@ -302,7 +387,8 @@ fn pipe_says_value_kept_the_way_the_cli_does() {
 #[test]
 fn filling_a_control_disabled_by_its_fieldset_is_refused() {
     let b = TestBrowser::new("fill-fieldset");
-    let Some((v, code)) = fill_on(b.name(), "form_value_disabled_input.html", "#dis", "1234") else {
+    let Some((v, code)) = fill_on(b.name(), "form_value_disabled_input.html", "#dis", "1234")
+    else {
         return;
     };
     assert_ne!(code, 0, "a disabled control cannot be filled: {v}");
@@ -335,7 +421,12 @@ fn filling_a_readonly_input_is_refused() {
 #[test]
 fn a_mask_that_rewrites_the_value_reports_both_sides() {
     let b = TestBrowser::new("fill-mask");
-    let Some((v, code)) = fill_on(b.name(), "form_value_phone_mask.html", "#phone", "5551234567") else {
+    let Some((v, code)) = fill_on(
+        b.name(),
+        "form_value_phone_mask.html",
+        "#phone",
+        "5551234567",
+    ) else {
         return;
     };
     assert_eq!(code, 0, "the fill did land, it was reformatted: {v}");
@@ -343,14 +434,21 @@ fn a_mask_that_rewrites_the_value_reports_both_sides() {
     let actual = v["value"]["actual"].as_str().unwrap_or_default();
     assert_ne!(actual, "5551234567", "the page rewrote it: {v}");
     assert!(actual.contains("555"), "and this is what it holds now: {v}");
-    assert_eq!(v["value"]["verbatim"], false, "so the caller is told it is not verbatim: {v}");
+    assert_eq!(
+        v["value"]["verbatim"], false,
+        "so the caller is told it is not verbatim: {v}"
+    );
 }
 
 #[test]
 fn a_plain_input_reports_the_value_went_in_verbatim() {
     let b = TestBrowser::new("fill-plain");
-    let Some((v, code)) = fill_on(b.name(), "form_value_plain_input.html", "input", "hello@example.com")
-    else {
+    let Some((v, code)) = fill_on(
+        b.name(),
+        "form_value_plain_input.html",
+        "input",
+        "hello@example.com",
+    ) else {
         return;
     };
     assert_eq!(code, 0, "{v}");
@@ -363,29 +461,45 @@ fn a_plain_input_reports_the_value_went_in_verbatim() {
 #[test]
 fn filling_past_maxlength_lands_verbatim_but_says_so() {
     let b = TestBrowser::new("fill-maxlen");
-    let Some((v, code)) = fill_on(b.name(), "form_value_maxlength_divergence.html", "#ml", "abcdefghijklmnop")
-    else {
+    let Some((v, code)) = fill_on(
+        b.name(),
+        "form_value_maxlength_divergence.html",
+        "#ml",
+        "abcdefghijklmnop",
+    ) else {
         return;
     };
     assert_eq!(code, 0, "{v}");
-    assert_eq!(v["value"]["verbatim"], true, "the setter is not bound by maxlength: {v}");
+    assert_eq!(
+        v["value"]["verbatim"], true,
+        "the setter is not bound by maxlength: {v}"
+    );
     let caveat = v["value"]["caveat"].as_str().unwrap_or_default();
-    assert!(caveat.contains("maxlength=5"), "the cap that was bypassed must be named: {v}");
+    assert!(
+        caveat.contains("maxlength=5"),
+        "the cap that was bypassed must be named: {v}"
+    );
 }
 
 /// A password is never echoed back; `verbatim` and the lengths survive redaction.
 #[test]
 fn a_password_field_is_never_echoed_back() {
     let b = TestBrowser::new("fill-secret");
-    let Some((v, code)) = fill_on(b.name(), "form_value_password.html", "#p", "topsecret123") else {
+    let Some((v, code)) = fill_on(b.name(), "form_value_password.html", "#p", "topsecret123")
+    else {
         return;
     };
     assert_eq!(code, 0, "{v}");
     assert_eq!(v["value"]["redacted"], true, "{v}");
-    assert_eq!(v["value"]["verbatim"], true, "the useful part survives: {v}");
+    assert_eq!(
+        v["value"]["verbatim"], true,
+        "the useful part survives: {v}"
+    );
     assert_eq!(v["value"]["requested_length"], 12, "{v}");
     assert!(
-        !serde_json::to_string(&v).unwrap_or_default().contains("topsecret123"),
+        !serde_json::to_string(&v)
+            .unwrap_or_default()
+            .contains("topsecret123"),
         "the secret must not appear anywhere in the response: {v}"
     );
 }

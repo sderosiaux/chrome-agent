@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// A parameter the macro declares.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -177,8 +177,8 @@ impl Macro {
     /// Parse and validate. `deny_unknown_fields` is the point: a guard this build does not know
     /// is refused loudly, since an ignored guard is a promise nobody checks.
     pub fn parse(text: &str) -> Result<Self, crate::BoxError> {
-        let parsed: Self = serde_json::from_str(text)
-            .map_err(|e| format!("Not a usable macro file: {e}"))?;
+        let parsed: Self =
+            serde_json::from_str(text).map_err(|e| format!("Not a usable macro file: {e}"))?;
         check_name(&parsed.name)?;
         if parsed.steps.is_empty() {
             return Err("This macro has no steps.".into());
@@ -219,7 +219,11 @@ impl Macro {
             .collect();
         let mut message = format!(
             "This macro needs {}: {}.",
-            if missing.len() == 1 { "a value" } else { "values" },
+            if missing.len() == 1 {
+                "a value"
+            } else {
+                "values"
+            },
             missing.join(", ")
         );
         if !secret.is_empty() {
@@ -227,21 +231,33 @@ impl Macro {
                 " {} declared secret, so {} never stored in the file and there is nothing to \
                  fall back on.",
                 secret.join(", "),
-                if secret.len() == 1 { "it is" } else { "they are" }
+                if secret.len() == 1 {
+                    "it is"
+                } else {
+                    "they are"
+                }
             ));
         }
         // The real names, not `--var name=value`: rule 2 says a copied hint has to run.
         message.push_str(&format!(
             " Pass {}: {}.",
             if missing.len() == 1 { "it" } else { "them" },
-            missing.iter().map(|name| format!("--var {name}=…")).collect::<Vec<_>>().join(" ")
+            missing
+                .iter()
+                .map(|name| format!("--var {name}=…"))
+                .collect::<Vec<_>>()
+                .join(" ")
         ));
         Err(message.into())
     }
 
     /// One step's command with `{{param}}` replaced. Textual, on the serialised command, the
     /// same spelling `replay` uses.
-    pub fn resolve(&self, step: &Step, vars: &BTreeMap<String, String>) -> Result<Value, crate::BoxError> {
+    pub fn resolve(
+        &self,
+        step: &Step,
+        vars: &BTreeMap<String, String>,
+    ) -> Result<Value, crate::BoxError> {
         let mut text = serde_json::to_string(&step.action)?;
         for (key, value) in vars {
             let escaped = serde_json::to_string(value)?;
@@ -280,7 +296,8 @@ pub fn list() -> Vec<String> {
         .filter_map(|entry| {
             let path = entry.path();
             if path.extension().is_some_and(|e| e == "json") {
-                path.file_stem().map(|stem| stem.to_string_lossy().into_owned())
+                path.file_stem()
+                    .map(|stem| stem.to_string_lossy().into_owned())
             } else {
                 None
             }
@@ -295,7 +312,11 @@ pub fn list() -> Vec<String> {
 pub fn summary(name: &str) -> Value {
     match Macro::load(name) {
         Ok(macro_file) => {
-            let unguarded = macro_file.steps.iter().filter(|s| s.expect.is_empty()).count();
+            let unguarded = macro_file
+                .steps
+                .iter()
+                .filter(|s| s.expect.is_empty())
+                .count();
             json!({
                 "name": macro_file.name,
                 "site": macro_file.site,
@@ -323,7 +344,10 @@ mod tests {
     use super::*;
 
     fn vars(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
-        pairs.iter().map(|(k, v)| ((*k).to_string(), (*v).to_string())).collect()
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect()
     }
 
     const CANCEL: &str = r##"{
@@ -344,7 +368,10 @@ mod tests {
         let parsed = Macro::parse(CANCEL).expect("parses");
         assert_eq!(parsed.steps.len(), 2);
         assert!(parsed.params["password"].secret);
-        assert_eq!(parsed.steps[0].expect.url_matches.as_deref(), Some("/account"));
+        assert_eq!(
+            parsed.steps[0].expect.url_matches.as_deref(),
+            Some("/account")
+        );
         let again = Macro::parse(&serde_json::to_string(&parsed).unwrap()).expect("re-parses");
         assert_eq!(parsed, again);
     }
@@ -354,7 +381,10 @@ mod tests {
     fn an_unknown_guard_is_refused_rather_than_dropped() {
         let text = r#"{"name":"x","steps":[{"do":{"cmd":"click"},"expect":{"added":450}}]}"#;
         let error = Macro::parse(text).expect_err("must refuse").to_string();
-        assert!(error.contains("added"), "the refusal names the field: {error}");
+        assert!(
+            error.contains("added"),
+            "the refusal names the field: {error}"
+        );
     }
 
     /// The parser is where the file format says no.
@@ -385,7 +415,11 @@ mod tests {
         assert!(error.contains("password"), "{error}");
         assert!(error.contains("never stored"), "{error}");
         assert!(error.contains("--var password="), "{error}");
-        assert!(parsed.bind(&vars(&[("email", "a@b.c"), ("password", "hunter2")])).is_ok());
+        assert!(
+            parsed
+                .bind(&vars(&[("email", "a@b.c"), ("password", "hunter2")]))
+                .is_ok()
+        );
     }
 
     #[test]
@@ -418,8 +452,14 @@ mod tests {
     #[test]
     fn an_empty_expect_is_the_shape_that_promises_nothing() {
         assert!(Guards::default().is_empty());
-        let guards = Guards { verdict: Some("changed".into()), ..Guards::default() };
+        let guards = Guards {
+            verdict: Some("changed".into()),
+            ..Guards::default()
+        };
         assert!(!guards.is_empty());
-        assert_eq!(guards.response_guards(), vec![("verdict", "changed".to_string())]);
+        assert_eq!(
+            guards.response_guards(),
+            vec![("verdict", "changed".to_string())]
+        );
     }
 }

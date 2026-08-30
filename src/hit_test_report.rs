@@ -6,7 +6,7 @@
 //! error channel, so an agent never parses English to learn which element to close. `ok` stays
 //! `false` and the CLI exits 1 — nothing was dispatched.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::hit_test::{Hit, SETTLE_ATTEMPTS, SETTLE_GAP_MS};
 use crate::verdict::{Assessment, Delivered, Delivery, Observation, Postcondition};
@@ -66,13 +66,21 @@ impl Dispatched {
 
     #[must_use]
     pub fn landed(delivery: Delivery, aim: (f64, f64), receiver: Option<Hit>) -> Self {
-        Self { aim: Some(aim), receiver, ..Self::bare(delivery, true) }
+        Self {
+            aim: Some(aim),
+            receiver,
+            ..Self::bare(delivery, true)
+        }
     }
 
     /// Aimed, refused, nothing sent. Keeps the receiver so the refusal can name it.
     #[must_use]
     pub fn skipped(delivery: Delivery, aim: (f64, f64), receiver: Option<Hit>) -> Self {
-        Self { aim: Some(aim), receiver, ..Self::bare(delivery, false) }
+        Self {
+            aim: Some(aim),
+            receiver,
+            ..Self::bare(delivery, false)
+        }
     }
 
     /// Carry why the aim failed, for the message and the hint that follow from it.
@@ -91,7 +99,12 @@ impl Dispatched {
 
     /// Carry over the identity of the node an action resolved for itself.
     #[must_use]
-    pub fn named(mut self, uid: Option<String>, role: Option<String>, name: Option<String>) -> Self {
+    pub fn named(
+        mut self,
+        uid: Option<String>,
+        role: Option<String>,
+        name: Option<String>,
+    ) -> Self {
         self.uid = uid;
         self.role = role;
         self.name = name;
@@ -158,7 +171,8 @@ impl Dispatched {
                  action measures the same coordinate and refuses again; `scroll` will not move \
                  it either. Run `inspect` to see what the page is showing, and change that \
                  state (dismiss the layer holding it) before aiming here again.",
-                self.aim.map_or_else(String::new, |(x, y)| format!(" ({x:.0}, {y:.0})"))
+                self.aim
+                    .map_or_else(String::new, |(x, y)| format!(" ({x:.0}, {y:.0})"))
             ));
         }
         out
@@ -180,17 +194,18 @@ impl Dispatched {
             (Delivery::OffTarget, Some(Unaimable::StableOffViewport)) => format!(
                 "Did not {verb} {target}: its aim point{} is outside the viewport and stayed \
                  there across {budget}ms of readings, so nothing was dispatched.",
-                self.aim.map_or_else(String::new, |(x, y)| format!(" ({x:.0}, {y:.0})"))
+                self.aim
+                    .map_or_else(String::new, |(x, y)| format!(" ({x:.0}, {y:.0})"))
             ),
             (Delivery::OffTarget, _) => format!(
                 "Did not {verb} {target}: no point inside the element's own boxes could be \
                  aimed at, so nothing was dispatched."
             ),
             _ => {
-                let who = self.receiver.as_ref().map_or_else(
-                    || "another element".to_string(),
-                    Hit::describe
-                );
+                let who = self
+                    .receiver
+                    .as_ref()
+                    .map_or_else(|| "another element".to_string(), Hit::describe);
                 match self.on_intercept {
                     Some(crate::hit_test::OnIntercept::Guard) => format!(
                         "Did not {verb} {target}: {who} occupies the point it would have been \
@@ -219,7 +234,10 @@ pub struct Refused {
 impl Refused {
     #[must_use]
     pub const fn new(message: String, dispatched: Dispatched) -> Self {
-        Self { message, dispatched }
+        Self {
+            message,
+            dispatched,
+        }
     }
 
     /// The same fields `Dispatched::named` puts on a success, applied to the error.
@@ -243,7 +261,11 @@ impl Refused {
             Observation::ReportingDisabled,
             Delivered {
                 how: self.dispatched.delivery,
-                modal_receiver: self.dispatched.receiver.as_ref().is_some_and(|hit| hit.modal),
+                modal_receiver: self
+                    .dispatched
+                    .receiver
+                    .as_ref()
+                    .is_some_and(|hit| hit.modal),
                 observed_after_ms: None,
             },
             Postcondition::NotRead,
@@ -268,7 +290,9 @@ impl Refused {
         obj["hint"] = json!(crate::hints::intercepted_refusal_hint(
             browser,
             self.dispatched.receiver.as_ref(),
-            self.dispatched.on_intercept.unwrap_or(crate::hit_test::OnIntercept::Refuse)
+            self.dispatched
+                .on_intercept
+                .unwrap_or(crate::hit_test::OnIntercept::Refuse)
         ));
         obj
     }
@@ -284,13 +308,18 @@ impl Refused {
                 .map_or_else(String::new, |uid| format!(" ({uid})"));
             lines.push(format!("in the way: {}{uid}", receiver.describe()));
         }
-        lines.push(format!("next: {}", crate::verdict::next_for(self.assessment())));
+        lines.push(format!(
+            "next: {}",
+            crate::verdict::next_for(self.assessment())
+        ));
         lines.push(format!(
             "hint: {}",
             crate::hints::intercepted_refusal_hint(
                 browser,
                 self.dispatched.receiver.as_ref(),
-                self.dispatched.on_intercept.unwrap_or(crate::hit_test::OnIntercept::Refuse)
+                self.dispatched
+                    .on_intercept
+                    .unwrap_or(crate::hit_test::OnIntercept::Refuse)
             )
         ));
         lines
@@ -325,8 +354,12 @@ mod tests {
     }
 
     fn refusal(modal: bool) -> Refused {
-        let dispatched = Dispatched::skipped(Delivery::Intercepted, (200.0, 130.0), Some(scrim(modal)))
-            .named(Some("n7".into()), Some("button".into()), None);
+        let dispatched = Dispatched::skipped(
+            Delivery::Intercepted,
+            (200.0, 130.0),
+            Some(scrim(modal)),
+        )
+        .named(Some("n7".into()), Some("button".into()), None);
         let message = dispatched
             .refusal_message("click", "uid=n7")
             .expect("a refusal message");
@@ -342,9 +375,15 @@ mod tests {
         assert_eq!(report["intercepted_by"]["id"], "scrim");
         assert_eq!(report["intercepted_by"]["uid"], "n11");
         assert_eq!(report["aim"], json!([200.0, 130.0]));
-        assert!(report["dispatched"].is_null(), "an action that ran says nothing here: {report}");
         assert!(
-            report["verdict_hint"].as_str().unwrap().contains("div#scrim"),
+            report["dispatched"].is_null(),
+            "an action that ran says nothing here: {report}"
+        );
+        assert!(
+            report["verdict_hint"]
+                .as_str()
+                .unwrap()
+                .contains("div#scrim"),
             "the hint has to name the receiver: {report}"
         );
     }
@@ -353,7 +392,9 @@ mod tests {
     #[test]
     fn a_refusal_says_what_it_did_not_do() {
         let not_settled = Dispatched::skipped(Delivery::NotSettled, (10.0, 20.0), None);
-        let msg = not_settled.refusal_message("click", "uid=n9").expect("a refusal message");
+        let msg = not_settled
+            .refusal_message("click", "uid=n9")
+            .expect("a refusal message");
         assert!(msg.starts_with("Did not click uid=n9"), "{msg}");
         assert!(msg.contains("150ms"), "the settle budget is stated: {msg}");
         assert!(
@@ -362,7 +403,8 @@ mod tests {
                 .is_none()
         );
 
-        let report = Dispatched::skipped(Delivery::Intercepted, (5.0, 6.0), Some(scrim(false))).report();
+        let report =
+            Dispatched::skipped(Delivery::Intercepted, (5.0, 6.0), Some(scrim(false))).report();
         assert_eq!(report["dispatched"], Value::Bool(false));
         let hint = report["verdict_hint"].as_str().unwrap_or_default();
         assert!(
@@ -379,18 +421,34 @@ mod tests {
             .unaimed(Some(Unaimable::NoBoxToAimAt));
         let off_screen = Dispatched::skipped(Delivery::OffTarget, (378.0, -14.0), None)
             .unaimed(Some(Unaimable::StableOffViewport));
-        let first = no_box.refusal_message("click", "uid=n1").expect("a message");
-        let second = off_screen.refusal_message("click", "uid=n1").expect("a message");
+        let first = no_box
+            .refusal_message("click", "uid=n1")
+            .expect("a message");
+        let second = off_screen
+            .refusal_message("click", "uid=n1")
+            .expect("a message");
         assert_ne!(first, second);
-        assert!(first.contains("no point inside the element's own boxes"), "{first}");
+        assert!(
+            first.contains("no point inside the element's own boxes"),
+            "{first}"
+        );
         assert!(second.contains("outside the viewport"), "{second}");
-        assert!(second.contains("(378, -14)"), "the coordinate is the evidence: {second}");
+        assert!(
+            second.contains("(378, -14)"),
+            "the coordinate is the evidence: {second}"
+        );
 
         // The off-screen shape needs its own hint; the generic one advises aiming at a child.
-        let hint = off_screen.report()["verdict_hint"].as_str().unwrap_or_default().to_string();
+        let hint = off_screen.report()["verdict_hint"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
         assert!(hint.contains("Repeating this action"), "{hint}");
         assert!(hint.contains("scroll` will not move it"), "{hint}");
-        assert!(no_box.report()["verdict_hint"].is_null(), "the generic table covers that one");
+        assert!(
+            no_box.report()["verdict_hint"].is_null(),
+            "the generic table covers that one"
+        );
     }
 
     #[test]
@@ -399,13 +457,18 @@ mod tests {
         assert_eq!(response["ok"], Value::Bool(false));
         assert_eq!(response["dispatched"], Value::Bool(false));
         assert_eq!(response["delivery"], "intercepted");
-        assert_eq!(response["uid"], "n7", "the node that was aimed at is still named");
+        assert_eq!(
+            response["uid"], "n7",
+            "the node that was aimed at is still named"
+        );
         assert_eq!(response["intercepted_by"]["id"], "scrim");
         assert_eq!(response["intercepted_by"]["uid"], "n11");
         assert_eq!(response["verdict"], "intercepted");
         assert_eq!(response["verdict_reason"], "hit_test_receiver");
         assert_eq!(response["next"], "dismiss");
-        let hint = response["hint"].as_str().expect("every error carries a hint");
+        let hint = response["hint"]
+            .as_str()
+            .expect("every error carries a hint");
         assert!(hint.contains("div#scrim"), "{hint}");
         assert!(hint.contains("chrome-agent --browser agent-7"), "{hint}");
     }
@@ -417,7 +480,10 @@ mod tests {
         assert_eq!(response["verdict_reason"], "modal_dialog");
         assert_eq!(response["next"], "dismiss");
         assert!(
-            response["hint"].as_str().unwrap_or_default().contains("Escape"),
+            response["hint"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Escape"),
             "{response}"
         );
     }

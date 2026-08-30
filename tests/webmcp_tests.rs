@@ -36,7 +36,6 @@ fn run_pipe(browser: &str, commands: &[Value]) -> Vec<Value> {
         .collect()
 }
 
-
 // --- list ---
 
 #[test]
@@ -94,7 +93,8 @@ fn list_on_a_page_with_no_model_context_is_refused_with_a_chrome_arg_hint() {
 // --- call: the honest/liar/partial demonstration ---
 
 /// The one string all three tools return, byte-identical. Pinned so a fixture change is caught.
-const IDENTICAL_RETURN: &str = "{\"success\":true,\"item\":\"Espresso Blend\",\"price\":\"$18.00\"}";
+const IDENTICAL_RETURN: &str =
+    "{\"success\":true,\"item\":\"Espresso Blend\",\"price\":\"$18.00\"}";
 
 #[test]
 fn an_honest_tool_reports_the_tree_delta_that_backs_its_declared_success() {
@@ -118,7 +118,10 @@ fn an_honest_tool_reports_the_tree_delta_that_backs_its_declared_success() {
     assert_eq!(call["verdict"], "changed", "{call:?}");
     assert_eq!(call["verdict_reason"], "tree_delta", "{call:?}");
     assert_eq!(call["next"], "proceed");
-    assert!(call["changed"]["added"].as_u64().unwrap_or(0) > 0, "{call:?}");
+    assert!(
+        call["changed"]["added"].as_u64().unwrap_or(0) > 0,
+        "{call:?}"
+    );
 }
 
 #[test]
@@ -146,7 +149,10 @@ fn a_liar_tool_reports_an_identical_tree_and_names_it_unproven_not_absent() {
     assert_eq!(call["changed"]["changed"], 0);
     // Never claim the action had no effect, only that the tree was quiet while watched.
     let hint = call["verdict_hint"].as_str().unwrap_or("");
-    assert!(hint.contains("not the same as the action having no effect"), "{hint}");
+    assert!(
+        hint.contains("not the same as the action having no effect"),
+        "{hint}"
+    );
 }
 
 #[test]
@@ -174,7 +180,10 @@ fn a_partial_tool_is_distinguished_from_the_liar_by_degree_of_change() {
     assert_eq!(call["verdict_reason"], "tree_delta", "{call:?}");
     assert_eq!(call["changed"]["added"], 0, "{call:?}");
     assert_eq!(call["changed"]["removed"], 0, "{call:?}");
-    assert!(call["changed"]["changed"].as_u64().unwrap_or(0) > 0, "{call:?}");
+    assert!(
+        call["changed"]["changed"].as_u64().unwrap_or(0) > 0,
+        "{call:?}"
+    );
 }
 
 // --- the spec's own traps, caught before they reach the page ---
@@ -197,7 +206,10 @@ fn an_unknown_tool_name_is_refused_with_the_known_names_and_a_hint() {
     let call = &responses[1];
     assert_eq!(call["ok"], Value::Bool(false), "{call:?}");
     let error = call["error"].as_str().unwrap_or("");
-    assert!(error.contains("add_to_cart"), "known tools should be named: {error}");
+    assert!(
+        error.contains("add_to_cart"),
+        "known tools should be named: {error}"
+    );
     let hint = call["hint"].as_str().unwrap_or("");
     assert!(hint.contains("webmcp list"), "{hint}");
 }
@@ -207,7 +219,10 @@ fn cli_run(browser: &str, args: &[&str]) -> Value {
     let mut full = vec!["--browser", browser];
     full.extend_from_slice(args);
     full.push("--json");
-    let output = Command::new(common::binary()).args(&full).output().expect("run chrome-agent");
+    let output = Command::new(common::binary())
+        .args(&full)
+        .output()
+        .expect("run chrome-agent");
     serde_json::from_str(&String::from_utf8_lossy(&output.stdout))
         .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&output.stdout).into_owned()))
 }
@@ -221,7 +236,10 @@ fn cli_args_that_are_not_valid_json_text_are_refused_before_touching_the_page() 
     let browser = guard.name();
     let url = common::fixture_url("webmcp_honest_liar_partial.html");
     let _ = cli_run(browser, &["goto", &url]);
-    let response = cli_run(browser, &["webmcp", "call", "add_to_cart", "--args", "not json at all"]);
+    let response = cli_run(
+        browser,
+        &["webmcp", "call", "add_to_cart", "--args", "not json at all"],
+    );
 
     assert_eq!(response["ok"], Value::Bool(false), "{response:?}");
     let error = response["error"].as_str().unwrap_or("");
@@ -244,7 +262,13 @@ fn cli_list_and_call_agree_with_pipe_mode() {
     let _ = cli_run(browser, &["inspect"]);
     let call = cli_run(
         browser,
-        &["webmcp", "call", "add_to_cart_broken", "--args", "{\"item\":\"Espresso Blend\"}"],
+        &[
+            "webmcp",
+            "call",
+            "add_to_cart_broken",
+            "--args",
+            "{\"item\":\"Espresso Blend\"}",
+        ],
     );
     assert_eq!(call["ok"], Value::Bool(true), "{call:?}");
     assert_eq!(call["declared_result"], IDENTICAL_RETURN);
@@ -269,7 +293,12 @@ fn a_frame_scoped_list_reports_undefined_and_says_it_is_unproven() {
         ],
     );
 
-    assert_eq!(responses[1]["ok"], Value::Bool(true), "frame switch: {:?}", responses[1]);
+    assert_eq!(
+        responses[1]["ok"],
+        Value::Bool(true),
+        "frame switch: {:?}",
+        responses[1]
+    );
     let call = &responses[2];
     assert_eq!(call["ok"], Value::Bool(false), "{call:?}");
     let hint = call["hint"].as_str().unwrap_or("");

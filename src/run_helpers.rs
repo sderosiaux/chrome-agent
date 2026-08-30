@@ -23,10 +23,13 @@ pub async fn connect_page(
             Ok(page_ws) => match CdpClient::connect(&page_ws).await {
                 Ok(client) => {
                     // Cheap liveness check: a connected socket is not a working session.
-                    if let Err(e) = client.call::<_, serde_json::Value>(
-                        "Runtime.evaluate",
-                        json!({"expression": "1", "returnByValue": true}),
-                    ).await {
+                    if let Err(e) = client
+                        .call::<_, serde_json::Value>(
+                            "Runtime.evaluate",
+                            json!({"expression": "1", "returnByValue": true}),
+                        )
+                        .await
+                    {
                         last_err = format!("Connection verify failed: {e}");
                         drop(client);
                         if attempt < 7 {
@@ -61,7 +64,6 @@ pub async fn connect_page(
     Err(format!("Failed to connect to page after 8 attempts: {last_err}").into())
 }
 
-
 /// What an action reports about the page once it has run.
 pub struct ActionReport {
     /// `--inspect`: the whole tree.
@@ -86,12 +88,17 @@ pub struct ReportPolicy {
 impl ReportPolicy {
     /// Build the per-action report from the policy plus that command's own flags.
     pub const fn for_action(self, inspect: bool, max_depth: Option<usize>) -> ActionReport {
-        ActionReport { inspect, changes: self.changes, budget: self.budget, max_depth }
+        ActionReport {
+            inspect,
+            changes: self.changes,
+            budget: self.budget,
+            max_depth,
+        }
     }
 }
 
 /// What the four read-back verbs put on their responses. Re-exported so a caller writes
-/// `run_helpers::fill_value_report` next to the `output_action` that ships it.
+/// `run_helpers::fill_value_report` next to the `output_action_with` that ships it.
 pub use crate::read_back::{bulk_fill_report, check_report, fill_value_report, select_report};
 
 /// The node an action is about to touch: `uid`, plus best-effort `role`/`name` off the
@@ -123,63 +130,35 @@ pub async fn target_details(
 
 /// Copy an optional field set into a response object at the top level.
 ///
-/// The ONE merge loop. It existed three times — here inside `merge_details`, again inside
-/// `output_action_with`, and a third time as `pipe_dispatch::merge_into` — for one four-line
-/// body that decides what an action's response says about the node it touched.
+/// The ONE merge loop. It existed three times — inside a `merge_details` the CLI used, again
+/// inside `output_action_with`, and a third time as `pipe_dispatch::merge_into` — for one
+/// four-line body that decides what an action's response says about the node it touched.
 pub fn merge_into(obj: &mut serde_json::Value, details: Option<&serde_json::Value>) {
-    if let (Some(target), Some(fields)) =
-        (obj.as_object_mut(), details.and_then(serde_json::Value::as_object))
-    {
+    if let (Some(target), Some(fields)) = (
+        obj.as_object_mut(),
+        details.and_then(serde_json::Value::as_object),
+    ) {
         for (key, value) in fields {
             target.insert(key.clone(), value.clone());
         }
     }
 }
 
-#[must_use]
-pub fn merge_details(
-    first: Option<serde_json::Value>,
-    second: Option<serde_json::Value>,
-) -> Option<serde_json::Value> {
-    match (first, second) {
-        (Some(mut a), b) => {
-            merge_into(&mut a, b.as_ref());
-            Some(a)
-        }
-        (None, only) => only,
-    }
-}
-
-/// Report what a command did to the page, and persist the new baseline. By default an action
-/// answers "what changed", saving a second call; `--verdict off` trades that for latency.
-pub async fn output_action(
-    client: &CdpClient,
-    store: &mut SessionStore,
-    browser_name: &str,
-    page_name: &str,
-    target_id: &str,
-    msg: String,
-    report: &ActionReport,
-    json_mode: bool,
-) -> Result<(), crate::BoxError> {
-    output_action_with(client, store, browser_name, page_name, target_id, msg, report, json_mode, None).await
-}
-
-/// `output_action` plus whatever the command itself observed (the value a fill left behind,
-/// the window a check looked through). Merged at the top level so the CLI and the pipe
-/// dispatchers, which build their JSON separately, agree on shape.
-#[allow(clippy::too_many_arguments)]
+/// Report what a command did to the page and persist the new baseline, plus whatever the
+/// command itself observed (the value a fill left behind, the window a check looked through).
+///
+/// By default an action answers "what changed", saving a second call; `--verdict off` trades
+/// that for latency. `details` is merged at the top level, so a response built here and the same
+/// response built by a `pipe_dispatch::dispatch_*` have one shape — which is what lets `run.rs`
+/// call the dispatcher and hand its object straight to this.
 pub async fn output_action_with(
-    client: &CdpClient,
-    store: &mut SessionStore,
-    browser_name: &str,
-    page_name: &str,
-    target_id: &str,
+    ctx: &mut crate::page_ctx::PageCtx<'_>,
     msg: String,
     report: &ActionReport,
     json_mode: bool,
     details: Option<serde_json::Value>,
 ) -> Result<(), crate::BoxError> {
+    let client = ctx.client;
     let mut obj = json!({"ok": true, "message": msg});
     merge_into(&mut obj, details.as_ref());
     let mut trailer = String::new();
@@ -198,7 +177,11 @@ pub async fn output_action_with(
         //
         // A read that fails is NOT an action that failed — `ok:false` after a delivered click
         // invites a second click — hence the early return with a `read_failed` verdict.
-        let display_depth = if report.inspect { report.max_depth } else { None };
+        let display_depth = if report.inspect {
+            report.max_depth
+        } else {
+            None
+        };
         let Ok(views) = commands::inspect::views(client, false, display_depth, None, None).await
         else {
             let assessment = crate::pipe_report::attach_verdict_for(
@@ -217,20 +200,26 @@ pub async fn output_action_with(
         let snapshot = views.full;
 
         if report.changes {
-            let previous = store
+            let previous = ctx
+                .store
                 .browsers
-                .get(browser_name)
-                .and_then(|b| b.pages.get(page_name))
+                .get(ctx.browser)
+                .and_then(|b| b.pages.get(ctx.page))
                 .map(|p| {
                     (
                         p.last_snapshot.clone(),
-                        p.last_snapshot_frame.clone().zip(p.last_snapshot_loader.clone()),
+                        p.last_snapshot_frame
+                            .clone()
+                            .zip(p.last_snapshot_loader.clone()),
                     )
                 });
             if let Some((Some(old_text), stored)) = previous {
                 let identity = commands::diff::Identity::from_loader(
                     stored.as_ref().map(|(f, l)| (f.as_str(), l.as_str())),
-                    snapshot.identity.as_ref().map(|(f, l)| (f.as_str(), l.as_str())),
+                    snapshot
+                        .identity
+                        .as_ref()
+                        .map(|(f, l)| (f.as_str(), l.as_str())),
                 );
                 let cmp = commands::diff::compare(identity, &old_text, &snapshot.text);
                 let body = if report.budget == 0 {
@@ -287,14 +276,7 @@ pub async fn output_action_with(
             trailer = shown;
         }
 
-        if let Some(browser_s) = store.browsers.get_mut(browser_name) {
-            let page = session::ensure_page(browser_s, page_name, target_id);
-            page.last_snapshot = Some(snapshot.text);
-            let (f, l) = snapshot.identity.map_or((None, None), |(f, l)| (Some(f), Some(l)));
-            page.last_snapshot_frame = f;
-            page.last_snapshot_loader = l;
-            page.uid_map = snapshot.uid_map;
-        }
+        ctx.store_snapshot(snapshot);
     }
 
     let assessment = crate::pipe_report::attach_verdict_for(client, &mut obj, observation);
@@ -341,11 +323,7 @@ pub fn attach_verdict(obj: &mut serde_json::Value, assessment: crate::verdict::A
 }
 
 pub async fn output_goto(
-    client: &CdpClient,
-    store: &mut SessionStore,
-    browser_name: &str,
-    page_name: &str,
-    target_id: &str,
+    ctx: &mut crate::page_ctx::PageCtx<'_>,
     url: &str,
     title: &str,
     landed: Option<&crate::landing::Landing>,
@@ -353,32 +331,31 @@ pub async fn output_goto(
     max_depth: Option<usize>,
     json_mode: bool,
 ) -> Result<(), crate::BoxError> {
-    let browser_session = store.browsers.get_mut(browser_name)
-        .ok_or_else(|| format!("Browser session '{browser_name}' not found in session store"))?;
-    let page = session::ensure_page(
-        browser_session,
-        page_name,
-        target_id,
-    );
+    let (client, browser_name) = (ctx.client, ctx.browser);
+    if !ctx.store.browsers.contains_key(browser_name) {
+        return Err(format!("Browser session '{browser_name}' not found in session store").into());
+    }
     // `backendNodeId` counters overlap between documents, so a stale uid can resolve to an
-    // unrelated element. The `if inspect` branches below refill the map.
-    page.uid_map.clear();
+    // unrelated element. The `if inspect` branch below refills the map.
+    ctx.clear_uid_map();
+    // One reading for both output modes. `--max-depth` decides what is PRINTED, never what is
+    // stored: a truncated baseline makes the next `diff` report every node past the limit added.
+    let views = if inspect {
+        Some(commands::inspect::views(client, false, max_depth, None, None).await?)
+    } else {
+        None
+    };
+    let shown = views.as_ref().map(|v| v.shown().to_string());
+    if let Some(views) = views {
+        ctx.store_snapshot(views.full);
+    }
     if json_mode {
         let mut obj = json!({"ok": true, "url": url, "title": title});
         if let Some(landing) = landed {
             landing.attach(&mut obj, browser_name);
         }
-        if inspect {
-            // `--max-depth` decides what is printed, never what is stored: a truncated
-            // baseline makes the next `diff` report every node past the limit as added.
-            let views = commands::inspect::views(client, false, max_depth, None, None).await?;
-            obj["snapshot"] = json!(views.shown());
-            let full = views.full;
-            page.last_snapshot = Some(full.text);
-            let (f, l) = full.identity.map_or((None, None), |(f, l)| (Some(f), Some(l)));
-            page.last_snapshot_frame = f;
-            page.last_snapshot_loader = l;
-            page.uid_map = full.uid_map;
+        if let Some(shown) = shown {
+            obj["snapshot"] = json!(shown);
         }
         json_output(&obj);
     } else {
@@ -390,16 +367,8 @@ pub async fn output_goto(
         if let Some(line) = landed.and_then(|landing| landing.text_line(browser_name)) {
             println!("{line}");
         }
-        if inspect {
-            // Same rule as the JSON branch above: the depth is a display flag.
-            let views = commands::inspect::views(client, false, max_depth, None, None).await?;
-            println!("{}", views.shown());
-            let full = views.full;
-            page.last_snapshot = Some(full.text);
-            let (f, l) = full.identity.map_or((None, None), |(f, l)| (Some(f), Some(l)));
-            page.last_snapshot_frame = f;
-            page.last_snapshot_loader = l;
-            page.uid_map = full.uid_map;
+        if let Some(shown) = shown {
+            println!("{shown}");
         }
     }
     Ok(())
@@ -474,7 +443,10 @@ pub fn batch_text_lines(out: &serde_json::Value, stopped_at: Option<u64>) -> Vec
         .flatten()
         .enumerate()
         .map(|(index, entry)| {
-            let ok = entry.get("ok").and_then(serde_json::Value::as_bool).unwrap_or(false);
+            let ok = entry
+                .get("ok")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
             let status = if ok { "ok" } else { "error" };
             let summary = entry
                 .get("message")
@@ -485,7 +457,10 @@ pub fn batch_text_lines(out: &serde_json::Value, stopped_at: Option<u64>) -> Vec
         })
         .collect();
     if let Some(index) = stopped_at {
-        let skipped = out.get("skipped").and_then(serde_json::Value::as_u64).unwrap_or(0);
+        let skipped = out
+            .get("skipped")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
         lines.push(format!("stopped at command {index} — {skipped} skipped"));
     }
     lines
@@ -494,7 +469,11 @@ pub fn batch_text_lines(out: &serde_json::Value, stopped_at: Option<u64>) -> Vec
 /// The error-recovery hints, re-exported for `main`, `pipe` and `pipe_dispatch`.
 pub use crate::hints::error_hint;
 
-pub fn get_uid_map(store: &SessionStore, browser_name: &str, page_name: &str) -> HashMap<String, ElementRef> {
+pub fn get_uid_map(
+    store: &SessionStore,
+    browser_name: &str,
+    page_name: &str,
+) -> HashMap<String, ElementRef> {
     store
         .browsers
         .get(browser_name)
@@ -598,7 +577,11 @@ pub fn cmd_status(json_mode: bool) -> Result<(), crate::BoxError> {
                 } else {
                     "external".into()
                 };
-                let mode = if browser.headless { "headless" } else { "headed" };
+                let mode = if browser.headless {
+                    "headless"
+                } else {
+                    "headed"
+                };
                 println!(
                     "browser={name}  {status}  {mode}  pages={}  ws={}",
                     browser.pages.len(),
@@ -623,7 +606,6 @@ pub fn cmd_status(json_mode: bool) -> Result<(), crate::BoxError> {
     Ok(())
 }
 
-
 /// Pure, so the stop decision is unit-testable without a socket.
 #[cfg(any(unix, test))]
 const fn stop_message(reached_daemon: bool) -> &'static str {
@@ -638,51 +620,58 @@ pub async fn cmd_stop(json_mode: bool) -> Result<(), crate::BoxError> {
     #[cfg(not(unix))]
     {
         let msg = "Daemon is not supported on this platform.";
-        if json_mode { json_output(&json!({"ok": true, "message": msg})); }
-        else { println!("{msg}"); }
+        if json_mode {
+            json_output(&json!({"ok": true, "message": msg}));
+        } else {
+            println!("{msg}");
+        }
         return Ok(());
     }
 
     #[cfg(unix)]
     {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::UnixStream;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::UnixStream;
 
-    let socket_path = session::daemon_socket_path()?;
+        let socket_path = session::daemon_socket_path()?;
 
-    // A missing socket and a stale one (ECONNREFUSED) both mean "not running": remove the
-    // stale socket rather than let the connect error escape via `?`.
-    let stream = if socket_path.exists() {
-        match UnixStream::connect(&socket_path).await {
-            Ok(stream) => Some(stream),
-            Err(_) => {
-                let _ = std::fs::remove_file(&socket_path);
-                None
+        // A missing socket and a stale one (ECONNREFUSED) both mean "not running": remove the
+        // stale socket rather than let the connect error escape via `?`.
+        let stream = if socket_path.exists() {
+            match UnixStream::connect(&socket_path).await {
+                Ok(stream) => Some(stream),
+                Err(_) => {
+                    let _ = std::fs::remove_file(&socket_path);
+                    None
+                }
             }
+        } else {
+            None
+        };
+
+        let Some(mut stream) = stream else {
+            let msg = stop_message(false);
+            if json_mode {
+                json_output(&json!({"ok": true, "message": msg}));
+            } else {
+                println!("{msg}");
+            }
+            return Ok(());
+        };
+
+        stream.write_all(b"{\"command\":\"stop\"}\n").await?;
+        stream.shutdown().await?;
+
+        let mut buf = Vec::new();
+        let _ = stream.read_to_end(&mut buf).await;
+
+        let msg = stop_message(true);
+        if json_mode {
+            json_output(&json!({"ok": true, "message": msg}));
+        } else {
+            println!("{msg}");
         }
-    } else {
-        None
-    };
-
-    let Some(mut stream) = stream else {
-        let msg = stop_message(false);
-        if json_mode { json_output(&json!({"ok": true, "message": msg})); }
-        else { println!("{msg}"); }
-        return Ok(());
-    };
-
-    stream
-        .write_all(b"{\"command\":\"stop\"}\n")
-        .await?;
-    stream.shutdown().await?;
-
-    let mut buf = Vec::new();
-    let _ = stream.read_to_end(&mut buf).await;
-
-    let msg = stop_message(true);
-    if json_mode { json_output(&json!({"ok": true, "message": msg})); }
-    else { println!("{msg}"); }
-    Ok(())
+        Ok(())
     } // #[cfg(unix)]
 }
 
@@ -780,7 +769,10 @@ pub fn cmd_close(browser_name: &str, purge: bool, json_mode: bool) -> Result<(),
     let outcome = killed.as_ref().map(|(pid, result)| {
         // `Err` is only ever "signalled, still running after the wait"; its message is the
         // relaunch caller's, and `close` writes its own.
-        (*pid, result.as_ref().copied().unwrap_or(KillOutcome::Signalled))
+        (
+            *pid,
+            result.as_ref().copied().unwrap_or(KillOutcome::Signalled),
+        )
     });
     let exited = killed.as_ref().map(|(_, result)| match result {
         // Signalled AND observed gone, or never signalled because it already was.
@@ -812,14 +804,18 @@ pub fn cmd_close(browser_name: &str, purge: bool, json_mode: bool) -> Result<(),
     // Never purge on the outcome that KEPT the session: nothing was closed, so a live Chrome
     // may still hold the profile. Refusing costs a repeat; the alternative is irreversible.
     let purge_outcome = if purge && !kept {
-        session::browsers_dir().ok().map(|dir| purge_profile(&dir.join(browser_name)))
+        session::browsers_dir()
+            .ok()
+            .map(|dir| purge_profile(&dir.join(browser_name)))
     } else {
         None
     };
 
     let message = match purge_outcome {
         None if purge && kept => {
-            format!("{message} (profile NOT purged: nothing was closed, so its profile may be in use)")
+            format!(
+                "{message} (profile NOT purged: nothing was closed, so its profile may be in use)"
+            )
         }
         None => message,
         Some(Ok(())) => format!("{message} (profile purged)"),
@@ -856,11 +852,20 @@ mod tests {
         // These carry the default `--browser` name without touching a browser.
         use crate::cli::Command as C;
         for command in [
-            C::Daemon { action: crate::cli::DaemonAction::Start },
+            C::Daemon {
+                action: crate::cli::DaemonAction::Start,
+            },
             C::Status,
             C::Stop,
-            C::Close { purge: false, purge_orphans: false, orphans: false },
-            C::History { filter: None, limit: 20 },
+            C::Close {
+                purge: false,
+                purge_orphans: false,
+                orphans: false,
+            },
+            C::History {
+                filter: None,
+                limit: 20,
+            },
         ] {
             assert!(
                 !interrupt_owns_browser(&command),
@@ -875,8 +880,24 @@ mod tests {
     #[test]
     fn an_interrupt_only_targets_this_invocation_s_browser() {
         let mut store = SessionStore::default();
-        session::ensure_browser(&mut store, "agent-1", "ws://a", Some(111), true, None, Vec::new());
-        session::ensure_browser(&mut store, "agent-2", "ws://b", Some(222), true, None, Vec::new());
+        session::ensure_browser(
+            &mut store,
+            "agent-1",
+            "ws://a",
+            Some(111),
+            true,
+            None,
+            Vec::new(),
+        );
+        session::ensure_browser(
+            &mut store,
+            "agent-2",
+            "ws://b",
+            Some(222),
+            true,
+            None,
+            Vec::new(),
+        );
 
         assert_eq!(interrupt_kill_target(&store, "agent-1"), Some(111));
         assert_eq!(

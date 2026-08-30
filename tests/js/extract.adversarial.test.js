@@ -1,20 +1,7 @@
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const path = require('node:path');
 
-const { extractFromHTML, extractFromHTMLWithSelector } = require('./helpers.js');
-
-const FIXTURES = path.resolve(__dirname, '..', 'fixtures');
-
-function loadFixture(name) {
-  return fs.readFileSync(path.join(FIXTURES, name), 'utf-8');
-}
-
-
-// ---------------------------------------------------------------------------
-// More adversarial coverage
-// ---------------------------------------------------------------------------
+const { extractFromHTML } = require('./helpers.js');
 
 describe('adversarial: malformed HTML recovery', () => {
   it('detects repeated entries with omitted closing tags', () => {
@@ -110,7 +97,8 @@ describe('adversarial: decorative elements with no textContent', () => {
     `).join('');
     const html = `<html><body><div class="icons">${cards}</div></body></html>`;
     const r = extractFromHTML(html);
-    assert.ok(r.items !== undefined);
+    // The cards do group, but every one is dropped for having under 3 chars of text.
+    assert.deepEqual(r, { items: [], count: 0, pattern: 'DIV.card' });
   });
 });
 
@@ -138,7 +126,7 @@ describe('adversarial: huge class lists', () => {
     `).join('');
     const html = `<html><body><div class="grid">${cards}</div></body></html>`;
     const r = extractFromHTML(html);
-    // Verifies that digit-class filtering allows grouping despite one unique utility class per sibling.
+    // The digit-class filter in childSignature is what lets these group.
     assert.equal(r.count, 4);
   });
 });
@@ -170,7 +158,6 @@ describe('adversarial: data and role attributes', () => {
     `).join('');
     const html = `<html><body><div class="grid">${cards}</div></body></html>`;
     const r = extractFromHTML(html);
-    // Verifies getAttribute fallback: when [data-price] has no visible text, the attribute value is used.
     assert.deepEqual(
       r.items.map(item => item.price),
       ['$20', '$21', '$22', '$23'],
@@ -261,7 +248,6 @@ describe('adversarial: same-tag siblings and noisy children', () => {
     `).join('');
     const html = `<html><body><div class="feed">${articles}</div></body></html>`;
     const r = extractFromHTML(html);
-    // Verifies heading link preference: the primary <h3> link is chosen over a longer CTA link.
     assert.deepEqual(
       r.items.map(item => item.url),
       ['/primary/0', '/primary/1', '/primary/2', '/primary/3'],
@@ -303,45 +289,36 @@ describe('adversarial: svg-heavy cards and forms as records', () => {
     assert.ok(r.items.some(item => item.title === 'SVG Card 0'));
   });
 
-  it('treats repeated form rows as repeated records', () => {
-    const rows = Array.from({ length: 4 }, (_, i) => `
+  const formRows = `<html><body><form><div class="rows">${Array.from({ length: 4 }, (_, i) => `
       <div class="record">
         <label>Name</label><input value="User ${i}">
         <label>Email</label><input value="user${i}@example.com">
         <button type="button">Save ${i}</button>
       </div>
-    `).join('');
-    const html = `<html><body><form><div class="rows">${rows}</div></form></body></html>`;
-    const r = extractFromHTML(html);
+    `).join('')}</div></form></body></html>`;
+
+  it('treats repeated form rows as repeated records', () => {
+    const r = extractFromHTML(formRows);
     assert.equal(r.count, 4);
   });
 
-  // By design: extract reads textContent, not input.value. Use eval for form data.
-  it.skip('captures input values when forms are the repeated records', () => {
-    const rows = Array.from({ length: 4 }, (_, i) => `
-      <div class="record">
-        <label>Name</label><input value="User ${i}">
-        <label>Email</label><input value="user${i}@example.com">
-        <button type="button">Save ${i}</button>
-      </div>
-    `).join('');
-    const html = `<html><body><form><div class="rows">${rows}</div></form></body></html>`;
-    const r = extractFromHTML(html);
-    // By design: the extractor reads textContent, not input.value. Use eval for form data.
-    assert.ok(r.items[0].fields.includes('User 0'));
-    assert.ok(r.items[0].fields.includes('user0@example.com'));
+  // By design: extract reads textContent, not input.value — use eval for form data. Was an
+  // `it.skip` asserting the opposite, which could neither pass nor fail.
+  it('does not read input values into fields', () => {
+    const r = extractFromHTML(formRows);
+    for (const item of r.items) {
+      const blob = JSON.stringify(item);
+      assert.doesNotMatch(blob, /User \d/);
+      assert.doesNotMatch(blob, /@example\.com/);
+    }
   });
 });
 
-// ---------------------------------------------------------------------------
-// The semantic fast-pass must not be a way around the anti-navigation rules
-// ---------------------------------------------------------------------------
-
+// The semantic fast-pass must not be a way around the anti-navigation rules.
 describe('adversarial: navigation wearing a data class name', () => {
   it('does not return nav links as the record set when real content is present', () => {
-    // Bootstrap/Tailwind style: the nav items carry a class the semantic fast-pass
-    // recognises ("item"), so they entered phase 1 — which applied none of phase 2's
-    // nav, link-density or richness rules — and outscored the actual product list.
+    // "nav-item" matches DATA_CLASS_RE, so these enter the phase-1 fast pass; without the
+    // shared nav and link-density penalties they outscore the real product list.
     const nav = Array.from({ length: 8 }, (_, i) =>
       `<li class="nav-item"><a href="/p${i}">Navigation Menu Label ${i}</a></li>`).join('');
     const cards = Array.from({ length: 3 }, (_, i) =>
@@ -365,5 +342,70 @@ describe('adversarial: navigation wearing a data class name', () => {
     const html = `<html><body><main><div class="list">${items}</div></main></body></html>`;
     const r = extractFromHTML(html);
     assert.equal(r.count, 5, `the fast-pass must still fire on real content: ${JSON.stringify(r)}`);
+  });
+});
+
+describe('adversarial: identical siblings with different content', () => {
+  it('detects items that share structure but have different text', () => {
+    const cards = Array.from({ length: 5 }, (_, i) => `
+      <div class="result">
+        <h3><a href="/r/${i}">${'X'.repeat(20 + i * 5)}</a></h3>
+        <p>${'Y'.repeat(50 + i * 10)}</p>
+      </div>`).join('');
+    const html = `<html><body><div class="results">${cards}</div></body></html>`;
+    const r = extractFromHTML(html);
+    assert.equal(r.count, 5);
+    const titles = r.items.map(i => i.title);
+    assert.equal(new Set(titles).size, titles.length, 'all titles should be unique');
+  });
+});
+
+describe('adversarial: items with no children', () => {
+  it('handles items that are leaf elements with only text', () => {
+    const items = Array.from({ length: 5 }, (_, i) =>
+      `<p class="entry">Entry number ${i}: This has enough text to pass the richness check hopefully</p>`).join('');
+    const html = `<html><body><div class="list">${items}</div></body></html>`;
+    const r = extractFromHTML(html);
+    // No children and no links puts richness under 2, so nothing groups.
+    assert.deepEqual(r, { items: [], hint: 'No repeating pattern found. Try: extract --selector or eval --selector' });
+  });
+});
+
+describe('adversarial: mixed tag types as siblings', () => {
+  it('only groups siblings with same signature', () => {
+    const html = `<html><body>
+      <div class="feed">
+        <div class="card"><h3><a href="/d1">Div 1</a></h3><p>Description one</p></div>
+        <section class="card"><h3><a href="/s1">Section 1</a></h3><p>Description one</p></section>
+        <div class="card"><h3><a href="/d2">Div 2</a></h3><p>Description two</p></div>
+        <section class="card"><h3><a href="/s2">Section 2</a></h3><p>Description two</p></section>
+        <div class="card"><h3><a href="/d3">Div 3</a></h3><p>Description three</p></div>
+        <section class="card"><h3><a href="/s3">Section 3</a></h3><p>Description three</p></section>
+      </div>
+    </body></html>`;
+    const r = extractFromHTML(html);
+    // Exactly 3, not `>= 3`: the six siblings are two record types of three each, and merging
+    // them into one group of six is the defect this fixture exists for.
+    assert.equal(r.count, 3, `the two tag groups must stay apart, got ${r.count}`);
+    const tag = r.pattern.split('.')[0];
+    assert.ok(['DIV', 'SECTION'].includes(tag), `Expected DIV or SECTION, got: ${tag}`);
+    const titles = r.items.map(i => JSON.stringify(i)).join(' ');
+    const mixed = /Div \d/.test(titles) && /Section \d/.test(titles);
+    assert.ok(!mixed, `records of both types were merged into one list: ${titles}`);
+  });
+});
+
+describe('adversarial: special characters in class names', () => {
+  it('handles class names with hyphens and numbers', () => {
+    const items = Array.from({ length: 4 }, (_, i) => `
+      <div class="item-2025-v3 result-card__wrapper">
+        <h3><a href="/x/${i}">Result ${i}</a></h3>
+        <p>Detailed content for result number ${i} to ensure sufficient richness scoring</p>
+      </div>`).join('');
+    const html = `<html><body><div>${items}</div></body></html>`;
+    const r = extractFromHTML(html);
+    assert.equal(r.count, 4);
+    // Every digit-carrying class is dropped from the signature; only the digit-free one is left.
+    assert.equal(r.pattern, 'DIV.result-card__wrapper');
   });
 });

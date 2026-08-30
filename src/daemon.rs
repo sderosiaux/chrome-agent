@@ -10,6 +10,34 @@ use crate::session;
 const IDLE_TIMEOUT: Duration = Duration::from_mins(5);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(2);
 
+/// Set an explicit mode on a path this tool created. Best effort: a daemon that started is more
+/// useful than one that refused over a chmod, and the two callers below both create the file
+/// themselves a moment earlier.
+fn restrict(path: &Path, mode: u32) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode));
+    }
+    #[cfg(not(unix))]
+    let _ = (path, mode);
+}
+
+/// Create `~/.chrome-agent` (or wherever the socket lives) 0700. Only `session::save_to` set
+/// this mode, so a daemon that came up first left the directory at whatever the umask allowed.
+fn prepare_dir(parent: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(parent)?;
+    restrict(parent, 0o700);
+    Ok(())
+}
+
+/// Write the pid file 0600. It names the process any local user could then signal.
+fn write_pid_file(pid_path: &Path) {
+    if std::fs::write(pid_path, format!("{}\n", std::process::id())).is_ok() {
+        restrict(pid_path, 0o600);
+    }
+}
+
 /// Run the micro-daemon. Blocks until idle timeout or explicit stop.
 pub async fn run_daemon(socket_path: &Path) -> Result<(), DaemonError> {
     if socket_path.exists() {
@@ -17,16 +45,20 @@ pub async fn run_daemon(socket_path: &Path) -> Result<(), DaemonError> {
     }
 
     if let Some(parent) = socket_path.parent() {
-        std::fs::create_dir_all(parent)
+        prepare_dir(parent)
             .map_err(|e| DaemonError(format!("Failed to create socket dir: {e}")))?;
     }
 
     if let Ok(pid_path) = session::daemon_pid_path() {
-        let _ = std::fs::write(&pid_path, format!("{}\n", std::process::id()));
+        write_pid_file(&pid_path);
     }
 
     let listener = UnixListener::bind(socket_path)
         .map_err(|e| DaemonError(format!("Failed to bind {}: {e}", socket_path.display())))?;
+    // Right after `bind`, before the first `accept`: `process_command` answers `status`, which
+    // enumerates every browser name, and `stop` to whoever connects. The umask decides the
+    // socket's mode otherwise, and on a typical 022 that is 0755 — every local user.
+    restrict(socket_path, 0o600);
 
     eprintln!("daemon ready on {}", socket_path.display());
 
@@ -104,11 +136,7 @@ pub async fn run_daemon(socket_path: &Path) -> Result<(), DaemonError> {
 /// Handle a single client connection. Protocol: newline-delimited JSON.
 /// Request: `{"command": "...", "args": {...}}`
 /// Response: `{"ok": true, "data": ...}` or `{"ok": false, "error": "..."}`
-async fn handle_client(
-    stream: UnixStream,
-    activity: mpsc::Sender<()>,
-    shutdown: mpsc::Sender<()>,
-) {
+async fn handle_client(stream: UnixStream, activity: mpsc::Sender<()>, shutdown: mpsc::Sender<()>) {
     let (reader, mut writer) = stream.into_split();
     let mut lines = BufReader::new(reader).lines();
 
@@ -117,11 +145,14 @@ async fn handle_client(
         let _ = activity.send(()).await;
 
         let (response, should_shutdown) = process_command(&line);
-        let json = serde_json::to_string(&response).unwrap_or_else(|_| {
-            r#"{"ok":false,"error":"serialization failed"}"#.to_string()
-        });
+        let json = serde_json::to_string(&response)
+            .unwrap_or_else(|_| r#"{"ok":false,"error":"serialization failed"}"#.to_string());
         // Write the response before triggering shutdown so the client sees it.
-        if writer.write_all(format!("{json}\n").as_bytes()).await.is_err() {
+        if writer
+            .write_all(format!("{json}\n").as_bytes())
+            .await
+            .is_err()
+        {
             break;
         }
         if should_shutdown {
@@ -161,7 +192,11 @@ fn process_command(line: &str) -> (serde_json::Value, bool) {
                 eprintln!("daemon status: could not read the session store: {e}");
                 session::SessionStore::default()
             });
-            let browsers: Vec<&str> = store.browsers.keys().map(std::string::String::as_str).collect();
+            let browsers: Vec<&str> = store
+                .browsers
+                .keys()
+                .map(std::string::String::as_str)
+                .collect();
             (
                 serde_json::json!({
                     "ok": true,
@@ -224,6 +259,81 @@ mod tests {
         assert!(!shutdown);
         assert_eq!(resp["ok"], false);
         assert!(resp["error"].as_str().unwrap().contains("Unknown command"));
+    }
+
+    /// A scratch directory no concurrent test thread or process shares. The real socket path is
+    /// `~/.chrome-agent/daemon.sock`, one per machine, so `run_daemon` itself cannot be started
+    /// from a test without clobbering a real daemon's pid file — these drive the same two
+    /// helpers it calls.
+    #[cfg(unix)]
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "chrome-agent-daemon-{tag}-{}-{n}",
+            std::process::id()
+        ))
+    }
+
+    /// The directory holds the socket, the pid file and the session store; only `session::save_to`
+    /// used to set its mode, so whoever created it first decided.
+    #[cfg(unix)]
+    #[test]
+    fn the_daemon_directory_is_not_readable_by_other_users() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch("dir");
+        prepare_dir(&dir).expect("create it");
+        let mode = std::fs::metadata(&dir).expect("dir").permissions().mode() & 0o777;
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(mode, 0o700, "got {mode:o}");
+    }
+
+    /// The pid file names a process any local user could signal.
+    #[cfg(unix)]
+    #[test]
+    fn the_pid_file_is_not_world_readable() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch("pid");
+        prepare_dir(&dir).expect("create it");
+        let path = dir.join("daemon.pid");
+        write_pid_file(&path);
+        let mode = std::fs::metadata(&path)
+            .expect("pid file")
+            .permissions()
+            .mode()
+            & 0o777;
+        let contents = std::fs::read_to_string(&path).expect("pid file");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(mode, 0o600, "got {mode:o}");
+        assert_eq!(contents.trim(), std::process::id().to_string());
+    }
+
+    /// The socket answers `status` (every browser name) and `stop` to whoever connects, so its
+    /// mode is the whole access control.
+    #[cfg(unix)]
+    #[test]
+    fn the_socket_is_not_connectable_by_other_users() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch("sock");
+        prepare_dir(&dir).expect("create it");
+        let path = dir.join("daemon.sock");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .build()
+            .expect("a test runtime");
+        let listener = runtime.block_on(async { UnixListener::bind(&path).expect("bind") });
+        restrict(&path, 0o600);
+        let mode = std::fs::metadata(&path)
+            .expect("socket")
+            .permissions()
+            .mode()
+            & 0o777;
+        drop(listener);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            mode, 0o600,
+            "a world-writable socket answers stop to anyone; got {mode:o}"
+        );
     }
 
     #[test]

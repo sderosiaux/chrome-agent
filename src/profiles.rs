@@ -10,7 +10,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use crate::session::{liveness, Liveness};
+use crate::session::{Liveness, liveness};
 
 /// How long a profile must sit untouched before it may be removed. The window closes the
 /// create-then-write race without new coordination: a profile legitimately has no store
@@ -43,7 +43,11 @@ pub struct Limits {
 
 impl Default for Limits {
     fn default() -> Self {
-        Self { grace: GRACE, examine: EXAMINE_CAP, remove: REMOVE_CAP }
+        Self {
+            grace: GRACE,
+            examine: EXAMINE_CAP,
+            remove: REMOVE_CAP,
+        }
     }
 }
 
@@ -187,9 +191,17 @@ fn singleton_lock_holder(target: &str) -> Hold {
 fn devtools_port_holder(path: &Path) -> Hold {
     let Ok(contents) = std::fs::read_to_string(path) else {
         // Only absence means "no browser announced itself here"; unreadable stays `Unknown`.
-        return if path.symlink_metadata().is_ok() { Hold::Unknown } else { Hold::Free };
+        return if path.symlink_metadata().is_ok() {
+            Hold::Unknown
+        } else {
+            Hold::Free
+        };
     };
-    let Some(port) = contents.lines().next().and_then(|l| l.trim().parse::<u16>().ok()) else {
+    let Some(port) = contents
+        .lines()
+        .next()
+        .and_then(|l| l.trim().parse::<u16>().ok())
+    else {
         return Hold::Unknown;
     };
     if port == 0 {
@@ -220,7 +232,10 @@ fn last_touched(root: &Path, profile: &Path) -> Option<SystemTime> {
         for entry in entries {
             // A directory we cannot enumerate is one whose age we do not know.
             let entry = entry.ok()?;
-            let meta = entry.metadata().ok().or_else(|| entry.path().symlink_metadata().ok())?;
+            let meta = entry
+                .metadata()
+                .ok()
+                .or_else(|| entry.path().symlink_metadata().ok())?;
             newest = newest.max(meta.modified().ok()?);
         }
     }
@@ -272,8 +287,7 @@ pub fn all_removable(
         .filter_map(Result::ok)
         .filter_map(|entry| {
             let name = entry.file_name().into_string().ok()?;
-            removable(browsers_dir, &name, referenced, now, grace)
-                .then(|| browsers_dir.join(name))
+            removable(browsers_dir, &name, referenced, now, grace).then(|| browsers_dir.join(name))
         })
         .collect();
     found.sort_unstable();
@@ -299,7 +313,10 @@ mod tests {
     /// crate in the dependency graph).
     fn backdate(root: &Path, idle: Duration) {
         let when = SystemTime::now() - idle;
-        let secs = when.duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs();
+        let secs = when
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
         let profile = root.join(PROFILE_SUBDIR);
         let mut paths = vec![root.to_path_buf(), profile.clone()];
         for dir in [profile.clone(), profile.join("Default")] {
@@ -318,18 +335,29 @@ mod tests {
     fn set_mtime(path: &Path, secs: u64) {
         use std::os::unix::ffi::OsStrExt;
         let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
-        let ts = libc::timespec { tv_sec: secs as libc::time_t, tv_nsec: 0 };
+        let ts = libc::timespec {
+            tv_sec: secs as libc::time_t,
+            tv_nsec: 0,
+        };
         let times = [ts, ts];
         // SAFETY: both pointers are valid for the duration of the call.
         #[allow(unsafe_code)]
         unsafe {
-            libc::utimensat(libc::AT_FDCWD, c_path.as_ptr(), times.as_ptr(), libc::AT_SYMLINK_NOFOLLOW);
+            libc::utimensat(
+                libc::AT_FDCWD,
+                c_path.as_ptr(),
+                times.as_ptr(),
+                libc::AT_SYMLINK_NOFOLLOW,
+            );
         }
     }
 
     fn tmp_dir(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir()
-            .join(format!("chrome-agent_profiles_{}_{}", tag, std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "chrome-agent_profiles_{}_{}",
+            tag,
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -344,7 +372,12 @@ mod tests {
 
     impl LivePid {
         fn spawn() -> Self {
-            Self(std::process::Command::new("sleep").arg("30").spawn().unwrap())
+            Self(
+                std::process::Command::new("sleep")
+                    .arg("30")
+                    .spawn()
+                    .unwrap(),
+            )
         }
     }
 
@@ -377,7 +410,11 @@ mod tests {
         .unwrap();
 
         let referenced: HashSet<String> = std::iter::once("in-store".to_string()).collect();
-        let limits = Limits { grace: Duration::from_mins(1), examine: 64, remove: 64 };
+        let limits = Limits {
+            grace: Duration::from_mins(1),
+            examine: 64,
+            remove: 64,
+        };
         let removed = sweep_orphans(&browsers, &referenced, &limits);
 
         assert_eq!(removed, vec!["orphan-old".to_string()], "wrong set removed");
@@ -395,14 +432,24 @@ mod tests {
         profile(&browsers, "agent-a", Duration::from_secs(0));
         profile(&browsers, "agent-b", Duration::from_secs(0));
 
-        let limits = || Limits { grace: GRACE, examine: 64, remove: 64 };
+        let limits = || Limits {
+            grace: GRACE,
+            examine: 64,
+            remove: 64,
+        };
         let a_sees: HashSet<String> = std::iter::once("agent-b".to_string()).collect();
         let b_sees: HashSet<String> = std::iter::once("agent-a".to_string()).collect();
         assert!(sweep_orphans(&browsers, &a_sees, &limits()).is_empty());
         assert!(sweep_orphans(&browsers, &b_sees, &limits()).is_empty());
 
-        assert!(browsers.join("agent-a").is_dir(), "agent-a's fresh profile was deleted");
-        assert!(browsers.join("agent-b").is_dir(), "agent-b's fresh profile was deleted");
+        assert!(
+            browsers.join("agent-a").is_dir(),
+            "agent-a's fresh profile was deleted"
+        );
+        assert!(
+            browsers.join("agent-b").is_dir(),
+            "agent-b's fresh profile was deleted"
+        );
         std::fs::remove_dir_all(&browsers).ok();
     }
 
@@ -415,7 +462,11 @@ mod tests {
         }
         let referenced = HashSet::new();
 
-        let limits = Limits { grace: Duration::from_mins(1), examine: 32, remove: 3 };
+        let limits = Limits {
+            grace: Duration::from_mins(1),
+            examine: 32,
+            remove: 3,
+        };
         let removed = sweep_orphans(&browsers, &referenced, &limits);
         assert_eq!(removed.len(), 3, "removal cap ignored: {removed:?}");
         assert_eq!(
@@ -435,7 +486,11 @@ mod tests {
         }
         let referenced = HashSet::new();
         for _ in 0..40 {
-            let limits = Limits { grace: Duration::from_mins(1), examine: 2, remove: 1 };
+            let limits = Limits {
+                grace: Duration::from_mins(1),
+                examine: 2,
+                remove: 1,
+            };
             if sweep_orphans(&browsers, &referenced, &limits).is_empty()
                 && std::fs::read_dir(&browsers).unwrap().count() == 0
             {
@@ -463,7 +518,11 @@ mod tests {
         let removed = sweep_orphans(
             &browsers,
             &HashSet::new(),
-            &Limits { grace: Duration::from_secs(0), examine: 64, remove: 64 },
+            &Limits {
+                grace: Duration::from_secs(0),
+                examine: 64,
+                remove: 64,
+            },
         );
         assert!(removed.is_empty(), "removed a non-profile: {removed:?}");
         assert!(browsers.join("notes").join("keep.txt").exists());
@@ -478,9 +537,16 @@ mod tests {
         let removed = sweep_orphans(
             &browsers,
             &HashSet::new(),
-            &Limits { grace: Duration::from_mins(1), examine: 64, remove: 64 },
+            &Limits {
+                grace: Duration::from_mins(1),
+                examine: 64,
+                remove: 64,
+            },
         );
-        assert!(removed.is_empty(), "the default profile was swept: {removed:?}");
+        assert!(
+            removed.is_empty(),
+            "the default profile was swept: {removed:?}"
+        );
         std::fs::remove_dir_all(&browsers).ok();
     }
 
@@ -495,7 +561,10 @@ mod tests {
         );
         assert_eq!(singleton_lock_holder("no-separator"), Hold::Unknown);
         let host = this_host().unwrap();
-        assert_eq!(singleton_lock_holder(&format!("{host}-notanumber")), Hold::Unknown);
+        assert_eq!(
+            singleton_lock_holder(&format!("{host}-notanumber")),
+            Hold::Unknown
+        );
         assert_eq!(
             singleton_lock_holder(&format!("{host}-{}", std::process::id())),
             Hold::Held

@@ -1,5 +1,5 @@
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::cdp::client::CdpClient;
 
@@ -71,9 +71,35 @@ pub async fn scroll_to_load(client: &CdpClient) -> Result<(), crate::BoxError> {
     Ok(())
 }
 
+/// The records `extract` reports, whichever tree they came from. The one entry point for CLI,
+/// pipe and batch, so the DOM/a11y choice and the scroll rule cannot drift into two versions.
+///
+/// `run_a11y` scrolls internally, so only the DOM path takes an explicit `scroll_to_load` —
+/// otherwise `--a11y --scroll` scrolls twice.
+pub async fn collect(
+    client: &CdpClient,
+    selector: Option<&str>,
+    limit: usize,
+    scroll: bool,
+    a11y: bool,
+) -> Result<ExtractResult, crate::BoxError> {
+    if a11y {
+        return run_a11y(client, limit, scroll).await;
+    }
+    if scroll {
+        scroll_to_load(client).await?;
+    }
+    run(client, selector, limit).await
+}
 
-/// Extract records from the accessibility tree instead of the DOM, by delegating to `inspect`
-/// with a role filter. Works on SPAs whose DOM structure is opaque but whose roles are clean.
+/// Extract records from the accessibility tree instead of the DOM. Works on SPAs whose DOM
+/// structure is opaque but whose roles are clean.
+///
+/// ONE reading, filtered four times in memory. A read per candidate role saw four different page
+/// states, so which pattern "won" depended on when the page settled — and with `--scroll` it also
+/// ran four scroll loops. The read asks for all four roles at once so `--scroll`'s `limit` still
+/// counts records rather than every node on the page; `apply_role_filter` then partitions it at
+/// no CDP cost.
 pub async fn run_a11y(
     client: &CdpClient,
     limit: usize,
@@ -81,36 +107,41 @@ pub async fn run_a11y(
 ) -> Result<ExtractResult, crate::BoxError> {
     let roles = ["article", "listitem", "row", "treeitem"];
 
-    for role in &roles {
-        let filter = vec![*role];
-        // Read-only: no baseline is stored, so the filtered rendering is enough.
-        let text = if scroll {
-            super::inspect::scroll_collect(client, false, None, Some(&filter), limit).await?.shown().to_string()
-        } else {
-            super::inspect::run(client, false, None, None, Some(&filter)).await?.text
-        };
+    // Read-only: no baseline is stored, so the filtered rendering is enough.
+    let text = if scroll {
+        super::inspect::scroll_collect(client, false, None, Some(&roles), limit)
+            .await?
+            .shown()
+            .to_string()
+    } else {
+        super::inspect::run(client, false, None, None, Some(&roles))
+            .await?
+            .text
+    };
 
-        let lines: Vec<&str> = text.lines()
+    for role in &roles {
+        let one_role = [*role];
+        let filtered =
+            crate::snapshot_render::apply_role_filter(text.clone(), Some(&one_role), None);
+        let lines: Vec<&str> = filtered
+            .lines()
             .filter(|l| l.trim().starts_with("uid="))
             .collect();
 
-        if lines.is_empty() { continue; }
-        if lines.len() < 3 && !scroll { continue; }
+        if lines.is_empty() {
+            continue;
+        }
+        if lines.len() < 3 && !scroll {
+            continue;
+        }
 
-        let items: Vec<Value> = lines.iter()
+        let items: Vec<Value> = lines
+            .iter()
             .take(limit)
             .map(|line| {
-                // `uid=n123 article "the text"` → the text.
-                let text = line.trim();
-                let text = if let Some(rest) = text.strip_prefix("uid=") {
-                    if let Some((_uid_role, content)) = rest.split_once('"') {
-                        content.trim_end_matches('"')
-                    } else {
-                        rest.splitn(3, ' ').last().unwrap_or(rest)
-                    }
-                } else {
-                    text
-                };
+                // `uid=n123 article "the text"` → the text, decoded.
+                let text = crate::snapshot_render::name_in(line)
+                    .unwrap_or_else(|| line.trim().to_string());
                 json!({"text": text})
             })
             .collect();
@@ -123,7 +154,10 @@ pub async fn run_a11y(
         });
     }
 
-    Err("No repeating a11y pattern found. Try: extract (DOM mode) or inspect --filter \"article\"".into())
+    Err(
+        "No repeating a11y pattern found. Try: extract (DOM mode) or inspect --filter \"article\""
+            .into(),
+    )
 }
 
 /// Bind `_scope`/`_limit`, embed [`EXTRACT_JS`], and call `extract(_scope, _limit)`. Wrapped
@@ -175,9 +209,10 @@ pub async fn run(
 
     // A hint with no items means no pattern was found; propagate it as an error.
     if let Some(hint) = parsed.get("hint").and_then(Value::as_str)
-        && items.is_empty() {
-            return Err(hint.into());
-        }
+        && items.is_empty()
+    {
+        return Err(hint.into());
+    }
 
     Ok(ExtractResult {
         items,
@@ -261,7 +296,9 @@ mod tests {
     #[test]
     fn a_truncated_extract_says_how_many_it_is_holding_back() {
         let result = ExtractResult {
-            items: (0..10).map(|i| json!({"title": format!("item {i}")})).collect(),
+            items: (0..10)
+                .map(|i| json!({"title": format!("item {i}")}))
+                .collect(),
             count: 30,
             pattern: "div.card".into(),
         };
@@ -277,8 +314,14 @@ mod tests {
         );
 
         let v = to_json(&result);
-        assert_eq!(v["count"], 30, "count stays the number of records on the page");
-        assert_eq!(v["returned"], 10, "returned is what the caller actually holds");
+        assert_eq!(
+            v["count"], 30,
+            "count stays the number of records on the page"
+        );
+        assert_eq!(
+            v["returned"], 10,
+            "returned is what the caller actually holds"
+        );
         assert_eq!(v["truncated"], true, "and the divergence is flagged: {v}");
         assert!(
             v["hint"].as_str().unwrap_or_default().contains("--limit"),
@@ -310,7 +353,9 @@ mod tests {
         );
         // The deadline promise must actually resolve, or racing it is pointless.
         assert!(
-            SCROLL_JS.contains("const deadline = new Promise(resolve => setTimeout(resolve, DEADLINE_MS))"),
+            SCROLL_JS.contains(
+                "const deadline = new Promise(resolve => setTimeout(resolve, DEADLINE_MS))"
+            ),
             "deadline must be a self-resolving timeout"
         );
         assert!(SCROLL_JS.contains("MAX_SCROLLS = 10"));

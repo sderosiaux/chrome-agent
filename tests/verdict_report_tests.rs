@@ -12,7 +12,10 @@ mod common;
 use common::TestBrowser;
 
 fn run_cli(args: &[&str]) -> (String, i32) {
-    let output = Command::new(common::binary()).args(args).output().expect("Failed to run chrome-agent");
+    let output = Command::new(common::binary())
+        .args(args)
+        .output()
+        .expect("Failed to run chrome-agent");
     (
         String::from_utf8_lossy(&output.stdout).to_string(),
         output.status.code().unwrap_or(-1),
@@ -60,13 +63,19 @@ fn an_action_that_moves_nothing_says_so_instead_of_going_quiet() {
     }
     // The first press moves focus to the document; the second changes nothing at all.
     let first = act(b.name(), &["press", "ArrowDown"]);
-    assert_eq!(first["verdict"], "changed", "focus moving is still the page reacting: {first}");
+    assert_eq!(
+        first["verdict"], "changed",
+        "focus moving is still the page reacting: {first}"
+    );
     assert_eq!(first["verdict_reason"], "focus_only", "{first}");
     let v = act(b.name(), &["press", "ArrowDown"]);
     assert_eq!(v["verdict"], "unchanged", "{v}");
     assert_eq!(v["verdict_reason"], "identical_tree", "{v}");
     assert!(
-        v["verdict_hint"].as_str().unwrap_or_default().contains("overlay"),
+        v["verdict_hint"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("overlay"),
         "an empty delta is not proof the action did nothing, and the hint must say so: {v}"
     );
 }
@@ -112,7 +121,10 @@ fn the_first_action_of_a_session_says_it_had_no_baseline() {
     assert_eq!(v["verdict"], "unknown", "{v}");
     assert_eq!(v["verdict_reason"], "no_baseline", "{v}");
     assert!(
-        v["verdict_hint"].as_str().unwrap_or_default().contains("inspect"),
+        v["verdict_hint"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("inspect"),
         "an agent that cannot be told what happened must be told how to find out: {v}"
     );
 }
@@ -123,7 +135,10 @@ fn verdict_off_says_it_did_not_look() {
     if !open_with_baseline(b.name()) {
         return;
     }
-    let v = act(b.name(), &["--verdict", "off", "click", "--selector", "#add"]);
+    let v = act(
+        b.name(),
+        &["--verdict", "off", "click", "--selector", "#add"],
+    );
     assert_eq!(v["verdict"], "not_checked", "{v}");
     assert_eq!(v["verdict_reason"], "reporting_disabled", "{v}");
     assert!(v["changed"].is_null(), "off still means no page read: {v}");
@@ -209,12 +224,18 @@ fn batch_carries_the_verdict_as_well() {
         .stderr(Stdio::null())
         .spawn()
         .expect("spawn batch");
-    child.stdin.as_mut().unwrap().write_all(script.as_bytes()).unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(script.as_bytes())
+        .unwrap();
     drop(child.stdin.take());
     let out = child.wait_with_output().expect("batch output");
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        stdout.contains("\"verdict\":\"changed\"") && stdout.contains("\"verdict_reason\":\"tree_delta\""),
+        stdout.contains("\"verdict\":\"changed\"")
+            && stdout.contains("\"verdict_reason\":\"tree_delta\""),
         "batch must answer like the other two modes: {stdout}"
     );
 }
@@ -244,20 +265,33 @@ fn an_intercepted_click_says_so_on_the_first_action_after_a_goto() {
     }
     let b = TestBrowser::new("verdict-demo-sequence");
     // A snapshot of a DIFFERENT page, which is what makes the identity stale below.
-    let (_, code) = run_cli(&["--browser", b.name(), "goto", &common::fixture_url("verdict_states.html")]);
+    let (_, code) = run_cli(&[
+        "--browser",
+        b.name(),
+        "goto",
+        &common::fixture_url("verdict_states.html"),
+    ]);
     if code != 0 {
         common::unavailable("goto verdict_states.html failed");
         return;
     }
     let (_, code) = run_cli(&["--browser", b.name(), "inspect"]);
     assert_eq!(code, 0, "inspect should establish the baseline");
-    let (_, code) = run_cli(&["--browser", b.name(), "goto", &common::fixture_url("click_overlay.html")]);
+    let (_, code) = run_cli(&[
+        "--browser",
+        b.name(),
+        "goto",
+        &common::fixture_url("click_overlay.html"),
+    ]);
     assert_eq!(code, 0, "goto click_overlay.html");
 
     let v = act(b.name(), &["click", "--selector", "#target"]);
     assert_eq!(v["verdict"], "intercepted", "{v}");
     assert_eq!(v["verdict_reason"], "hit_test_receiver", "{v}");
-    assert_eq!(v["intercepted_by"]["id"], "scrim", "and it names the receiver: {v}");
+    assert_eq!(
+        v["intercepted_by"]["id"], "scrim",
+        "and it names the receiver: {v}"
+    );
     assert_eq!(
         v["changed"]["document_changed"], true,
         "the identity reading still rides on the response: {v}"
@@ -290,7 +324,12 @@ fn run_pipe(label: &str, extra: &[&str], script: &str) -> Vec<Value> {
         .stderr(Stdio::null())
         .spawn()
         .expect("spawn pipe");
-    child.stdin.as_mut().unwrap().write_all(script.as_bytes()).unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(script.as_bytes())
+        .unwrap();
     drop(child.stdin.take());
     let out = child.wait_with_output().expect("pipe output");
     let stdout = String::from_utf8_lossy(&out.stdout);

@@ -2,8 +2,8 @@ use std::io::{Read as _, Write as _};
 use std::net::{SocketAddr, TcpListener};
 use std::path::PathBuf;
 use std::process::{Command, Output};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -17,7 +17,6 @@ fn run(browser: &str, args: &[&str]) -> Output {
         .output()
         .expect("run chrome-agent")
 }
-
 
 struct FixtureServer {
     addr: SocketAddr,
@@ -134,13 +133,22 @@ fn download_rejects_declared_and_streamed_overflow_without_writing_a_file() {
             ],
         );
         let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(!output.status.success(), "oversized {path} unexpectedly succeeded");
+        assert!(
+            !output.status.success(),
+            "oversized {path} unexpectedly succeeded"
+        );
         assert!(
             stderr.contains("download exceeded 10 bytes"),
             "unexpected error for {path}: {stderr}"
         );
-        assert!(!stderr.contains("12345678901"), "response bytes leaked in error output");
-        assert!(!output_path.exists(), "rejected download wrote {output_path:?}");
+        assert!(
+            !stderr.contains("12345678901"),
+            "response bytes leaked in error output"
+        );
+        assert!(
+            !output_path.exists(),
+            "rejected download wrote {output_path:?}"
+        );
     }
 
     let exact_path = temp_dir.join("exact");

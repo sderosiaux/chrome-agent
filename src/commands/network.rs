@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::cdp::client::CdpClient;
 use crate::cdp::types::EvaluateResult;
@@ -124,9 +124,10 @@ pub async fn run_retroactive(
         .filter_map(|e| {
             let url = e.get("url")?.as_str()?.to_string();
             if let Some(ref f) = filter_lower
-                && !url.to_ascii_lowercase().contains(f.as_str()) {
-                    return None;
-                }
+                && !url.to_ascii_lowercase().contains(f.as_str())
+            {
+                return None;
+            }
             let initiator = e.get("type").and_then(Value::as_str).unwrap_or("other");
             let duration = e.get("duration").and_then(Value::as_u64).unwrap_or(0);
             let size = e.get("size").and_then(Value::as_u64).unwrap_or(0);
@@ -144,7 +145,7 @@ pub async fn run_retroactive(
             Some(NetworkEntry {
                 url,
                 resource_type: initiator.to_string(), // initiatorType, not the HTTP method
-                status: 0,                             // not exposed by Resource Timing
+                status: 0,                            // not exposed by Resource Timing
                 content_type,
                 body: None,
                 body_omitted: None,
@@ -174,7 +175,8 @@ pub async fn run_live(
 
     let mut entries: Vec<NetworkEntry> = Vec::new();
     // request id -> index into `entries`, for bodies still in flight.
-    let mut pending_bodies: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut pending_bodies: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
 
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -220,7 +222,9 @@ pub async fn run_live(
             continue;
         }
 
-        let Some(response) = event.params.get("response") else { continue };
+        let Some(response) = event.params.get("response") else {
+            continue;
+        };
 
         let url = response
             .get("url")
@@ -229,14 +233,12 @@ pub async fn run_live(
             .to_string();
 
         if let Some(ref f) = filter_lower
-            && !url.to_ascii_lowercase().contains(f.as_str()) {
-                continue;
-            }
+            && !url.to_ascii_lowercase().contains(f.as_str())
+        {
+            continue;
+        }
 
-        let status = response
-            .get("status")
-            .and_then(Value::as_u64)
-            .unwrap_or(0) as u16;
+        let status = response.get("status").and_then(Value::as_u64).unwrap_or(0) as u16;
         let content_type = response
             .get("mimeType")
             .and_then(Value::as_str)
@@ -308,6 +310,76 @@ async fn fill_body(client: &CdpClient, request_id: &str, entry: &mut NetworkEntr
     }
 }
 
+/// What one `network` invocation observed. `--abort` blocks for a window and reports what it
+/// stopped; every other shape reports what it saw.
+pub enum Capture {
+    Blocked {
+        pattern: String,
+        seconds: u64,
+        urls: Vec<String>,
+    },
+    Requests(Vec<NetworkEntry>),
+}
+
+impl Capture {
+    /// The response every mode carries.
+    #[must_use]
+    pub fn to_json(&self) -> serde_json::Value {
+        match self {
+            Self::Blocked { urls, .. } => json!({"ok": true, "blocked": urls.len(), "urls": urls}),
+            Self::Requests(entries) => json!({"ok": true, "requests": entries}),
+        }
+    }
+
+    /// The CLI's rendering. `--abort` names its window before the list, because the command
+    /// blocked for it.
+    #[must_use]
+    pub fn text(&self) -> String {
+        match self {
+            Self::Blocked {
+                pattern,
+                seconds,
+                urls,
+            } => {
+                let mut out =
+                    format!("Blocking requests matching \"{pattern}\" for {seconds}s...\n");
+                for url in urls {
+                    out += &format!("  blocked: {url}\n");
+                }
+                out + &format!("Blocked {} request(s)", urls.len())
+            }
+            Self::Requests(entries) => format_text(entries),
+        }
+    }
+}
+
+/// One `network` invocation, whichever of its three shapes was asked for. The single entry point
+/// for CLI, pipe and batch — the branch used to be written out in both.
+pub async fn collect(
+    client: &CdpClient,
+    filter: Option<&str>,
+    body: bool,
+    live: Option<u64>,
+    limit: usize,
+    abort: Option<&str>,
+) -> Result<Capture, crate::BoxError> {
+    if let Some(pattern) = abort {
+        // `--live` doubles as the abort window (default 30s).
+        let seconds = live.unwrap_or(30);
+        let urls = run_route_abort(client, pattern, seconds).await?;
+        return Ok(Capture::Blocked {
+            pattern: pattern.to_string(),
+            seconds,
+            urls,
+        });
+    }
+    let entries = match live {
+        Some(secs) => run_live(client, filter, body, limit, secs).await?,
+        None => run_retroactive(client, filter, limit).await?,
+    };
+    Ok(Capture::Requests(entries))
+}
+
 /// Render the entries as a table.
 pub fn format_text(entries: &[NetworkEntry]) -> String {
     if entries.is_empty() {
@@ -315,12 +387,20 @@ pub fn format_text(entries: &[NetworkEntry]) -> String {
     }
     let mut out = format!(
         "{:<70} {:>6} {:<14} {:>8} {:>6}\n{}\n",
-        "URL", "STATUS", "TYPE", "SIZE", "MS",
+        "URL",
+        "STATUS",
+        "TYPE",
+        "SIZE",
+        "MS",
         "-".repeat(110)
     );
     for e in entries {
         let url_display = crate::truncate::truncate_str(&e.url, 67, "...");
-        let status_str = if e.status == 0 { "-".to_string() } else { e.status.to_string() };
+        let status_str = if e.status == 0 {
+            "-".to_string()
+        } else {
+            e.status.to_string()
+        };
         let size_str = if e.size == 0 {
             "-".to_string()
         } else if e.size >= 1024 {
@@ -384,7 +464,9 @@ pub async fn run_route_abort(
     pattern: &str,
     timeout_secs: u64,
 ) -> Result<Vec<String>, crate::BoxError> {
-    client.send("Fetch.enable", fetch_enable_params(pattern)).await?;
+    client
+        .send("Fetch.enable", fetch_enable_params(pattern))
+        .await?;
 
     // Subscribe ONCE, before the loop: re-subscribing per iteration drops the
     // `Fetch.requestPaused` events emitted during the `Fetch.failRequest` round trip.
@@ -401,8 +483,7 @@ pub async fn run_route_abort(
             loop {
                 match rx.recv().await {
                     Ok(ev) if ev.method == "Fetch.requestPaused" => return Some(ev),
-                    Ok(_)
-                    | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
                 }
             }
@@ -411,10 +492,14 @@ pub async fn run_route_abort(
 
         match event {
             Ok(Some(ev)) => {
-                let request_id = ev.params.get("requestId")
+                let request_id = ev
+                    .params
+                    .get("requestId")
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
-                let url = ev.params.get("request")
+                let url = ev
+                    .params
+                    .get("request")
                     .and_then(|r| r.get("url"))
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
@@ -468,7 +553,6 @@ mod tests {
         assert_eq!(fail["requestId"], "req-42");
         assert_eq!(fail["reason"], "BlockedByClient");
     }
-
 
     #[test]
     fn a_url_filter_overrides_the_mime_allowlist() {

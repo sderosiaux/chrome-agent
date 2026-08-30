@@ -66,8 +66,8 @@ Use `--browser <name>` to give each parallel agent its own Chrome and its own se
 | Command | What it does |
 |---|---|
 | `goto <url> [--inspect] [--max-depth N] [--header "K: V"]` | Navigate. Auto-prefixes `https://`. Reports `landed` (see below). `--header` is repeatable. |
-| `back` | History back. |
-| `forward` | History forward. |
+| `back [--inspect]` | History back. Answers `url` and `title`, or a message when there is nowhere to go. |
+| `forward [--inspect]` | History forward. Same answer, opposite sign. |
 | `history [--filter pattern]` | Pages this browser visited. |
 | `tabs` | List open tabs. |
 | `status` | Browsers the session store knows, their pids, and running ones no entry claims (`orphan=`). |
@@ -93,14 +93,14 @@ Use `--browser <name>` to give each parallel agent its own Chrome and its own se
 |---|---|
 | `click <uid> [--selector "css"] [--xy X,Y] [--inspect]` | Click. Falls back to JS `.click()` when there is no box model. |
 | `dblclick <uid>` | Double-click, same three targeting modes. |
-| `fill --uid <uid> <value> [--inspect]` | Fill an input. Also `--selector "css"`. Reports what the page kept. |
+| `fill --uid <uid> <value> [--secret] [--inspect]` | Fill an input. Also `--selector "css"`. Reports what the page kept; `--secret` reports only its length. |
 | `fill-form <uid=val>...` | Fill several fields, one kept-value report per field. |
 | `select --uid <uid> <value>` | Pick a `<select>` option by value or visible text. |
 | `check <uid>` | Ensure a checkbox or radio is checked. Idempotent. |
 | `uncheck <uid>` | Ensure a checkbox is unchecked. Idempotent. |
 | `upload --uid <uid> <file>...` | Upload to a file input. Paths are validated first. |
 | `drag <from-uid> <to-uid>` | Mouse-event drag. Does not work with the HTML5 Drag and Drop API. |
-| `type <text> [--selector "css"]` | Type into the focused element. |
+| `type <text> [--selector "css"] [--secret]` | Type into the focused element. `--secret` withholds the length too. |
 | `press <key>` | Enter, Tab, Escape, and so on. |
 | `scroll <down\|up\|uid>` | Scroll the page, or an element into view. |
 | `hover <uid>` | Hover. |
@@ -225,8 +225,9 @@ Navigation Timing API so `--stealth` is untouched.
 
 ### Exit codes
 
-`0` success · `1` error, including a bad flag · `2` an assertion did not hold · `130` Ctrl+C.
-Only `assert` ever returns `2`, so CI can tell "the page is wrong" from "the tool broke".
+`0` success · `1` error, including a bad flag · `2` a claim this tool made did not hold · `130`
+Ctrl+C. `2` is an assertion, or a macro guard — the two things this tool promises about a page —
+so CI can tell "the page is wrong" from "the tool broke".
 
 ```bash
 chrome-agent fill --selector "#coupon" "SAVE10"
@@ -242,8 +243,13 @@ stopped on it exits 1, not 2.
 
 ### Pipe and batch mode
 
-One process, one connection, one JSON line per response. About 10x faster than spawning a process
-per command, and uids stay stable across the whole sequence.
+One process, one connection, one JSON line per response, and uids stay stable across the whole
+sequence — which is the reason to reach for it. The speed-up is real and small: pipe removes about
+12 ms of per-command overhead, worth **1.5x on a stream of reads** (nine commands, 352 ms → 228 ms)
+and **1.1x on a stream of fills and clicks** (2029 ms → 1908 ms), where the settle window and the
+tree re-read pipe does not touch are most of the cost. Measured on 2026-08-30, M4 Max, Chrome 152,
+median of 9 runs; reproduce with `./scripts/measure-pipe.sh`, record in
+`docs/design/pipe-latency.md`.
 
 ```bash
 echo '{"cmd":"goto","url":"https://example.com","inspect":true}
@@ -256,7 +262,8 @@ one response object rather than one line per command. Pass `--json` to get that 
 without it the CLI prints one text line per entry.
 
 The CLI `batch` process exits `1` when `--stop-on-error` cut the run short — never `2`, which stays
-reserved for an assertion that did not hold. Without `--stop-on-error` it ran every command it was
+reserved for a claim that did not hold: the process is reporting that the batch stopped, not saying
+anything about the page. Without `--stop-on-error` it ran every command it was
 given and exits `0` even when one of them failed: read `ok`, on the batch and on each result.
 
 ### Iframes
@@ -316,6 +323,11 @@ chrome-agent macro run cancel --var email=ada@example.com
 Guards are `delivery: target_hit`, the verdict word, `value.verbatim`, and a `url_matches` built
 from the path — never the change counters, a uid, or a duration. A step aimed by uid is recorded by
 role and accessible name, or refused. Secret fields become declared parameters, never file content.
+
+A guard that was checked and did not hold exits **2**, the same code as a failed assertion: it is
+the same kind of claim. The report carries `stopped_by: "guard"` along with which guard, what it
+expected and what was there. A run that stopped for any other reason — the step itself failed, the
+page could not be read, the macro file is missing — exits `1`, with `stopped_by: "error"`.
 
 ### Files on disk
 
@@ -384,7 +396,7 @@ main-world script is invisible from the isolated world.
 |---|---|---|---|
 | Language | Rust | Rust | TypeScript |
 | Binary | 3 MB, zero runtime | 3 MB CLI + dashboard + cloud providers | Node + Playwright |
-| Startup | ~10ms (session reuse) | daemon (fast after first) | cold start |
+| Startup | 12 ms measured, one command on a running browser | daemon (fast after first) | cold start |
 | UID stability | `backendNodeId`, stable across inspects | sequential `@e1`, reassigned per snapshot | N/A (selectors) |
 | Action + observe | `--inspect` flag, one call | separate snapshot call | separate call |
 | Compliance reporting | `verdict`/`next` on every action | no | no |
@@ -394,7 +406,7 @@ main-world script is invisible from the isolated world.
 | PDF export | `pdf` | none | none |
 | MCP server | none | yes | yes |
 | Cloud providers, iOS/Safari | none (`--connect` to anything) | yes | none |
-| Codebase | ~23.2K lines of Rust in `src/` (blank and comment-only lines excluded; a test re-measures it) | ~40K lines (their figure, unverified here) | Playwright |
+| Codebase | ~28.2K lines of Rust in `src/` (blank and comment-only lines excluded; a test re-measures it) | ~40K lines (their figure, unverified here) | Playwright |
 
 `extract` finds repeating records structurally with MDR/DEPTA-style heuristics (sibling similarity,
 content heterogeneity, text-to-link ratio) instead of asking a model to read the DOM. On the Hacker
@@ -417,7 +429,7 @@ embeds a full LLM usage guide, and every error carries a `hint` naming the next 
 permissions: `{"permissions": {"allow": ["Bash(chrome-agent *)"]}}`.
 
 ```
-chrome-agent (3 MB Rust binary, ~23.2K lines of Rust in src/)
+chrome-agent (3 MB Rust binary, ~28.2K lines of Rust in src/)
     | CDP over WebSocket
     v
 Chrome (headless by default, no Node.js, no runtime)

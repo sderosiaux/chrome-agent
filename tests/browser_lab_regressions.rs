@@ -4,8 +4,8 @@
 use std::io::{Read as _, Write as _};
 use std::net::{SocketAddr, TcpListener};
 use std::process::{Command, Output, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -21,7 +21,6 @@ fn run(browser: &str, args: &[&str]) -> Output {
         .output()
         .expect("run chrome-agent")
 }
-
 
 fn run_pipe(browser: &str, commands: &[Value], timeout: Duration) -> Vec<Value> {
     let mut child = Command::new(common::binary())
@@ -56,7 +55,9 @@ fn run_pipe(browser: &str, commands: &[Value], timeout: Duration) -> Vec<Value> 
         }
         if Instant::now() >= deadline {
             let _ = child.kill();
-            let output = child.wait_with_output().expect("collect timed-out pipe output");
+            let output = child
+                .wait_with_output()
+                .expect("collect timed-out pipe output");
             panic!(
                 "pipe timed out after {timeout:?}; stdout={} stderr={}",
                 String::from_utf8_lossy(&output.stdout),
@@ -79,7 +80,9 @@ struct RedirectServer {
 fn serve(mut stream: std::net::TcpStream) {
     // On macOS/BSD an accepted socket inherits the listener's O_NONBLOCK, so a read before
     // the request lands returns WouldBlock.
-    stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
     let mut request = Vec::new();
     let mut chunk = [0_u8; 1024];
     // Read until the headers end rather than trusting a single read to deliver them.
@@ -89,7 +92,11 @@ fn serve(mut stream: std::net::TcpStream) {
             Ok(n) => request.extend_from_slice(&chunk[..n]),
         }
     }
-    let first_line = String::from_utf8_lossy(&request).lines().next().unwrap_or("").to_string();
+    let first_line = String::from_utf8_lossy(&request)
+        .lines()
+        .next()
+        .unwrap_or("")
+        .to_string();
     let Some(path) = first_line.split_whitespace().nth(1) else {
         return; // no request line: a preconnect, not a page load
     };
@@ -213,7 +220,9 @@ fn the_fixture_server_answers_nothing_to_a_connection_that_sends_nothing() {
 
     let server = RedirectServer::start();
     let mut silent = TcpStream::connect(server.addr).expect("preconnect");
-    silent.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    silent
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
 
     let mut response = String::new();
     let _ = silent.read_to_string(&mut response);
@@ -242,7 +251,11 @@ fn frame_can_switch_from_an_iframe_into_a_nested_iframe() {
         Duration::from_secs(30),
     );
     assert_eq!(responses.len(), 4, "responses: {responses:?}");
-    assert_eq!(responses[2]["ok"], true, "nested frame switch: {:?}", responses[2]);
+    assert_eq!(
+        responses[2]["ok"], true,
+        "nested frame switch: {:?}",
+        responses[2]
+    );
     assert_eq!(responses[3]["result"], "NESTED GRANDCHILD CONTENT");
 }
 

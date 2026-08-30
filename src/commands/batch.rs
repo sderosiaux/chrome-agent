@@ -2,9 +2,10 @@ use serde_json::Value;
 
 /// Parse a JSON array of commands from stdin input.
 pub fn parse_commands(input: &str) -> Result<Vec<Value>, crate::BoxError> {
-    let parsed: Value = serde_json::from_str(input.trim())
-        .map_err(|e| format!("Invalid JSON: {e}"))?;
-    let arr = parsed.as_array()
+    let parsed: Value =
+        serde_json::from_str(input.trim()).map_err(|e| format!("Invalid JSON: {e}"))?;
+    let arr = parsed
+        .as_array()
         .ok_or("batch: expected a JSON array of commands")?;
     if arr.is_empty() {
         return Err("batch: empty command array".into());

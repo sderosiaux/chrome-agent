@@ -79,12 +79,16 @@ LLM USAGE GUIDE:
     chrome-agent click --selector "button.submit"
     chrome-agent click --xy 100,200
     chrome-agent fill --uid n20 "value"
+    chrome-agent fill --uid n21 "hunter2" --secret
     chrome-agent fill-form n20="a@b.com" n30="pass"
     chrome-agent hover n30
     chrome-agent dblclick n42
     chrome-agent drag n10 n20
     # Every targeted action returns the `uid` it actually resolved -- check it against the delta.
     # drag uses mouse events: works with Sortable.js and React DnD, NOT with HTML5 drag-and-drop.
+    # Exactly one targeting mode per invocation: two is a usage error before a browser is opened.
+    # --secret on fill/type reports lengths instead of the value; it only ever ADDS redaction to
+    # what the element already declares, and there is no flag that turns redaction off.
 
   Form controls:
     chrome-agent select --uid n15 "Option text"
@@ -98,6 +102,7 @@ LLM USAGE GUIDE:
 
   Keyboard:
     chrome-agent type "search term"
+    chrome-agent type "hunter2" --secret
     chrome-agent press Enter
     # A key NAME that is not mapped is refused rather than dispatched with virtual key code 0.
 
@@ -107,6 +112,9 @@ LLM USAGE GUIDE:
     chrome-agent goto https://api.co --header "Authorization: Bearer XYZ"
     chrome-agent back
     chrome-agent forward
+    # back/forward are one step with a sign: both answer {url, title}, and at either end of the
+    # stack {"ok":true,"title":"","message":"Already at first|last history entry"} with no url.
+    # Both drop the uid map, as goto does -- re-inspect after either.
     chrome-agent scroll down
     chrome-agent wait text "Success"
     chrome-agent wait network-idle --idle-ms 800 --timeout 20
@@ -215,8 +223,13 @@ LLM USAGE GUIDE:
     # observed and the action's own next -- nothing is repaired, retried or skipped. Steps that
     # promise nothing are marked unguarded. replay re-runs a `pipe --record` file raw: no guards,
     # no parameters.
+    # Exit 2 when a guard was CHECKED and did not hold (stopped_by "guard") -- the same code as a
+    # failed assert, because it is the same kind of claim. Exit 1 when the run stopped for any
+    # other reason (stopped_by "error"): the step itself failed, the page could not be read, the
+    # macro file is missing or malformed. Branch on stopped_by, or on the exit code.
 
-  Pipe and batch (one connection, ~10x faster, uids stay valid across commands):
+  Pipe and batch (one connection, uids stay valid across commands; ~12 ms less overhead per
+  command -- measured 1.5x on a read stream, 1.1x on fills and clicks, so use it for the uids):
     echo '{"cmd":"goto","url":"https://example.com","inspect":true}' | chrome-agent pipe
     echo '[{"cmd":"goto","url":"https://example.com"},{"cmd":"inspect"}]' | chrome-agent --json batch
     chrome-agent --json batch --stop-on-error
@@ -292,9 +305,11 @@ LLM USAGE GUIDE:
   JSON mode and exit codes:
     chrome-agent --json goto https://example.com
     # -> {"ok":true,"url":"...","title":"..."}; errors are {"ok":false,"error":"...","hint":"..."}
-    # on stdout with exit 1. Exit codes: 0 success · 1 error (also a bad flag) · 2 an assertion
-    # did not hold · 130 Ctrl+C. A failed assertion prints {"ok":false,"assertion":{...}} on
-    # stdout with exit 2; without --json that line goes to stderr and stdout stays empty.
+    # on stdout with exit 1. Exit codes: 0 success · 1 error (also a bad flag) · 2 a claim this
+    # tool made did not hold · 130 Ctrl+C. Exactly two things return 2: a failed assertion, and
+    # a `macro run` guard that was checked and did not hold. A failed assertion prints
+    # {"ok":false,"assertion":{...}} on stdout with exit 2; without --json that line goes to
+    # stderr and stdout stays empty.
     # A batch --stop-on-error that stopped exits 1, with its response still on stdout.
 
   Cost and correctness notes:

@@ -13,7 +13,10 @@ mod common;
 use common::TestBrowser;
 
 fn run_cli(args: &[&str]) -> (String, i32) {
-    let output = Command::new(common::binary()).args(args).output().expect("Failed to run chrome-agent");
+    let output = Command::new(common::binary())
+        .args(args)
+        .output()
+        .expect("Failed to run chrome-agent");
     (
         String::from_utf8_lossy(&output.stdout).to_string(),
         output.status.code().unwrap_or(-1),
@@ -66,7 +69,10 @@ fn a_target_moving_inside_the_viewport_is_refused_rather_than_aimed_at() {
         response["delivery"], "not_settled",
         "a point still moving cannot be claimed, viewport or not: {response}"
     );
-    assert_eq!(response["verdict_reason"], "scroll_not_settled", "{response}");
+    assert_eq!(
+        response["verdict_reason"], "scroll_not_settled",
+        "{response}"
+    );
     assert_eq!(
         response["dispatched"],
         Value::Bool(false),

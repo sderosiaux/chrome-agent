@@ -129,7 +129,11 @@ pub const fn classify(
         (_, Delivery::OffTarget) => (Verdict::Unknown, "aim_point_off_target"),
         (_, Delivery::Intercepted) => (
             Verdict::Intercepted,
-            if delivered.modal_receiver { "modal_dialog" } else { "hit_test_receiver" },
+            if delivered.modal_receiver {
+                "modal_dialog"
+            } else {
+                "hit_test_receiver"
+            },
         ),
         // One verdict, two reasons: the recovery differs, and `value_reverted` on a phone mask
         // would be a token saying something false.
@@ -142,8 +146,20 @@ pub const fn classify(
         // ---- GROUP B: depends on comparing the stored tree with the live one. -------------
         // Identity first within the group: without it the uid spaces may belong to different
         // documents and every count below is meaningless.
-        (Observation::Compared { identity_known: false, .. }, _) => (Verdict::Unknown, "identity_unreadable"),
-        (Observation::Compared { document_changed: true, .. }, _) => (Verdict::Navigated, "document_replaced"),
+        (
+            Observation::Compared {
+                identity_known: false,
+                ..
+            },
+            _,
+        ) => (Verdict::Unknown, "identity_unreadable"),
+        (
+            Observation::Compared {
+                document_changed: true,
+                ..
+            },
+            _,
+        ) => (Verdict::Navigated, "document_replaced"),
         // A field held a value before this action and holds none after it. Above `tree_delta`
         // because it IS one, and only the reason separates "the page moved" from "the page moved
         // and dropped what you had typed". The verdict stays `changed`: a form that clears itself
@@ -166,13 +182,19 @@ pub const fn classify(
         // window. Without the window it falls to the floor below. Above `focus_only` because a
         // proven hit is better delivery evidence than focus churn, and clicking anything
         // focusable moves focus — `focus_only` first would make `no_effect` unreachable.
-        (Observation::Compared { edits: 0, moved: 0, .. }, Delivery::TargetHit)
-            if delivered.observed_after_ms.is_some() =>
-        {
-            (Verdict::NoEffect, "delivered_no_change")
-        }
+        (
+            Observation::Compared {
+                edits: 0, moved: 0, ..
+            },
+            Delivery::TargetHit,
+        ) if delivered.observed_after_ms.is_some() => (Verdict::NoEffect, "delivered_no_change"),
         // Without that proof, focus churn is the only sign the action arrived at all.
-        (Observation::Compared { focus_moved: true, .. }, _) => (Verdict::Changed, "focus_only"),
+        (
+            Observation::Compared {
+                focus_moved: true, ..
+            },
+            _,
+        ) => (Verdict::Changed, "focus_only"),
         (Observation::Compared { .. }, _) => (Verdict::Unchanged, "identical_tree"),
     };
     // Carried, not classified: a Group A rung can be true about the handle while the page around
@@ -183,7 +205,11 @@ pub const fn classify(
             PageSight::Readable
         }
     };
-    Assessment { verdict, reason, page }
+    Assessment {
+        verdict,
+        reason,
+        page,
+    }
 }
 
 /// The human gloss, the next-step token and the two hint tables, all read off an `Assessment`.
@@ -217,7 +243,11 @@ mod tests {
     }
 
     const fn intercepted(modal_receiver: bool) -> Delivered {
-        Delivered { how: Delivery::Intercepted, modal_receiver, observed_after_ms: None }
+        Delivered {
+            how: Delivery::Intercepted,
+            modal_receiver,
+            observed_after_ms: None,
+        }
     }
 
     /// No mouse event, or no answer from the hit test.
@@ -239,7 +269,11 @@ mod tests {
     #[test]
     fn every_silent_case_names_itself() {
         let cases = [
-            (Observation::ReportingDisabled, Verdict::NotChecked, "reporting_disabled"),
+            (
+                Observation::ReportingDisabled,
+                Verdict::NotChecked,
+                "reporting_disabled",
+            ),
             (Observation::ReadFailed, Verdict::Unknown, "read_failed"),
             (Observation::NoBaseline, Verdict::Unknown, "no_baseline"),
             (compared(0, 0, false), Verdict::Unchanged, "identical_tree"),
@@ -249,7 +283,10 @@ mod tests {
             let got = plain(observation);
             assert_eq!(got.verdict, verdict, "for {observation:?}");
             assert_eq!(got.reason, reason, "for {observation:?}");
-            assert!(seen.insert((got.verdict, got.reason)), "two silences share a name: {got:?}");
+            assert!(
+                seen.insert((got.verdict, got.reason)),
+                "two silences share a name: {got:?}"
+            );
         }
     }
 
@@ -290,12 +327,19 @@ mod tests {
     /// A pre-dispatch measurement outranks a post-dispatch one: the delta belongs to the scrim.
     #[test]
     fn an_interception_outranks_the_delta_it_caused() {
-        for observation in [compared(4, 0, true), compared(0, 0, true), compared(0, 0, false)] {
+        for observation in [
+            compared(4, 0, true),
+            compared(0, 0, true),
+            compared(0, 0, false),
+        ] {
             let got = mouse(observation, intercepted(false));
             assert_eq!(got.verdict, Verdict::Intercepted, "for {observation:?}");
             assert_eq!(got.reason, "hit_test_receiver");
         }
-        assert_eq!(mouse(compared(1, 0, false), intercepted(true)).reason, "modal_dialog");
+        assert_eq!(
+            mouse(compared(1, 0, false), intercepted(true)).reason,
+            "modal_dialog"
+        );
     }
 
     /// `document_replaced` means "I cannot compare two trees"; a hit test does not need them.
@@ -309,11 +353,20 @@ mod tests {
             focus_moved: false,
             values_lost: 0,
         };
-        assert_eq!(mouse(navigated, intercepted(false)).verdict, Verdict::Intercepted);
+        assert_eq!(
+            mouse(navigated, intercepted(false)).verdict,
+            Verdict::Intercepted
+        );
         assert_eq!(mouse(navigated, intercepted(true)).reason, "modal_dialog");
         // Nothing dispatched is a fact about this action, whatever the document did.
         for how in [Delivery::NotSettled, Delivery::OffTarget] {
-            let got = mouse(navigated, Delivered { how, ..Delivered::NOT_PROBED });
+            let got = mouse(
+                navigated,
+                Delivered {
+                    how,
+                    ..Delivered::NOT_PROBED
+                },
+            );
             assert_eq!(got.verdict, Verdict::Unknown, "for {how:?}");
             assert_ne!(got.reason, "document_replaced");
         }
@@ -331,9 +384,16 @@ mod tests {
             focus_moved: false,
             values_lost: 0,
         };
-        for how in [Delivery::TargetHit, Delivery::JsDispatch, Delivery::NotProbed] {
-            let delivered =
-                Delivered { how, modal_receiver: false, observed_after_ms: Some(60) };
+        for how in [
+            Delivery::TargetHit,
+            Delivery::JsDispatch,
+            Delivery::NotProbed,
+        ] {
+            let delivered = Delivered {
+                how,
+                modal_receiver: false,
+                observed_after_ms: Some(60),
+            };
             let got = classify(navigated, delivered, Postcondition::NotRead);
             assert_eq!(got.verdict, Verdict::Navigated, "for {how:?}");
             assert_eq!(got.reason, "document_replaced");
@@ -343,7 +403,11 @@ mod tests {
     /// A page that empties the field still moves focus, and `focus_only` would read as success.
     #[test]
     fn a_value_the_page_did_not_keep_outranks_the_delta_beside_it() {
-        for observation in [compared(0, 0, true), compared(4, 0, true), compared(0, 2, false)] {
+        for observation in [
+            compared(0, 0, true),
+            compared(4, 0, true),
+            compared(0, 2, false),
+        ] {
             let got = reverted(observation);
             assert_eq!(got.verdict, Verdict::NotKept, "for {observation:?}");
             assert_eq!(got.reason, "value_reverted");
@@ -388,8 +452,15 @@ mod tests {
         };
         assert_eq!(reverted(navigated).verdict, Verdict::NotKept);
         // Nothing dispatched, or another element took it: both explain the missing value.
-        for how in [Delivery::NotSettled, Delivery::OffTarget, Delivery::Intercepted] {
-            let delivered = Delivered { how, ..Delivered::NOT_PROBED };
+        for how in [
+            Delivery::NotSettled,
+            Delivery::OffTarget,
+            Delivery::Intercepted,
+        ] {
+            let delivered = Delivered {
+                how,
+                ..Delivered::NOT_PROBED
+            };
             let got = classify(compared(0, 0, false), delivered, Postcondition::Discarded);
             assert_ne!(got.verdict, Verdict::NotKept, "for {how:?}");
         }
@@ -411,9 +482,10 @@ mod tests {
         };
         assert_eq!(kept(lost).reason, "values_lost");
         // A confirmed write on a replaced page describes a field that is gone.
-        for (document_changed, identity_known, reason) in
-            [(true, true, "document_replaced"), (false, false, "identity_unreadable")]
-        {
+        for (document_changed, identity_known, reason) in [
+            (true, true, "document_replaced"),
+            (false, false, "identity_unreadable"),
+        ] {
             let observation = Observation::Compared {
                 document_changed,
                 identity_known,
@@ -431,9 +503,17 @@ mod tests {
     fn a_confirmed_write_the_tree_cannot_show_is_not_reported_as_focus_alone() {
         for observation in [compared(0, 0, true), compared(0, 0, false)] {
             let got = classify(observation, Delivered::NOT_PROBED, Postcondition::Kept);
-            assert_eq!(got.verdict, Verdict::Changed, "the write did change the page: {got:?}");
+            assert_eq!(
+                got.verdict,
+                Verdict::Changed,
+                "the write did change the page: {got:?}"
+            );
             assert_eq!(got.reason, "value_kept");
-            assert_ne!(plain(observation).reason, got.reason, "and the old answer is gone");
+            assert_ne!(
+                plain(observation).reason,
+                got.reason,
+                "and the old answer is gone"
+            );
         }
     }
 
@@ -457,14 +537,25 @@ mod tests {
     fn a_confirmed_write_on_an_unread_page_still_says_inspect() {
         use crate::verdict_words::Next;
 
-        let blind = classify(Observation::ReadFailed, Delivered::NOT_PROBED, Postcondition::Kept);
+        let blind = classify(
+            Observation::ReadFailed,
+            Delivered::NOT_PROBED,
+            Postcondition::Kept,
+        );
         assert_eq!(blind.verdict, Verdict::Changed);
         assert_eq!(blind.reason, "value_kept");
         assert_eq!(blind.page, PageSight::Unreadable);
-        assert_eq!(next_for(blind), Next::Inspect, "carrying on while blind is the one refusal");
+        assert_eq!(
+            next_for(blind),
+            Next::Inspect,
+            "carrying on while blind is the one refusal"
+        );
         let hint = hint_for(blind).expect("the blindness has to be said somewhere");
         assert!(hint.contains("inspect"), "{hint}");
-        assert!(hint.contains("what else moved"), "and name what is unknown: {hint}");
+        assert!(
+            hint.contains("what else moved"),
+            "and name what is unknown: {hint}"
+        );
 
         // The same rung with the page in hand keeps `proceed` and needs no advice.
         for observation in [
@@ -485,9 +576,12 @@ mod tests {
     fn no_verdict_answers_proceed_about_a_page_it_could_not_read() {
         use crate::verdict_words::Next;
 
-        for postcondition in
-            [Postcondition::NotRead, Postcondition::Kept, Postcondition::Discarded, Postcondition::Rewritten]
-        {
+        for postcondition in [
+            Postcondition::NotRead,
+            Postcondition::Kept,
+            Postcondition::Discarded,
+            Postcondition::Rewritten,
+        ] {
             for how in [
                 Delivery::TargetHit,
                 Delivery::Intercepted,
@@ -496,13 +590,26 @@ mod tests {
                 Delivery::JsDispatch,
                 Delivery::NotProbed,
             ] {
-                let delivered = Delivered { how, modal_receiver: false, observed_after_ms: Some(60) };
+                let delivered = Delivered {
+                    how,
+                    modal_receiver: false,
+                    observed_after_ms: Some(60),
+                };
                 let blind = classify(Observation::ReadFailed, delivered, postcondition);
-                assert_ne!(next_for(blind), Next::Proceed, "{} / {}", blind.verdict, blind.reason);
+                assert_ne!(
+                    next_for(blind),
+                    Next::Proceed,
+                    "{} / {}",
+                    blind.verdict,
+                    blind.reason
+                );
             }
         }
         // The retry survives: nothing was dispatched, so there is nothing to be blind about.
-        let not_settled = Delivered { how: Delivery::NotSettled, ..Delivered::NOT_PROBED };
+        let not_settled = Delivered {
+            how: Delivery::NotSettled,
+            ..Delivered::NOT_PROBED
+        };
         let got = classify(Observation::ReadFailed, not_settled, Postcondition::NotRead);
         assert_eq!(next_for(got), Next::Retry);
     }
@@ -510,8 +617,15 @@ mod tests {
     /// A failed delivery explains a value more than the value explains the delivery.
     #[test]
     fn a_confirmed_write_does_not_outrank_a_delivery_that_failed() {
-        for how in [Delivery::NotSettled, Delivery::OffTarget, Delivery::Intercepted] {
-            let delivered = Delivered { how, ..Delivered::NOT_PROBED };
+        for how in [
+            Delivery::NotSettled,
+            Delivery::OffTarget,
+            Delivery::Intercepted,
+        ] {
+            let delivered = Delivered {
+                how,
+                ..Delivered::NOT_PROBED
+            };
             let got = classify(compared(0, 0, true), delivered, Postcondition::Kept);
             assert_ne!(got.reason, "value_kept", "for {how:?}");
         }
@@ -552,7 +666,10 @@ mod tests {
         assert_eq!(got.verdict, Verdict::Changed, "the page did move: {got:?}");
         assert_eq!(got.reason, "values_lost");
         let hint = hint_for(got).expect("a values_lost hint");
-        assert!(hint.contains("values_lost"), "the hint names the field to read: {hint}");
+        assert!(
+            hint.contains("values_lost"),
+            "the hint names the field to read: {hint}"
+        );
         assert!(
             hint.contains("cleared itself"),
             "and states the ambiguity rather than declaring a failure: {hint}"
@@ -562,9 +679,10 @@ mod tests {
     /// A Group B rung: with no comparable tree there is no "before" to have lost anything from.
     #[test]
     fn a_lost_value_does_not_outrank_the_document_it_was_measured_in() {
-        for (document_changed, identity_known, reason) in
-            [(true, true, "document_replaced"), (false, false, "identity_unreadable")]
-        {
+        for (document_changed, identity_known, reason) in [
+            (true, true, "document_replaced"),
+            (false, false, "identity_unreadable"),
+        ] {
             let got = plain(Observation::Compared {
                 document_changed,
                 identity_known,
@@ -580,22 +698,32 @@ mod tests {
     /// Collapsing the two would put `value_reverted` on every phone and currency mask on the web.
     #[test]
     fn an_emptied_field_and_a_rewritten_one_do_not_share_a_reason() {
-        let emptied = classify(compared(0, 0, true), Delivered::NOT_PROBED, Postcondition::Discarded);
-        let rewritten =
-            classify(compared(0, 0, true), Delivered::NOT_PROBED, Postcondition::Rewritten);
+        let emptied = classify(
+            compared(0, 0, true),
+            Delivered::NOT_PROBED,
+            Postcondition::Discarded,
+        );
+        let rewritten = classify(
+            compared(0, 0, true),
+            Delivered::NOT_PROBED,
+            Postcondition::Rewritten,
+        );
         assert_eq!(emptied.verdict, Verdict::NotKept);
         assert_eq!(rewritten.verdict, Verdict::NotKept);
         assert_eq!(emptied.reason, "value_reverted");
         assert_eq!(rewritten.reason, "value_rewritten");
-        assert_ne!(hint_for(emptied), hint_for(rewritten), "two recoveries, two hints");
+        assert_ne!(
+            hint_for(emptied),
+            hint_for(rewritten),
+            "two recoveries, two hints"
+        );
     }
 
     /// Both hints stop the retry: re-filling produces the same answer and edits the page again.
     #[test]
     fn the_not_kept_hints_forbid_the_refill_and_name_the_field() {
         for postcondition in [Postcondition::Discarded, Postcondition::Rewritten] {
-            let assessment =
-                classify(compared(0, 0, true), Delivered::NOT_PROBED, postcondition);
+            let assessment = classify(compared(0, 0, true), Delivered::NOT_PROBED, postcondition);
             let hint = hint_for(assessment).expect("a not_kept hint");
             assert!(
                 hint.contains("value.actual"),
@@ -636,7 +764,10 @@ mod tests {
         assert_eq!(got.verdict, Verdict::Changed);
         assert_eq!(got.reason, "focus_only");
         // Same for a synthetic click, which performs no hit test.
-        let js = Delivered { how: Delivery::JsDispatch, ..hit(60) };
+        let js = Delivered {
+            how: Delivery::JsDispatch,
+            ..hit(60)
+        };
         assert_eq!(mouse(compared(0, 0, true), js).reason, "focus_only");
     }
 
@@ -657,8 +788,11 @@ mod tests {
     #[test]
     fn no_effect_is_refused_without_proof_of_delivery() {
         for how in [Delivery::JsDispatch, Delivery::NotProbed] {
-            let delivered =
-                Delivered { how, modal_receiver: false, observed_after_ms: Some(120) };
+            let delivered = Delivered {
+                how,
+                modal_receiver: false,
+                observed_after_ms: Some(120),
+            };
             let got = mouse(compared(0, 0, false), delivered);
             assert_eq!(got.verdict, Verdict::Unchanged, "for {how:?}");
             assert_eq!(got.reason, "identical_tree");
@@ -684,22 +818,41 @@ mod tests {
         assert_eq!(got.verdict, Verdict::NoEffect);
         assert_eq!(got.reason, "delivered_no_change");
 
-        let unmeasured = Delivered { observed_after_ms: None, ..hit(0) };
-        assert_eq!(mouse(compared(0, 0, false), unmeasured).verdict, Verdict::Unchanged);
+        let unmeasured = Delivered {
+            observed_after_ms: None,
+            ..hit(0)
+        };
+        assert_eq!(
+            mouse(compared(0, 0, false), unmeasured).verdict,
+            Verdict::Unchanged
+        );
     }
 
     /// Every "I don't know" — and every claim with a blind spot — tells the agent what to do.
     #[test]
     fn each_uncertain_verdict_carries_a_way_forward() {
-        for observation in [Observation::ReadFailed, Observation::NoBaseline, compared(0, 0, false)] {
-            assert!(hint_for(plain(observation)).is_some(), "no hint for {observation:?}");
+        for observation in [
+            Observation::ReadFailed,
+            Observation::NoBaseline,
+            compared(0, 0, false),
+        ] {
+            assert!(
+                hint_for(plain(observation)).is_some(),
+                "no hint for {observation:?}"
+            );
         }
         for delivered in [
             intercepted(false),
             intercepted(true),
             hit(60),
-            Delivered { how: Delivery::NotSettled, ..Delivered::NOT_PROBED },
-            Delivered { how: Delivery::OffTarget, ..Delivered::NOT_PROBED },
+            Delivered {
+                how: Delivery::NotSettled,
+                ..Delivered::NOT_PROBED
+            },
+            Delivered {
+                how: Delivery::OffTarget,
+                ..Delivered::NOT_PROBED
+            },
         ] {
             let assessment = mouse(compared(0, 0, false), delivered);
             assert!(hint_for(assessment).is_some(), "no hint for {delivered:?}");
@@ -713,6 +866,9 @@ mod tests {
         for blind_spot in ["canvas", "CSS-only", "after the window"] {
             assert!(hint.contains(blind_spot), "hint omits {blind_spot}: {hint}");
         }
-        assert!(hint.contains("observed_after_ms"), "hint must scope itself to the window");
+        assert!(
+            hint.contains("observed_after_ms"),
+            "hint must scope itself to the window"
+        );
     }
 }

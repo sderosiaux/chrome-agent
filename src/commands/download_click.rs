@@ -10,12 +10,12 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::sync::broadcast;
 
 use crate::cdp::client::CdpClient;
 use crate::cdp::types::CdpEvent;
-use crate::session::{liveness, Liveness};
+use crate::session::{Liveness, liveness};
 
 /// What Chrome said about the download this action armed for.
 pub enum Transfer {
@@ -34,13 +34,22 @@ pub enum Transfer {
         waited_ms: u64,
     },
     /// Chrome reported `completed` and named the file it wrote.
-    Completed { began: Began, bytes: u64, temp_path: PathBuf },
+    Completed {
+        began: Began,
+        bytes: u64,
+        temp_path: PathBuf,
+    },
     /// Chrome reported `canceled`. `why` separates our own size cap (the caller can raise it)
     /// from the browser's or the page's (they cannot).
     Canceled { began: Began, why: Cancelled },
     /// Began and unfinished when the window closed. The bytes on disk are a prefix, so nothing
     /// is moved into place and no path is claimed.
-    Unfinished { began: Began, received: u64, total: u64, waited_ms: u64 },
+    Unfinished {
+        began: Began,
+        received: u64,
+        total: u64,
+        waited_ms: u64,
+    },
 }
 
 /// Who ended a download that started.
@@ -83,9 +92,9 @@ impl Armed {
         }
         // Whatever the rename does, `clean_up` must not remove this.
         self.preserved = true;
-        let kept = self
-            .dir
-            .with_file_name(format!("{KEPT_PREFIX}{}-{}", std::process::id(), nanos()));
+        let kept =
+            self.dir
+                .with_file_name(format!("{KEPT_PREFIX}{}-{}", std::process::id(), nanos()));
         if std::fs::rename(&self.dir, &kept).is_ok() {
             self.dir.clone_from(&kept);
             return Some(kept);
@@ -151,14 +160,21 @@ pub async fn arm(client: &CdpClient) -> Result<Armed, crate::BoxError> {
         )
         .into());
     }
-    Ok(Armed { events, dir, preserved: false })
+    Ok(Armed {
+        events,
+        dir,
+        preserved: false,
+    })
 }
 
 /// Give downloads back to Chrome's own setting. Best effort, unchecked: the override dies with
 /// the CDP session anyway, so this only matters for the rest of a `pipe` session.
 pub async fn disarm(client: &CdpClient) {
     let _ = client
-        .call::<_, Value>("Browser.setDownloadBehavior", json!({"behavior": "default"}))
+        .call::<_, Value>(
+            "Browser.setDownloadBehavior",
+            json!({"behavior": "default"}),
+        )
         .await;
 }
 
@@ -204,7 +220,9 @@ pub async fn collect(
             }
             "Browser.downloadProgress" => {
                 // A second, concurrent download is not this action's answer. First guid wins.
-                let Some(current) = began.as_ref() else { continue };
+                let Some(current) = began.as_ref() else {
+                    continue;
+                };
                 if string_field(&event.params, "guid") != current.guid {
                     continue;
                 }
@@ -214,10 +232,7 @@ pub async fn collect(
                 if !cancelled_by_us && last_received.max(last_total) > max_bytes {
                     cancelled_by_us = true;
                     let _ = client
-                        .call::<_, Value>(
-                            "Browser.cancelDownload",
-                            json!({"guid": current.guid}),
-                        )
+                        .call::<_, Value>("Browser.cancelDownload", json!({"guid": current.guid}))
                         .await;
                     // Do not return yet: Chrome answers with a `canceled` progress event and
                     // deletes the partial file on that transition.
@@ -236,9 +251,16 @@ pub async fn collect(
                         if cancelled_by_us {
                             // Finished before the cancel landed, and over the cap: remove it.
                             let _ = std::fs::remove_file(&temp_path);
-                            return Transfer::Canceled { began, why: Cancelled::ExceededCap };
+                            return Transfer::Canceled {
+                                began,
+                                why: Cancelled::ExceededCap,
+                            };
                         }
-                        return Transfer::Completed { began, bytes: last_received, temp_path };
+                        return Transfer::Completed {
+                            began,
+                            bytes: last_received,
+                            temp_path,
+                        };
                     }
                     "canceled" => {
                         let began = began.take().expect("guarded above");
@@ -260,7 +282,14 @@ pub async fn collect(
     // itself. Anything Chrome wrote is taken out of the sweep's reach BEFORE the outcome is
     // built, so the two cannot disagree.
     let kept = if dropped > 0 { armed.preserve() } else { None };
-    conclude(dropped, began, kept, last_received, last_total, elapsed_ms(started))
+    conclude(
+        dropped,
+        began,
+        kept,
+        last_received,
+        last_total,
+        elapsed_ms(started),
+    )
 }
 
 /// What the end of the wait means. Pure, so the rule "a dropped event never produces a confident
@@ -274,11 +303,21 @@ fn conclude(
     waited_ms: u64,
 ) -> Transfer {
     if dropped > 0 {
-        return Transfer::EvidenceLost { began, dropped, kept, waited_ms };
+        return Transfer::EvidenceLost {
+            began,
+            dropped,
+            kept,
+            waited_ms,
+        };
     }
     match began {
         None => Transfer::NeverBegan { waited_ms },
-        Some(began) => Transfer::Unfinished { began, received, total, waited_ms },
+        Some(began) => Transfer::Unfinished {
+            began,
+            received,
+            total,
+            waited_ms,
+        },
     }
 }
 
@@ -295,7 +334,7 @@ pub fn place(
     }
     // `rename` works when both sides share a filesystem; an `--out` on another volume copies.
     if std::fs::rename(completed_path, &destination).is_err() {
-        std::fs::copy(completed_path, &destination)?;
+        copy_without_following(completed_path, &destination)?;
         let _ = std::fs::remove_file(completed_path);
     }
     #[cfg(unix)]
@@ -305,6 +344,34 @@ pub fn place(
     }
     let bytes = std::fs::metadata(&destination)?.len();
     Ok((destination.display().to_string(), bytes))
+}
+
+/// The cross-device half of [`place`], with `rename`'s semantics rather than `copy`'s.
+///
+/// `fs::rename` REPLACES a symlink at the destination; `fs::copy` FOLLOWS it and writes through
+/// to wherever it points. The destination name is server-supplied (`sanitize_name` keeps it
+/// inside the directory, and says nothing about what is already there), so the two halves of one
+/// verb disagreed about whether a planted `~/.chrome-agent/tmp/report.csv -> ~/.ssh/authorized_keys`
+/// gets replaced or written through.
+///
+/// Unlink first, then `create_new`: the unlink removes the LINK, and `create_new` refuses
+/// anything that appears in between rather than opening it.
+fn copy_without_following(
+    from: &std::path::Path,
+    to: &std::path::Path,
+) -> Result<(), crate::BoxError> {
+    let _ = std::fs::remove_file(to);
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut target = options.open(to)?;
+    let mut source = std::fs::File::open(from)?;
+    std::io::copy(&mut source, &mut target)?;
+    Ok(())
 }
 
 /// Drop the private directory, retrying while Chrome is still writing into it.
@@ -372,7 +439,8 @@ fn is_abandoned(name: &str) -> bool {
     let Some((pid, _nanos)) = rest.split_once('-') else {
         return false;
     };
-    pid.parse::<u32>().is_ok_and(|pid| liveness(pid) == Liveness::Dead)
+    pid.parse::<u32>()
+        .is_ok_and(|pid| liveness(pid) == Liveness::Dead)
 }
 
 /// Where every file this tool writes without being told a path goes.
@@ -384,7 +452,11 @@ fn tmp_root() -> Result<PathBuf, crate::BoxError> {
 /// A directory only this invocation writes to, so `allowAndName`'s guid-named files cannot
 /// collide with a concurrent agent's.
 fn incoming_dir(tmp: &Path) -> PathBuf {
-    tmp.join(format!("{INCOMING_PREFIX}{}-{}", std::process::id(), nanos()))
+    tmp.join(format!(
+        "{INCOMING_PREFIX}{}-{}",
+        std::process::id(),
+        nanos()
+    ))
 }
 
 /// Wall clock since the epoch, in nanoseconds: what separates two directories one process opens.
@@ -396,14 +468,20 @@ fn nanos() -> u128 {
 }
 
 fn string_field(params: &Value, key: &str) -> String {
-    params.get(key).and_then(Value::as_str).unwrap_or_default().to_string()
+    params
+        .get(key)
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string()
 }
 
 /// Byte counters are CDP `number`s. `as_u64` alone reports 0 for a float; casting the float
 /// directly turns Chrome's `-1` ("size unknown") into 18 exabytes, which `--max-bytes` would
 /// then cancel over.
 fn number_field(params: &Value, key: &str) -> u64 {
-    let Some(value) = params.get(key) else { return 0 };
+    let Some(value) = params.get(key) else {
+        return 0;
+    };
     if let Some(exact) = value.as_u64() {
         return exact;
     }
@@ -451,7 +529,11 @@ mod tests {
     /// `clean_up` never read the events.
     fn armed_over(dir: PathBuf) -> Armed {
         let (_tx, events) = broadcast::channel(1);
-        Armed { events, dir, preserved: false }
+        Armed {
+            events,
+            dir,
+            preserved: false,
+        }
     }
 
     /// The bug this guards: a lost `Browser.downloadWillBegin` (it fires once, and the channel
@@ -466,17 +548,29 @@ mod tests {
         };
 
         assert!(
-            matches!(conclude(0, None, None, 0, 0, 12), Transfer::NeverBegan { .. }),
+            matches!(
+                conclude(0, None, None, 0, 0, 12),
+                Transfer::NeverBegan { .. }
+            ),
             "with nothing dropped, an empty wait is still an answer"
         );
         assert!(
-            matches!(conclude(0, Some(began()), None, 3, 9, 12), Transfer::Unfinished { .. }),
+            matches!(
+                conclude(0, Some(began()), None, 3, 9, 12),
+                Transfer::Unfinished { .. }
+            ),
             "with nothing dropped, a started-and-unfinished transfer is still an answer"
         );
 
         let kept = PathBuf::from("/tmp/kept-1-2");
         let lost = conclude(1, None, Some(kept.clone()), 0, 0, 12);
-        let Transfer::EvidenceLost { began: none, dropped, kept: where_, waited_ms } = lost else {
+        let Transfer::EvidenceLost {
+            began: none,
+            dropped,
+            kept: where_,
+            waited_ms,
+        } = lost
+        else {
             panic!("a drop with no terminal state cannot claim that nothing began");
         };
         assert!(none.is_none());
@@ -485,7 +579,10 @@ mod tests {
         assert_eq!(waited_ms, 12);
 
         assert!(
-            matches!(conclude(7, Some(began()), None, 3, 9, 12), Transfer::EvidenceLost { .. }),
+            matches!(
+                conclude(7, Some(began()), None, 3, 9, 12),
+                Transfer::EvidenceLost { .. }
+            ),
             "a drop after the download began may have eaten `completed`, so `incomplete` is a \
              claim this cannot make either"
         );
@@ -496,13 +593,27 @@ mod tests {
     #[test]
     fn a_directory_whose_evidence_was_lost_survives_both_sweeps() {
         let tmp = scratch("kept-dir");
-        let dir = transfer_dir(&tmp, &format!("{INCOMING_PREFIX}{}-1788086042802162000", std::process::id()));
+        let dir = transfer_dir(
+            &tmp,
+            &format!(
+                "{INCOMING_PREFIX}{}-1788086042802162000",
+                std::process::id()
+            ),
+        );
         let mut armed = armed_over(dir.clone());
 
-        let kept = armed.preserve().expect("a directory holding a file is kept");
-        assert!(!dir.exists(), "the transfer directory was left where a sweep can find it");
+        let kept = armed
+            .preserve()
+            .expect("a directory holding a file is kept");
+        assert!(
+            !dir.exists(),
+            "the transfer directory was left where a sweep can find it"
+        );
         assert!(kept.exists(), "the file was not moved anywhere");
-        assert_eq!(std::fs::read(kept.join("6f1c1f0e-guid")).unwrap(), b"partial");
+        assert_eq!(
+            std::fs::read(kept.join("6f1c1f0e-guid")).unwrap(),
+            b"partial"
+        );
         let name = kept.file_name().unwrap().to_string_lossy().into_owned();
         assert!(
             !name.starts_with(INCOMING_PREFIX),
@@ -511,7 +622,10 @@ mod tests {
 
         assert!(collect_abandoned(&tmp, COLLECT_CAP).is_empty());
         block_on(clean_up(&armed));
-        assert!(kept.exists(), "clean_up deleted a directory that may hold a completed file");
+        assert!(
+            kept.exists(),
+            "clean_up deleted a directory that may hold a completed file"
+        );
 
         std::fs::remove_dir_all(&tmp).ok();
     }
@@ -521,7 +635,10 @@ mod tests {
     #[test]
     fn an_empty_transfer_directory_is_not_kept() {
         let tmp = scratch("kept-empty");
-        let dir = tmp.join(format!("{INCOMING_PREFIX}{}-1788086042802162001", std::process::id()));
+        let dir = tmp.join(format!(
+            "{INCOMING_PREFIX}{}-1788086042802162001",
+            std::process::id()
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         let mut armed = armed_over(dir.clone());
 
@@ -531,6 +648,59 @@ mod tests {
         assert!(!dir.exists(), "an empty directory is still swept");
 
         std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// The destination name comes from the server. `fs::copy` follows a symlink sitting there
+    /// and writes through it; the file this verb produces must land where it says it did.
+    #[cfg(unix)]
+    #[test]
+    fn the_cross_device_copy_replaces_a_symlink_instead_of_writing_through_it() {
+        let tmp = scratch("copy-symlink");
+        let source = tmp.join("completed");
+        std::fs::write(&source, b"the download").unwrap();
+        let elsewhere = tmp.join("private-key");
+        std::fs::write(&elsewhere, b"untouched").unwrap();
+        let destination = tmp.join("report.csv");
+        std::os::unix::fs::symlink(&elsewhere, &destination).unwrap();
+
+        copy_without_following(&source, &destination).expect("the copy still lands");
+
+        assert_eq!(
+            std::fs::read(&elsewhere).unwrap(),
+            b"untouched",
+            "written through the link"
+        );
+        assert_eq!(std::fs::read(&destination).unwrap(), b"the download");
+        assert!(
+            !std::fs::symlink_metadata(&destination)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the link was replaced, not followed"
+        );
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// 0600 at creation, not after: a `--out` on another volume is the same file the rename
+    /// path narrows, and a window where it is world-readable is a window.
+    #[cfg(unix)]
+    #[test]
+    fn the_cross_device_copy_creates_the_file_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = scratch("copy-perms");
+        let source = tmp.join("completed");
+        std::fs::write(&source, b"bytes").unwrap();
+        let destination = tmp.join("out.bin");
+
+        copy_without_following(&source, &destination).expect("copy");
+
+        let mode = std::fs::metadata(&destination)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        std::fs::remove_dir_all(&tmp).ok();
+        assert_eq!(mode, 0o600, "got {mode:o}");
     }
 
     /// Run one future to completion on a current-thread runtime: `clean_up` is `async` only for
@@ -549,8 +719,8 @@ mod tests {
             .duration_since(SystemTime::UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or_default();
-        let dir = std::env::temp_dir()
-            .join(format!("chrome-agent-{tag}-{}-{nanos}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("chrome-agent-{tag}-{}-{nanos}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -567,8 +737,10 @@ mod tests {
     /// A pid nothing holds any more: spawned, waited on, and therefore reaped.
     #[cfg(unix)]
     fn a_reaped_pid() -> u32 {
-        let mut child =
-            std::process::Command::new("/bin/sh").args(["-c", "exit 0"]).spawn().expect("spawn");
+        let mut child = std::process::Command::new("/bin/sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .expect("spawn");
         let pid = child.id();
         child.wait().expect("wait");
         pid
@@ -587,15 +759,24 @@ mod tests {
             "the pid was recycled between the wait and the probe, so this proves nothing"
         );
 
-        let abandoned = transfer_dir(&tmp, &format!("{INCOMING_PREFIX}{dead}-1788086042802162000"));
+        let abandoned = transfer_dir(
+            &tmp,
+            &format!("{INCOMING_PREFIX}{dead}-1788086042802162000"),
+        );
         let live = transfer_dir(
             &tmp,
-            &format!("{INCOMING_PREFIX}{}-1788086042802162001", std::process::id()),
+            &format!(
+                "{INCOMING_PREFIX}{}-1788086042802162001",
+                std::process::id()
+            ),
         );
 
         let removed = collect_abandoned(&tmp, COLLECT_CAP);
 
-        assert!(!abandoned.exists(), "a directory nothing can write to any more was kept");
+        assert!(
+            !abandoned.exists(),
+            "a directory nothing can write to any more was kept"
+        );
         assert_eq!(removed.len(), 1, "{removed:?}");
         assert!(
             live.exists(),
@@ -631,13 +812,23 @@ mod tests {
         let dead = a_reaped_pid();
         assert_eq!(liveness(dead), Liveness::Dead, "the pid was recycled");
         for n in 0..5 {
-            transfer_dir(&tmp, &format!("{INCOMING_PREFIX}{dead}-178808604280216200{n}"));
+            transfer_dir(
+                &tmp,
+                &format!("{INCOMING_PREFIX}{dead}-178808604280216200{n}"),
+            );
         }
 
-        assert_eq!(collect_abandoned(&tmp, 2).len(), 2, "the cap is not applied");
+        assert_eq!(
+            collect_abandoned(&tmp, 2).len(),
+            2,
+            "the cap is not applied"
+        );
         assert_eq!(collect_abandoned(&tmp, 2).len(), 2);
         assert_eq!(collect_abandoned(&tmp, 2).len(), 1);
-        assert!(collect_abandoned(&tmp, 2).is_empty(), "the backlog did not drain");
+        assert!(
+            collect_abandoned(&tmp, 2).is_empty(),
+            "the backlog did not drain"
+        );
         std::fs::remove_dir_all(&tmp).ok();
     }
 }

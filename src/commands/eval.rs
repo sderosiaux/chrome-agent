@@ -1,4 +1,4 @@
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::cdp::client::CdpClient;
 use crate::cdp::types::EvaluateResult;
@@ -36,11 +36,25 @@ fn evaluate_params(client: &CdpClient, expression: &str) -> Value {
     params
 }
 
+/// What `--selector` actually evaluates: the caller's expression with `el` bound to the matched
+/// element, and a throw naming the selector when nothing matches.
+///
+/// One definition. `run::run` and `pipe_dispatch::dispatch_eval` each carried this format string,
+/// character for character.
+#[must_use]
+pub fn scoped_expression(expression: &str, selector: Option<&str>) -> String {
+    let Some(selector) = selector else {
+        return expression.to_string();
+    };
+    let escaped = serde_json::to_string(selector).unwrap_or_default();
+    format!(
+        "((el) => {{ if (!el) throw new Error('No element matches selector ' + {escaped}); \
+         return {expression} }})(document.querySelector({escaped}))"
+    )
+}
+
 /// Evaluate JS and return the raw `serde_json::Value` (for JSON mode).
-pub async fn run_raw(
-    client: &CdpClient,
-    expression: &str,
-) -> Result<Value, crate::BoxError> {
+pub async fn run_raw(client: &CdpClient, expression: &str) -> Result<Value, crate::BoxError> {
     let expression = maybe_block_scope(expression);
     let result: EvaluateResult = client
         .call("Runtime.evaluate", evaluate_params(client, &expression))
@@ -62,10 +76,7 @@ pub async fn run_raw(
 }
 
 /// Evaluate JS and return a display string (for text mode).
-pub async fn run(
-    client: &CdpClient,
-    expression: &str,
-) -> Result<String, crate::BoxError> {
+pub async fn run(client: &CdpClient, expression: &str) -> Result<String, crate::BoxError> {
     let expression = maybe_block_scope(expression);
     let result: EvaluateResult = client
         .call("Runtime.evaluate", evaluate_params(client, &expression))

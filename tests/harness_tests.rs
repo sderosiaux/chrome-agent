@@ -37,8 +37,14 @@ fn the_require_flag_reads_its_value_not_just_its_presence() {
     // edition 2024. Only the parse is pinned.
     assert!(!common::require_from(None), "unset means skips are allowed");
     assert!(common::require_from(Some("1")), "set means skips are fatal");
-    assert!(!common::require_from(Some("0")), "an explicit 0 opts back out");
-    assert!(!common::require_from(Some("")), "an empty value opts back out");
+    assert!(
+        !common::require_from(Some("0")),
+        "an explicit 0 opts back out"
+    );
+    assert!(
+        !common::require_from(Some("")),
+        "an empty value opts back out"
+    );
 }
 
 #[test]
@@ -51,7 +57,10 @@ fn a_missing_fixture_is_never_a_usable_url() {
 fn a_present_fixture_resolves_to_a_file_url() {
     let url = common::fixture_url("press_keys.html");
     assert!(url.starts_with("file:///"), "got {url}");
-    assert!(url.ends_with("/tests/fixtures/press_keys.html"), "got {url}");
+    assert!(
+        url.ends_with("/tests/fixtures/press_keys.html"),
+        "got {url}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -107,7 +116,9 @@ const SCANNER: &str = "tests/harness_tests.rs";
 /// Whether line `n` is exempt: the marker is on it, or on one of the 3 lines above it.
 fn exempt(lines: &[&str], n: usize) -> bool {
     let from = n.saturating_sub(3);
-    lines[from..=n].iter().any(|line| line.contains("isolation-exempt:"))
+    lines[from..=n]
+        .iter()
+        .any(|line| line.contains("isolation-exempt:"))
 }
 
 /// A hard-coded `--browser` name is a browser two concurrent runs share.
@@ -131,7 +142,10 @@ fn no_test_hard_codes_a_browser_name() {
                 .is_some_and(|rest| rest.trim_start().starts_with('"'));
             let bound_to_a_literal = line.trim_start().starts_with("let browser")
                 && line.contains('=')
-                && line.split('=').nth(1).is_some_and(|rest| rest.trim_start().starts_with('"'));
+                && line
+                    .split('=')
+                    .nth(1)
+                    .is_some_and(|rest| rest.trim_start().starts_with('"'));
             if after_flag || bound_to_a_literal {
                 offenders.push(format!("{name}:{}: {}", n + 1, line.trim()));
             }
@@ -246,9 +260,16 @@ fn a_unique_name_differs_from_the_last_one_and_carries_the_pid() {
     assert_ne!(first, second, "two names in one process collided: {first}");
     let pid = std::process::id().to_string();
     assert!(first.starts_with("iso-"), "{first}");
-    assert!(first.contains(&pid), "the pid separates concurrent runs: {first}");
+    assert!(
+        first.contains(&pid),
+        "the pid separates concurrent runs: {first}"
+    );
     let path = common::temp_path("iso", "jsonl");
     assert!(path.starts_with(std::env::temp_dir()), "{}", path.display());
-    assert!(path.to_string_lossy().ends_with(".jsonl"), "{}", path.display());
+    assert!(
+        path.to_string_lossy().ends_with(".jsonl"),
+        "{}",
+        path.display()
+    );
     assert_ne!(path, common::temp_path("iso", "jsonl"));
 }

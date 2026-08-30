@@ -10,7 +10,10 @@ mod common;
 use common::TestBrowser;
 
 fn run_cli(args: &[&str]) -> (String, i32) {
-    let output = Command::new(common::binary()).args(args).output().expect("Failed to run chrome-agent");
+    let output = Command::new(common::binary())
+        .args(args)
+        .output()
+        .expect("Failed to run chrome-agent");
     (
         String::from_utf8_lossy(&output.stdout).to_string(),
         output.status.code().unwrap_or(-1),
@@ -37,7 +40,13 @@ fn a_reverted_selection_is_not_reported_as_selected() {
         return;
     }
     let (stdout, code) = run_cli(&[
-        "--browser", b.name(), "--json", "select", "b", "--selector", "#controlled",
+        "--browser",
+        b.name(),
+        "--json",
+        "select",
+        "b",
+        "--selector",
+        "#controlled",
     ]);
     assert_ne!(
         code, 0,
@@ -56,7 +65,13 @@ fn a_kept_selection_reports_its_observation_window() {
         return;
     }
     let (stdout, code) = run_cli(&[
-        "--browser", b.name(), "--json", "select", "b", "--selector", "#plain",
+        "--browser",
+        b.name(),
+        "--json",
+        "select",
+        "b",
+        "--selector",
+        "#plain",
     ]);
     assert_eq!(code, 0, "{stdout}");
     let v: Value = serde_json::from_str(&stdout).expect("JSON response");
@@ -85,7 +100,8 @@ fn the_uid_path_reads_back_too() {
         .lines()
         .find_map(|l| {
             let l = l.trim();
-            l.contains("combobox").then(|| l.strip_prefix("uid=")?.split(' ').next())?
+            l.contains("combobox")
+                .then(|| l.strip_prefix("uid=")?.split(' ').next())?
         })
         .expect("a combobox uid in the snapshot");
 

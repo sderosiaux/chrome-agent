@@ -1,16 +1,105 @@
-use serde_json::json;
+use serde_json::{Value, json};
 
 use crate::BoxError;
 use crate::cli::{Cli, Command, DaemonAction, EmulateAction, WebmcpAction};
-use crate::run_helpers::{ReportPolicy, check_report, cmd_close, cmd_purge_orphans, cmd_status, cmd_stop, get_uid_map, json_output, output_action, output_action_with, output_goto, print_batch_text};
+use crate::page_ctx::PageCtx;
+use crate::pipe_command::{
+    EvalArgs, FillArgs, FillFormArgs, FrameArgs, HoverArgs, InspectArgs, PairArgs, PointerArgs,
+    PressArgs, ReadArgs, ScreenshotArgs, ScrollArgs, TextArgs, TypeArgs, UploadArgs, ValueArgs,
+    WaitArgs,
+};
+use crate::pipe_dispatch as dispatch;
+use crate::run_helpers::{
+    ActionReport, ReportPolicy, cmd_close, cmd_purge_orphans, cmd_status, cmd_stop, json_output,
+    output_action_with, output_goto, print_batch_text,
+};
 use crate::{commands, pipe, session};
+
+/// The CLI rendering of a dispatcher's response: `message` is the action's sentence and
+/// everything else it observed rides as details through [`output_action_with`], which owns the
+/// change report, `--inspect` and the text output.
+///
+/// The CLI never asks a dispatcher for `inspect`. `output_action_with` takes ONE reading and
+/// renders it twice — the baseline at full depth, the display at `--max-depth` — where a
+/// dispatcher's own `inspect` would take a second one.
+async fn output_dispatched(
+    ctx: &mut PageCtx<'_>,
+    mut value: Value,
+    report: &ActionReport,
+    json_mode: bool,
+) -> Result<(), BoxError> {
+    let msg = value
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let details = value
+        .as_object_mut()
+        .map(|map| {
+            map.remove("ok");
+            map.remove("message");
+            std::mem::take(map)
+        })
+        .filter(|map| !map.is_empty())
+        .map(Value::Object);
+    output_action_with(ctx, msg, report, json_mode, details).await
+}
+
+/// A read verb's response: JSON as-is, or the one string text mode prints for it.
+fn output_read(json_mode: bool, value: &Value, text: &str) {
+    if json_mode {
+        json_output(value);
+    } else {
+        println!("{text}");
+    }
+}
+
+/// One step through the history stack, in the CLI's words. The response is
+/// `dispatch::history_step`'s, so all three modes answer the same object at the boundary; text
+/// mode reads `url`'s presence to tell a navigation from a stated non-event.
+async fn output_history_step(
+    ctx: &mut PageCtx<'_>,
+    delta: i64,
+    inspect: bool,
+    max_depth: Option<usize>,
+    json_mode: bool,
+) -> Result<(), BoxError> {
+    let mut out = Box::pin(dispatch::history_step(ctx, delta)).await?;
+    // `--inspect` refills the map the step just cleared, as `goto --inspect` does.
+    if inspect && out.get("url").is_some() {
+        out["snapshot"] = json!(Box::pin(dispatch::attach_snapshot(ctx, max_depth)).await?);
+    }
+    if json_mode {
+        json_output(&out);
+        return Ok(());
+    }
+    let field = |key: &str| {
+        out.get(key)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    match out.get("url") {
+        Some(_) => println!("{} — {}", field("url"), field("title")),
+        None => println!("{}", field("message")),
+    }
+    if let Some(snapshot) = out.get("snapshot").and_then(Value::as_str) {
+        println!("{snapshot}");
+    }
+    Ok(())
+}
 
 /// CLI command dispatch.
 ///
+/// Every arm that also exists in pipe mode calls the SAME `pipe_dispatch::dispatch_*`, builds
+/// its typed args from clap and renders the response. What is left in each arm is the rendering
+/// — the one thing the two front ends genuinely do not share, since `--json` is a CLI flag and
+/// pipe mode is JSON by definition.
+///
 /// The biggest awaited futures here are `Box::pin`ned. Required, not style:
 /// `clippy::large_stack_frames` (denied in CI) sums every MIR local, and one `.await` per
-/// match arm summed to 527,450 bytes against a 512,000 limit even though the real state
-/// machine is 8,608. Un-boxing any of them re-trips the lint.
+/// match arm summed past the 512,000-byte limit even though the real state machine is a
+/// fraction of that. Un-boxing any of them re-trips the lint.
 pub async fn run(cli: Cli) -> Result<(), BoxError> {
     match cli.command {
         Command::Daemon { action } => {
@@ -23,7 +112,10 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
                     }
                     #[cfg(not(unix))]
                     {
-                        return Err("Daemon is not supported on Windows. Commands work without a daemon.".into());
+                        return Err(
+                            "Daemon is not supported on Windows. Commands work without a daemon."
+                                .into(),
+                        );
                     }
                 }
             }
@@ -38,7 +130,11 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
             return cmd_stop(cli.json).await;
         }
 
-        Command::Close { purge, purge_orphans, orphans } => {
+        Command::Close {
+            purge,
+            purge_orphans,
+            orphans,
+        } => {
             // Processes before profiles: a profile whose browser still runs is not
             // removable, so sweeping the disk first would skip the directories this pair
             // exists to reclaim.
@@ -68,14 +164,12 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
             return Box::pin(pipe::run_replay(&cli, file, vars.as_deref())).await;
         }
 
+        // Reads a file, not a page. One reading, two renderings — `to_json` is the shape the
+        // pipe's `history` answers with too.
         Command::History { ref filter, limit } => {
             let entries = commands::history::run(filter.as_deref(), limit)?;
             if cli.json {
-                let entries_json: Vec<serde_json::Value> = entries
-                    .iter()
-                    .map(|e| json!({"ts": e.ts, "url": e.url, "title": e.title, "page": e.page}))
-                    .collect();
-                json_output(&json!({"ok": true, "entries": entries_json}));
+                json_output(&commands::history::to_json(&entries));
             } else {
                 let text = commands::history::format_text(&entries);
                 if text.is_empty() {
@@ -127,8 +221,30 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
         budget: cli.budget,
         on_intercept: crate::hit_test::OnIntercept::parse(&cli.on_intercept)?,
     };
+    // The page every arm below acts on. `store` lives in here from now on: reach it as
+    // `ctx.store`.
+    let mut ctx = PageCtx {
+        client: &client,
+        browser_client: &browser_client,
+        store: &mut store,
+        browser: &cli.browser,
+        page: &cli.page,
+        target_id: &target_id,
+        timeout: cli.timeout,
+        max_depth: cli.max_depth,
+        report: policy,
+    };
     match cli.command {
-        Command::Goto { url, inspect, max_depth, wait_for, headers } => {
+        // `goto` is the one navigation verb that does NOT route through its dispatcher: text
+        // mode renders `landed` from the `Landing` struct (`text_line`), and the JSON the
+        // dispatcher returns has already flattened it. `output_goto` owns both renderings.
+        Command::Goto {
+            url,
+            inspect,
+            max_depth,
+            wait_for,
+            headers,
+        } => {
             let depth = max_depth.or(cli.max_depth);
             let parsed_headers = headers
                 .iter()
@@ -139,470 +255,410 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
                 commands::wait::run(&client, "selector", selector, cli.timeout, 500).await?;
             }
             let _ = commands::history::append(&result.url, &result.title, &cli.page);
-            output_goto(&client, &mut store, &cli.browser, &cli.page, &target_id, &result.url, &result.title, Some(&result.landed), inspect, depth, json_mode).await?;
+            output_goto(
+                &mut ctx,
+                &result.url,
+                &result.title,
+                Some(&result.landed),
+                inspect,
+                depth,
+                json_mode,
+            )
+            .await?;
         }
 
-        Command::Click { uid, selector, xy, inspect, max_depth } => {
-            let depth = max_depth.or(cli.max_depth);
-            let provided = u8::from(uid.is_some()) + u8::from(selector.is_some()) + u8::from(xy.is_some());
-            if provided == 0 {
-                return Err("Provide a uid, --selector, or --xy to identify the click target.".into());
-            }
-            if provided > 1 {
-                return Err("Only one of uid, --selector, or --xy can be provided.".into());
-            }
-
-            // The selector path names its own node, from the handle it probes and clicks;
-            // only --xy has no element to name.
-            let (msg, details) = if let Some(ref sel) = selector {
-                let outcome = crate::element::click_selector(&client, sel, policy.on_intercept).await?;
-                let target = format!("selector '{sel}'");
-                (
-                    outcome.refusal_message("click", &target).unwrap_or_else(|| format!("Clicked {target}")),
-                    Some(outcome.report()),
-                )
-            } else if let Some(ref coords) = xy {
-                if coords.len() != 2 {
-                    return Err("--xy requires exactly 2 values: x,y".into());
-                }
-                crate::element::click_at_coords(&client, coords[0], coords[1]).await?;
-                (format!("Clicked at ({}, {})", coords[0], coords[1]), None)
-            } else {
-                let uid = uid.as_ref().unwrap();
-                let uid_map = get_uid_map(&store, &cli.browser, &cli.page);
-                let (msg, outcome) = commands::click::run(&client, &uid_map, uid, policy.on_intercept).await?;
-                (msg, Some(outcome.report()))
+        Command::Click {
+            uid,
+            selector,
+            xy,
+            inspect,
+            max_depth,
+        } => {
+            let args = PointerArgs {
+                uid,
+                selector,
+                xy,
+                on_intercept: None,
+                inspect: None,
+                max_depth: None,
             };
-
-            output_action_with(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, &policy.for_action(inspect, depth), json_mode, details).await?;
+            let out = Box::pin(dispatch::dispatch_click(&mut ctx, &args)).await?;
+            let report = policy.for_action(inspect, max_depth.or(cli.max_depth));
+            Box::pin(output_dispatched(&mut ctx, out, &report, json_mode)).await?;
         }
 
-        Command::Fill { uid, selector, value, inspect, max_depth } => {
-            let depth = max_depth.or(cli.max_depth);
-            let provided = u8::from(uid.is_some()) + u8::from(selector.is_some());
-            if provided == 0 {
-                return Err("Provide --uid or --selector to identify the element.".into());
-            }
-            if provided > 1 {
-                return Err("Only one of --uid or --selector can be provided.".into());
-            }
-
-            let target = crate::run_helpers::target_details(&client, selector.as_deref(), uid.as_deref()).await;
-            let (msg, outcome) = if let Some(ref sel) = selector {
-                let outcome = crate::element::fill_selector(&client, sel, &value).await?;
-                (format!("Filled selector '{sel}'"), outcome)
-            } else {
-                let uid = uid.as_ref().unwrap();
-                let uid_map = get_uid_map(&store, &cli.browser, &cli.page);
-                commands::fill::run(&client, &uid_map, uid, &value).await?
+        Command::Dblclick {
+            uid,
+            selector,
+            xy,
+            inspect,
+            max_depth,
+        } => {
+            let args = PointerArgs {
+                uid,
+                selector,
+                xy,
+                on_intercept: None,
+                inspect: None,
+                max_depth: None,
             };
-
-            output_action_with(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, &policy.for_action(inspect, depth), json_mode, crate::run_helpers::merge_details(target, Some(json!({"value": crate::run_helpers::fill_value_report(&outcome)})))).await?;
+            let out = Box::pin(dispatch::dispatch_dblclick(&mut ctx, &args)).await?;
+            let report = policy.for_action(inspect, max_depth.or(cli.max_depth));
+            Box::pin(output_dispatched(&mut ctx, out, &report, json_mode)).await?;
         }
 
-        Command::FillForm { pairs, inspect, max_depth } => {
-            let depth = max_depth.or(cli.max_depth);
-            let uid_map = get_uid_map(&store, &cli.browser, &cli.page);
-            let parsed: Result<Vec<(&str, &str)>, _> = pairs
+        Command::Fill {
+            value,
+            uid,
+            selector,
+            secret,
+            inspect,
+            max_depth,
+        } => {
+            let args = FillArgs {
+                value,
+                uid,
+                selector,
+                secret: Some(secret),
+                inspect: None,
+                max_depth: None,
+            };
+            let out = Box::pin(dispatch::dispatch_fill(&mut ctx, &args)).await?;
+            let report = policy.for_action(inspect, max_depth.or(cli.max_depth));
+            Box::pin(output_dispatched(&mut ctx, out, &report, json_mode)).await?;
+        }
+
+        Command::FillForm {
+            pairs,
+            inspect,
+            max_depth,
+        } => {
+            let parsed: Vec<PairArgs> = pairs
                 .iter()
                 .map(|p| {
-                    p.split_once('=')
-                        .ok_or_else(|| format!("Invalid pair (expected uid=value): {p}"))
+                    let (uid, value) = p
+                        .split_once('=')
+                        .ok_or_else(|| format!("Invalid pair (expected uid=value): {p}"))?;
+                    Ok::<_, BoxError>(PairArgs {
+                        uid: Some(uid.to_string()),
+                        value: Some(value.to_string()),
+                    })
                 })
-                .collect();
-            let parsed = parsed?;
-            let (msg, outcomes) = commands::fill::run_form(&client, &uid_map, &parsed).await?;
-            let details = Some(json!({"values": crate::run_helpers::bulk_fill_report("uid", &outcomes)}));
-            output_action_with(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, &policy.for_action(inspect, depth), json_mode, details).await?;
+                .collect::<Result<_, _>>()?;
+            let args = FillFormArgs {
+                pairs: Some(parsed),
+                inspect: None,
+                max_depth: None,
+            };
+            let out = Box::pin(dispatch::dispatch_fill_form(&mut ctx, &args)).await?;
+            let report = policy.for_action(inspect, max_depth.or(cli.max_depth));
+            Box::pin(output_dispatched(&mut ctx, out, &report, json_mode)).await?;
         }
 
-        Command::Text { uid, selector, truncate } => {
-            if uid.is_some() && selector.is_some() {
-                return Err("Only one of uid or --selector can be provided.".into());
-            }
-            let uid_map = get_uid_map(&store, &cli.browser, &cli.page);
-            let text = commands::text::run(&client, uid.as_deref(), selector.as_deref(), &uid_map).await?;
-            let full_length = text.chars().count();
-            let (text, truncated) = if let Some(n) = truncate
-                && full_length > n {
-                    (crate::truncate::truncate_str(&text, n, "...").into_owned(), true)
-                } else {
-                    (text, false)
-                };
-            if json_mode {
-                let mut obj = json!({"ok": true, "text": text});
-                if truncated {
-                    obj["truncated"] = json!(true);
-                    obj["fullLength"] = json!(full_length);
-                }
-                json_output(&obj);
-            } else {
-                println!("{text}");
-            }
+        Command::Select {
+            value,
+            uid,
+            selector,
+            inspect,
+            max_depth,
+        } => {
+            let args = ValueArgs {
+                value,
+                uid,
+                selector,
+                inspect: None,
+                max_depth: None,
+            };
+            let out = Box::pin(dispatch::dispatch_select(&mut ctx, &args)).await?;
+            let report = policy.for_action(inspect, max_depth.or(cli.max_depth));
+            Box::pin(output_dispatched(&mut ctx, out, &report, json_mode)).await?;
         }
 
-        Command::Read { html, truncate } => {
-            let result = commands::read::run(&client, html, truncate).await?;
-            if json_mode {
-                let mut obj = json!({"ok": true, "title": result.title, "text": result.text_content});
-                if let Some(excerpt) = &result.excerpt {
-                    obj["excerpt"] = json!(excerpt);
-                }
-                if let Some(byline) = &result.byline {
-                    obj["byline"] = json!(byline);
-                }
-                json_output(&obj);
-            } else {
-                if !result.title.is_empty() {
-                    println!("# {}", result.title);
-                    println!();
-                }
-                if html {
-                    if let Some(content) = &result.content {
-                        println!("{content}");
-                    }
-                } else {
-                    println!("{}", result.text_content);
-                }
-            }
+        Command::Check {
+            uid,
+            selector,
+            inspect,
+            max_depth,
+        } => {
+            let out = Box::pin(dispatch::dispatch_check(
+                &ctx,
+                true,
+                uid.as_deref(),
+                selector.as_deref(),
+                None,
+            ))
+            .await?;
+            let report = policy.for_action(inspect, max_depth.or(cli.max_depth));
+            Box::pin(output_dispatched(&mut ctx, out, &report, json_mode)).await?;
         }
 
-        Command::Back => {
-            client.send("Runtime.evaluate", json!({"expression": "history.back()"})).await?;
-            let _ = client.wait_for_event("Page.loadEventFired", std::time::Duration::from_secs(5)).await;
-            let title: crate::cdp::types::EvaluateResult = client
-                .call("Runtime.evaluate", json!({"expression": "document.title", "returnByValue": true}))
-                .await?;
-            let title_str = title.result.value.as_ref().and_then(|v| v.as_str()).unwrap_or("");
-            // Same as goto: the old document is gone, and backendNodeId counters overlap
-            // between documents, so a stale uid can resolve to an unrelated element.
-            if let Some(browser_s) = store.browsers.get_mut(&cli.browser) {
-                session::ensure_page(browser_s, &cli.page, &target_id).uid_map.clear();
-            }
-            if json_mode {
-                json_output(&json!({"ok": true, "title": title_str}));
-            } else {
-                println!("Navigated back — {title_str}");
-            }
+        Command::Uncheck {
+            uid,
+            selector,
+            inspect,
+            max_depth,
+        } => {
+            let out = Box::pin(dispatch::dispatch_check(
+                &ctx,
+                false,
+                uid.as_deref(),
+                selector.as_deref(),
+                None,
+            ))
+            .await?;
+            let report = policy.for_action(inspect, max_depth.or(cli.max_depth));
+            Box::pin(output_dispatched(&mut ctx, out, &report, json_mode)).await?;
+        }
+
+        Command::Upload {
+            files,
+            uid,
+            selector,
+            inspect,
+            max_depth,
+        } => {
+            let args = UploadArgs {
+                files: Some(files),
+                uid,
+                selector,
+            };
+            let out = Box::pin(dispatch::dispatch_upload(&ctx, &args)).await?;
+            let report = policy.for_action(inspect, max_depth.or(cli.max_depth));
+            Box::pin(output_dispatched(&mut ctx, out, &report, json_mode)).await?;
+        }
+
+        Command::Drag {
+            from,
+            to,
+            inspect,
+            max_depth,
+        } => {
+            let args = crate::pipe_command::DragArgs {
+                from: Some(from),
+                to: Some(to),
+            };
+            let out = Box::pin(dispatch::dispatch_drag(&ctx, &args)).await?;
+            let report = policy.for_action(inspect, max_depth.or(cli.max_depth));
+            Box::pin(output_dispatched(&mut ctx, out, &report, json_mode)).await?;
+        }
+
+        Command::Hover { uid } => {
+            let out = Box::pin(dispatch::dispatch_hover(
+                &ctx,
+                &HoverArgs { uid: Some(uid) },
+            ))
+            .await?;
+            let report = policy.for_action(false, None);
+            Box::pin(output_dispatched(&mut ctx, out, &report, json_mode)).await?;
+        }
+
+        Command::Type {
+            text,
+            selector,
+            secret,
+        } => {
+            let args = TypeArgs {
+                text,
+                selector,
+                secret: Some(secret),
+            };
+            let out = Box::pin(dispatch::dispatch_type(&client, &args)).await?;
+            let report = policy.for_action(false, None);
+            Box::pin(output_dispatched(&mut ctx, out, &report, json_mode)).await?;
+        }
+
+        Command::Press { key } => {
+            let out = Box::pin(dispatch::dispatch_press(&client, &PressArgs { key })).await?;
+            let report = policy.for_action(false, None);
+            Box::pin(output_dispatched(&mut ctx, out, &report, json_mode)).await?;
+        }
+
+        Command::Scroll { target, px } => {
+            let args = ScrollArgs {
+                target,
+                px: Some(px),
+            };
+            let out = Box::pin(dispatch::dispatch_scroll(&ctx, &args)).await?;
+            let report = policy.for_action(false, None);
+            Box::pin(output_dispatched(&mut ctx, out, &report, json_mode)).await?;
+        }
+
+        Command::Back { inspect, max_depth } => {
+            let depth = max_depth.or(cli.max_depth);
+            output_history_step(&mut ctx, -1, inspect, depth, json_mode).await?;
         }
 
         Command::Forward { inspect, max_depth } => {
             let depth = max_depth.or(cli.max_depth);
-            let history: serde_json::Value = client
-                .call("Page.getNavigationHistory", json!({}))
-                .await?;
-            let current_index = history.get("currentIndex").and_then(serde_json::Value::as_i64).unwrap_or(0);
-            let entries = history.get("entries").and_then(serde_json::Value::as_array);
-            let entry_count = entries.map_or(0, Vec::len) as i64;
-            if current_index >= entry_count - 1 {
-                let msg = "Already at last history entry".to_string();
-                if json_mode {
-                    json_output(&json!({"ok": true, "title": "", "message": msg}));
-                } else {
-                    println!("{msg}");
-                }
-            } else {
-                let next_entry_id = entries
-                    .and_then(|e| e.get(usize::try_from(current_index + 1).unwrap_or(0)))
-                    .and_then(|e| e.get("id"))
-                    .and_then(serde_json::Value::as_i64)
-                    .ok_or("Could not find next history entry")?;
-                client.send("Page.navigateToHistoryEntry", json!({"entryId": next_entry_id})).await?;
-                let _ = client.wait_for_event("Page.loadEventFired", std::time::Duration::from_secs(5)).await;
-                let dest: crate::cdp::types::EvaluateResult = client
-                    .call("Runtime.evaluate", json!({"expression": "({title: document.title, url: location.href})", "returnByValue": true}))
-                    .await?;
-                let title_str = dest.result.value.as_ref().and_then(|v| v.get("title")).and_then(|v| v.as_str()).unwrap_or("");
-                let url_str = dest.result.value.as_ref().and_then(|v| v.get("url")).and_then(|v| v.as_str()).unwrap_or("");
-                // Answers like `goto`: no change report, stale uids dropped, `--inspect`
-                // refills from the destination. No `landed` either — the caller asked for a
-                // history entry, not a URL, so nothing could have redirected away from it.
-                output_goto(&client, &mut store, &cli.browser, &cli.page, &target_id, url_str, title_str, None, inspect, depth, json_mode).await?;
-            }
+            output_history_step(&mut ctx, 1, inspect, depth, json_mode).await?;
         }
 
-        Command::Dblclick { uid, selector, xy, inspect, max_depth } => {
-            let depth = max_depth.or(cli.max_depth);
-            let provided = u8::from(uid.is_some()) + u8::from(selector.is_some()) + u8::from(xy.is_some());
-            if provided == 0 {
-                return Err("Provide a uid, --selector, or --xy.".into());
-            }
-            if provided > 1 {
-                return Err("Only one of uid, --selector, or --xy can be provided.".into());
-            }
-
-            let (msg, details) = if let Some(ref sel) = selector {
-                let outcome = crate::element::dblclick_selector(&client, sel, policy.on_intercept).await?;
-                let target = format!("selector '{sel}'");
-                (
-                    outcome
-                        .refusal_message("double-click", &target)
-                        .unwrap_or_else(|| format!("Double-clicked {target}")),
-                    Some(outcome.report()),
-                )
-            } else if let Some(ref coords) = xy {
-                if coords.len() != 2 {
-                    return Err("--xy requires exactly 2 values: x,y".into());
-                }
-                crate::element::dblclick_at_coords(&client, coords[0], coords[1]).await?;
-                (format!("Double-clicked at ({}, {})", coords[0], coords[1]), None)
-            } else {
-                let uid = uid.as_ref().unwrap();
-                let uid_map = get_uid_map(&store, &cli.browser, &cli.page);
-                let (msg, outcome) = commands::dblclick::run(&client, &uid_map, uid, policy.on_intercept).await?;
-                (msg, Some(outcome.report()))
+        Command::Text {
+            uid,
+            selector,
+            truncate,
+        } => {
+            let args = TextArgs {
+                uid,
+                selector,
+                truncate: truncate.map(|n| n as u64),
             };
-
-            output_action_with(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, &policy.for_action(inspect, depth), json_mode, details).await?;
+            let out = dispatch::dispatch_text(&ctx, &args).await?;
+            let text = out["text"].as_str().unwrap_or_default().to_string();
+            output_read(json_mode, &out, &text);
         }
 
-        Command::Select { value, uid, selector, inspect, max_depth } => {
-            let depth = max_depth.or(cli.max_depth);
-            let provided = u8::from(uid.is_some()) + u8::from(selector.is_some());
-            if provided == 0 {
-                return Err("Provide --uid or --selector to identify the <select>.".into());
-            }
-            if provided > 1 {
-                return Err("Only one of --uid or --selector can be provided.".into());
-            }
-
-            let target = crate::run_helpers::target_details(&client, selector.as_deref(), uid.as_deref()).await;
-            let (msg, outcome) = if let Some(ref sel) = selector {
-                let outcome = crate::element::select_option_selector(&client, sel, &value).await?;
-                (format!("Selected \"{}\" on selector '{sel}'", outcome.label()), outcome)
-            } else {
-                let uid = uid.as_ref().unwrap();
-                let uid_map = get_uid_map(&store, &cli.browser, &cli.page);
-                let outcome = commands::select::run(&client, &uid_map, uid, &value).await?;
-                (format!("Selected \"{}\" on uid={uid}", outcome.label()), outcome)
+        Command::Read { html, truncate } => {
+            let args = ReadArgs {
+                html: Some(html),
+                truncate: truncate.map(|n| n as u64),
             };
-            let details = Some(crate::run_helpers::select_report(&outcome));
-
-            output_action_with(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, &policy.for_action(inspect, depth), json_mode, crate::run_helpers::merge_details(target, details)).await?;
-        }
-
-        Command::Check { uid, selector, inspect, max_depth } => {
-            let depth = max_depth.or(cli.max_depth);
-            let provided = u8::from(uid.is_some()) + u8::from(selector.is_some());
-            if provided == 0 {
-                return Err("Provide a uid or --selector.".into());
-            }
-            if provided > 1 {
-                return Err("Only one of uid or --selector can be provided.".into());
-            }
-            let target = crate::run_helpers::target_details(&client, selector.as_deref(), uid.as_deref()).await;
-            let outcome = if let Some(ref sel) = selector {
-                crate::element::set_checked_selector(&client, sel, true).await?
-            } else {
-                let uid = uid.as_ref().unwrap();
-                let uid_map = get_uid_map(&store, &cli.browser, &cli.page);
-                commands::check::run(&client, &uid_map, uid, true, policy.on_intercept).await?
-            };
-            let (msg, details) = check_report(outcome);
-            output_action_with(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, &policy.for_action(inspect, depth), json_mode, crate::run_helpers::merge_details(target, details)).await?;
-        }
-
-        Command::Uncheck { uid, selector, inspect, max_depth } => {
-            let depth = max_depth.or(cli.max_depth);
-            let provided = u8::from(uid.is_some()) + u8::from(selector.is_some());
-            if provided == 0 {
-                return Err("Provide a uid or --selector.".into());
-            }
-            if provided > 1 {
-                return Err("Only one of uid or --selector can be provided.".into());
-            }
-            let target = crate::run_helpers::target_details(&client, selector.as_deref(), uid.as_deref()).await;
-            let outcome = if let Some(ref sel) = selector {
-                crate::element::set_checked_selector(&client, sel, false).await?
-            } else {
-                let uid = uid.as_ref().unwrap();
-                let uid_map = get_uid_map(&store, &cli.browser, &cli.page);
-                commands::check::run(&client, &uid_map, uid, false, policy.on_intercept).await?
-            };
-            let (msg, details) = check_report(outcome);
-            output_action_with(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, &policy.for_action(inspect, depth), json_mode, crate::run_helpers::merge_details(target, details)).await?;
-        }
-
-        Command::Upload { files, uid, selector, inspect, max_depth } => {
-            let depth = max_depth.or(cli.max_depth);
-            let provided = u8::from(uid.is_some()) + u8::from(selector.is_some());
-            if provided == 0 {
-                return Err("Provide --uid or --selector to identify the file input.".into());
-            }
-            if provided > 1 {
-                return Err("Only one of --uid or --selector can be provided.".into());
-            }
-            let target = crate::run_helpers::target_details(&client, selector.as_deref(), uid.as_deref()).await;
-            let msg = if let Some(ref sel) = selector {
-                crate::element::set_file_input_selector(&client, sel, &files).await?;
-                format!("Uploaded {} file(s) to selector '{sel}'", files.len())
-            } else {
-                let uid = uid.as_ref().unwrap();
-                let uid_map = get_uid_map(&store, &cli.browser, &cli.page);
-                commands::upload::run(&client, &uid_map, uid, &files).await?
-            };
-            output_action_with(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, &policy.for_action(inspect, depth), json_mode, target).await?;
-        }
-
-        Command::Drag { from, to, inspect, max_depth } => {
-            let depth = max_depth.or(cli.max_depth);
-            let uid_map = get_uid_map(&store, &cli.browser, &cli.page);
-            let msg = commands::drag::run(&client, &uid_map, &from, &to).await?;
-            output_action(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, &policy.for_action(inspect, depth), json_mode).await?;
-        }
-
-        Command::Inspect { verbose, max_depth, uid, filter, scroll, limit, urls, max_chars, offset } => {
-            if scroll {
-                commands::extract::scroll_to_load(&client).await?;
-            }
-            let role_filter: Option<Vec<&str>> = filter.as_deref().map(|f| f.split(',').map(str::trim).collect());
-            let views = if let Some(max) = limit {
-                Box::pin(commands::inspect::scroll_collect(&client, verbose, uid.as_deref(), role_filter.as_deref(), max)).await?
-            } else {
-                commands::inspect::views(&client, verbose, max_depth, uid.as_deref(), role_filter.as_deref()).await?
-            };
-            // `--urls` annotates the lines it prints. Applied to the baseline it would make
-            // every link read as changed on the next diff, which reads no url= token.
-            let shown = if urls {
-                commands::inspect::resolve_urls(&client, views.shown(), &views.full.uid_map).await
-            } else {
-                views.shown().to_string()
-            };
-            // Persist the FULL snapshot so diff and uid lookups stay complete: display
-            // flags and paging affect only what is printed.
-            if let Some(browser_s) = store.browsers.get_mut(&cli.browser) {
-                let page = session::ensure_page(browser_s, &cli.page, &target_id);
-                let full = views.full;
-                page.uid_map = full.uid_map;
-                page.last_snapshot = Some(full.text);
-                let (f, l) = full.identity.map_or((None, None), |(f, l)| (Some(f), Some(l)));
-                page.last_snapshot_frame = f;
-                page.last_snapshot_loader = l;
-            }
-            let paged = commands::inspect::paginate(&shown, offset, max_chars);
+            let out = Box::pin(dispatch::dispatch_read(&client, &args)).await?;
             if json_mode {
-                json_output(&json!({
-                    "ok": true,
-                    "snapshot": paged.text,
-                    "total_chars": paged.total_chars,
-                    "truncated": paged.truncated,
-                    "next_offset": paged.next_offset,
-                }));
+                json_output(&out);
             } else {
-                println!("{}", paged.text);
+                let field = |key: &str| out.get(key).and_then(Value::as_str).unwrap_or_default();
+                let title = field("title");
+                if !title.is_empty() {
+                    println!("# {title}");
+                    println!();
+                }
+                // `--html` prints nothing when Readability produced no content, as it always
+                // did; the plain-text branch always has something to print.
+                if html {
+                    if let Some(content) = out.get("content").and_then(Value::as_str) {
+                        println!("{content}");
+                    }
+                } else {
+                    println!("{}", field("text"));
+                }
             }
+        }
+
+        Command::Inspect {
+            verbose,
+            max_depth,
+            uid,
+            filter,
+            scroll,
+            limit,
+            urls,
+            max_chars,
+            offset,
+        } => {
+            let args = InspectArgs {
+                uid,
+                filter,
+                verbose: Some(verbose),
+                scroll: Some(scroll),
+                urls: Some(urls),
+                limit: limit.map(|n| n as u64),
+                max_depth: max_depth.map(|n| n as u64),
+                offset: Some(offset as u64),
+                max_chars: max_chars.map(|n| n as u64),
+            };
+            let out = Box::pin(dispatch::dispatch_inspect(&mut ctx, &args)).await?;
+            let text = out["snapshot"].as_str().unwrap_or_default().to_string();
+            output_read(json_mode, &out, &text);
         }
 
         Command::Diff => {
-            let page_state = store
-                .browsers
-                .get(&cli.browser)
-                .and_then(|b| b.pages.get(&cli.page));
-            let old_text = page_state
-                .and_then(|p| p.last_snapshot.clone())
-                .ok_or("No previous snapshot. Run 'chrome-agent inspect' first.")?;
-            let stored = page_state.and_then(|p| {
-                p.last_snapshot_frame.clone().zip(p.last_snapshot_loader.clone())
-            });
-            let snapshot = commands::inspect::run(&client, false, None, None, None).await?;
-            let identity = commands::diff::Identity::from_loader(
-                stored.as_ref().map(|(f, l)| (f.as_str(), l.as_str())),
-                snapshot.identity.as_ref().map(|(f, l)| (f.as_str(), l.as_str())),
-            );
-            let result = commands::diff::compare(identity, &old_text, &snapshot.text);
-            if let Some(browser_s) = store.browsers.get_mut(&cli.browser) {
-                let page = session::ensure_page(browser_s, &cli.page, &target_id);
-                page.last_snapshot = Some(snapshot.text);
-            let (f, l) = snapshot.identity.map_or((None, None), |(f, l)| (Some(f), Some(l)));
-            page.last_snapshot_frame = f;
-            page.last_snapshot_loader = l;
-                page.uid_map = snapshot.uid_map;
-            }
+            let out = Box::pin(dispatch::dispatch_diff(&mut ctx)).await?;
             if json_mode {
-                let mut obj = json!({
-                    "ok": true,
-                    "document_changed": result.document_changed,
-                    "identity_known": result.identity_known,
-                    "added": result.added,
-                    "removed": result.removed,
-                    "changed": result.changed,
-                    "unchanged": result.unchanged,
-                    "moved": result.moved,
-                    "anonymous": result.anonymous,
-                    "diff": result.text.trim_end(),
-                });
-                if result.focus_from.is_some() || result.focus_to.is_some() {
-                    obj["focus"] = json!({"from": result.focus_from, "to": result.focus_to});
-                }
-                if let Some(hint) = result.hint {
-                    obj["hint"] = json!(hint);
-                }
-                json_output(&obj);
+                json_output(&out);
             } else {
-                if result.document_changed {
+                if out["document_changed"] == json!(true) {
                     println!("Page navigated — previous uids are gone. New page:");
                 }
-                print!("{}", result.text);
-            }
-        }
-
-        Command::Screenshot { filename, format, quality, max_width, uid, selector } => {
-            if uid.is_some() && selector.is_some() {
-                return Err("Provide only one of uid or --selector for an element screenshot.".into());
-            }
-            let clip = if let Some(ref u) = uid {
-                let uid_map = get_uid_map(&store, &cli.browser, &cli.page);
-                Some(crate::geometry::clip_for_uid(&client, &uid_map, u).await?)
-            } else if let Some(ref sel) = selector {
-                Some(crate::geometry::clip_for_selector(&client, sel).await?)
-            } else {
-                None
-            };
-            let opts = commands::screenshot::ScreenshotOpts {
-                filename: filename.as_deref(),
-                format: commands::screenshot::ImgFormat::parse(&format)?,
-                quality,
-                max_width,
-                clip,
-            };
-            let path = commands::screenshot::run(&client, &opts).await?;
-            if json_mode {
-                json_output(&json!({"ok": true, "path": path}));
-            } else {
-                println!("{path}");
-            }
-        }
-
-        Command::Download { url, uid, selector, out, timeout, max_bytes } => {
-            let target = commands::download::Target::parse(url.as_deref(), uid.as_deref(), selector.as_deref())?;
-            let uid_map = get_uid_map(&store, &cli.browser, &cli.page);
-            let outcome = Box::pin(commands::download::dispatch(&client, &uid_map, &target, out.as_deref(), timeout, max_bytes, policy.on_intercept, &cli.browser)).await?;
-            if json_mode { json_output(&outcome.to_json()); } else { outcome.print_text(); }
-        }
-
-        Command::Pdf { filename, landscape, background } => {
-            let opts = commands::pdf::PdfOpts {
-                filename: filename.as_deref(),
-                landscape,
-                background,
-            };
-            let path = commands::pdf::run(&client, &opts).await?;
-            if json_mode {
-                json_output(&json!({"ok": true, "path": path}));
-            } else {
-                println!("{path}");
-            }
-        }
-
-        Command::Extract { selector, limit, scroll, a11y } => {
-            let result = if a11y {
-                commands::extract::run_a11y(&client, limit, scroll).await?
-            } else {
-                if scroll {
-                    commands::extract::scroll_to_load(&client).await?;
+                let body = out["diff"].as_str().unwrap_or_default();
+                if !body.is_empty() {
+                    println!("{body}");
                 }
-                commands::extract::run(&client, selector.as_deref(), limit).await?
+            }
+        }
+
+        Command::Screenshot {
+            filename,
+            format,
+            quality,
+            max_width,
+            uid,
+            selector,
+        } => {
+            let args = ScreenshotArgs {
+                filename,
+                uid,
+                selector,
+                format: Some(format),
+                quality: quality.map(u64::from),
+                max_width: max_width.map(u64::from),
             };
+            let out = Box::pin(dispatch::dispatch_screenshot(&ctx, &args)).await?;
+            let path = out["path"].as_str().unwrap_or_default().to_string();
+            output_read(json_mode, &out, &path);
+        }
+
+        Command::Download {
+            url,
+            uid,
+            selector,
+            out,
+            timeout,
+            max_bytes,
+        } => {
+            let target = commands::download::Target::parse(
+                url.as_deref(),
+                uid.as_deref(),
+                selector.as_deref(),
+            )?;
+            let uid_map = ctx.uid_map();
+            let req = commands::download::Request {
+                target: &target,
+                out: out.as_deref(),
+                timeout_secs: timeout,
+                max_bytes,
+                on_intercept: policy.on_intercept,
+                browser: &cli.browser,
+            };
+            let outcome = Box::pin(commands::download::dispatch(&client, &uid_map, &req)).await?;
+            if json_mode {
+                json_output(&outcome.to_json());
+            } else {
+                outcome.print_text();
+            }
+        }
+
+        Command::Pdf {
+            filename,
+            landscape,
+            background,
+        } => {
+            let args = crate::pipe_command::PdfArgs {
+                filename,
+                landscape: Some(landscape),
+                background: Some(background),
+            };
+            let out = Box::pin(dispatch::dispatch_pdf(&client, &args)).await?;
+            let path = out["path"].as_str().unwrap_or_default().to_string();
+            output_read(json_mode, &out, &path);
+        }
+
+        // `collect` is shared with the dispatcher; only the two renderings differ, and
+        // `format_text` reads the record structs the JSON has already flattened.
+        Command::Extract {
+            selector,
+            limit,
+            scroll,
+            a11y,
+        } => {
+            let result = Box::pin(commands::extract::collect(
+                &client,
+                selector.as_deref(),
+                limit,
+                scroll,
+                a11y,
+            ))
+            .await?;
             if json_mode {
                 json_output(&commands::extract::to_json(&result));
             } else {
@@ -610,280 +666,226 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
             }
         }
 
-        Command::Eval { expression, selector } => {
-            let expr = if let Some(ref sel) = selector {
-                let escaped = serde_json::to_string(sel).unwrap_or_default();
-                format!("((el) => {{ if (!el) throw new Error('No element matches selector ' + {escaped}); return {expression} }})(document.querySelector({escaped}))")
-            } else {
-                expression
-            };
+        // Two readers, deliberately: `run_raw` answers the JSON and `run` the display string,
+        // which differ on a result with no value (`undefined` rather than `null`). The
+        // expression they evaluate is one function.
+        Command::Eval {
+            expression,
+            selector,
+        } => {
             if json_mode {
-                let raw = commands::eval::run_raw(&client, &expr).await?;
-                json_output(&json!({"ok": true, "result": raw}));
+                let args = EvalArgs {
+                    expression,
+                    selector,
+                };
+                json_output(&Box::pin(dispatch::dispatch_eval(&client, &args)).await?);
             } else {
-                let result = commands::eval::run(&client, &expr).await?;
-                println!("{result}");
+                let expr = commands::eval::scoped_expression(&expression, selector.as_deref());
+                println!("{}", commands::eval::run(&client, &expr).await?);
             }
         }
 
-        Command::Wait { what, pattern, timeout, idle_ms } => {
-            let msg = commands::wait::run(&client, &what, &pattern, timeout, idle_ms).await?;
-            // Not in `mutates_page`, so pipe/batch answer plainly — the CLI must too.
-            if json_mode {
-                json_output(&json!({"ok": true, "message": msg}));
-            } else {
-                println!("{msg}");
-            }
+        Command::Wait {
+            what,
+            pattern,
+            timeout,
+            idle_ms,
+        } => {
+            let args = WaitArgs {
+                what: Some(what),
+                pattern: Some(pattern),
+                text: None,
+                url: None,
+                selector: None,
+                timeout: Some(timeout),
+                idle_ms: Some(idle_ms),
+            };
+            let out = Box::pin(dispatch::dispatch_wait(&client, &args)).await?;
+            let msg = out["message"].as_str().unwrap_or_default().to_string();
+            output_read(json_mode, &out, &msg);
         }
 
         Command::Assert { ref what } => {
             // A read: no change report, no verdict. `run_cli` returns `assert::NotHeld` when
             // the claim did not hold, which `main` turns into exit 2.
-            let uid_map = get_uid_map(&store, &cli.browser, &cli.page);
-            Box::pin(commands::assert::run_cli(&client, &uid_map, what, json_mode)).await?;
+            let uid_map = ctx.uid_map();
+            Box::pin(commands::assert::run_cli(
+                &client, &uid_map, what, json_mode,
+            ))
+            .await?;
         }
 
-        Command::Type { text, selector } => {
-            if let Some(ref sel) = selector {
-                crate::element::focus_selector(&client, sel).await?;
+        Command::Network {
+            filter,
+            body,
+            live,
+            limit,
+            abort,
+        } => {
+            if abort.is_none() && live.is_some() && cli.stealth {
+                eprintln!("warning: --live enables Network domain (detectable)");
             }
-            crate::element::require_editable_focus(&client).await?;
-            crate::element::type_text(&client, &text).await?;
-            let msg = if let Some(sel) = &selector {
-                format!("Typed {} chars into selector '{sel}'", text.len())
-            } else {
-                format!("Typed {} chars", text.len())
-            };
-            output_action(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, &policy.for_action(false, None), json_mode).await?;
-        }
-
-        Command::Press { key } => {
-            crate::element::press_key(&client, &key).await?;
-            let msg = format!("Pressed {key}");
-            output_action(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, &policy.for_action(false, None), json_mode).await?;
-        }
-
-        Command::Scroll { target, px } => {
-            let msg = match target.as_str() {
-                "down" => {
-                    let _: serde_json::Value = client
-                        .call("Runtime.evaluate", json!({
-                            "expression": format!("window.scrollBy(0, {px})"),
-                            "returnByValue": true,
-                        }))
-                        .await?;
-                    format!("Scrolled down {px}px")
-                }
-                "up" => {
-                    let _: serde_json::Value = client
-                        .call("Runtime.evaluate", json!({
-                            "expression": format!("window.scrollBy(0, -{px})"),
-                            "returnByValue": true,
-                        }))
-                        .await?;
-                    format!("Scrolled up {px}px")
-                }
-                uid => {
-                    let uid_map = get_uid_map(&store, &cli.browser, &cli.page);
-                    let element_ref = uid_map.get(uid).ok_or_else(|| {
-                        format!("Element uid={uid} not found. Run 'chrome-agent inspect' to get fresh uids.")
-                    })?;
-                    let backend_node_id = element_ref.backend_node_id().ok_or_else(|| {
-                        format!("Element uid={uid} has no resolvable backend node.")
-                    })?;
-                    let resolve_result: crate::cdp::types::ResolveNodeResult = client
-                        .call(
-                            "DOM.resolveNode",
-                            crate::cdp::types::ResolveNodeParams {
-                                node_id: None,
-                                backend_node_id: Some(backend_node_id),
-                                object_group: Some("chrome-agent".into()),
-                                execution_context_id: None,
-                            },
-                        )
-                        .await?;
-                    let object_id = resolve_result.object.object_id.ok_or_else(|| {
-                        format!("Element uid={uid} could not be resolved to a JS object.")
-                    })?;
-                    let _: serde_json::Value = client
-                        .call(
-                            "Runtime.callFunctionOn",
-                            json!({
-                                "objectId": object_id,
-                                "functionDeclaration": "function() { this.scrollIntoView({block: 'center'}); }",
-                                "returnByValue": true,
-                            }),
-                        )
-                        .await?;
-                    format!("Scrolled uid={uid} into view")
-                }
-            };
-            output_action(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, &policy.for_action(false, None), json_mode).await?;
-        }
-
-        Command::Hover { uid } => {
-            let uid_map = get_uid_map(&store, &cli.browser, &cli.page);
-            crate::element::hover(&client, &uid_map, &uid).await?;
-            let msg = format!("Hovered uid={uid}");
-            output_action(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, &policy.for_action(false, None), json_mode).await?;
-        }
-
-        Command::Network { filter, body, live, limit, abort } => {
-            if let Some(ref pattern) = abort {
-                let timeout_secs = live.unwrap_or(30);
-                let blocked = Box::pin(commands::network::run_route_abort(&client, pattern, timeout_secs)).await?;
-                if json_mode {
-                    json_output(&json!({"ok": true, "blocked": blocked.len(), "urls": blocked}));
-                } else {
-                    println!("Blocking requests matching \"{pattern}\" for {timeout_secs}s...");
-                    for url in &blocked {
-                        println!("  blocked: {url}");
-                    }
-                    println!("Blocked {} request(s)", blocked.len());
-                }
-            } else {
-                let entries = if let Some(secs) = live {
-                    if cli.stealth { eprintln!("warning: --live enables Network domain (detectable)"); }
-                    commands::network::run_live(&client, filter.as_deref(), body, limit, secs).await?
-                } else {
-                    commands::network::run_retroactive(&client, filter.as_deref(), limit).await?
-                };
-                if json_mode {
-                    json_output(&json!({"ok": true, "requests": entries}));
-                } else {
-                    println!("{}", commands::network::format_text(&entries));
-                }
-            }
-        }
-
-        Command::Console { level, clear, limit } => {
-            let entries = commands::console::run(&client, level.as_deref(), clear, limit).await?;
+            let capture = Box::pin(commands::network::collect(
+                &client,
+                filter.as_deref(),
+                body,
+                live,
+                limit,
+                abort.as_deref(),
+            ))
+            .await?;
             if json_mode {
-                let messages: Vec<serde_json::Value> = entries
-                    .iter()
-                    .map(|e| json!({"level": e.level, "message": e.message, "timestamp": e.timestamp}))
-                    .collect();
-                json_output(&json!({"ok": true, "installed": entries.installed, "messages": messages}));
+                json_output(&capture.to_json());
             } else {
-                println!("{}", commands::console::format_text(&entries));
+                println!("{}", capture.text());
+            }
+        }
+
+        // One reading, two renderings. `to_json` is the shape the dispatcher answers with too;
+        // `format_text` reads the `ConsoleReading` the JSON has already flattened.
+        Command::Console {
+            level,
+            clear,
+            limit,
+        } => {
+            let reading = Box::pin(commands::console::run(
+                &client,
+                level.as_deref(),
+                clear,
+                limit,
+            ))
+            .await?;
+            if json_mode {
+                json_output(&commands::console::to_json(&reading));
+            } else {
+                println!("{}", commands::console::format_text(&reading));
             }
         }
 
         Command::Tabs => {
             if json_mode {
-                let tabs = commands::tabs::run_structured(&browser_client, &store).await?;
-                json_output(&json!({"ok": true, "tabs": tabs}));
+                json_output(&dispatch::dispatch_tabs(&ctx).await?);
             } else {
-                let output = commands::tabs::run(&browser_client, &store).await?;
-                print!("{output}");
+                print!(
+                    "{}",
+                    commands::tabs::run(ctx.browser_client, ctx.store).await?
+                );
             }
         }
 
         Command::Frame { target } => {
-            let msg = commands::frame::run(&client, &target).await?;
-            // Not in `mutates_page`, so pipe/batch answer plainly — the CLI must too.
-            if json_mode {
-                json_output(&json!({"ok": true, "message": msg}));
-            } else {
-                println!("{msg}");
-            }
+            let out = dispatch::dispatch_frame(&client, &FrameArgs { target }).await?;
+            let msg = out["message"].as_str().unwrap_or_default().to_string();
+            output_read(json_mode, &out, &msg);
         }
 
-        Command::Emulate { action } => {
-            match action {
-                EmulateAction::Device { label, width, height, dpr, mobile, touch, orientation } => {
-                    let config = crate::emulation::DeviceEmulation::new(
-                        label, width, height, dpr, mobile, touch, orientation,
-                    )?;
-                    let response = crate::emulation::apply_and_store(
-                        &client, &mut store, &cli.browser, &cli.page, config.clone(),
-                    ).await?;
-                    session::save_session(&mut store)?;
-                    if json_mode {
-                        json_output(&response);
-                    } else {
-                        println!("{}", config.text_line());
-                        println!(
-                            "{}",
-                            crate::emulation::format_effective_metrics(&response["effective"])
-                        );
-                    }
-                }
-                EmulateAction::Status => {
-                    let requested_line = store.browsers.get(&cli.browser)
-                        .and_then(|browser| browser.pages.get(&cli.page))
-                        .and_then(|page| page.device_emulation.as_ref())
-                        .map(crate::emulation::DeviceEmulation::text_line);
-                    let response = crate::emulation::status(
-                        &client, &store, &cli.browser, &cli.page,
-                    ).await?;
-                    if json_mode {
-                        json_output(&response);
-                    } else if let Some(requested_line) = requested_line {
-                        println!("{requested_line}");
-                        println!("{}", crate::emulation::format_effective_metrics(&response["effective"]));
-                    } else {
-                        println!("No device emulation on page={:?}.", cli.page);
-                    }
-                }
-                EmulateAction::Reset => {
-                    let response = crate::emulation::clear(
-                        &client, &mut store, &cli.browser, &cli.page,
-                    ).await?;
-                    session::save_session(&mut store)?;
-                    if json_mode {
-                        json_output(&response);
-                    } else {
-                        println!("Cleared device emulation from page={:?}.", cli.page);
-                    }
+        // Not routed through `dispatch_emulate`: clap has already parsed these into typed
+        // fields, and the pipe's parser exists to turn untyped JSON into the same values.
+        // Going through it would re-serialise a parse that already succeeded.
+        Command::Emulate { action } => match action {
+            EmulateAction::Device {
+                label,
+                width,
+                height,
+                dpr,
+                mobile,
+                touch,
+                orientation,
+            } => {
+                let config = crate::emulation::DeviceEmulation::new(
+                    label,
+                    width,
+                    height,
+                    dpr,
+                    mobile,
+                    touch,
+                    orientation,
+                )?;
+                let response = crate::emulation::apply_and_store(
+                    &client,
+                    ctx.store,
+                    &cli.browser,
+                    &cli.page,
+                    config.clone(),
+                )
+                .await?;
+                session::save_session(ctx.store)?;
+                if json_mode {
+                    json_output(&response);
+                } else {
+                    println!("{}", config.text_line());
+                    println!(
+                        "{}",
+                        crate::emulation::format_effective_metrics(&response["effective"])
+                    );
                 }
             }
-        }
+            EmulateAction::Status => {
+                let requested_line = ctx
+                    .store
+                    .browsers
+                    .get(&cli.browser)
+                    .and_then(|browser| browser.pages.get(&cli.page))
+                    .and_then(|page| page.device_emulation.as_ref())
+                    .map(crate::emulation::DeviceEmulation::text_line);
+                let response =
+                    crate::emulation::status(&client, ctx.store, &cli.browser, &cli.page).await?;
+                if json_mode {
+                    json_output(&response);
+                } else if let Some(requested_line) = requested_line {
+                    println!("{requested_line}");
+                    println!(
+                        "{}",
+                        crate::emulation::format_effective_metrics(&response["effective"])
+                    );
+                } else {
+                    println!("No device emulation on page={:?}.", cli.page);
+                }
+            }
+            EmulateAction::Reset => {
+                let response =
+                    crate::emulation::clear(&client, ctx.store, &cli.browser, &cli.page).await?;
+                session::save_session(ctx.store)?;
+                if json_mode {
+                    json_output(&response);
+                } else {
+                    println!("Cleared device emulation from page={:?}.", cli.page);
+                }
+            }
+        },
 
         Command::Webmcp { action } => {
             match action {
                 WebmcpAction::List => {
-                    let tools = commands::webmcp::list_tools(&client).await?;
+                    let out = Box::pin(dispatch::dispatch_webmcp_list(&client)).await?;
                     if json_mode {
-                        json_output(&json!({
-                            "ok": true,
-                            "tools": tools.tools,
-                            "frame_scoped": tools.frame_scoped,
-                        }));
+                        json_output(&out);
                     } else {
-                        print!("{}", commands::webmcp::render_list_text(&tools.tools));
-                        if tools.frame_scoped {
-                            println!(
-                                "note: scoped to the bound frame's isolated world — a tool the \
-                                 frame registered from its own main-world script is invisible \
-                                 here; an empty list is not proof this frame has none."
-                            );
+                        let tools = out["tools"].as_array().cloned().unwrap_or_default();
+                        print!("{}", commands::webmcp::render_list_text(&tools));
+                        if out["frame_scoped"] == json!(true) {
+                            println!("{}", commands::webmcp::FRAME_SCOPED_LIST_NOTE);
                         }
                     }
                 }
-                WebmcpAction::Call { name, args, inspect, max_depth } => {
-                    let depth = max_depth.or(cli.max_depth);
-                    let outcome = commands::webmcp::call_tool(&client, &name, &args).await?;
-                    let msg = format!("Called WebMCP tool '{}'", outcome.tool);
-                    let mut details = json!({
-                        "tool": outcome.tool,
-                        "declared_result": outcome.declared_result,
-                    });
-                    if let Ok(parsed) =
-                        serde_json::from_str::<serde_json::Value>(&outcome.declared_result)
-                    {
-                        details["declared_result_parsed"] = parsed;
-                    }
-                    if !outcome.declared_result_was_string {
-                        details["declared_result_was_string"] = json!(false);
-                    }
-                    if outcome.frame_scoped {
-                        details["frame_scoped"] = json!(true);
-                    }
-                    output_action_with(
-                        &client, &mut store, &cli.browser, &cli.page, &target_id, msg,
-                        &policy.for_action(inspect, depth), json_mode, Some(details),
-                    ).await?;
+                // `--args` is a raw JSON string here and a parsed object in pipe mode, so this
+                // reaches `call_tool` directly; `call_report` is the shared half.
+                WebmcpAction::Call {
+                    name,
+                    args,
+                    inspect,
+                    max_depth,
+                } => {
+                    let outcome =
+                        Box::pin(commands::webmcp::call_tool(&client, &name, &args)).await?;
+                    let report = policy.for_action(inspect, max_depth.or(cli.max_depth));
+                    Box::pin(output_dispatched(
+                        &mut ctx,
+                        commands::webmcp::call_report(&outcome),
+                        &report,
+                        json_mode,
+                    ))
+                    .await?;
                 }
             }
         }
@@ -899,19 +901,19 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
             // The same loop pipe mode's `{"cmd":"batch"}` runs, so `--stop-on-error` and
             // `"stop_on_error"` cannot drift. One recovery state shared by every entry: a
             // reset repairs later commands without reapplying before each one.
-            let mut emulation_recovery = crate::pipe_dispatch::EmulationRecovery::new(
-                &client, &store, &cli.browser, &cli.page,
-            ).await;
+            let mut emulation_recovery =
+                dispatch::EmulationRecovery::new(&client, ctx.store, &cli.browser, &cli.page).await;
             // Boxed for the same stack-frame reason as the other arms (see `run`'s doc).
-            let out = Box::pin(crate::pipe_dispatch::run_batch(
-                &client, &browser_client, &mut store,
-                &cli.browser, &cli.page, &target_id,
-                cli.timeout, cli.max_depth, policy, &cmds, stop_on_error,
+            let out = Box::pin(dispatch::run_batch(
+                &mut ctx,
+                &cmds,
+                stop_on_error,
                 &mut emulation_recovery,
-            )).await;
+            ))
+            .await;
             // `stopped_at` is set by `run_batch` only when `stop_on_error` cut the run short,
             // so its presence IS "an entry failed and the rest never ran".
-            let stopped_at = out.get("stopped_at").and_then(serde_json::Value::as_u64);
+            let stopped_at = out.get("stopped_at").and_then(Value::as_u64);
             if json_mode {
                 json_output(&out);
             } else {
@@ -921,7 +923,7 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
             // channel when it stopped, and a batch that ran commands owes the store its
             // uid_map and snapshot either way. `save_session` also disarms the reaper, so the
             // error path in `main` cannot mistake this browser for a leaked one.
-            session::save_session(&mut store)?;
+            session::save_session(ctx.store)?;
             if stopped_at.is_some() {
                 return Err(Box::new(crate::run_helpers::BatchStopped));
             }
@@ -929,13 +931,19 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
         }
 
         // Already handled above
-        Command::Daemon { .. } | Command::Status | Command::Stop | Command::Close { .. }
-        | Command::Pipe | Command::Replay { .. } | Command::History { .. } | Command::Macro { .. } => {
+        Command::Daemon { .. }
+        | Command::Status
+        | Command::Stop
+        | Command::Close { .. }
+        | Command::Pipe
+        | Command::Replay { .. }
+        | Command::History { .. }
+        | Command::Macro { .. } => {
             unreachable!()
         }
     }
 
-    session::save_session(&mut store)?;
+    session::save_session(ctx.store)?;
 
     Ok(())
 }

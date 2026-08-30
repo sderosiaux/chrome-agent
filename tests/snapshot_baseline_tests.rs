@@ -17,7 +17,10 @@ const INJECT: &str = "document.getElementById('slot').insertAdjacentHTML('before
                       '<button id=\"fresh\">Freshly added</button>'); 1";
 
 fn run_cli(args: &[&str]) -> (String, String, i32) {
-    let output = Command::new(common::binary()).args(args).output().expect("Failed to run chrome-agent");
+    let output = Command::new(common::binary())
+        .args(args)
+        .output()
+        .expect("Failed to run chrome-agent");
     (
         String::from_utf8_lossy(&output.stdout).to_string(),
         String::from_utf8_lossy(&output.stderr).to_string(),
@@ -60,7 +63,10 @@ fn goto(browser: &str) -> bool {
 
 fn inject(browser: &str) {
     let (_, stderr, code) = run_cli(&["--browser", browser, "eval", INJECT]);
-    assert_eq!(code, 0, "injecting the one known node must succeed: {stderr}");
+    assert_eq!(
+        code, 0,
+        "injecting the one known node must succeed: {stderr}"
+    );
 }
 
 fn diff_json(browser: &str) -> serde_json::Value {
@@ -74,13 +80,19 @@ fn assert_only_the_injected_node_moved(json: &serde_json::Value, path: &str) {
         json["added"], 1,
         "{path}: exactly one node was injected; anything more is the baseline missing nodes the page always had.\n{json}"
     );
-    assert_eq!(json["removed"], 0, "{path}: nothing was removed from the page.\n{json}");
+    assert_eq!(
+        json["removed"], 0,
+        "{path}: nothing was removed from the page.\n{json}"
+    );
     assert_eq!(
         json["changed"], 0,
         "{path}: no node was rewritten; a non-zero count means the baseline rendered them differently.\n{json}"
     );
     assert!(
-        json["diff"].as_str().unwrap_or_default().contains("Freshly added"),
+        json["diff"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Freshly added"),
         "{path}: the diff must name the node that really appeared.\n{json}"
     );
 }
@@ -130,8 +142,14 @@ fn filter_does_not_reach_the_baseline() {
     let (stdout, _, code) = run_cli(&["--browser", b.name(), "inspect", "--filter", "button"]);
     assert_eq!(code, 0);
     // The flag must still do its job: one button on this page, and no heading or link.
-    assert!(stdout.contains("button \"Go\""), "the filtered view is what is printed:\n{stdout}");
-    assert!(!stdout.contains("heading"), "the filter still narrows the output:\n{stdout}");
+    assert!(
+        stdout.contains("button \"Go\""),
+        "the filtered view is what is printed:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("heading"),
+        "the filter still narrows the output:\n{stdout}"
+    );
 
     inject(b.name());
     assert_only_the_injected_node_moved(&diff_json(b.name()), "inspect --filter button");
@@ -148,8 +166,14 @@ fn max_depth_does_not_reach_the_baseline() {
     }
     let (stdout, _, code) = run_cli(&["--browser", b.name(), "inspect", "--max-depth", "1"]);
     assert_eq!(code, 0);
-    assert!(stdout.contains("main"), "depth 1 still prints the top level:\n{stdout}");
-    assert!(!stdout.contains("combobox"), "depth 1 still cuts below it:\n{stdout}");
+    assert!(
+        stdout.contains("main"),
+        "depth 1 still prints the top level:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("combobox"),
+        "depth 1 still cuts below it:\n{stdout}"
+    );
 
     inject(b.name());
     assert_only_the_injected_node_moved(&diff_json(b.name()), "inspect --max-depth 1");
@@ -167,8 +191,14 @@ fn focus_uid_does_not_reach_the_baseline() {
     let main_uid = uid_of_role(b.name(), "main");
     let (stdout, _, code) = run_cli(&["--browser", b.name(), "inspect", "--uid", &main_uid]);
     assert_eq!(code, 0);
-    assert!(stdout.contains("combobox"), "the subtree is still what is printed:\n{stdout}");
-    assert!(!stdout.contains("contentinfo"), "the subtree still excludes the footer:\n{stdout}");
+    assert!(
+        stdout.contains("combobox"),
+        "the subtree is still what is printed:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("contentinfo"),
+        "the subtree still excludes the footer:\n{stdout}"
+    );
 
     inject(b.name());
     assert_only_the_injected_node_moved(&diff_json(b.name()), "inspect --uid <main>");
@@ -187,7 +217,10 @@ fn urls_does_not_reach_the_baseline() {
     }
     let (stdout, _, code) = run_cli(&["--browser", b.name(), "inspect", "--urls"]);
     assert_eq!(code, 0);
-    assert!(stdout.contains("url=\""), "--urls still annotates what it prints:\n{stdout}");
+    assert!(
+        stdout.contains("url=\""),
+        "--urls still annotates what it prints:\n{stdout}"
+    );
 
     inject(b.name());
     assert_only_the_injected_node_moved(&diff_json(b.name()), "inspect --urls");
@@ -204,11 +237,24 @@ fn limit_does_not_reach_the_baseline() {
     if !goto(b.name()) {
         return;
     }
-    let (stdout, _, code) =
-        run_cli(&["--browser", b.name(), "inspect", "--limit", "20", "--filter", "button"]);
+    let (stdout, _, code) = run_cli(&[
+        "--browser",
+        b.name(),
+        "inspect",
+        "--limit",
+        "20",
+        "--filter",
+        "button",
+    ]);
     assert_eq!(code, 0);
-    assert!(stdout.contains("button \"Go\""), "the collected view is still printed:\n{stdout}");
-    assert!(!stdout.contains("heading"), "the filter still applies to it:\n{stdout}");
+    assert!(
+        stdout.contains("button \"Go\""),
+        "the collected view is still printed:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("heading"),
+        "the filter still applies to it:\n{stdout}"
+    );
 
     inject(b.name());
     assert_only_the_injected_node_moved(&diff_json(b.name()), "inspect --limit 20 --filter button");
@@ -225,11 +271,24 @@ fn paging_still_windows_the_printed_view() {
     if !goto(b.name()) {
         return;
     }
-    let (stdout, _, code) =
-        run_cli(&["--browser", b.name(), "inspect", "--filter", "button", "--max-chars", "12"]);
+    let (stdout, _, code) = run_cli(&[
+        "--browser",
+        b.name(),
+        "inspect",
+        "--filter",
+        "button",
+        "--max-chars",
+        "12",
+    ]);
     assert_eq!(code, 0);
-    assert!(stdout.contains("chars truncated"), "paging still truncates:\n{stdout}");
-    assert!(stdout.contains("--offset 12"), "paging still says how to continue:\n{stdout}");
+    assert!(
+        stdout.contains("chars truncated"),
+        "paging still truncates:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("--offset 12"),
+        "paging still says how to continue:\n{stdout}"
+    );
 
     inject(b.name());
     assert_only_the_injected_node_moved(&diff_json(b.name()), "inspect --filter --max-chars");
@@ -253,8 +312,8 @@ fn a_display_flag_does_not_narrow_the_uid_map() {
     assert_eq!(code, 0);
 
     let (stdout, _, _) = run_cli(&["--browser", b.name(), "--json", "click", &button_uid]);
-    let json: serde_json::Value =
-        serde_json::from_str(&stdout).unwrap_or_else(|e| panic!("click should emit JSON: {e}\n{stdout}"));
+    let json: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("click should emit JSON: {e}\n{stdout}"));
     assert_eq!(
         json["ok"], true,
         "a uid deeper than --max-depth is still a node on the page, got {json}"
@@ -274,11 +333,20 @@ fn verdict_of_inert_click(label: &str, flags: &[&str]) -> Option<serde_json::Val
     let (_, _, code) = run_cli(&args);
     assert_eq!(code, 0, "inspect {flags:?} should succeed");
 
-    let (stdout, _, _) =
-        run_cli(&["--browser", b.name(), "--json", "click", "--selector", "#go"]);
+    let (stdout, _, _) = run_cli(&[
+        "--browser",
+        b.name(),
+        "--json",
+        "click",
+        "--selector",
+        "#go",
+    ]);
     let json: serde_json::Value = serde_json::from_str(&stdout)
         .unwrap_or_else(|e| panic!("click should emit JSON: {e}\n{stdout}"));
-    assert_eq!(json["ok"], true, "the click itself should succeed, got {json}");
+    assert_eq!(
+        json["ok"], true,
+        "the click itself should succeed, got {json}"
+    );
     Some(json)
 }
 
@@ -320,13 +388,23 @@ fn goto_inspect_max_depth_does_not_reach_the_baseline() {
     }
     let b = TestBrowser::new("baseline-goto");
     let url = common::fixture_url(FIXTURE);
-    let (stdout, stderr, code) =
-        run_cli(&["--browser", b.name(), "goto", &url, "--inspect", "--max-depth", "1"]);
+    let (stdout, stderr, code) = run_cli(&[
+        "--browser",
+        b.name(),
+        "goto",
+        &url,
+        "--inspect",
+        "--max-depth",
+        "1",
+    ]);
     if code != 0 {
         common::unavailable(&format!("goto --inspect failed: {stderr}"));
         return;
     }
-    assert!(!stdout.contains("combobox"), "--max-depth still cuts the printed tree:\n{stdout}");
+    assert!(
+        !stdout.contains("combobox"),
+        "--max-depth still cuts the printed tree:\n{stdout}"
+    );
 
     inject(b.name());
     assert_only_the_injected_node_moved(&diff_json(b.name()), "goto --inspect --max-depth 1");
@@ -344,7 +422,10 @@ fn pipe_goto_inspect_max_depth_does_not_reach_the_baseline() {
         &["--browser", b.name()],
         &[
             format!(r#"{{"cmd":"goto","url":"{url}","inspect":true,"max_depth":1}}"#),
-            format!(r#"{{"cmd":"eval","expression":{}}}"#, serde_json::json!(INJECT)),
+            format!(
+                r#"{{"cmd":"eval","expression":{}}}"#,
+                serde_json::json!(INJECT)
+            ),
             r#"{"cmd":"diff"}"#.to_string(),
         ],
     );
@@ -352,9 +433,16 @@ fn pipe_goto_inspect_max_depth_does_not_reach_the_baseline() {
         common::unavailable("pipe produced no response");
         return;
     };
-    assert_eq!(responses[0]["ok"], true, "goto should succeed: {}", responses[0]);
+    assert_eq!(
+        responses[0]["ok"], true,
+        "goto should succeed: {}",
+        responses[0]
+    );
     assert!(
-        !responses[0]["snapshot"].as_str().unwrap_or_default().contains("combobox"),
+        !responses[0]["snapshot"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("combobox"),
         "max_depth still cuts the returned tree: {}",
         responses[0]
     );
@@ -375,7 +463,10 @@ fn pipe_action_inspect_with_the_report_off_does_not_reach_the_baseline() {
         &[
             format!(r#"{{"cmd":"goto","url":"{url}"}}"#),
             r##"{"cmd":"click","selector":"#go","inspect":true,"max_depth":1}"##.to_string(),
-            format!(r#"{{"cmd":"eval","expression":{}}}"#, serde_json::json!(INJECT)),
+            format!(
+                r#"{{"cmd":"eval","expression":{}}}"#,
+                serde_json::json!(INJECT)
+            ),
             r#"{"cmd":"diff"}"#.to_string(),
         ],
     );
@@ -383,6 +474,10 @@ fn pipe_action_inspect_with_the_report_off_does_not_reach_the_baseline() {
         common::unavailable("pipe produced no response");
         return;
     };
-    assert_eq!(responses[1]["ok"], true, "click should succeed: {}", responses[1]);
+    assert_eq!(
+        responses[1]["ok"], true,
+        "click should succeed: {}",
+        responses[1]
+    );
     assert_only_the_injected_node_moved(diff, "pipe click inspect+max_depth, report off");
 }

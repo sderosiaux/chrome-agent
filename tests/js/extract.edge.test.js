@@ -1,20 +1,7 @@
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const path = require('node:path');
 
-const { extractFromHTML, extractFromHTMLWithSelector } = require('./helpers.js');
-
-const FIXTURES = path.resolve(__dirname, '..', 'fixtures');
-
-function loadFixture(name) {
-  return fs.readFileSync(path.join(FIXTURES, name), 'utf-8');
-}
-
-
-// ---------------------------------------------------------------------------
-// Edge cases: dynamically generated HTML
-// ---------------------------------------------------------------------------
+const { extractFromHTML, extractFromHTMLWithSelector, loadFixture } = require('./helpers.js');
 
 describe('edge: empty page', () => {
   it('returns hint for completely empty body', () => {
@@ -68,7 +55,8 @@ describe('edge: deeply nested structures', () => {
       <div class="outer"><div class="mid"><div class="inner-list">${items}</div></div></div>
     </body></html>`;
     const r = extractFromHTML(html);
-    assert.ok(r.count >= 4, `Expected >=4, got ${r.count}`);
+    assert.equal(r.count, 4);
+    assert.equal(r.pattern, 'DIV.card');
     assert.ok(r.items[0].title.includes('Nested Item'));
   });
 });
@@ -79,10 +67,9 @@ describe('edge: all-links page', () => {
       `<li><a href="/p/${i}">Page ${i}</a></li>`).join('');
     const html = `<html><body><ul>${links}</ul></body></html>`;
     const r = extractFromHTML(html);
-    // The link-text ratio is 1.0 so score should be penalized heavily.
-    // Might still extract or might return hint -- either is acceptable.
-    // Key: should NOT crash.
-    assert.ok(r.items !== undefined);
+    // Was `assert.ok(r.items !== undefined)`, which a stub returning {items: []} also passes.
+    // Link ratio 1.0 sinks every candidate, so the answer is the no-pattern hint.
+    assert.deepEqual(r, { items: [], hint: 'No repeating pattern found. Try: extract --selector or eval --selector' });
   });
 });
 
@@ -92,26 +79,25 @@ describe('edge: page with only images', () => {
       `<div><img src="/img/${i}.jpg"></div>`).join('');
     const html = `<html><body><div class="gallery">${imgs}</div></body></html>`;
     const r = extractFromHTML(html);
-    // Images with no text and no links likely won't pass richness >= 2,
-    // so likely a hint. Either way should not crash.
-    assert.ok(r.items !== undefined);
+    // No text and no links fails richness >= 2, so nothing groups and the hint is the answer.
+    assert.deepEqual(r, { items: [], hint: 'No repeating pattern found. Try: extract --selector or eval --selector' });
   });
 });
 
 describe('edge: unicode content', () => {
   it('handles unicode titles and text', () => {
     const items = [
-      { title: '\u5F00\u6E90\u8F6F\u4EF6', desc: '\u8FD9\u662F\u4E00\u4E2A\u5F00\u6E90\u9879\u76EE\u7684\u8BE6\u7EC6\u63CF\u8FF0\uFF0C\u4E3A\u4E86\u6D4B\u8BD5\u591A\u8BED\u8A00\u652F\u6301' },
-      { title: '\u30D7\u30ED\u30B0\u30E9\u30DF\u30F3\u30B0', desc: '\u30D7\u30ED\u30B0\u30E9\u30DF\u30F3\u30B0\u306B\u95A2\u3059\u308B\u8A73\u7D30\u306A\u8AAC\u660E\u3068\u4F8B\u3092\u793A\u3057\u307E\u3059' },
-      { title: '\u041F\u0440\u043E\u0433\u0440\u0430\u043C\u043C\u0438\u0440\u043E\u0432\u0430\u043D\u0438\u0435', desc: '\u041F\u043E\u0434\u0440\u043E\u0431\u043D\u043E\u0435 \u043E\u043F\u0438\u0441\u0430\u043D\u0438\u0435 \u043F\u0440\u043E\u0435\u043A\u0442\u0430 \u0434\u043B\u044F \u0442\u0435\u0441\u0442\u0438\u0440\u043E\u0432\u0430\u043D\u0438\u044F' },
-      { title: 'Caf\u00E9 \u00C9moji \u2615', desc: 'Un projet open source avec des caract\u00E8res sp\u00E9ciaux pour tester' },
+      { title: '开源软件', desc: '这是一个开源项目的详细描述，为了测试多语言支持' },
+      { title: 'プログラミング', desc: 'プログラミングに関する詳細な説明と例を示します' },
+      { title: 'Программирование', desc: 'Подробное описание проекта для тестирования' },
+      { title: 'Café Émoji ☕', desc: 'Un projet open source avec des caractères spéciaux pour tester' },
     ];
     const cards = items.map(i => `
       <div class="item"><h3><a href="/x">${i.title}</a></h3><p>${i.desc}</p></div>`).join('');
     const html = `<html><body><div class="list">${cards}</div></body></html>`;
     const r = extractFromHTML(html);
-    assert.ok(r.count >= 3, `Expected >=3, got ${r.count}`);
-    assert.ok(r.items.some(i => i.title && i.title.includes('\u5F00\u6E90')));
+    assert.equal(r.count, 4);
+    assert.deepEqual(r.items.map(i => i.title), items.map(i => i.title));
   });
 });
 
@@ -125,9 +111,8 @@ describe('edge: huge page with 100+ items', () => {
       </div>`).join('');
     const html = `<html><body><div class="grid">${cards}</div></body></html>`;
     const r = extractFromHTML(html);
-    assert.ok(r.count >= 100, `Expected >=100, got ${r.count}`);
-    // Default limit is 20
-    assert.ok(r.items.length <= 20, `Items should be capped by default limit, got ${r.items.length}`);
+    assert.equal(r.count, 120);
+    assert.equal(r.items.length, 20, 'the default limit is 20');
   });
 });
 
@@ -144,20 +129,13 @@ describe('edge: whitespace-heavy content', () => {
       </div>`).join('');
     const html = `<html><body><div>${cards}</div></body></html>`;
     const r = extractFromHTML(html);
-    assert.ok(r.count >= 3);
-    for (const item of r.items) {
-      if (item.title) {
-        assert.ok(!item.title.startsWith(' '), 'title should be trimmed');
-        assert.ok(!item.title.endsWith(' '), 'title should be trimmed');
-        assert.ok(!item.title.includes('  '), 'title should collapse whitespace');
-      }
-    }
+    assert.equal(r.count, 4);
+    assert.deepEqual(
+      r.items.map(i => i.title),
+      ['Whitespace Title 0', 'Whitespace Title 1', 'Whitespace Title 2', 'Whitespace Title 3'],
+    );
   });
 });
-
-// ---------------------------------------------------------------------------
-// Limit parameter
-// ---------------------------------------------------------------------------
 
 describe('limit parameter', () => {
   it('limit=2 caps items but preserves full count', () => {
@@ -187,10 +165,6 @@ describe('limit parameter', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// Selector scoping
-// ---------------------------------------------------------------------------
-
 describe('selector scoping (extractFromHTMLWithSelector)', () => {
   it('scopes extraction to a specific container', () => {
     const html = `<html><body>
@@ -207,10 +181,8 @@ describe('selector scoping (extractFromHTMLWithSelector)', () => {
       </div>
     </body></html>`;
     const r = extractFromHTMLWithSelector(html, '#main');
-    assert.ok(r.count >= 3, `Expected >=3, got ${r.count}`);
-    const titles = r.items.map(i => i.title);
-    assert.ok(titles.some(t => t && t.includes('Main')));
-    assert.ok(!titles.some(t => t && t.includes('Sidebar')));
+    assert.equal(r.count, 4);
+    assert.deepEqual(r.items.map(i => i.title), ['Main 1', 'Main 2', 'Main 3', 'Main 4']);
   });
 
   it('returns hint when selector not found', () => {
@@ -228,32 +200,59 @@ describe('selector scoping (extractFromHTMLWithSelector)', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// Pattern string format
-// ---------------------------------------------------------------------------
-
 describe('pattern string format', () => {
   it('pattern has TAG.class format', () => {
     const html = loadFixture('extract_semantic_classes.html');
     const r = extractFromHTML(html);
-    // pattern should be like "DIV.repo-card"
-    assert.ok(r.pattern);
-    const parts = r.pattern.split('.');
-    assert.ok(parts.length >= 2, `Expected TAG.class format, got: ${r.pattern}`);
-    // First part should be an HTML tag
-    assert.match(parts[0], /^[A-Z]+$/, `Tag should be uppercase, got: ${parts[0]}`);
+    assert.equal(r.pattern, 'DIV.repo-card');
   });
 
   it('pattern class comes from element classList', () => {
     const html = loadFixture('extract_link_heavy_nav.html');
     const r = extractFromHTML(html);
-    assert.match(r.pattern, /listing/i);
+    assert.equal(r.pattern, 'DIV.job-listing');
+  });
+
+  // The 40-char truncation only shows on a class list long enough to cross it, which no
+  // realistic fixture has; without this the cap can be deleted with the suite green.
+  it('truncates the class part of the pattern at 40 chars', () => {
+    const cls = 'alpha beta delta epsilon gamma record zeta';
+    const cards = Array.from({ length: 4 }, (_, i) =>
+      `<div class="${cls}"><h3>Row ${i}</h3><p>Description for row ${i} with plenty of words to score well.</p></div>`).join('');
+    const html = `<html><body><div class="grid">${cards}</div></body></html>`;
+    const r = extractFromHTML(html);
+    assert.equal(r.pattern, 'DIV.alpha.beta.delta.epsilon.gamma.record.ze...');
   });
 });
 
-// ---------------------------------------------------------------------------
-// Field extraction details
-// ---------------------------------------------------------------------------
+// A class carrying a digit, or 30+ chars long, is per-instance noise and must leave the
+// signature — otherwise four identical cards become four groups of one and nothing groups.
+describe('grouping: the class-name length filter', () => {
+  it('groups cards whose only difference is a 30+ char generated class', () => {
+    const long = ['alpha', 'bravo', 'charlie', 'delta'].map(w => `emitted-utility-classname-${w}`);
+    assert.ok(long.every(c => c.length >= 30 && !/\d/.test(c)), 'the filter under test is length, not digits');
+    const cards = long.map((c, i) =>
+      `<div class="card ${c}"><h3><a href="/p/${i}">Card ${i}</a></h3>` +
+      `<p>Description for card ${i} with plenty of words to score.</p></div>`).join('');
+    const html = `<html><body><div class="grid">${cards}</div></body></html>`;
+    const r = extractFromHTML(html);
+    assert.equal(r.count, 4);
+    assert.equal(r.pattern, 'DIV.card');
+  });
+});
+
+// Reached only when both passes come up empty; every table fixture in the suite wins in phase 2.
+describe('fallback: <tr> rows when nothing else groups', () => {
+  it('returns rows with 2+ cells when no candidate survives either pass', () => {
+    const rows = ['alpha', 'bravo', 'charlie'].map((c, i) =>
+      `<tr class="${c}"><td><a href="/row/${i}">Row ${i}</a></td><td>Value ${i}</td></tr>`).join('');
+    const r = extractFromHTML(`<html><body><table>${rows}</table></body></html>`);
+    // A unique class per row keeps every signature group at one element, so phase 2 finds nothing.
+    assert.equal(r.count, 3);
+    assert.equal(r.pattern, 'TR.table');
+    assert.deepEqual(r.items.map(i => i.title), ['Row 0', 'Row 1', 'Row 2']);
+  });
+});
 
 describe('field extraction: fields array', () => {
   it('fields contain child text that is not title or price', () => {
@@ -265,12 +264,12 @@ describe('field extraction: fields array', () => {
       </div>
     </body></html>`;
     const r = extractFromHTML(html);
-    // These simple rows with no links/headings should get text or fields
-    assert.ok(r.count >= 3);
-    // Each item should have either text or fields
-    for (const item of r.items) {
-      assert.ok(item.text || item.fields, 'item should have text or fields');
-    }
+    assert.equal(r.count, 3);
+    assert.deepEqual(r.items.map(i => i.fields), [
+      ['Alpha', 'Beta', 'Gamma'],
+      ['Delta', 'Epsilon', 'Zeta'],
+      ['Eta', 'Theta', 'Iota'],
+    ]);
   });
 
   it('fields are capped at 8', () => {
@@ -279,13 +278,46 @@ describe('field extraction: fields array', () => {
       `<div class="row">${cells}</div>`).join('');
     const html = `<html><body><div class="table">${rows}</div></body></html>`;
     const r = extractFromHTML(html);
-    if (r.items && r.items.length > 0) {
-      for (const item of r.items) {
-        if (item.fields) {
-          assert.ok(item.fields.length <= 8, `fields should cap at 8, got ${item.fields.length}`);
-        }
-      }
+    assert.equal(r.items.length, 4);
+    for (const item of r.items) {
+      assert.deepEqual(item.fields, ['Field0', 'Field1', 'Field2', 'Field3',
+        'Field4', 'Field5', 'Field6', 'Field7']);
     }
+  });
+
+  // Single-word action labels are chrome, not data.
+  it('drops chrome labels from fields', () => {
+    const recs = Array.from({ length: 4 }, (_, i) =>
+      `<div class="alpha"><h3>Record ${i}</h3><span>Star</span><span>Built by</span>` +
+      `<span>Real field ${i}</span></div>`).join('');
+    const r = extractFromHTML(`<html><body><div class="ga">${recs}</div></body></html>`);
+    assert.equal(r.count, 4);
+    assert.deepEqual(r.items.map(i => i.fields), [
+      ['Real field 0'], ['Real field 1'], ['Real field 2'], ['Real field 3'],
+    ]);
+  });
+
+  // A <style> one level down is not caught by the SCRIPT/STYLE skip, so its rules land in
+  // the child's textContent and only cleanText's regex keeps them out of the field.
+  it('strips CSS that leaks in from a nested <style>', () => {
+    const recs = Array.from({ length: 4 }, (_, i) =>
+      `<div class="alpha"><h3>Record ${i}</h3>` +
+      `<div class="wrap"><style>.leak{color:red}</style>Visible label ${i}</div></div>`).join('');
+    const r = extractFromHTML(`<html><body><div class="ga">${recs}</div></body></html>`);
+    assert.equal(r.count, 4);
+    assert.deepEqual(r.items.map(i => i.fields), [
+      ['Visible label 0'], ['Visible label 1'], ['Visible label 2'], ['Visible label 3'],
+    ]);
+  });
+});
+
+describe('field extraction: dates', () => {
+  it('falls back to the text of a <time> with no datetime attribute', () => {
+    const recs = Array.from({ length: 4 }, (_, i) =>
+      `<div class="alpha"><h3><a href="/r/${i}">Record ${i}</a></h3><time>March ${i + 1}</time>` +
+      `<p>Description ${i} with enough words for scoring here.</p></div>`).join('');
+    const r = extractFromHTML(`<html><body><div class="ga">${recs}</div></body></html>`);
+    assert.deepEqual(r.items.map(i => i.date), ['March 1', 'March 2', 'March 3', 'March 4']);
   });
 });
 
@@ -297,34 +329,27 @@ describe('field extraction: text fallback', () => {
       </div>`).join('');
     const html = `<html><body><div class="feed">${rows}</div></body></html>`;
     const r = extractFromHTML(html);
-    // With only one child and no links, items should fall back to text
-    if (r.items && r.items.length > 0) {
-      for (const item of r.items) {
-        assert.ok(item.text || item.title || item.fields,
-          'item must have text, title, or fields');
-      }
-    }
+    assert.equal(r.count, 4);
+    assert.deepEqual(r.items.map(i => i.fields), Array.from({ length: 4 }, (_, i) =>
+      [`This is entry number ${i} with some text content in a single child paragraph`]));
   });
 
+  // The 200-char cap only runs when no child yields a field, which needs a child whose own
+  // text is already over the 200-char field limit.
   it('text fallback is capped at 200 chars', () => {
     const longText = 'A'.repeat(500);
     const rows = Array.from({ length: 4 }, () =>
-      `<div class="entry">${longText}</div>`).join('');
+      `<div class="entry"><span>${longText}</span></div>`).join('');
     const html = `<html><body><div class="list">${rows}</div></body></html>`;
     const r = extractFromHTML(html);
-    if (r.items && r.items.length > 0) {
-      for (const item of r.items) {
-        if (item.text) {
-          assert.ok(item.text.length <= 200, `text should be <=200 chars, got ${item.text.length}`);
-        }
-      }
+    assert.equal(r.count, 4);
+    assert.equal(r.items.length, 4);
+    for (const item of r.items) {
+      assert.equal(item.text, 'A'.repeat(200));
+      assert.ok(!item.fields, 'the 500-char child is over the field limit, so no field is emitted');
     }
   });
 });
-
-// ---------------------------------------------------------------------------
-// Anti-patterns
-// ---------------------------------------------------------------------------
 
 describe('anti-pattern: nav links', () => {
   it('a <nav> with many links should NOT be the main data pattern', () => {
@@ -341,10 +366,9 @@ describe('anti-pattern: nav links', () => {
       <main>${cards}</main>
     </body></html>`;
     const r = extractFromHTML(html);
-    const titles = r.items.map(i => i.title);
-    assert.ok(!titles.some(t => t && t.startsWith('Nav Item')),
-      'Nav links should not be extracted as main data');
-    assert.ok(titles.some(t => t && t.includes('Blog Post')));
+    assert.equal(r.count, 5);
+    assert.deepEqual(r.items.map(i => i.title),
+      ['Blog Post 0', 'Blog Post 1', 'Blog Post 2', 'Blog Post 3', 'Blog Post 4']);
   });
 });
 
@@ -362,8 +386,9 @@ describe('anti-pattern: footer links', () => {
       <footer><nav>${footerLinks}</nav></footer>
     </body></html>`;
     const r = extractFromHTML(html);
-    const titles = r.items.map(i => i.title);
-    assert.ok(titles.some(t => t && t.includes('Content Card')));
+    assert.equal(r.count, 4);
+    assert.deepEqual(r.items.map(i => i.title),
+      ['Content Card 0', 'Content Card 1', 'Content Card 2', 'Content Card 3']);
   });
 });
 
@@ -371,18 +396,13 @@ describe('anti-pattern: ad banners should not be main pattern', () => {
   it('interleaved ads should not become the detected pattern', () => {
     const html = loadFixture('extract_ads_interleaved.html');
     const r = extractFromHTML(html);
-    assert.ok(r.pattern);
-    assert.ok(!r.pattern.includes('ad'), `Pattern should not be ads: ${r.pattern}`);
+    // Exact, not `!includes('ad')`: a bare substring would also reject TR.load-row.
+    assert.equal(r.pattern, 'ARTICLE.story');
   });
 });
 
-// ---------------------------------------------------------------------------
-// Algorithm internals: scoring heuristics
-// ---------------------------------------------------------------------------
-
 describe('scoring: link-heavy items penalized', () => {
   it('items where >85% of text is links score lower', () => {
-    // Build a page where all content is links vs a page with mixed content
     const linkItems = Array.from({ length: 5 }, (_, i) =>
       `<div class="item"><a href="/${i}">Link text ${i}</a></div>`).join('');
     const richItems = Array.from({ length: 5 }, (_, i) => `
@@ -396,16 +416,120 @@ describe('scoring: link-heavy items penalized', () => {
       <div class="entries">${richItems}</div>
     </body></html>`;
     const r = extractFromHTML(html);
-    // The rich items should win
     const titles = r.items.map(i => i.title);
     assert.ok(titles.some(t => t && t.includes('Entry')),
       'Rich entries should be preferred over link-only items');
   });
 });
 
+// Both link-density tiers in `penalise` can be deleted with the rest of this suite green:
+// the pages above are ones the content group already wins on raw score. These two are sized
+// so the link strip out-scores the content and only the penalty puts it back in its place.
+describe('scoring: the link-density penalty is what suppresses a link strip', () => {
+  const posts = Array.from({ length: 3 }, (_, i) => `
+    <article class="post">
+      <h2><a href="/post/${i}">Story ${i}</a></h2>
+      <p>A body paragraph for story ${i} with enough words to be worth extracting.</p>
+    </article>`).join('');
+
+  it('a 50-item strip of all-link labels loses to 3 real posts (ratio > 0.85, x0.2)', () => {
+    const tags = Array.from({ length: 50 }, (_, i) =>
+      `<li class="item"><a href="/tag/${i}">Category ${i}0</a></li>`).join('');
+    const html = `<html><body><main>
+      <div class="listing">${posts}</div>
+      <div class="tags"><ul>${tags}</ul></div>
+    </main></body></html>`;
+    const r = extractFromHTML(html);
+    assert.match(r.pattern, /ARTICLE/i, `the link strip won on count alone: pattern=${r.pattern}`);
+    assert.equal(r.count, 3);
+  });
+
+  it('a mostly-link strip loses too when its labels leave a little plain text (ratio > 0.7, x0.5)', () => {
+    const tags = Array.from({ length: 8 }, (_, i) =>
+      `<li class="item"><a href="/tag/${i}">Category ${i}0</a><span>new</span></li>`).join('');
+    const html = `<html><body><main>
+      <div class="listing">${posts}</div>
+      <div class="tags"><ul>${tags}</ul></div>
+    </main></body></html>`;
+    const r = extractFromHTML(html);
+    assert.match(r.pattern, /ARTICLE/i, `the link strip won on count alone: pattern=${r.pattern}`);
+    assert.equal(r.count, 3);
+  });
+});
+
+// The four rungs below are each worth one multiplier. Every other fixture in this suite is
+// won on raw score, so each rung can be deleted with the suite green unless a page is sized
+// to be decided by that rung alone: the group that should win trails on raw score and only
+// its own multiplier puts it ahead.
+describe('scoring: the heterogeneity boost', () => {
+  const body = n => `Body text for this record, long enough to clear both the twenty and eighty ` +
+    `character richness thresholds without any links at all. ${n}`;
+
+  it('3 mixed-tag records beat 3 same-tag records that carry one more child (x1.3)', () => {
+    const mixed = Array.from({ length: 3 }, (_, i) =>
+      `<div class="alpha"><h3>Alpha ${i}</h3><p>${body(i)}</p><span>tail ${i}</span></div>`).join('');
+    const uniform = Array.from({ length: 3 }, (_, i) =>
+      `<div class="beta"><p>Beta ${i}</p><p>${body(i)}</p><p>more ${i}</p><p>even more ${i}</p></div>`).join('');
+    const r = extractFromHTML(`<html><body><main>
+      <div class="ga">${mixed}</div><div class="gb">${uniform}</div></main></body></html>`);
+    // 15.60 vs 15.00; without the boost 12.00 vs 15.00 and DIV.beta wins.
+    assert.equal(r.pattern, 'DIV.alpha');
+    assert.equal(r.count, 3);
+  });
+});
+
+describe('scoring: the subtree-depth boost', () => {
+  const body = n => `Body text for record ${n}, long enough to clear both the twenty and the ` +
+    `eighty character richness thresholds on its own.`;
+
+  it('6 three-deep records beat 7 flat ones (x1.2)', () => {
+    const deep = Array.from({ length: 6 }, (_, i) =>
+      `<div class="alpha"><h3>Alpha ${i}</h3><div class="wrap"><p>${body(i)}</p></div></div>`).join('');
+    const flat = Array.from({ length: 7 }, (_, i) =>
+      `<div class="beta"><h3>Beta ${i}</h3><p>${body(i)}</p></div>`).join('');
+    const r = extractFromHTML(`<html><body><main>
+      <div class="ga">${deep}</div><div class="gb">${flat}</div></main></body></html>`);
+    // 31.68 vs 30.80; without the boost 26.40 vs 30.80 and DIV.beta wins.
+    assert.equal(r.pattern, 'DIV.alpha');
+    assert.equal(r.count, 6);
+  });
+});
+
+describe('scoring: the record-tag boost', () => {
+  const body = n => `Body text for record ${n}, long enough to clear both the twenty and the ` +
+    `eighty character richness thresholds on its own.`;
+
+  it('6 <article> records beat 7 identical <div> records (x1.2)', () => {
+    const arts = Array.from({ length: 6 }, (_, i) =>
+      `<article class="alpha"><h3>Alpha ${i}</h3><p>${body(i)}</p></article>`).join('');
+    const divs = Array.from({ length: 7 }, (_, i) =>
+      `<div class="beta"><h3>Beta ${i}</h3><p>${body(i)}</p></div>`).join('');
+    const r = extractFromHTML(`<html><body><main>
+      <div class="ga">${arts}</div><div class="gb">${divs}</div></main></body></html>`);
+    // 31.68 vs 30.80; without the boost 26.40 vs 30.80 and DIV.beta wins.
+    assert.equal(r.pattern, 'ARTICLE.alpha');
+    assert.equal(r.count, 6);
+  });
+});
+
+describe('scoring: the body-parent penalty', () => {
+  const body = n => `Body text for record ${n}, long enough to clear both the twenty and the ` +
+    `eighty character richness thresholds on its own.`;
+
+  it('6 records in a container beat 7 loose in <body> (x0.5)', () => {
+    const contained = Array.from({ length: 6 }, (_, i) =>
+      `<div class="alpha"><h3>Alpha ${i}</h3><p>${body(i)}</p></div>`).join('');
+    const loose = Array.from({ length: 7 }, (_, i) =>
+      `<div class="beta"><h3>Beta ${i}</h3><p>${body(i)}</p></div>`).join('');
+    const r = extractFromHTML(`<html><body><div class="ga">${contained}</div>${loose}</body></html>`);
+    // 26.40 vs 15.40; without the penalty 26.40 vs 30.80 and DIV.beta wins.
+    assert.equal(r.pattern, 'DIV.alpha');
+    assert.equal(r.count, 6);
+  });
+});
+
 describe('scoring: semantic classes boosted', () => {
   it('items with DATA_CLASS_RE matching classes are preferred', () => {
-    // Two groups of items, one with semantic class names, one without
     const semantic = Array.from({ length: 4 }, (_, i) => `
       <div class="product-item">
         <h3><a href="/p/${i}">Product ${i}</a></h3>
@@ -421,13 +545,9 @@ describe('scoring: semantic classes boosted', () => {
       <div class="boxes">${generic}</div>
     </body></html>`;
     const r = extractFromHTML(html);
-    assert.match(r.pattern, /product/i, 'semantic class items should be preferred');
+    assert.equal(r.pattern, 'DIV.product-item');
   });
 });
-
-// ---------------------------------------------------------------------------
-// Return shape validation
-// ---------------------------------------------------------------------------
 
 describe('return shape', () => {
   it('successful extraction returns { items, count, pattern }', () => {
@@ -449,107 +569,8 @@ describe('return shape', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// Tricky / adversarial HTML
-// ---------------------------------------------------------------------------
-
-describe('adversarial: identical siblings with different content', () => {
-  it('detects items that share structure but have different text', () => {
-    const cards = Array.from({ length: 5 }, (_, i) => `
-      <div class="result">
-        <h3><a href="/r/${i}">${'X'.repeat(20 + i * 5)}</a></h3>
-        <p>${'Y'.repeat(50 + i * 10)}</p>
-      </div>`).join('');
-    const html = `<html><body><div class="results">${cards}</div></body></html>`;
-    const r = extractFromHTML(html);
-    assert.ok(r.count >= 5);
-    // All items should be unique
-    const titles = r.items.map(i => i.title);
-    const unique = new Set(titles);
-    assert.equal(unique.size, titles.length, 'all titles should be unique');
-  });
-});
-
-describe('adversarial: items with no children', () => {
-  it('handles items that are leaf elements with only text', () => {
-    // Items with zero children get childSignature like "P||"
-    const items = Array.from({ length: 5 }, (_, i) =>
-      `<p class="entry">Entry number ${i}: This has enough text to pass the richness check hopefully</p>`).join('');
-    const html = `<html><body><div class="list">${items}</div></body></html>`;
-    const r = extractFromHTML(html);
-    // These are leaf elements with no children, richness will be low (children.length < 2)
-    // and no links/images. Likely returns hint. Should NOT crash.
-    assert.ok(r.items !== undefined);
-  });
-});
-
-describe('adversarial: nested tables', () => {
-  it('handles table within table without crashing', () => {
-    const html = `<html><body>
-      <table>
-        <tr><td>
-          <table class="inner">
-            <tr><td><a href="/a">A</a></td><td class="price">$10</td><td>Cat A</td></tr>
-            <tr><td><a href="/b">B</a></td><td class="price">$20</td><td>Cat B</td></tr>
-            <tr><td><a href="/c">C</a></td><td class="price">$30</td><td>Cat C</td></tr>
-            <tr><td><a href="/d">D</a></td><td class="price">$40</td><td>Cat D</td></tr>
-          </table>
-        </td></tr>
-      </table>
-    </body></html>`;
-    const r = extractFromHTML(html);
-    assert.ok(r.count >= 3, `Expected >=3, got ${r.count}`);
-  });
-});
-
-describe('adversarial: mixed tag types as siblings', () => {
-  it('only groups siblings with same signature', () => {
-    // Mix of <div> and <section> — the algorithm should group them separately
-    const html = `<html><body>
-      <div class="feed">
-        <div class="card"><h3><a href="/d1">Div 1</a></h3><p>Description one</p></div>
-        <section class="card"><h3><a href="/s1">Section 1</a></h3><p>Description one</p></section>
-        <div class="card"><h3><a href="/d2">Div 2</a></h3><p>Description two</p></div>
-        <section class="card"><h3><a href="/s2">Section 2</a></h3><p>Description two</p></section>
-        <div class="card"><h3><a href="/d3">Div 3</a></h3><p>Description three</p></div>
-        <section class="card"><h3><a href="/s3">Section 3</a></h3><p>Description three</p></section>
-      </div>
-    </body></html>`;
-    const r = extractFromHTML(html);
-    // Exactly 3: the six siblings are two record types of three, and merging them into
-    // one group of six is the defect this fixture exists for (the extractor's own
-    // comment cites HN story rows vs subtext rows). `>= 3` passed either way, so a
-    // regression in the tag-merge logic could ship with the suite green.
-    assert.equal(r.count, 3, `the two tag groups must stay apart, got ${r.count}`);
-    const tag = r.pattern.split('.')[0];
-    assert.ok(['DIV', 'SECTION'].includes(tag), `Expected DIV or SECTION, got: ${tag}`);
-    // And every returned record is of that one type, not a mix.
-    const titles = r.items.map(i => JSON.stringify(i)).join(' ');
-    const mixed = /Div \d/.test(titles) && /Section \d/.test(titles);
-    assert.ok(!mixed, `records of both types were merged into one list: ${titles}`);
-  });
-});
-
-describe('adversarial: special characters in class names', () => {
-  it('handles class names with hyphens and numbers', () => {
-    const items = Array.from({ length: 4 }, (_, i) => `
-      <div class="item-2025-v3 result-card__wrapper">
-        <h3><a href="/x/${i}">Result ${i}</a></h3>
-        <p>Detailed content for result number ${i} to ensure sufficient richness scoring</p>
-      </div>`).join('');
-    const html = `<html><body><div>${items}</div></body></html>`;
-    const r = extractFromHTML(html);
-    assert.ok(r.count >= 4);
-    assert.ok(r.pattern.includes('result'), `pattern should reference result class: ${r.pattern}`);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Ambiguity: when a second pattern scores close to the winner, the caller has to
-// be told. Silently returning one of two plausible lists is the failure an agent
-// cannot detect on its own.
-// ---------------------------------------------------------------------------
-
+// A second pattern within 60% of the winner has to be named: silently returning one of two
+// plausible lists is the failure an agent cannot detect on its own.
 describe('ambiguous pages', () => {
   const twoLists = `
     <main>
@@ -569,10 +590,8 @@ describe('ambiguous pages', () => {
 
   it('names the runner-up when two patterns are comparable', () => {
     const r = extractFromHTML(twoLists);
-    assert.ok(r.count >= 3, `should find one of the lists, got ${r.count}`);
-    assert.ok(r.alternatives, `an ambiguous page must say so: ${JSON.stringify(r)}`);
-    assert.ok(Array.isArray(r.alternatives) && r.alternatives.length >= 1,
-      `and name the other candidate: ${JSON.stringify(r.alternatives)}`);
+    assert.equal(r.count, 4);
+    assert.deepEqual(r.alternatives, [{ selector: '#posts', count: 4 }]);
     assert.ok(r.hint && /selector/.test(r.hint), `and say how to disambiguate: ${r.hint}`);
   });
 
@@ -584,5 +603,41 @@ describe('ambiguous pages', () => {
     </ul></main>`;
     const r = extractFromHTML(single);
     assert.ok(!r.alternatives, `no ambiguity to report: ${JSON.stringify(r.alternatives)}`);
+  });
+
+  // Five comparable lists: the cap is the only thing that stops all four runners-up being named.
+  it('names at most 3 runners-up', () => {
+    const list = id => `<ul id="${id}">${Array.from({ length: 3 }, (_, i) =>
+      `<li><h3><a href="/${id}/${i}">${id} item ${i}</a></h3>` +
+      `<p>Description ${i} for list ${id} with enough words to score.</p></li>`).join('')}</ul>`;
+    const ids = ['la', 'lb', 'lc', 'ld', 'le'];
+    const r = extractFromHTML(`<html><body><main>${ids.map(list).join('')}</main></body></html>`);
+    assert.deepEqual(r.alternatives, [
+      { selector: '#la', count: 3 },
+      { selector: '#lb', count: 3 },
+      { selector: '#lc', count: 3 },
+    ]);
+  });
+
+  // selectorFor's id branch is covered above; these two are the fallbacks under it.
+  describe('the selector named for a container with no id', () => {
+    const recs = p => Array.from({ length: 3 }, (_, i) =>
+      `<div class="rec"><h3><a href="/${p}/${i}">${p} record ${i}</a></h3>` +
+      `<p>Description ${i} in ${p} with enough words to score.</p></div>`).join('');
+    const page = `<html><body><main>
+      <section id="primary">${recs('primary')}</section>
+      <div class="secondary">${recs('secondary')}</div>
+      <div class="col-2">${recs('third')}</div>
+    </main></body></html>`;
+
+    it('uses tag.class when the container has a digit-free class', () => {
+      const r = extractFromHTML(page);
+      assert.equal(r.alternatives[0].selector, 'div.secondary');
+    });
+
+    it('falls back to the bare tag when every class carries a digit', () => {
+      const r = extractFromHTML(page);
+      assert.equal(r.alternatives[1].selector, 'div');
+    });
   });
 });

@@ -5,7 +5,10 @@ mod common;
 use common::TestBrowser;
 
 fn run_cli(args: &[&str]) -> (String, i32) {
-    let output = Command::new(common::binary()).args(args).output().expect("Failed to run chrome-agent");
+    let output = Command::new(common::binary())
+        .args(args)
+        .output()
+        .expect("Failed to run chrome-agent");
     (
         String::from_utf8_lossy(&output.stdout).to_string(),
         output.status.code().unwrap_or(-1),
@@ -21,7 +24,12 @@ fn goto_returns_on_a_page_that_never_stops_mutating() {
     let b = TestBrowser::new("settle-ticker");
     let url = common::fixture_url("goto_ticker.html");
     // Warm the browser so the measurement covers navigation, not Chrome startup.
-    let _ = run_cli(&["--browser", b.name(), "goto", &common::fixture_url("extract_cards.html")]);
+    let _ = run_cli(&[
+        "--browser",
+        b.name(),
+        "goto",
+        &common::fixture_url("extract_cards.html"),
+    ]);
 
     let started = Instant::now();
     let (_, code) = run_cli(&["--browser", b.name(), "goto", &url]);

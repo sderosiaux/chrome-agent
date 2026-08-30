@@ -34,7 +34,10 @@ pub fn disarm(pid: u32) {
 /// browser already in the store is NOT reaped — a failed `goto` leaving a usable browser
 /// behind is the existing contract.
 pub fn reap_unpersisted() {
-    let armed: Vec<u32> = UNPERSISTED.lock().map(|mut a| std::mem::take(&mut *a)).unwrap_or_default();
+    let armed: Vec<u32> = UNPERSISTED
+        .lock()
+        .map(|mut a| std::mem::take(&mut *a))
+        .unwrap_or_default();
     for pid in armed {
         let _ = kill_pid(pid);
     }
@@ -62,9 +65,10 @@ pub enum KillOutcome {
     NotABrowser,
     /// The pid holds no process. Nothing to signal, nothing lost.
     Gone,
-    /// The reading that classifies the pid did not happen. Nothing was signalled and
-    /// nothing is claimed: the browser may be running. The other three are assertions
-    /// about a process; this one is the absence of one. See [`process_name`].
+    /// Nothing was signalled and nothing is claimed: the browser may be running. Two ways in
+    /// — the reading that classifies the pid did not happen ([`process_name`]), or the signal
+    /// itself could not be sent. The other three are assertions about a process; this one is
+    /// the absence of one.
     Unverified,
 }
 
@@ -84,16 +88,49 @@ impl KillOutcome {
     }
 }
 
-/// The executable behind `pid` per the process table, or `None` when the table would not
-/// answer — a different fact from "the pid is gone".
+/// Where `ps` and `kill` are, tried in order. `PATH` is deliberately not consulted.
 ///
-/// Three doors reach `None`: `ps` may not exist (a distroless image, the audience a static
-/// musl binary is built for); busybox's `ps` does not implement `-p <pid> -o comm=` and
+/// [`process_name`] is the check that stops this tool signalling a recycled pid, so resolving
+/// it through an environment variable makes the guard only as trustworthy as whatever set
+/// `PATH` — and nothing here controls that end to end. Absolute paths cannot be redirected;
+/// the cost is a system that installs these somewhere else, which reads as "the process table
+/// would not answer" and is already a state both callers handle ([`KillOutcome::Unverified`]).
+#[cfg(unix)]
+pub const PS_PATHS: &[&str] = &["/bin/ps", "/usr/bin/ps"];
+#[cfg(unix)]
+const KILL_PATHS: &[&str] = &["/bin/kill", "/usr/bin/kill"];
+
+/// The first of `candidates` that exists, or `None`.
+#[cfg(unix)]
+pub fn first_existing(candidates: &[&'static str]) -> Option<&'static str> {
+    candidates
+        .iter()
+        .copied()
+        .find(|path| std::path::Path::new(path).exists())
+}
+
+/// The executable behind `pid` per the OS, or `None` when it would not answer — a different
+/// fact from "the pid is gone".
+///
+/// Linux is answered out of `/proc/<pid>/comm`: the kernel's own view, no subprocess, no path
+/// to resolve. Everywhere else it takes `ps`, at an absolute path (see [`PS_PATHS`]).
+///
+/// Four doors reach `None`: no `ps` at either absolute path (a distroless image, the audience a
+/// static musl binary is built for); busybox's `ps` does not implement `-p <pid> -o comm=` and
 /// exits non-zero with empty stdout, which `output()` still reports as `Ok`, hence the
-/// `status.success()` gate; and an empty name on a successful read classifies nothing.
+/// `status.success()` gate; an empty name on a successful read classifies nothing; and on Linux
+/// a `/proc` that is not mounted, which falls through to the `ps` path rather than answering.
 #[cfg(unix)]
 fn process_name(pid: u32) -> Option<String> {
-    let out = std::process::Command::new("ps")
+    #[cfg(target_os = "linux")]
+    if let Ok(comm) = std::fs::read_to_string(format!("/proc/{pid}/comm")) {
+        let comm = comm.trim().to_string();
+        if !comm.is_empty() {
+            return Some(comm);
+        }
+    }
+    let ps = first_existing(PS_PATHS)?;
+    let out = std::process::Command::new(ps)
         .args(["-p", &pid.to_string(), "-o", "comm="])
         .output()
         .ok()?;
@@ -130,6 +167,10 @@ fn classify(existence: crate::session::Liveness, comm: Option<&str>) -> Option<K
 /// made a `ps` this tool could not run report `Gone` for a pid it never looked at. The
 /// check-then-kill window is milliseconds, not zero.
 ///
+/// Both external tools are reached at absolute paths ([`PS_PATHS`]), and on Linux the guard
+/// needs no tool at all — `/proc/<pid>/comm` is read directly. A guard resolved through the
+/// inherited `PATH` is only as trustworthy as whoever set it.
+///
 /// Callers that kill on their way to relaunching (`run.rs`) or on interrupt (`main.rs`)
 /// discard the outcome; they act the same either way.
 ///
@@ -147,12 +188,21 @@ pub fn kill_pid(pid: u32) -> KillOutcome {
         if let Some(refusal) = classify(existence, comm.as_deref()) {
             return refusal;
         }
-        let _ = std::process::Command::new("kill")
-            .arg(pid.to_string())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
-        KillOutcome::Signalled
+        // Absolute, for the reason in `PS_PATHS`, and the outcome is read rather than assumed:
+        // a `kill` that could not run signalled nothing, and `Signalled` would be a claim about
+        // an act that did not happen — the one thing this module exists to refuse.
+        let ran = first_existing(KILL_PATHS).and_then(|kill| {
+            std::process::Command::new(kill)
+                .arg(pid.to_string())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .ok()
+        });
+        match ran {
+            Some(status) if status.success() => KillOutcome::Signalled,
+            _ => KillOutcome::Unverified,
+        }
     }
     #[cfg(not(unix))]
     {
@@ -200,13 +250,12 @@ pub fn close_message(browser_name: &str, pid: u32, outcome: KillOutcome) -> Stri
             "Removed session={browser_name} (pid={pid} now belongs to another process and was left alone)"
         ),
         KillOutcome::Unverified => format!(
-            "Kept session={browser_name} (pid={pid} could not be checked against the process table, \
-             so nothing was signalled and the browser may still be running)"
+            "Kept session={browser_name} (pid={pid} could not be checked against the process table \
+             or could not be signalled, so nothing was signalled and the browser may still be \
+             running)"
         ),
     }
 }
-
-
 
 #[cfg(test)]
 mod tests {
@@ -233,7 +282,10 @@ mod tests {
         // that the list drains, not that a bystander dies.
         arm(leaked.id());
         reap_unpersisted();
-        assert!(UNPERSISTED.lock().unwrap().is_empty(), "reap must drain what it took");
+        assert!(
+            UNPERSISTED.lock().unwrap().is_empty(),
+            "reap must drain what it took"
+        );
         let _ = leaked.kill();
         let _ = leaked.wait();
     }
@@ -245,13 +297,20 @@ mod tests {
         let signalled = close_message("s9", 80548, KillOutcome::Signalled);
         assert!(signalled.starts_with("Closed browser=s9"), "{signalled}");
 
-        for refused in [KillOutcome::NotABrowser, KillOutcome::Gone, KillOutcome::Unverified] {
+        for refused in [
+            KillOutcome::NotABrowser,
+            KillOutcome::Gone,
+            KillOutcome::Unverified,
+        ] {
             let message = close_message("s9", 80548, refused);
             assert!(
                 !message.contains("Closed"),
                 "a kill that never happened must not be worded as one: {message}"
             );
-            assert!(message.contains("80548"), "the pid left alone is the fact: {message}");
+            assert!(
+                message.contains("80548"),
+                "the pid left alone is the fact: {message}"
+            );
         }
     }
 
@@ -282,10 +341,24 @@ mod tests {
 
         // The other three each did establish something.
         assert_eq!(classify(Liveness::Dead, None), Some(KillOutcome::Gone));
-        assert_eq!(classify(Liveness::Alive, Some("sleep")), Some(KillOutcome::NotABrowser));
-        assert_eq!(classify(Liveness::Alive, Some("Google Chrome")), None, "this one signals");
-        for settled in [KillOutcome::Signalled, KillOutcome::Gone, KillOutcome::NotABrowser] {
-            assert!(settled.entry_may_be_dropped(), "{settled:?} settles what the entry names");
+        assert_eq!(
+            classify(Liveness::Alive, Some("sleep")),
+            Some(KillOutcome::NotABrowser)
+        );
+        assert_eq!(
+            classify(Liveness::Alive, Some("Google Chrome")),
+            None,
+            "this one signals"
+        );
+        for settled in [
+            KillOutcome::Signalled,
+            KillOutcome::Gone,
+            KillOutcome::NotABrowser,
+        ] {
+            assert!(
+                settled.entry_may_be_dropped(),
+                "{settled:?} settles what the entry names"
+            );
         }
     }
 
@@ -334,7 +407,51 @@ mod tests {
         let survived = status.is_none();
         let _ = child.kill();
         let _ = child.wait();
-        assert!(survived, "kill_pid killed an unrelated process holding a reused pid");
+        assert!(
+            survived,
+            "kill_pid killed an unrelated process holding a reused pid"
+        );
+    }
+
+    /// The pid-reuse guard decides whether a signal is sent. Resolving the tools it needs
+    /// through the inherited `PATH` makes the guard only as trustworthy as whoever set it, and
+    /// the arguments being numeric is why that is the whole of the exposure — there is no shell
+    /// here, so nothing else about the invocation is attacker-shaped.
+    #[test]
+    fn the_guard_reaches_its_tools_by_absolute_path_only() {
+        for path in PS_PATHS.iter().chain(KILL_PATHS) {
+            assert!(path.starts_with('/'), "{path} is not an absolute path");
+        }
+        // If neither list resolves on the platform under test, every kill degrades to
+        // `Unverified` and `close` stops removing entries — a state worth failing loudly on.
+        assert!(first_existing(PS_PATHS).is_some(), "no ps at {PS_PATHS:?}");
+        assert!(
+            first_existing(KILL_PATHS).is_some(),
+            "no kill at {KILL_PATHS:?}"
+        );
+    }
+
+    /// The rule, held by a scan rather than by care: a spawn naming a bare binary is one the
+    /// environment resolves. Only the part of each file before `#[cfg(test)]` counts — a test
+    /// spawning `sleep` is not a guard.
+    #[test]
+    fn no_system_tool_is_reached_through_the_inherited_path() {
+        const NEEDLE: &str = "Command::new(\"";
+        for (name, text) in [
+            ("kill.rs", include_str!("kill.rs")),
+            ("orphans.rs", include_str!("orphans.rs")),
+            ("browser.rs", include_str!("browser.rs")),
+        ] {
+            let body = text.split("#[cfg(test)]").next().unwrap_or(text);
+            for (at, _) in body.match_indices(NEEDLE) {
+                let spawned = &body[at + NEEDLE.len()..];
+                let spawned = spawned.split('"').next().unwrap_or(spawned);
+                assert!(
+                    spawned.starts_with('/'),
+                    "{name} spawns `{spawned}`, which PATH resolves — name it absolutely"
+                );
+            }
+        }
     }
 
     #[test]

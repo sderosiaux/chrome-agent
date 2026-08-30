@@ -37,11 +37,17 @@ fn read_and_parse(path: &Path) -> Result<SessionStore, LoadFailure> {
     }
 
     let contents = std::fs::read_to_string(path).map_err(|e| {
-        LoadFailure::Unreadable(SessionError(format!("Failed to read {}: {e}", path.display())))
+        LoadFailure::Unreadable(SessionError(format!(
+            "Failed to read {}: {e}",
+            path.display()
+        )))
     })?;
 
     let mut store: SessionStore = serde_json::from_str(&contents).map_err(|e| {
-        LoadFailure::Unparsable(SessionError(format!("Failed to parse {}: {e}", path.display())))
+        LoadFailure::Unparsable(SessionError(format!(
+            "Failed to parse {}: {e}",
+            path.display()
+        )))
     })?;
     store.take_baseline();
     Ok(store)
@@ -77,8 +83,10 @@ mod tests {
     fn temp_dir(label: &str) -> std::path::PathBuf {
         static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
         let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let dir = std::env::temp_dir()
-            .join(format!("chrome-agent-session-load-{label}-{}-{n}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "chrome-agent-session-load-{label}-{}-{n}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("create the test's own directory");
         dir
@@ -95,8 +103,15 @@ mod tests {
 
         let err = reread_for_merge(&path).expect_err("a merge may not start from a guess");
         assert!(err.0.contains("Failed to read"), "{}", err.0);
-        assert!(err.0.contains("sessions.json"), "the file that failed is the fact: {}", err.0);
-        assert!(load_from(&path).is_err(), "the command-level read refuses it too");
+        assert!(
+            err.0.contains("sessions.json"),
+            "the file that failed is the fact: {}",
+            err.0
+        );
+        assert!(
+            load_from(&path).is_err(),
+            "the command-level read refuses it too"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -107,7 +122,9 @@ mod tests {
         let dir = temp_dir("corrupt");
         let path = dir.join("sessions.json");
         std::fs::write(&path, "NOT VALID JSON {{{").unwrap();
-        let err = load_from(&path).expect_err("corrupt JSON should error").to_string();
+        let err = load_from(&path)
+            .expect_err("corrupt JSON should error")
+            .to_string();
         assert!(err.contains("Failed to parse"), "unexpected error: {err}");
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -119,7 +136,9 @@ mod tests {
         let dir = temp_dir("empty");
         let path = dir.join("sessions.json");
         std::fs::write(&path, "").unwrap();
-        let err = load_from(&path).expect_err("empty file should error").to_string();
+        let err = load_from(&path)
+            .expect_err("empty file should error")
+            .to_string();
         assert!(err.contains("Failed to parse"), "unexpected error: {err}");
 
         std::fs::remove_file(&path).unwrap();
@@ -163,7 +182,15 @@ mod tests {
 
         // Another agent's store, valid and complete.
         let mut theirs = SessionStore::default();
-        crate::session::ensure_browser(&mut theirs, "someone-else", "ws://theirs", None, true, None, Vec::new());
+        crate::session::ensure_browser(
+            &mut theirs,
+            "someone-else",
+            "ws://theirs",
+            None,
+            true,
+            None,
+            Vec::new(),
+        );
         crate::session::save_to(&path, &mut theirs).unwrap();
         let before = std::fs::read_to_string(&path).unwrap();
         assert!(before.contains("someone-else"));
@@ -179,7 +206,15 @@ mod tests {
         }
 
         let mut mine = SessionStore::default();
-        crate::session::ensure_browser(&mut mine, "mine", "ws://mine", None, true, None, Vec::new());
+        crate::session::ensure_browser(
+            &mut mine,
+            "mine",
+            "ws://mine",
+            None,
+            true,
+            None,
+            Vec::new(),
+        );
         let err = crate::session::save_to(&path, &mut mine)
             .expect_err("a save that cannot read the store must not publish over it")
             .0;
@@ -204,8 +239,17 @@ mod tests {
         assert!(!path.exists());
 
         let mut store = SessionStore::default();
-        crate::session::ensure_browser(&mut store, "first", "ws://first", None, true, None, Vec::new());
-        crate::session::save_to(&path, &mut store).expect("no file yet is the ordinary state, not a failure");
+        crate::session::ensure_browser(
+            &mut store,
+            "first",
+            "ws://first",
+            None,
+            true,
+            None,
+            Vec::new(),
+        );
+        crate::session::save_to(&path, &mut store)
+            .expect("no file yet is the ordinary state, not a failure");
 
         let disk = load_from(&path).unwrap();
         assert!(disk.browsers.contains_key("first"));

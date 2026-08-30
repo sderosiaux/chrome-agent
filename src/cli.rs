@@ -9,6 +9,21 @@ fn validate_header(value: &str) -> Result<String, String> {
     Ok(value.to_string())
 }
 
+/// `--xy 100,200` as a pair. A count other than two is a usage error rather than a refusal that
+/// costs a browser launch; `num_args = 2` cannot express it, because the two numbers arrive as
+/// one comma-separated token.
+fn parse_xy(value: &str) -> Result<[f64; 2], String> {
+    let mut parts = value.split(',').map(|p| {
+        p.trim()
+            .parse::<f64>()
+            .map_err(|_| format!("invalid coordinate: {p}"))
+    });
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(x), Some(y), None) => Ok([x?, y?]),
+        _ => Err(format!("--xy takes exactly 2 values as x,y (got: {value})")),
+    }
+}
+
 fn parse_positive_usize(value: &str) -> Result<usize, String> {
     let parsed = value
         .parse::<usize>()
@@ -180,6 +195,7 @@ pub enum Command {
 
     /// Click an element (uid, CSS, or x,y) — the response says whether it landed and who received the event
     #[command(alias = "tap")]
+    #[command(group = clap::ArgGroup::new("click_target").required(true).args(["uid", "selector", "xy"]))]
     Click {
         /// Element uid (e.g. "n47") — omit if using --selector or --xy
         uid: Option<String>,
@@ -187,8 +203,8 @@ pub enum Command {
         #[arg(long)]
         selector: Option<String>,
         /// Click at x,y coordinates (e.g. --xy 100,200)
-        #[arg(long, value_delimiter = ',')]
-        xy: Option<Vec<f64>>,
+        #[arg(long, value_parser = parse_xy)]
+        xy: Option<[f64; 2]>,
         /// Inspect page after clicking
         #[arg(long)]
         inspect: bool,
@@ -198,6 +214,7 @@ pub enum Command {
     },
 
     /// Fill an input (uid or CSS) — the response reports what the page actually kept, in `value`
+    #[command(group = clap::ArgGroup::new("fill_target").required(true).args(["uid", "selector"]))]
     Fill {
         /// Value to fill
         value: String,
@@ -207,6 +224,10 @@ pub enum Command {
         /// CSS selector to fill
         #[arg(long)]
         selector: Option<String>,
+        /// Treat the value as a secret: never print it, report only its length. Adds redaction
+        /// on top of what the element declares; there is no flag that turns redaction off
+        #[arg(long)]
+        secret: bool,
         /// Inspect page after filling
         #[arg(long)]
         inspect: bool,
@@ -229,6 +250,7 @@ pub enum Command {
     },
 
     /// Extract visible text from the page or an element
+    #[command(group = clap::ArgGroup::new("text_target").args(["uid", "selector"]))]
     Text {
         /// Element uid to extract text from (default: entire page)
         uid: Option<String>,
@@ -251,7 +273,14 @@ pub enum Command {
     },
 
     /// Navigate back in browser history
-    Back,
+    Back {
+        /// Inspect page after navigation
+        #[arg(long)]
+        inspect: bool,
+        /// Max depth for inspect output
+        #[arg(long)]
+        max_depth: Option<usize>,
+    },
 
     /// Navigate forward in browser history
     Forward {
@@ -264,6 +293,7 @@ pub enum Command {
     },
 
     /// Double-click an element (uid, CSS, or x,y) — hit-tested, so an interception is named, not silent
+    #[command(group = clap::ArgGroup::new("dblclick_target").required(true).args(["uid", "selector", "xy"]))]
     Dblclick {
         /// Element uid
         uid: Option<String>,
@@ -271,8 +301,8 @@ pub enum Command {
         #[arg(long)]
         selector: Option<String>,
         /// Click at x,y coordinates
-        #[arg(long, value_delimiter = ',')]
-        xy: Option<Vec<f64>>,
+        #[arg(long, value_parser = parse_xy)]
+        xy: Option<[f64; 2]>,
         /// Inspect page after double-clicking
         #[arg(long)]
         inspect: bool,
@@ -282,6 +312,7 @@ pub enum Command {
     },
 
     /// Select a dropdown option by value or visible text — refuses if the page reverts the selection
+    #[command(group = clap::ArgGroup::new("select_target").required(true).args(["uid", "selector"]))]
     Select {
         /// Value or visible text to select
         value: String,
@@ -300,6 +331,7 @@ pub enum Command {
     },
 
     /// Ensure a checkbox/radio is checked — idempotent, state read back, refuses what it cannot classify
+    #[command(group = clap::ArgGroup::new("check_target").required(true).args(["uid", "selector"]))]
     Check {
         /// Element uid
         uid: Option<String>,
@@ -315,6 +347,7 @@ pub enum Command {
     },
 
     /// Ensure a checkbox/radio is unchecked — idempotent, state read back, unchecking a radio is refused
+    #[command(group = clap::ArgGroup::new("uncheck_target").required(true).args(["uid", "selector"]))]
     Uncheck {
         /// Element uid
         uid: Option<String>,
@@ -330,6 +363,7 @@ pub enum Command {
     },
 
     /// Upload file(s) to a file input — paths are validated before the page is touched
+    #[command(group = clap::ArgGroup::new("upload_target").required(true).args(["uid", "selector"]))]
     Upload {
         /// File path(s) to upload
         files: Vec<String>,
@@ -398,6 +432,7 @@ pub enum Command {
 
     /// Capture a screenshot
     #[command(alias = "capture")]
+    #[command(group = clap::ArgGroup::new("screenshot_target").args(["uid", "selector"]))]
     Screenshot {
         /// Output filename (default: timestamped)
         #[arg(long)]
@@ -453,7 +488,7 @@ pub enum Command {
         /// file removed
         #[arg(
             long,
-            default_value = "67108864",
+            default_value_t = crate::commands::download::DEFAULT_MAX_BYTES,
             value_parser = parse_positive_usize
         )]
         max_bytes: usize,
@@ -530,6 +565,10 @@ pub enum Command {
         /// CSS selector to focus before typing
         #[arg(long)]
         selector: Option<String>,
+        /// Treat the text as a secret: the message withholds its length too, since `type` has
+        /// no read-back to classify. Only ever adds redaction
+        #[arg(long)]
+        secret: bool,
     },
 
     /// Press a key (Enter, Tab, Escape, etc.)
@@ -689,8 +728,8 @@ mod tests {
 
     #[test]
     fn download_max_bytes_defaults_and_accepts_an_explicit_limit() {
-        let default = Cli::try_parse_from(["chrome-agent", "download", "https://example.com/a"])
-            .unwrap();
+        let default =
+            Cli::try_parse_from(["chrome-agent", "download", "https://example.com/a"]).unwrap();
         let explicit = Cli::try_parse_from([
             "chrome-agent",
             "download",
@@ -702,7 +741,7 @@ mod tests {
 
         assert!(matches!(
             default.command,
-            Command::Download { max_bytes: 67_108_864, .. }
+            Command::Download { max_bytes, .. } if max_bytes == crate::commands::download::DEFAULT_MAX_BYTES
         ));
         assert!(matches!(
             explicit.command,
@@ -734,10 +773,34 @@ mod tests {
         assert!(ok(&["assert", "value", "--selector", "#a", "--equals", "x"]).is_ok());
         assert!(ok(&["assert", "value", "--uid", "n1", "--contains", "x"]).is_ok());
         // Two comparators, or none.
-        assert!(ok(&["assert", "value", "--selector", "#a", "--equals", "x", "--contains", "y"]).is_err());
+        assert!(
+            ok(&[
+                "assert",
+                "value",
+                "--selector",
+                "#a",
+                "--equals",
+                "x",
+                "--contains",
+                "y"
+            ])
+            .is_err()
+        );
         assert!(ok(&["assert", "value", "--selector", "#a"]).is_err());
         // Two targets, or none.
-        assert!(ok(&["assert", "value", "--selector", "#a", "--uid", "n1", "--equals", "x"]).is_err());
+        assert!(
+            ok(&[
+                "assert",
+                "value",
+                "--selector",
+                "#a",
+                "--uid",
+                "n1",
+                "--equals",
+                "x"
+            ])
+            .is_err()
+        );
         assert!(ok(&["assert", "value", "--equals", "x"]).is_err());
         // `text` needs no target but still needs a comparator, and `--equals` is not one.
         assert!(ok(&["assert", "text", "--contains", "x"]).is_ok());
@@ -745,13 +808,35 @@ mod tests {
         assert!(ok(&["assert", "text", "--equals", "x"]).is_err());
         // Exactly one state, and a target for it.
         assert!(ok(&["assert", "state", "--selector", "#a", "--checked"]).is_ok());
-        assert!(ok(&["assert", "state", "--selector", "#a", "--checked", "--unchecked"]).is_err());
+        assert!(
+            ok(&[
+                "assert",
+                "state",
+                "--selector",
+                "#a",
+                "--checked",
+                "--unchecked"
+            ])
+            .is_err()
+        );
         assert!(ok(&["assert", "state", "--selector", "#a"]).is_err());
         assert!(ok(&["assert", "state", "--checked"]).is_err());
         // exists: selector required, count and min mutually exclusive but both optional.
         assert!(ok(&["assert", "exists", "--selector", ".row"]).is_ok());
         assert!(ok(&["assert", "exists", "--selector", ".row", "--count", "3"]).is_ok());
-        assert!(ok(&["assert", "exists", "--selector", ".row", "--count", "3", "--min", "1"]).is_err());
+        assert!(
+            ok(&[
+                "assert",
+                "exists",
+                "--selector",
+                ".row",
+                "--count",
+                "3",
+                "--min",
+                "1"
+            ])
+            .is_err()
+        );
         assert!(ok(&["assert", "exists", "--count", "3"]).is_err());
         // url takes no target at all.
         assert!(ok(&["assert", "url", "--equals", "https://a/"]).is_ok());
@@ -762,8 +847,18 @@ mod tests {
     fn batch_stop_on_error_is_off_by_default() {
         let default = Cli::try_parse_from(["chrome-agent", "batch"]).unwrap();
         let explicit = Cli::try_parse_from(["chrome-agent", "batch", "--stop-on-error"]).unwrap();
-        assert!(matches!(default.command, Command::Batch { stop_on_error: false }));
-        assert!(matches!(explicit.command, Command::Batch { stop_on_error: true }));
+        assert!(matches!(
+            default.command,
+            Command::Batch {
+                stop_on_error: false
+            }
+        ));
+        assert!(matches!(
+            explicit.command,
+            Command::Batch {
+                stop_on_error: true
+            }
+        ));
     }
 
     #[test]
@@ -817,7 +912,10 @@ mod tests {
         .unwrap();
         assert_eq!(
             cli.chrome_args,
-            vec!["--disable-gpu".to_string(), "--auto-open-devtools-for-tabs".to_string()]
+            vec![
+                "--disable-gpu".to_string(),
+                "--auto-open-devtools-for-tabs".to_string()
+            ]
         );
     }
 }

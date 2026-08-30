@@ -50,7 +50,10 @@ fn help_shows_all_subcommands() {
     let verbs = subcommands();
     for verb in &verbs {
         let (_, stderr, code) = run_cli(&[verb, "--help"]);
-        assert_eq!(code, 0, "--help lists `{verb}`, which the parser does not accept: {stderr}");
+        assert_eq!(
+            code, 0,
+            "--help lists `{verb}`, which the parser does not accept: {stderr}"
+        );
     }
 }
 
@@ -62,7 +65,10 @@ fn every_verb_appears_as_an_invocation_in_the_documents_an_agent_reads() {
     let docs = [
         ("llm-guide.txt", include_str!("../llm-guide.txt")),
         ("README.md", include_str!("../README.md")),
-        ("skills/chrome-agent/SKILL.md", include_str!("../skills/chrome-agent/SKILL.md")),
+        (
+            "skills/chrome-agent/SKILL.md",
+            include_str!("../skills/chrome-agent/SKILL.md"),
+        ),
     ];
     let mut missing = Vec::new();
     for (name, doc) in docs {
@@ -137,9 +143,12 @@ fn heads_a_command_row(doc: &str, verb: &str) -> bool {
         .filter(|line| line.starts_with('|'))
         .filter_map(|line| line.trim_start_matches('|').split('|').next())
         .any(|cell| {
-            cell.trim().strip_prefix('`').and_then(|rest| rest.strip_prefix(verb)).is_some_and(
-                |tail| tail.starts_with('`') || tail.starts_with(' ') || tail.starts_with('\\'),
-            )
+            cell.trim()
+                .strip_prefix('`')
+                .and_then(|rest| rest.strip_prefix(verb))
+                .is_some_and(|tail| {
+                    tail.starts_with('`') || tail.starts_with(' ') || tail.starts_with('\\')
+                })
         })
 }
 
@@ -177,23 +186,43 @@ fn a_global_flag_is_accepted_on_either_side_of_the_verb() {
             .expect("run chrome-agent");
         (
             output.status.success(),
-            String::from_utf8_lossy(&output.stderr).lines().next().unwrap_or("").to_string(),
+            String::from_utf8_lossy(&output.stderr)
+                .lines()
+                .next()
+                .unwrap_or("")
+                .to_string(),
         )
     };
     let cases: &[(&[&str], &[&str])] = &[
-        (&["--json", "fill", "--selector", "#micro", "x"], &["fill", "--selector", "#micro", "x", "--json"]),
+        (
+            &["--json", "fill", "--selector", "#micro", "x"],
+            &["fill", "--selector", "#micro", "x", "--json"],
+        ),
         (&["--json", "click", "n1"], &["click", "n1", "--json"]),
         (&["--json", "inspect"], &["inspect", "--json"]),
-        (&["--verdict", "off", "click", "n1"], &["click", "n1", "--verdict", "off"]),
-        // isolation-exempt: CHROME_AGENT_PARSE_ONLY, so no browser is launched and the name
-        // reaches nothing; what is under test is where the flag sits.
-        (&["--browser", "a7", "eval", "1"], &["eval", "1", "--browser", "a7"]),
+        (
+            &["--verdict", "off", "click", "n1"],
+            &["click", "n1", "--verdict", "off"],
+        ),
+        (
+            // isolation-exempt: PARSE_ONLY, no browser launched; the name reaches nothing.
+            &["--browser", "a7", "eval", "1"],
+            // isolation-exempt: same, and the marker is repeated because rustfmt decides how
+            // far these two lines sit from a comment above the pair.
+            &["eval", "1", "--browser", "a7"],
+        ),
     ];
     for (before, after) in cases {
         let (ok, err) = parses(before);
-        assert!(ok, "the documented order stopped working: {before:?} -> {err}");
+        assert!(
+            ok,
+            "the documented order stopped working: {before:?} -> {err}"
+        );
         let (ok, err) = parses(after);
-        assert!(ok, "a global flag after the verb must parse: {after:?} -> {err}");
+        assert!(
+            ok,
+            "a global flag after the verb must parse: {after:?} -> {err}"
+        );
     }
 }
 
@@ -224,8 +253,16 @@ fn the_two_locally_redeclared_flags_still_work_in_both_positions() {
 #[test]
 fn a_flag_that_must_precede_the_verb_says_so_instead_of_offering_to_escape_it() {
     for (args, flag, moved) in [
-        (vec!["click", "n1", "--timeout", "5"], "--timeout", "chrome-agent --timeout 5 click n1"),
-        (vec!["text", "--max-depth", "2"], "--max-depth", "chrome-agent --max-depth 2 text"),
+        (
+            vec!["click", "n1", "--timeout", "5"],
+            "--timeout",
+            "chrome-agent --timeout 5 click n1",
+        ),
+        (
+            vec!["text", "--max-depth", "2"],
+            "--max-depth",
+            "chrome-agent --max-depth 2 text",
+        ),
     ] {
         let (_, stderr, code) = run_cli(&args);
         assert_eq!(code, 1, "{args:?} should still be a usage error: {stderr}");
@@ -266,8 +303,14 @@ fn a_flag_that_must_precede_the_verb_says_so_instead_of_offering_to_escape_it() 
 fn an_unrelated_usage_error_is_left_to_clap() {
     let (_, stderr, code) = run_cli(&["click", "n1", "--nonsense"]);
     assert_eq!(code, 1);
-    assert!(stderr.contains("unexpected argument '--nonsense'"), "{stderr}");
-    assert!(stderr.contains("-- --nonsense"), "clap's tip should survive here: {stderr}");
+    assert!(
+        stderr.contains("unexpected argument '--nonsense'"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("-- --nonsense"),
+        "clap's tip should survive here: {stderr}"
+    );
     assert!(!stderr.contains("read before the verb"), "{stderr}");
 }
 
@@ -282,10 +325,71 @@ fn an_invalid_invocation_is_refused_before_a_browser_is_resolved() {
     // Each pair is an invocation and a word its refusal must contain.
     for (args, names) in [
         (&["download"][..], "--selector"),
-        (&["download", "https://example.com/f.csv", "--uid", "n1"][..], "cannot be used with"),
+        (
+            &["download", "https://example.com/f.csv", "--uid", "n1"][..],
+            "cannot be used with",
+        ),
         (&["screenshot", "--format", "webp"][..], "--format"),
         (&["--dialog", "nope", "inspect"][..], "--dialog"),
-        (&["goto", "https://example.com", "--header", "nocolon"][..], "--header"),
+        (
+            &["goto", "https://example.com", "--header", "nocolon"][..],
+            "--header",
+        ),
+        // Two ways to name one target, on every verb that takes more than one. These used to
+        // live in `run::run`'s second match, i.e. after the browser was resolved, so
+        // `click --selector a --xy 1,2` launched a Chrome before saying no.
+        (
+            &["click", "n1", "--selector", "#a"][..],
+            "cannot be used with",
+        ),
+        (
+            &["click", "--selector", "#a", "--xy", "1,2"][..],
+            "cannot be used with",
+        ),
+        (
+            &["dblclick", "n1", "--xy", "1,2"][..],
+            "cannot be used with",
+        ),
+        (
+            &["fill", "x", "--uid", "n1", "--selector", "#a"][..],
+            "cannot be used with",
+        ),
+        (
+            &["select", "x", "--uid", "n1", "--selector", "#a"][..],
+            "cannot be used with",
+        ),
+        (
+            &["check", "n1", "--selector", "#a"][..],
+            "cannot be used with",
+        ),
+        (
+            &["uncheck", "n1", "--selector", "#a"][..],
+            "cannot be used with",
+        ),
+        (
+            &["upload", "f.txt", "--uid", "n1", "--selector", "#a"][..],
+            "cannot be used with",
+        ),
+        (
+            &["text", "n1", "--selector", "#a"][..],
+            "cannot be used with",
+        ),
+        (
+            &["screenshot", "--uid", "n1", "--selector", "#a"][..],
+            "cannot be used with",
+        ),
+        // And no way at all, on the seven where a target is mandatory.
+        (&["click"][..], "required"),
+        (&["dblclick"][..], "required"),
+        (&["fill", "x"][..], "required"),
+        (&["select", "x"][..], "required"),
+        (&["check"][..], "required"),
+        (&["uncheck"][..], "required"),
+        (&["upload", "f.txt"][..], "required"),
+        // `--xy` is a pair, judged by its own value parser: the two numbers arrive as one
+        // comma-separated token, which `num_args` cannot count.
+        (&["click", "--xy", "1,2,3"][..], "exactly 2 values"),
+        (&["click", "--xy", "1"][..], "exactly 2 values"),
     ] {
         let output = Command::new(common::binary())
             .args(args)
@@ -293,11 +397,35 @@ fn an_invalid_invocation_is_refused_before_a_browser_is_resolved() {
             .output()
             .expect("run chrome-agent");
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         assert_eq!(output.status.code(), Some(1), "{args:?}: {stderr}");
-        assert!(stderr.contains(names), "{args:?} never names {names}: {stderr}");
+        assert!(
+            stderr.contains(names),
+            "{args:?} never names {names}: {stderr}"
+        );
+        assert!(
+            stdout.trim().is_empty(),
+            "{args:?} put a usage error on stdout: {stdout}"
+        );
         assert!(
             !stderr.contains("browser session"),
             "{args:?} answered about a browser, not about its arguments: {stderr}"
+        );
+    }
+
+    // `text` and `screenshot` take no target at all — the group is exclusive, not required.
+    for args in [&["text"][..], &["screenshot"][..]] {
+        let output = Command::new(common::binary())
+            .args(args)
+            .env("HOME", &home)
+            .env("CHROME_AGENT_PARSE_ONLY", "1")
+            .output()
+            .expect("run chrome-agent");
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "a whole-page {args:?} is not a missing target: {}",
+            String::from_utf8_lossy(&output.stderr)
         );
     }
 
@@ -410,7 +538,10 @@ fn goto_then_eval_share_one_named_browser() {
     }
 
     let b = TestBrowser::new("test-integration");
-    let url = format!("file://{}", common::fixture_path("assert_page.html").display());
+    let url = format!(
+        "file://{}",
+        common::fixture_path("assert_page.html").display()
+    );
 
     let (stdout, stderr, code) = run_cli(&["--browser", b.name(), "goto", &url]);
     assert_eq!(code, 0, "goto {url} failed: {stderr}");
@@ -477,7 +608,10 @@ fn headed_inspect_returns_uids() {
     let (stdout, _, code) = run_cli(&["--browser", b.name(), "inspect"]);
 
     if code == 0 {
-        assert!(stdout.contains("uid="), "inspect should contain uid=N: {stdout}");
+        assert!(
+            stdout.contains("uid="),
+            "inspect should contain uid=N: {stdout}"
+        );
     }
 }
 

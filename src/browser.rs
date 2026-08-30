@@ -43,10 +43,7 @@ pub struct BrowserConnection {
 }
 
 /// Fetch a target's page WebSocket URL from /json/list on the browser's HTTP endpoint.
-pub async fn get_page_ws_url(
-    http_endpoint: &str,
-    target_id: &str,
-) -> Result<String, BrowserError> {
+pub async fn get_page_ws_url(http_endpoint: &str, target_id: &str) -> Result<String, BrowserError> {
     let url = format!("{}/json/list", http_endpoint.trim_end_matches('/'));
 
     // Retry a few times — Chrome may not be fully ready yet
@@ -58,9 +55,11 @@ pub async fn get_page_ws_url(
                     for page in pages {
                         let id = page.get("id").and_then(|v| v.as_str()).unwrap_or("");
                         if id == target_id
-                            && let Some(ws) = page.get("webSocketDebuggerUrl").and_then(|v| v.as_str()) {
-                                return Ok(ws.to_string());
-                            }
+                            && let Some(ws) =
+                                page.get("webSocketDebuggerUrl").and_then(|v| v.as_str())
+                        {
+                            return Ok(ws.to_string());
+                        }
                     }
                     // Target not found in list — might not be created yet
                     last_err = BrowserError::NotFound(format!(
@@ -83,9 +82,13 @@ pub fn validate_browser_name(name: &str) -> Result<(), BrowserError> {
     if name.is_empty() {
         return Err(BrowserError::Launch("Browser name cannot be empty".into()));
     }
-    if !name.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+    if !name
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+    {
         return Err(BrowserError::Launch(
-            "Browser name must contain only alphanumeric characters, hyphens, and underscores".into(),
+            "Browser name must contain only alphanumeric characters, hyphens, and underscores"
+                .into(),
         ));
     }
     Ok(())
@@ -184,9 +187,8 @@ pub async fn resolve_browser(opts: &BrowserOptions) -> Result<BrowserConnection,
 /// Launch a Chromium instance with remote debugging.
 async fn launch_browser(opts: &BrowserOptions) -> Result<BrowserConnection, BrowserError> {
     let profile_dir = browser_profile_dir(&opts.name)?;
-    std::fs::create_dir_all(&profile_dir).map_err(|e| {
-        BrowserError::Launch(format!("Failed to create profile dir: {e}"))
-    })?;
+    std::fs::create_dir_all(&profile_dir)
+        .map_err(|e| BrowserError::Launch(format!("Failed to create profile dir: {e}")))?;
     // 0700: the profile can hold cookies and the Local State decryption key copied from
     // the user's real Chrome profile (--copy-cookies).
     #[cfg(unix)]
@@ -360,13 +362,14 @@ async fn auto_discover() -> Result<BrowserConnection, BrowserError> {
     // 1. Check DevToolsActivePort files from known Chrome profile paths
     for candidate in devtools_active_port_candidates() {
         if let Some(ws) = read_devtools_active_port(&candidate)
-            && probe_ws_endpoint(&ws).await {
-                return Ok(BrowserConnection {
-                    http_endpoint: Some(extract_http_endpoint(&ws)),
-                    ws_endpoint: ws,
-                    pid: None,
-                });
-            }
+            && probe_ws_endpoint(&ws).await
+        {
+            return Ok(BrowserConnection {
+                http_endpoint: Some(extract_http_endpoint(&ws)),
+                ws_endpoint: ws,
+                pid: None,
+            });
+        }
     }
 
     // 2. Probe common debugging ports
@@ -419,10 +422,7 @@ fn extract_http_endpoint(ws_url: &str) -> String {
 
 /// Fetch the webSocketDebuggerUrl from a /json/version endpoint.
 async fn fetch_ws_endpoint(base_url: &str) -> Result<String, BrowserError> {
-    let url = format!(
-        "{}/json/version",
-        base_url.trim_end_matches('/')
-    );
+    let url = format!("{}/json/version", base_url.trim_end_matches('/'));
 
     let response = http_get_json(&url, Duration::from_secs(2)).await?;
 
@@ -435,12 +435,8 @@ async fn fetch_ws_endpoint(base_url: &str) -> Result<String, BrowserError> {
 }
 
 /// HTTP GET that returns JSON. Uses ureq (blocking, run on tokio `spawn_blocking`).
-async fn http_get_json(
-    url: &str,
-    timeout: Duration,
-) -> Result<serde_json::Value, BrowserError> {
+async fn http_get_json(url: &str, timeout: Duration) -> Result<serde_json::Value, BrowserError> {
     let url = url.to_string();
-    
 
     tokio::task::spawn_blocking(move || {
         let agent = ureq::Agent::config_builder()
@@ -476,10 +472,7 @@ async fn probe_ws_endpoint(ws_url: &str) -> bool {
 }
 
 /// Wait for `DevToolsActivePort` file to appear and parse it.
-async fn wait_for_devtools_port(
-    path: &Path,
-    timeout: Duration,
-) -> Result<String, BrowserError> {
+async fn wait_for_devtools_port(path: &Path, timeout: Duration) -> Result<String, BrowserError> {
     let deadline = Instant::now() + timeout;
 
     while Instant::now() < deadline {
@@ -553,9 +546,7 @@ const DISCOVERY_PORTS: &[u16] = &[9222, 9223, 9224, 9225, 9226, 9227, 9228, 9229
 fn find_chromium() -> Result<PathBuf, BrowserError> {
     // 1. Check for managed Chromium
     if let Some(home) = dirs::home_dir() {
-        let managed = home
-            .join(".chrome-agent")
-            .join("chromium");
+        let managed = home.join(".chrome-agent").join("chromium");
 
         if cfg!(target_os = "macos") {
             let app = managed.join("Chromium.app/Contents/MacOS/Chromium");
@@ -593,6 +584,19 @@ fn find_chromium() -> Result<PathBuf, BrowserError> {
     }
 
     // 2. Check system Chrome
+    /// The first entry of `PATH` holding `name`, searched here rather than by shelling out to
+    /// `which`/`where`.
+    ///
+    /// Those two are themselves resolved through `PATH`, so finding Chrome ran a program the
+    /// same variable chose — one more execution than the search needs, and one this tool has no
+    /// reason to perform. Reading the variable and joining it is the whole of what they did.
+    fn on_path(name: &str) -> Option<PathBuf> {
+        let path = std::env::var_os("PATH")?;
+        std::env::split_paths(&path)
+            .map(|dir| dir.join(name))
+            .find(|candidate| candidate.is_file())
+    }
+
     let system_candidates: &[&str] = if cfg!(target_os = "macos") {
         &[
             "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
@@ -607,9 +611,7 @@ fn find_chromium() -> Result<PathBuf, BrowserError> {
             "chromium-browser",
         ]
     } else if cfg!(target_os = "windows") {
-        &[
-            "chrome.exe",
-        ]
+        &["chrome.exe"]
     } else {
         &[]
     };
@@ -619,25 +621,9 @@ fn find_chromium() -> Result<PathBuf, BrowserError> {
         if path.exists() {
             return Ok(path);
         }
-        // For Linux: check if it's on PATH
-        if cfg!(target_os = "linux")
-            && let Ok(output) = Command::new("which").arg(candidate).output()
-                && output.status.success() {
-                    let found = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                    if !found.is_empty() {
-                        return Ok(PathBuf::from(found));
-                    }
-                }
-        // For Windows: check if it's on PATH
-        if cfg!(target_os = "windows")
-            && let Ok(output) = Command::new("where").arg(candidate).output()
-                && output.status.success() {
-                    let found = String::from_utf8_lossy(&output.stdout)
-                        .lines().next().unwrap_or("").trim().to_string();
-                    if !found.is_empty() {
-                        return Ok(PathBuf::from(found));
-                    }
-                }
+        if let Some(found) = on_path(candidate) {
+            return Ok(found);
+        }
     }
 
     // Windows: standard install locations (not necessarily on PATH)
@@ -653,8 +639,7 @@ fn find_chromium() -> Result<PathBuf, BrowserError> {
     }
 
     Err(BrowserError::NotFound(
-        "Could not find Chrome or Chromium. Install Chrome and ensure it's on your PATH."
-            .into(),
+        "Could not find Chrome or Chromium. Install Chrome and ensure it's on your PATH.".into(),
     ))
 }
 
@@ -670,12 +655,10 @@ fn copy_chrome_cookies(profile_dir: &Path) -> Result<(), BrowserError> {
     }
 
     let cookies_dst = profile_dir.join("Default");
-    std::fs::create_dir_all(&cookies_dst).map_err(|e| {
-        BrowserError::Launch(format!("Failed to create Default dir: {e}"))
-    })?;
-    std::fs::copy(&cookies_src, cookies_dst.join("Cookies")).map_err(|e| {
-        BrowserError::Launch(format!("Failed to copy Cookies: {e}"))
-    })?;
+    std::fs::create_dir_all(&cookies_dst)
+        .map_err(|e| BrowserError::Launch(format!("Failed to create Default dir: {e}")))?;
+    std::fs::copy(&cookies_src, cookies_dst.join("Cookies"))
+        .map_err(|e| BrowserError::Launch(format!("Failed to copy Cookies: {e}")))?;
     // Also copy WAL/SHM if they exist (SQLite journal files)
     for ext in ["Cookies-journal", "Cookies-wal", "Cookies-shm"] {
         let src = chrome_default.join(ext);
@@ -736,10 +719,13 @@ fn chrome_default_profile_dir() -> Result<PathBuf, BrowserError> {
 
 /// Get the profile directory for a named browser instance.
 fn browser_profile_dir(name: &str) -> Result<PathBuf, BrowserError> {
-    let home = dirs::home_dir().ok_or_else(|| {
-        BrowserError::Launch("Could not determine home directory".into())
-    })?;
-    Ok(home.join(".chrome-agent").join("browsers").join(name).join("chromium-profile"))
+    let home = dirs::home_dir()
+        .ok_or_else(|| BrowserError::Launch("Could not determine home directory".into()))?;
+    Ok(home
+        .join(".chrome-agent")
+        .join("browsers")
+        .join(name)
+        .join("chromium-profile"))
 }
 
 fn auto_connect_error_message() -> String {
@@ -799,7 +785,8 @@ mod tests {
 
     #[test]
     fn read_devtools_active_port_parses_correctly() {
-        let dir = std::env::temp_dir().join(format!("chrome-agent_test_devtools-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("chrome-agent_test_devtools-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("DevToolsActivePort");
         std::fs::write(&path, "9222\n/devtools/browser/abc-123\n").unwrap();
@@ -813,7 +800,10 @@ mod tests {
 
     #[test]
     fn read_devtools_active_port_rejects_invalid() {
-        let dir = std::env::temp_dir().join(format!("chrome-agent_test_devtools_bad-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "chrome-agent_test_devtools_bad-{}",
+            std::process::id()
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("DevToolsActivePort");
         std::fs::write(&path, "not_a_number\n").unwrap();
@@ -881,12 +871,10 @@ mod tests {
 
     #[test]
     fn attached_browser_rejects_launch_proxy() {
-        let error = normalized_proxy_option(
-            Some("http://127.0.0.1:9222"),
-            Some("http://127.0.0.1:8080"),
-        )
-        .unwrap_err()
-        .to_string();
+        let error =
+            normalized_proxy_option(Some("http://127.0.0.1:9222"), Some("http://127.0.0.1:8080"))
+                .unwrap_err()
+                .to_string();
         assert!(error.contains("applies only when chrome-agent launches Chrome"));
     }
 
@@ -911,7 +899,10 @@ mod tests {
 
     #[tokio::test]
     async fn try_reconnect_existing_none_when_absent() {
-        let dir = std::env::temp_dir().join(format!("chrome-agent_test_reconnect_absent-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "chrome-agent_test_reconnect_absent-{}",
+            std::process::id()
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("DevToolsActivePort");
         std::fs::remove_file(&path).ok();
@@ -921,7 +912,10 @@ mod tests {
 
     #[tokio::test]
     async fn try_reconnect_existing_removes_stale_file() {
-        let dir = std::env::temp_dir().join(format!("chrome-agent_test_reconnect_stale-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "chrome-agent_test_reconnect_stale-{}",
+            std::process::id()
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("DevToolsActivePort");
         // Valid format, but the port has no listening server → stale.
@@ -956,7 +950,10 @@ mod tests {
             composed.contains(&cause),
             "the cause must survive into the message a user reads:\n  cause: {cause}\n  said:  {composed}"
         );
-        assert!(composed.contains(&endpoint), "the endpoint is still named: {composed}");
+        assert!(
+            composed.contains(&endpoint),
+            "the endpoint is still named: {composed}"
+        );
         assert!(
             composed.contains("auto-discovery"),
             "the existing suggestion must not be lost: {composed}"
@@ -968,8 +965,14 @@ mod tests {
         // Cookies land, Local State does not: the caller must not read that as success.
         let failed = cookie_copy_message(&LocalState::Failed("Permission denied".into()));
         assert!(failed.contains("NOT the decryption key"), "{failed}");
-        assert!(failed.contains("Permission denied"), "the OS error must survive: {failed}");
-        assert!(failed.starts_with("warning:"), "a partial copy is not a success line: {failed}");
+        assert!(
+            failed.contains("Permission denied"),
+            "the OS error must survive: {failed}"
+        );
+        assert!(
+            failed.starts_with("warning:"),
+            "a partial copy is not a success line: {failed}"
+        );
 
         let copied = cookie_copy_message(&LocalState::Copied);
         assert!(copied.contains("decryption key"), "{copied}");

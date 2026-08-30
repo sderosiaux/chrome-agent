@@ -11,7 +11,10 @@ mod common;
 use common::TestBrowser;
 
 fn run_cli(args: &[&str]) -> (String, i32) {
-    let output = Command::new(common::binary()).args(args).output().expect("Failed to run chrome-agent");
+    let output = Command::new(common::binary())
+        .args(args)
+        .output()
+        .expect("Failed to run chrome-agent");
     (
         String::from_utf8_lossy(&output.stdout).to_string(),
         output.status.code().unwrap_or(-1),
@@ -28,7 +31,12 @@ fn run_pipe(label: &str, script: &str) -> Vec<Value> {
         .stderr(Stdio::null())
         .spawn()
         .expect("spawn pipe");
-    child.stdin.as_mut().unwrap().write_all(script.as_bytes()).unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(script.as_bytes())
+        .unwrap();
     drop(child.stdin.take());
     let out = child.wait_with_output().expect("pipe output");
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -60,14 +68,22 @@ fn fill_form_reports_what_each_field_kept() {
     let responses = run_pipe("bulk-fill-submit", &script);
     let last = responses.last().expect("a fill_and_submit response");
 
-    let values = last["values"].as_array().unwrap_or_else(|| panic!("no per-field report: {last}"));
+    let values = last["values"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no per-field report: {last}"));
     assert_eq!(values.len(), 2, "one entry per field: {last}");
 
-    let name = values.iter().find(|v| v["selector"] == "#name").expect("the name field");
+    let name = values
+        .iter()
+        .find(|v| v["selector"] == "#name")
+        .expect("the name field");
     assert_eq!(name["value"]["actual"], "Ada Lovelace", "{name}");
     assert_eq!(name["value"]["verbatim"], true, "{name}");
 
-    let phone = values.iter().find(|v| v["selector"] == "#phone").expect("the phone field");
+    let phone = values
+        .iter()
+        .find(|v| v["selector"] == "#phone")
+        .expect("the phone field");
     assert_eq!(
         phone["value"]["verbatim"], false,
         "the mask rewrote it, and after the submit nothing else can tell you: {phone}"
@@ -89,7 +105,10 @@ fn fill_form_by_uid_reports_each_outcome() {
         serde_json::json!({"cmd": "eval", "expression": probe}),
     );
     let responses = run_pipe("bulk-fill-probe", &script);
-    let snapshot = responses[1]["snapshot"].as_str().unwrap_or_default().to_string();
+    let snapshot = responses[1]["snapshot"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
     let uid_of = |name: &str| -> String {
         snapshot
             .lines()
@@ -109,7 +128,9 @@ fn fill_form_by_uid_reports_each_outcome() {
     );
     let responses = run_pipe("bulk-fill-uid", &script);
     let last = responses.last().expect("a fill_form response");
-    let values = last["values"].as_array().unwrap_or_else(|| panic!("no per-field report: {last}"));
+    let values = last["values"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no per-field report: {last}"));
     assert_eq!(values.len(), 1, "{last}");
     assert_eq!(values[0]["uid"], phone_uid, "{last}");
     assert_eq!(values[0]["value"]["verbatim"], false, "{last}");
@@ -143,7 +164,9 @@ fn the_cli_fill_form_reports_each_outcome_too() {
     let (stdout, code) = run_cli(&["--browser", b.name(), "--json", "fill-form", &pair]);
     assert_eq!(code, 0, "{stdout}");
     let v: Value = serde_json::from_str(&stdout).expect("JSON fill-form");
-    let values = v["values"].as_array().unwrap_or_else(|| panic!("no per-field report: {v}"));
+    let values = v["values"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no per-field report: {v}"));
     assert_eq!(values[0]["value"]["verbatim"], false, "{v}");
 }
 
@@ -169,6 +192,8 @@ fn a_password_in_a_bulk_fill_is_still_redacted() {
         "a bulk fill must not be a way around redaction: {whole}"
     );
     let last = responses.last().expect("a response");
-    let values = last["values"].as_array().unwrap_or_else(|| panic!("no per-field report: {last}"));
+    let values = last["values"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no per-field report: {last}"));
     assert_eq!(values[0]["value"]["redacted"], true, "{last}");
 }

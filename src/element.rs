@@ -5,10 +5,7 @@ use serde_json::json;
 use tokio::sync::broadcast;
 
 use crate::cdp::client::CdpClient;
-use crate::cdp::types::{
-    CdpEvent, DispatchMouseEventParams, GetBoxModelResult, MouseButton, MouseEventType, ResolveNodeParams,
-    ResolveNodeResult,
-};
+use crate::cdp::types::{CdpEvent, GetBoxModelResult, ResolveNodeParams, ResolveNodeResult};
 use crate::element_ref::ElementRef;
 
 /// Resolve a uid to a CDP objectId via the `ElementRef` in the uid map.
@@ -28,12 +25,15 @@ pub async fn resolve_uid(
     })?;
 
     let result: ResolveNodeResult = client
-        .call("DOM.resolveNode", ResolveNodeParams {
-            node_id: None,
-            backend_node_id: Some(backend_node_id),
-            object_group: Some("dev-browser".into()),
-            execution_context_id: None,
-        })
+        .call(
+            "DOM.resolveNode",
+            ResolveNodeParams {
+                node_id: None,
+                backend_node_id: Some(backend_node_id),
+                object_group: Some("dev-browser".into()),
+                execution_context_id: None,
+            },
+        )
         .await
         .map_err(|e| {
             ElementError::Detached(format!(
@@ -68,172 +68,6 @@ pub struct ResolvedElement {
     pub object_id: String,
     pub center: Option<(f64, f64)>,
     pub backend_node_id: i64,
-}
-
-/// Click an element by uid. `hit_test::aim` scrolls the element into view, measures where the click would go and says what
-/// sits there, in one round trip. A click delivered elsewhere reports `intercepted`; an aim point
-/// still moving under a smooth scroll is refused. No layout box falls back to a JS `.click()`.
-pub async fn click(
-    client: &CdpClient,
-    uid_map: &HashMap<String, ElementRef>,
-    uid: &str,
-    on_intercept: crate::hit_test::OnIntercept,
-) -> Result<crate::hit_test::Dispatched, ElementError> {
-    let resolved = resolve_uid(client, uid_map, uid).await?;
-    if resolved.center.is_none() {
-        js_click(client, &resolved.object_id).await?;
-        return Ok(crate::hit_test::Dispatched::js().named(Some(uid.to_string()), None, None));
-    }
-    let outcome = click_handle(
-        client,
-        &resolved.object_id,
-        resolved.center,
-        on_intercept,
-        &format!("uid={uid}"),
-    )
-    .await
-    .map_err(|e| e.naming(Some(uid.to_string()), None, None))?;
-    Ok(outcome.named(Some(uid.to_string()), None, None))
-}
-
-/// Aim at a resolved handle and single-click it. Shared by the uid and selector paths.
-/// `fallback_center` is the box model's centre, used only when the probe could not run.
-pub async fn click_handle(
-    client: &CdpClient,
-    object_id: &str,
-    fallback_center: Option<(f64, f64)>,
-    on_intercept: crate::hit_test::OnIntercept,
-    target: &str,
-) -> Result<crate::hit_test::Dispatched, ElementError> {
-    use crate::hit_test::{Aim, Dispatched};
-    use crate::verdict::Delivery;
-
-    let (point, delivery, receiver, unaimable) = match crate::hit_test::aim(client, object_id).await {
-        Aim::NoBox => {
-            js_click(client, object_id).await?;
-            return Ok(Dispatched::js());
-        }
-        Aim::Unprobed => {
-            let Some(center) = fallback_center else {
-                js_click(client, object_id).await?;
-                return Ok(Dispatched::js());
-            };
-            (center, Delivery::NotProbed, None, None)
-        }
-        Aim::At { point, delivery, receiver, unaimable } => (point, delivery, receiver, unaimable),
-    };
-
-    if matches!(delivery, Delivery::NotSettled | Delivery::OffTarget) {
-        // `unaimable` separates a box a pointer cannot reach from a box the page holds off
-        // screen: same verdict, same absence of a dispatch, different recovery.
-        return Ok(Dispatched::skipped(delivery, point, None).unaimed(unaimable));
-    }
-    if delivery == Delivery::Intercepted
-        && crate::hit_test::should_refuse_intercept(on_intercept, receiver.as_ref())
-    {
-        return Err(refusal(
-            Dispatched::skipped(delivery, point, receiver).under(on_intercept),
-            "click",
-            target,
-        ));
-    }
-
-    dispatch_click_at(client, point.0, point.1).await?;
-    Ok(Dispatched::landed(delivery, point, receiver))
-}
-
-/// The error a refused pointer action returns, carrying what the probe measured. One place for
-/// both verbs, so `click` and `dblclick` refuse in the same words.
-fn refusal(
-    dispatched: crate::hit_test::Dispatched,
-    verb: &str,
-    target: &str,
-) -> ElementError {
-    let message = dispatched
-        .refusal_message(verb, target)
-        .unwrap_or_else(|| format!("Refused to {verb} {target}"));
-    ElementError::Refused(Box::new(crate::hit_test::Refused::new(message, dispatched)))
-}
-
-/// A click at coordinates somebody else decided on: mouse normally, touch under emulation.
-async fn dispatch_click_at(client: &CdpClient, cx: f64, cy: f64) -> Result<(), ElementError> {
-    // A background tab answers a pointer event on a fixed five-second timer, the foreground tab
-    // in single-digit ms. Costs 3 ms, once per connection (`CdpClient::ensure_foreground`).
-    client.ensure_foreground().await;
-    // Subscribe BEFORE dispatching so a fast navigation isn't missed.
-    let nav_events = client.events();
-    client.mark_dispatch();
-    if client.touch_emulation_enabled() {
-        client
-            .send_input(
-                "Input.dispatchTouchEvent",
-                json!({
-                    "type": "touchStart",
-                    "touchPoints": [{"x": cx, "y": cy, "id": 0}],
-                }),
-            )
-            .await
-            .map_err(|e| ElementError::Action(format!("touchStart failed: {e}")))?;
-        client
-            .send_input(
-                "Input.dispatchTouchEvent",
-                json!({"type": "touchEnd", "touchPoints": []}),
-            )
-            .await
-            .map_err(|e| ElementError::Action(format!("touchEnd failed: {e}")))?;
-    } else {
-        client
-            .send_input("Input.dispatchMouseEvent", DispatchMouseEventParams {
-                event_type: MouseEventType::MousePressed,
-                x: cx, y: cy,
-                button: Some(MouseButton::Left), buttons: Some(1), click_count: Some(1),
-                modifiers: None, timestamp: None, delta_x: None, delta_y: None,
-                pointer_type: Some("mouse".into()),
-            })
-            .await
-            .map_err(|e| ElementError::Action(format!("mousePressed failed: {e}")))?;
-
-        client
-            .send_input("Input.dispatchMouseEvent", DispatchMouseEventParams {
-                event_type: MouseEventType::MouseReleased,
-                x: cx, y: cy,
-                button: Some(MouseButton::Left), buttons: Some(0), click_count: Some(1),
-                modifiers: None, timestamp: None, delta_x: None, delta_y: None,
-                pointer_type: Some("mouse".into()),
-            })
-            .await
-            .map_err(|e| ElementError::Action(format!("mouseReleased failed: {e}")))?;
-    }
-
-    wait_for_stabilization(client, nav_events).await;
-    Ok(())
-}
-
-/// Fallback: click an element via JS `.click()` when mouse events can't be dispatched.
-pub async fn js_click(client: &CdpClient, object_id: &str) -> Result<(), ElementError> {
-    let nav_events = client.events();
-    client.mark_dispatch();
-    let result: serde_json::Value = client
-        .call(
-            "Runtime.callFunctionOn",
-            json!({
-                "objectId": object_id,
-                "functionDeclaration": "function() { this.click(); }",
-                "returnByValue": true,
-            }),
-        )
-        .await
-        .map_err(|e| ElementError::Action(format!("JS click fallback failed: {e}")))?;
-
-    if let Some(exception) = result.get("exceptionDetails") {
-        return Err(ElementError::Action(format!(
-            "JS click threw: {}",
-            exception.get("text").and_then(|t| t.as_str()).unwrap_or("unknown")
-        )));
-    }
-
-    wait_for_stabilization(client, nav_events).await;
-    Ok(())
 }
 
 /// What the page holds after a fill, next to what was asked for. A write is a request: masks reformat, `maxlength` truncates, controlled components rewrite,
@@ -288,25 +122,38 @@ impl FillOutcome {
     }
 }
 
-/// Whether a field holds something that must never be printed, as a JS expression over `el`.
-/// Shared by `fill` (uid and selector), `assert value` and the `values_lost` report, because it
-/// gates what reaches stdout, the transcript and any `--record` file.
-/// Chrome masks `type=password` in the accessibility tree; the `autocomplete` half it does not,
-/// so a one-time code or card number in a `type=text` field is redacted only by this.
-pub const SECRET_FIELD: &str =
-    r"(el.type === 'password' || /password|cc-number|cc-csc|one-time-code/i.test(el.autocomplete || ''))";
-
 /// How long every read-back waits before looking at what the page kept.
 /// 60 ms catches a revert on the microtask queue, in `setTimeout(0)` or in an animation frame,
 /// and NOT a validator firing at 400 ms — no fixed window could. Hence read-backs report
 /// `observed_after_ms` rather than asserting persistence. Raising it costs every fill and check.
 pub const READ_BACK_MS: u64 = 60;
 
+// The predicate lives with the reports it redacts (`read_back`), re-exported so every call site
+// keeps saying `element::SECRET_FIELD`. Split out for the 1000-line cap.
+pub use crate::read_back::SECRET_FIELD;
+
+/// Fill by uid, reading secrecy off the element. See [`fill_with`] for the caller that asserts it.
 pub async fn fill(
     client: &CdpClient,
     uid_map: &HashMap<String, ElementRef>,
     uid: &str,
     value: &str,
+) -> Result<FillOutcome, ElementError> {
+    fill_with(client, uid_map, uid, value, false).await
+}
+
+/// Fill by uid. `asserted_secret` is the CALLER's claim about the value, on top of what
+/// [`SECRET_FIELD`] read off the element: it only ever ADDS redaction, because an override that
+/// turned redaction off would be a way to print a password.
+///
+/// `false` — infer from the DOM — is what every front end passes today. The flag that would set
+/// it is a follow-up in `src/cli.rs`.
+pub async fn fill_with(
+    client: &CdpClient,
+    uid_map: &HashMap<String, ElementRef>,
+    uid: &str,
+    value: &str,
+    asserted_secret: bool,
 ) -> Result<FillOutcome, ElementError> {
     let resolved = resolve_uid(client, uid_map, uid).await?;
 
@@ -357,24 +204,26 @@ pub async fn fill(
         .await
         .map_err(|e| ElementError::Action(format!("fill failed: {e}")))?;
 
-    if let Some(exception) = result.get("exceptionDetails") {
-        let text = exception
-            .get("exception")
-            .and_then(|ex| ex.get("description"))
-            .and_then(|d| d.as_str())
-            .or_else(|| exception.get("text").and_then(|t| t.as_str()))
-            .unwrap_or("unknown error");
-        return Err(ElementError::Action(
-            text.lines().next().unwrap_or(text).trim_start_matches("Error: ").to_string(),
-        ));
-    }
+    check_js_exception(&result)?;
 
-    let payload = result.get("result").and_then(|r| r.get("value")).cloned().unwrap_or_default();
-    let actual = payload.get("value").and_then(serde_json::Value::as_str).map(str::to_string);
+    let payload = result
+        .get("result")
+        .and_then(|r| r.get("value"))
+        .cloned()
+        .unwrap_or_default();
+    let actual = payload
+        .get("value")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
     let max_length = payload.get("maxLength").and_then(serde_json::Value::as_i64);
-    let sensitive = payload.get("sensitive").and_then(serde_json::Value::as_bool).unwrap_or(false);
+    let sensitive = payload
+        .get("sensitive")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
     wait_for_stabilization(client, nav_events).await;
-    Ok(FillOutcome::new(value, actual).with_max_length(max_length).secret(sensitive))
+    Ok(FillOutcome::new(value, actual)
+        .with_max_length(max_length)
+        .secret(asserted_secret || sensitive))
 }
 
 /// Refuse to type when nothing editable holds focus. `Input.insertText` goes to whatever is focused; with focus on BODY it goes nowhere, and a
@@ -388,7 +237,10 @@ pub async fn require_editable_focus(client: &CdpClient) -> Result<(), ElementErr
         return tag.toLowerCase();
     })()";
     let result: serde_json::Value = client
-        .call("Runtime.evaluate", json!({"expression": probe, "returnByValue": true}))
+        .call(
+            "Runtime.evaluate",
+            json!({"expression": probe, "returnByValue": true}),
+        )
         .await
         .map_err(|e| ElementError::Action(format!("focus check failed: {e}")))?;
     let state = result
@@ -410,10 +262,45 @@ pub async fn require_editable_focus(client: &CdpClient) -> Result<(), ElementErr
     }
 }
 
-pub async fn type_text(
+/// Whether the element holding focus is one whose value must never be printed. `false` on any
+/// failure to read: nothing was typed yet, so this is a question about the page, not a refusal.
+async fn focused_is_secret(client: &CdpClient) -> bool {
+    let probe = format!(
+        "(() => {{ const el = document.activeElement; if (!el) return false; return !!{SECRET_FIELD}; }})()"
+    );
+    let Ok(result) = client
+        .call::<_, serde_json::Value>(
+            "Runtime.evaluate",
+            json!({"expression": probe, "returnByValue": true}),
+        )
+        .await
+    else {
+        return false;
+    };
+    result
+        .get("result")
+        .and_then(|r| r.get("value"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+}
+
+/// Type into whatever holds focus, and return the message the response should carry.
+///
+/// `type` has no read-back — `Input.insertText` goes wherever focus is and the tool never learns
+/// what the page kept — so the message is the whole report, and it is built HERE rather than at
+/// the call site so the predicate and the wording cannot drift apart. A secret field names
+/// neither the text (which was never echoed) nor its length: unlike `fill` there is no
+/// `verbatim` to classify, so the length buys the caller nothing and only narrows the value.
+///
+/// The caller appends its own `into selector '…'` clause, as it already did.
+pub async fn type_text_with(
     client: &CdpClient,
     text: &str,
-) -> Result<(), ElementError> {
+    asserted_secret: bool,
+) -> Result<String, ElementError> {
+    // Before the insert, and skipped when the caller already asserted secrecy: one round trip,
+    // and after typing `document.activeElement` may be somewhere else entirely.
+    let sensitive = asserted_secret || focused_is_secret(client).await;
     let nav_events = client.events();
     // An input event, so: the input-event deadline rather than `--timeout`, and the dispatch mark
     // that both starts the observation window and clears the previous action's settle wait.
@@ -424,13 +311,14 @@ pub async fn type_text(
         .map_err(|e| ElementError::Action(format!("insertText failed: {e}")))?;
 
     wait_for_stabilization(client, nav_events).await;
-    Ok(())
+    Ok(if sensitive {
+        "Typed into a secret field (length withheld)".to_string()
+    } else {
+        format!("Typed {} chars", text.chars().count())
+    })
 }
 
-pub async fn press_key(
-    client: &CdpClient,
-    key: &str,
-) -> Result<(), ElementError> {
+pub async fn press_key(client: &CdpClient, key: &str) -> Result<(), ElementError> {
     let (vk_code, text) = match key {
         "Enter" | "Return" => (13, Some("\r")),
         "Tab" => (9, None),
@@ -493,7 +381,7 @@ pub async fn press_key(
         key_down["text"] = json!(t);
     }
     let nav_events = client.events();
-    // Same as `type_text`: a keyboard event is an input event, deadline and mark included.
+    // Same as `type_text_with`: a keyboard event is an input event, deadline and mark included.
     client.mark_dispatch();
     client
         .send_input("Input.dispatchKeyEvent", key_down)
@@ -512,36 +400,6 @@ pub async fn press_key(
         .map_err(|e| ElementError::Action(format!("keyUp failed: {e}")))?;
 
     wait_for_stabilization(client, nav_events).await;
-    Ok(())
-}
-
-pub async fn hover(
-    client: &CdpClient,
-    uid_map: &HashMap<String, ElementRef>,
-    uid: &str,
-) -> Result<(), ElementError> {
-    let resolved = resolve_uid(client, uid_map, uid).await?;
-
-    let (x, y) = resolved.center.ok_or_else(|| {
-        ElementError::NotInteractable(format!(
-            "Element uid={uid} has no visible box model."
-        ))
-    })?;
-
-    // A background tab answers a pointer event on a fixed five-second timer, the foreground tab
-    // in single-digit ms. Costs 3 ms, once per connection (`CdpClient::ensure_foreground`).
-    client.ensure_foreground().await;
-    client
-        .send_input("Input.dispatchMouseEvent", DispatchMouseEventParams {
-            event_type: MouseEventType::MouseMoved,
-            x, y,
-            button: None, buttons: None, click_count: None,
-            modifiers: None, timestamp: None, delta_x: None, delta_y: None,
-            pointer_type: Some("mouse".into()),
-        })
-        .await
-        .map_err(|e| ElementError::Action(format!("hover failed: {e}")))?;
-
     Ok(())
 }
 
@@ -567,7 +425,11 @@ async fn recv_event_where(
 }
 
 /// Wait (≤`timeout`) for one event of this exact method.
-async fn recv_event(rx: &mut broadcast::Receiver<CdpEvent>, method: &str, timeout: Duration) -> bool {
+async fn recv_event(
+    rx: &mut broadcast::Receiver<CdpEvent>,
+    method: &str,
+    timeout: Duration,
+) -> bool {
     recv_event_where(rx, |event| event.method == method, timeout).await
 }
 
@@ -588,10 +450,7 @@ fn main_frame_navigated(event: &CdpEvent) -> bool {
 /// `nav_events` MUST be subscribed (`client.events()`) BEFORE dispatching — `broadcast` only
 /// delivers post-subscribe messages. The probe reads its whole window rather than stopping at
 /// the first event: a click that spawns a tracker AND navigates emits the subframe's first.
-pub async fn wait_for_stabilization(
-    client: &CdpClient,
-    nav_events: broadcast::Receiver<CdpEvent>,
-) {
+pub async fn wait_for_stabilization(client: &CdpClient, nav_events: broadcast::Receiver<CdpEvent>) {
     // Boxed: thirteen action paths await this inside one `run::run` match arm, where inline its
     // subscription and two nested timeouts would be counted thirteen times over.
     if let Some(waited) = Box::pin(settle_after_navigation(nav_events)).await {
@@ -604,11 +463,22 @@ pub async fn wait_for_stabilization(
 async fn settle_after_navigation(
     mut nav_events: broadcast::Receiver<CdpEvent>,
 ) -> Option<Duration> {
-    if !recv_event_where(&mut nav_events, main_frame_navigated, Duration::from_millis(50)).await {
+    if !recv_event_where(
+        &mut nav_events,
+        main_frame_navigated,
+        Duration::from_millis(50),
+    )
+    .await
+    {
         return None;
     }
     let started = std::time::Instant::now();
-    let _ = recv_event(&mut nav_events, "Page.loadEventFired", Duration::from_secs(10)).await;
+    let _ = recv_event(
+        &mut nav_events,
+        "Page.loadEventFired",
+        Duration::from_secs(10),
+    )
+    .await;
     Some(started.elapsed())
 }
 
@@ -633,12 +503,7 @@ impl ElementError {
     /// Carry the identity of the node an action resolved onto the refusal it produced. A no-op
     /// for every other variant: only a refusal has a structured response to put it on.
     #[must_use]
-    pub fn naming(
-        self,
-        uid: Option<String>,
-        role: Option<String>,
-        name: Option<String>,
-    ) -> Self {
+    pub fn naming(self, uid: Option<String>, role: Option<String>, name: Option<String>) -> Self {
         match self {
             Self::Refused(refused) => Self::Refused(Box::new(refused.naming(uid, role, name))),
             other => other,
@@ -646,162 +511,49 @@ impl ElementError {
     }
 }
 
-/// Click at explicit (x, y) coordinates. No hit test: `--xy` names no element, so there is
-/// nothing for a receiver to differ from.
-pub async fn click_at_coords(
-    client: &CdpClient,
-    x: f64,
-    y: f64,
-) -> Result<(), ElementError> {
-    dispatch_click_at(client, x, y).await
-}
-
-// Selector-based actions live in `element_selector`, re-exported so callers keep using
-// `crate::element::*`.
-pub use crate::element_selector::{
-    click_selector, dblclick_selector, fill_selector, focus_selector,
-};
+// Form controls, the pointer path and the selector-based actions live in their own modules,
+// re-exported so callers keep using `crate::element::*`.
 pub use crate::element_controls::{
-    drag, select_option, select_option_selector, set_checked, set_checked_selector, CheckOutcome,
-    SelectOutcome, set_file_input, set_file_input_selector,
+    CheckOutcome, SelectOutcome, drag, select_option, select_option_selector, set_checked,
+    set_checked_selector, set_file_input, set_file_input_selector,
+};
+pub use crate::element_pointer::{
+    PointerVerb, aim_and_dispatch, click, click_at_coords, dblclick, dblclick_at_coords, hover,
+};
+pub use crate::element_selector::{
+    click_selector, dblclick_selector, fill_selector_with, focus_selector,
 };
 
-/// Double-click an element by uid. Aimed by the same probe as `click`.
-pub async fn dblclick(
-    client: &CdpClient,
-    uid_map: &HashMap<String, ElementRef>,
-    uid: &str,
-    on_intercept: crate::hit_test::OnIntercept,
-) -> Result<crate::hit_test::Dispatched, ElementError> {
-    let resolved = resolve_uid(client, uid_map, uid).await?;
-    if resolved.center.is_none() {
-        js_dblclick(client, &resolved.object_id).await?;
-        return Ok(crate::hit_test::Dispatched::js().named(Some(uid.to_string()), None, None));
-    }
-    let outcome = dblclick_handle(
-        client,
-        &resolved.object_id,
-        resolved.center,
-        on_intercept,
-        &format!("uid={uid}"),
+/// What a `Runtime` reply says was thrown, if anything. A throw is not a transport failure: CDP
+/// answers `Ok` and puts the exception in `exceptionDetails`, so every caller has to look. This is
+/// the one place that knows where to look — `exception.description` first, `text` only as the
+/// fallback, since the latter is Chrome's wrapper ("Uncaught Error: …") rather than the message —
+/// and what to keep: the thrown text arrives as `Error: message\n    at <anonymous>:3:19`, and the
+/// stack is noise.
+///
+/// Returns the message rather than an error, because the variant is the caller's call: the same
+/// throw is an `Action` failure to `fill` and a `NotFound` to `focus`.
+#[must_use]
+pub fn js_exception(result: &serde_json::Value) -> Option<String> {
+    let exception = result.get("exceptionDetails")?;
+    let text = exception
+        .get("exception")
+        .and_then(|ex| ex.get("description"))
+        .and_then(|d| d.as_str())
+        .or_else(|| exception.get("text").and_then(|t| t.as_str()))
+        .unwrap_or("unknown error");
+    Some(
+        text.lines()
+            .next()
+            .unwrap_or(text)
+            .trim_start_matches("Error: ")
+            .to_string(),
     )
-    .await
-    .map_err(|e| e.naming(Some(uid.to_string()), None, None))?;
-    Ok(outcome.named(Some(uid.to_string()), None, None))
 }
 
-/// Aim at a resolved handle and double-click it. Mirrors `click_handle`.
-pub async fn dblclick_handle(
-    client: &CdpClient,
-    object_id: &str,
-    fallback_center: Option<(f64, f64)>,
-    on_intercept: crate::hit_test::OnIntercept,
-    target: &str,
-) -> Result<crate::hit_test::Dispatched, ElementError> {
-    use crate::hit_test::{Aim, Dispatched};
-    use crate::verdict::Delivery;
-
-    let (point, delivery, receiver, unaimable) = match crate::hit_test::aim(client, object_id).await {
-        Aim::NoBox => {
-            js_dblclick(client, object_id).await?;
-            return Ok(Dispatched::js());
-        }
-        Aim::Unprobed => {
-            let Some(center) = fallback_center else {
-                js_dblclick(client, object_id).await?;
-                return Ok(Dispatched::js());
-            };
-            (center, Delivery::NotProbed, None, None)
-        }
-        Aim::At { point, delivery, receiver, unaimable } => (point, delivery, receiver, unaimable),
-    };
-
-    if matches!(delivery, Delivery::NotSettled | Delivery::OffTarget) {
-        // `unaimable` separates a box a pointer cannot reach from a box the page holds off
-        // screen: same verdict, same absence of a dispatch, different recovery.
-        return Ok(Dispatched::skipped(delivery, point, None).unaimed(unaimable));
-    }
-    if delivery == Delivery::Intercepted
-        && crate::hit_test::should_refuse_intercept(on_intercept, receiver.as_ref())
-    {
-        return Err(refusal(
-            Dispatched::skipped(delivery, point, receiver).under(on_intercept),
-            "double-click",
-            target,
-        ));
-    }
-
-    dblclick_at_coords(client, point.0, point.1).await?;
-    Ok(Dispatched::landed(delivery, point, receiver))
-}
-
-pub async fn js_dblclick(client: &CdpClient, object_id: &str) -> Result<(), ElementError> {
-    let nav_events = client.events();
-    client.mark_dispatch();
-    client
-        .call::<_, serde_json::Value>(
-            "Runtime.callFunctionOn",
-            json!({
-                "objectId": object_id,
-                "functionDeclaration": "function() { this.dispatchEvent(new MouseEvent('dblclick', {bubbles:true, cancelable:true})); }",
-                "returnByValue": true,
-            }),
-        )
-        .await
-        .map_err(|e| ElementError::Action(format!("JS dblclick failed: {e}")))?;
-
-    wait_for_stabilization(client, nav_events).await;
-    Ok(())
-}
-
-pub async fn dblclick_at_coords(client: &CdpClient, x: f64, y: f64) -> Result<(), ElementError> {
-    // A background tab answers a pointer event on a fixed five-second timer, the foreground tab
-    // in single-digit ms. Costs 3 ms, once per connection (`CdpClient::ensure_foreground`).
-    client.ensure_foreground().await;
-    let nav_events = client.events();
-    client.mark_dispatch();
-    for click_count in [1, 2] {
-        client
-            .send_input("Input.dispatchMouseEvent", DispatchMouseEventParams {
-                event_type: MouseEventType::MousePressed, x, y,
-                button: Some(MouseButton::Left), buttons: Some(1),
-                click_count: Some(click_count),
-                modifiers: None, timestamp: None, delta_x: None, delta_y: None,
-                pointer_type: Some("mouse".into()),
-            })
-            .await
-            .map_err(|e| ElementError::Action(format!("mousePressed failed: {e}")))?;
-
-        client
-            .send_input("Input.dispatchMouseEvent", DispatchMouseEventParams {
-                event_type: MouseEventType::MouseReleased, x, y,
-                button: Some(MouseButton::Left), buttons: Some(0),
-                click_count: Some(click_count),
-                modifiers: None, timestamp: None, delta_x: None, delta_y: None,
-                pointer_type: Some("mouse".into()),
-            })
-            .await
-            .map_err(|e| ElementError::Action(format!("mouseReleased failed: {e}")))?;
-    }
-    wait_for_stabilization(client, nav_events).await;
-    Ok(())
-}
-
-/// Turn an `exceptionDetails` on a CDP result into an `ElementError`, keeping the first line of
-/// the thrown text and dropping the stack.
+/// [`js_exception`] for the majority of callers, to whom a throw is a failed action.
 pub fn check_js_exception(result: &serde_json::Value) -> Result<(), ElementError> {
-    if let Some(exception) = result.get("exceptionDetails") {
-        let text = exception
-            .get("exception")
-            .and_then(|ex| ex.get("description"))
-            .and_then(|d| d.as_str())
-            .or_else(|| exception.get("text").and_then(|t| t.as_str()))
-            .unwrap_or("unknown error");
-        return Err(ElementError::Action(
-            text.lines().next().unwrap_or(text).trim_start_matches("Error: ").to_string(),
-        ));
-    }
-    Ok(())
+    js_exception(result).map_or(Ok(()), |thrown| Err(ElementError::Action(thrown)))
 }
 
 #[cfg(test)]
@@ -809,7 +561,10 @@ mod tests {
     use super::*;
 
     fn ev(method: &str) -> CdpEvent {
-        CdpEvent { method: method.to_string(), params: serde_json::Value::Null }
+        CdpEvent {
+            method: method.to_string(),
+            params: serde_json::Value::Null,
+        }
     }
 
     /// As Chrome sends it: the top frame carries no `parentId`, a subframe does.
@@ -835,6 +590,37 @@ mod tests {
         let val = serde_json::json!({"exceptionDetails": {"text": "boom"}});
         let err = check_js_exception(&val).unwrap_err();
         assert!(err.to_string().contains("boom"));
+    }
+
+    /// The thrown message, not Chrome's wrapper around it, and not the stack under it. Five
+    /// call sites each re-derived this; the ones reading `text` first answered
+    /// `Uncaught Error: boom` where the description says `boom`.
+    #[test]
+    fn the_description_outranks_the_wrapper_and_the_stack_is_dropped() {
+        let val = serde_json::json!({"exceptionDetails": {
+            "text": "Uncaught Error: boom",
+            "exception": {"description": "Error: boom\n    at <anonymous>:3:19"},
+        }});
+        assert_eq!(js_exception(&val).as_deref(), Some("boom"));
+    }
+
+    /// A `DOMException`'s description carries the error's own class, which must survive: a
+    /// `SyntaxError` is what tells a caller the SELECTOR was the problem.
+    #[test]
+    fn a_non_error_class_keeps_its_name() {
+        let val = serde_json::json!({"exceptionDetails": {
+            "exception": {"description": "SyntaxError: '[' is not a valid selector.\n    at x"},
+        }});
+        assert_eq!(
+            js_exception(&val).as_deref(),
+            Some("SyntaxError: '[' is not a valid selector.")
+        );
+    }
+
+    /// No throw, no message — the ordinary path costs one `get`.
+    #[test]
+    fn a_clean_reply_carries_no_exception() {
+        assert!(js_exception(&serde_json::json!({"result": {"value": 1}})).is_none());
     }
 
     #[tokio::test]
@@ -868,7 +654,10 @@ mod tests {
         let waited = tokio::time::timeout(Duration::from_secs(2), settle_after_navigation(rx))
             .await
             .expect("must not wait for a load event that cannot come");
-        assert_eq!(waited, None, "nothing was waited for, and nothing is reported");
+        assert_eq!(
+            waited, None,
+            "nothing was waited for, and nothing is reported"
+        );
     }
 
     /// Why the probe reads its whole window: a click that spawns a tracker AND navigates emits
@@ -883,7 +672,10 @@ mod tests {
         let waited = tokio::time::timeout(Duration::from_secs(1), settle_after_navigation(rx))
             .await
             .expect("should not hang");
-        assert!(waited.is_some(), "the top-frame navigation still arms the wait");
+        assert!(
+            waited.is_some(),
+            "the top-frame navigation still arms the wait"
+        );
     }
 
     #[test]

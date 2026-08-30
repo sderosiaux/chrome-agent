@@ -67,10 +67,20 @@ pub fn from_ps(ps_output: &str, browsers_dir: &Path, claimed_pids: &HashSet<u32>
 }
 
 /// Read the process table. `None` means it could not be read, which is not "no orphans".
+///
+/// `ps` at an absolute path, never through `PATH` — same rule and same list as `kill.rs`, which
+/// states why. A system with `ps` somewhere else reads as "could not be read", and
+/// `cmd_close_orphans` already refuses rather than reporting "0 closed".
 #[cfg(unix)]
 fn process_table() -> Option<String> {
-    let out = std::process::Command::new("ps").args(["-eo", "pid=,command="]).output().ok()?;
-    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+    let ps = crate::kill::first_existing(crate::kill::PS_PATHS)?;
+    let out = std::process::Command::new(ps)
+        .args(["-eo", "pid=,command="])
+        .output()
+        .ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 #[cfg(not(unix))]
@@ -102,10 +112,13 @@ pub fn cmd_close_orphans(json_mode: bool) -> Result<(), crate::BoxError> {
     // The outcome is kept rather than reduced to a boolean: the three ways of not signalling
     // are three different facts, and the warnings below name which.
     use crate::run_helpers::KillOutcome;
-    let attempted: Vec<(&Orphan, KillOutcome)> =
-        orphans.iter().map(|o| (o, crate::run_helpers::kill_pid(o.pid))).collect();
-    let (closed, skipped): (Vec<_>, Vec<_>) =
-        attempted.iter().partition(|(_, outcome)| *outcome == KillOutcome::Signalled);
+    let attempted: Vec<(&Orphan, KillOutcome)> = orphans
+        .iter()
+        .map(|o| (o, crate::run_helpers::kill_pid(o.pid)))
+        .collect();
+    let (closed, skipped): (Vec<_>, Vec<_>) = attempted
+        .iter()
+        .partition(|(_, outcome)| *outcome == KillOutcome::Signalled);
 
     let message = format!("Closed {} orphaned browser(s)", closed.len());
     if json_mode {
@@ -129,7 +142,9 @@ pub fn cmd_close_orphans(json_mode: bool) -> Result<(), crate::BoxError> {
             let reason = match outcome {
                 KillOutcome::Gone => "it had already exited",
                 KillOutcome::NotABrowser => "its pid now belongs to another process",
-                KillOutcome::Unverified => "its pid could not be checked against the process table",
+                KillOutcome::Unverified => {
+                    "its pid could not be checked against the process table, or could not be signalled"
+                }
                 // Unreachable: this half is everything that is not `Signalled`.
                 KillOutcome::Signalled => "it was signalled",
             };
@@ -194,7 +209,10 @@ mod tests {
         let claimed = HashSet::from([42289]);
         assert_eq!(
             from_ps(ps, &dir(), &claimed),
-            vec![Orphan { pid: 16504, name: "test-tabs".into() }]
+            vec![Orphan {
+                pid: 16504,
+                name: "test-tabs".into()
+            }]
         );
     }
 
@@ -205,7 +223,10 @@ mod tests {
         let claimed = HashSet::from([42289]);
         assert_eq!(
             from_ps(ps, &dir(), &claimed),
-            vec![Orphan { pid: 16504, name: "hcvar".into() }]
+            vec![Orphan {
+                pid: 16504,
+                name: "hcvar".into()
+            }]
         );
     }
 

@@ -29,10 +29,11 @@ fn page_labels(store: &SessionStore) -> HashMap<String, String> {
 }
 
 /// Return structured tab data.
-pub async fn run_structured(client: &CdpClient, store: &SessionStore) -> Result<Vec<TabInfo>, crate::BoxError> {
-    let result: GetTargetsResult = client
-        .call("Target.getTargets", json!({}))
-        .await?;
+pub async fn run_structured(
+    client: &CdpClient,
+    store: &SessionStore,
+) -> Result<Vec<TabInfo>, crate::BoxError> {
+    let result: GetTargetsResult = client.call("Target.getTargets", json!({})).await?;
 
     let labels = page_labels(store);
 

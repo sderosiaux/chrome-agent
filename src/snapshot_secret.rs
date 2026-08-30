@@ -70,7 +70,11 @@ impl Redaction {
     /// Replace the whole string when it carries a secret, not just the matching slice: a
     /// partially masked card number is still a card number minus a substring.
     fn scrub<'a>(&'a self, s: &'a str) -> &'a str {
-        if self.strings.iter().any(|secret| s.contains(secret.as_str())) {
+        if self
+            .strings
+            .iter()
+            .any(|secret| s.contains(secret.as_str()))
+        {
             MARKER
         } else {
             s
@@ -236,7 +240,10 @@ async fn scan(client: &CdpClient) -> Option<Vec<String>> {
         params["contextId"] = json!(ctx.context_id);
     }
     let result: Value = client.call("Runtime.evaluate", params).await.ok()?;
-    if result.get("exceptionDetails").is_some() {
+    // Discarded on purpose: `None` makes `build` redact every value on the page, and there is no
+    // channel here to say why — the caller renders a tree, it does not report errors. A message
+    // would have to be printed beside the redaction, which is louder than the fact it explains.
+    if crate::element::js_exception(&result).is_some() {
         return None;
     }
     let array = result.get("result")?.get("objectId")?.as_str()?;
@@ -251,8 +258,14 @@ async fn scan(client: &CdpClient) -> Option<Vec<String>> {
     let mut handles = Vec::new();
     for entry in entries {
         // Skip `length` and anything else that is not an element handle.
-        if entry.get("name").and_then(Value::as_str).is_some_and(|n| n.parse::<usize>().is_ok())
-            && let Some(id) = entry.get("value").and_then(|v| v.get("objectId")).and_then(Value::as_str)
+        if entry
+            .get("name")
+            .and_then(Value::as_str)
+            .is_some_and(|n| n.parse::<usize>().is_ok())
+            && let Some(id) = entry
+                .get("value")
+                .and_then(|v| v.get("objectId"))
+                .and_then(Value::as_str)
         {
             handles.push(id.to_string());
         }
@@ -286,7 +299,10 @@ mod tests {
     fn an_ordinary_value_is_untouched() {
         let r = Redaction::for_tests(&[2], &[16], &["4111111111111111"]);
         assert_eq!(r.value(Some(6), "leave at the door"), "leave at the door");
-        assert_eq!(r.name(Some(6), "Note for the courier"), "Note for the courier");
+        assert_eq!(
+            r.name(Some(6), "Note for the courier"),
+            "Note for the courier"
+        );
     }
 
     #[test]
@@ -315,7 +331,10 @@ mod tests {
     fn the_marker_does_not_depend_on_the_value_it_hides() {
         // A marker that varied would turn every action report into a report of change.
         let r = Redaction::for_tests(&[2], &[], &[]);
-        assert_eq!(r.value(Some(2), "4111111111111111"), r.value(Some(2), "4242424242424242"));
+        assert_eq!(
+            r.value(Some(2), "4111111111111111"),
+            r.value(Some(2), "4242424242424242")
+        );
     }
 
     #[test]

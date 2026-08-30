@@ -6,8 +6,8 @@
 //! anything non-focusable leaves behind — so the destination is judged, not the move itself.
 //! The `focus` field is unchanged; it just no longer licenses the verdict.
 
-use std::process::{Command, Output, Stdio};
 use std::io::Write as _;
+use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
@@ -23,7 +23,12 @@ fn run_pipe(browser: &str, script: &str) -> Vec<Value> {
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn chrome-agent");
-    child.stdin.take().expect("stdin").write_all(script.as_bytes()).expect("write");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(script.as_bytes())
+        .expect("write");
     let deadline = Instant::now() + Duration::from_mins(1);
     loop {
         if child.try_wait().expect("poll").is_some() {
@@ -76,13 +81,19 @@ fn focus_landing_on_the_document_does_not_prove_a_click_arrived() {
     );
     let clicked = &run_pipe(guard.name(), &script)[2];
 
-    assert_eq!(clicked["ok"], true, "the click itself is not a failure: {clicked}");
+    assert_eq!(
+        clicked["ok"], true,
+        "the click itself is not a failure: {clicked}"
+    );
     assert_eq!(
         clicked["verdict"], "unchanged",
         "the document taking focus is not proof the click reached an element: {clicked}"
     );
     assert_eq!(clicked["verdict_reason"], "identical_tree", "{clicked}");
-    assert_ne!(clicked["next"], "proceed", "an agent must not carry on from this: {clicked}");
+    assert_ne!(
+        clicked["next"], "proceed",
+        "an agent must not carry on from this: {clicked}"
+    );
 
     // The reading stays on the response. The root's uid is a `backendNodeId` and differs
     // between documents, so this checks that a destination is reported, not which one.
@@ -114,13 +125,22 @@ fn focus_landing_on_a_real_element_is_still_evidence() {
     let lines = run_pipe(guard.name(), &script);
 
     let button = &lines[2];
-    assert_eq!(button["focus"]["to"], "n8", "the button itself took focus: {button}");
+    assert_eq!(
+        button["focus"]["to"], "n8",
+        "the button itself took focus: {button}"
+    );
     assert_eq!(button["verdict"], "changed", "{button}");
 
     // A span inside a link: the browser focuses the ANCESTOR link, so `focus.to` must not be
     // read as "the element you clicked".
     let span = &lines[3];
-    assert_eq!(span["uid"], "n10", "the click was aimed at the span: {span}");
-    assert_eq!(span["focus"]["to"], "n9", "focus went to the link that wraps it: {span}");
+    assert_eq!(
+        span["uid"], "n10",
+        "the click was aimed at the span: {span}"
+    );
+    assert_eq!(
+        span["focus"]["to"], "n9",
+        "focus went to the link that wraps it: {span}"
+    );
     assert_eq!(span["verdict"], "changed", "{span}");
 }

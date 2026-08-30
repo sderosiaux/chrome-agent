@@ -14,7 +14,10 @@ use common::TestBrowser;
 const WINDOW_MS: u64 = 60;
 
 fn run_cli(args: &[&str]) -> (String, i32) {
-    let output = Command::new(common::binary()).args(args).output().expect("Failed to run chrome-agent");
+    let output = Command::new(common::binary())
+        .args(args)
+        .output()
+        .expect("Failed to run chrome-agent");
     (
         String::from_utf8_lossy(&output.stdout).to_string(),
         output.status.code().unwrap_or(-1),
@@ -34,7 +37,15 @@ fn open(browser: &str, fixture: &str) -> bool {
 }
 
 fn fill(browser: &str, selector: &str, value: &str) -> Value {
-    let (stdout, _) = run_cli(&["--browser", browser, "--json", "fill", "--selector", selector, value]);
+    let (stdout, _) = run_cli(&[
+        "--browser",
+        browser,
+        "--json",
+        "fill",
+        "--selector",
+        selector,
+        value,
+    ]);
     serde_json::from_str(&stdout).unwrap_or_else(|e| panic!("not JSON ({e}): {stdout}"))
 }
 
@@ -51,7 +62,10 @@ fn a_value_reverted_on_the_microtask_queue_is_not_reported_as_kept() {
         v["value"]["actual"], "",
         "the page threw the value away before the read window closed: {v}"
     );
-    assert_eq!(v["value"]["verbatim"], false, "so it was not kept verbatim: {v}");
+    assert_eq!(
+        v["value"]["verbatim"], false,
+        "so it was not kept verbatim: {v}"
+    );
 }
 
 #[test]
@@ -86,8 +100,13 @@ fn a_revert_past_the_window_is_still_bounded_by_a_stated_time() {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     let last;
     loop {
-        let (stdout, code) =
-            run_cli(&["--browser", b.name(), "--json", "eval", "document.querySelector('#late').value"]);
+        let (stdout, code) = run_cli(&[
+            "--browser",
+            b.name(),
+            "--json",
+            "eval",
+            "document.querySelector('#late').value",
+        ]);
         assert_eq!(code, 0, "{stdout}");
         let current: Value = serde_json::from_str(&stdout).expect("JSON eval");
         if current["result"] == "" || std::time::Instant::now() >= deadline {
@@ -108,7 +127,14 @@ fn check_reports_the_same_window_as_fill() {
     if !open(b.name(), "checkable_kinds.html") {
         return;
     }
-    let (stdout, code) = run_cli(&["--browser", b.name(), "--json", "check", "--selector", "#native"]);
+    let (stdout, code) = run_cli(&[
+        "--browser",
+        b.name(),
+        "--json",
+        "check",
+        "--selector",
+        "#native",
+    ]);
     assert_eq!(code, 0, "{stdout}");
     let v: Value = serde_json::from_str(&stdout).expect("JSON check response");
     assert_eq!(v["observed_after_ms"], WINDOW_MS, "{v}");

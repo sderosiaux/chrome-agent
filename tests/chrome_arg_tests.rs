@@ -10,7 +10,6 @@ use std::process::Command;
 mod common;
 use common::TestBrowser;
 
-
 fn status_pid(browser: &str) -> Option<u32> {
     let output = Command::new(common::binary())
         .args(["--browser", browser, "status", "--json"])
@@ -76,7 +75,10 @@ fn chrome_arg_reaches_the_real_chrome_process() {
         .unwrap();
     assert!(follow_up.status.success());
     let follow_up_pid = status_pid(browser).expect("browser still has a pid after a follow-up");
-    assert_eq!(follow_up_pid, pid, "omitting --chrome-arg relaunched the browser");
+    assert_eq!(
+        follow_up_pid, pid,
+        "omitting --chrome-arg relaunched the browser"
+    );
 }
 
 #[cfg(unix)]
@@ -100,7 +102,11 @@ fn a_conflicting_chrome_arg_is_refused_rather_than_relaunching() {
         ])
         .output()
         .unwrap();
-    assert!(first.status.success(), "{}", String::from_utf8_lossy(&first.stderr));
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
     let pid = status_pid(browser).expect("launched browser has a pid");
 
     let conflicting = Command::new(common::binary())
@@ -115,12 +121,19 @@ fn a_conflicting_chrome_arg_is_refused_rather_than_relaunching() {
         ])
         .output()
         .unwrap();
-    assert!(!conflicting.status.success(), "a different --chrome-arg must be refused, not silently applied");
+    assert!(
+        !conflicting.status.success(),
+        "a different --chrome-arg must be refused, not silently applied"
+    );
     // --json puts the error on stdout (`{"ok":false,...}`), not stderr.
     let stdout = String::from_utf8_lossy(&conflicting.stdout);
     assert!(stdout.contains("different --chrome-arg flags"), "{stdout}");
 
     // The refusal must not tear down the running browser.
-    let still_pid = status_pid(browser).expect("the refused command must not have killed the browser");
-    assert_eq!(still_pid, pid, "a refused --chrome-arg relaunched the browser anyway");
+    let still_pid =
+        status_pid(browser).expect("the refused command must not have killed the browser");
+    assert_eq!(
+        still_pid, pid,
+        "a refused --chrome-arg relaunched the browser anyway"
+    );
 }

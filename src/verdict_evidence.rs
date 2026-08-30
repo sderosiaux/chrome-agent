@@ -105,8 +105,11 @@ pub struct Delivered {
 
 impl Delivered {
     /// The floor: no pointer event, or no answer from the hit test.
-    pub const NOT_PROBED: Self =
-        Self { how: Delivery::NotProbed, modal_receiver: false, observed_after_ms: None };
+    pub const NOT_PROBED: Self = Self {
+        how: Delivery::NotProbed,
+        modal_receiver: false,
+        observed_after_ms: None,
+    };
 }
 
 /// What we observed after an action.

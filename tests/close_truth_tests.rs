@@ -1,115 +1,101 @@
-//! `close` says what it did, including when it could not read the process table.
+//! `close` says what it did, and the guard behind it is not the caller's to move.
 //!
 //! `src/kill.rs` unit-tests the classifier; this pins the whole command against a real
-//! Chrome, because what matters is that the session entry and the browser both survive.
+//! Chrome, because what matters is which process gets signalled.
 
 mod common;
 
 use std::process::Command;
 
-/// A `ps` that exists and exits non-zero with empty output — the busybox case, which is an
-/// `Ok` from `Command::output()` rather than a spawn failure.
-fn refusing_ps_dir() -> std::path::PathBuf {
-    let dir = common::temp_path("close-ps-refuses", "d");
-    std::fs::create_dir_all(&dir).expect("the stub's own directory");
-    let stub = dir.join("ps");
-    std::fs::write(&stub, "#!/bin/sh\nexit 1\n").expect("write the stub");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o700)).expect("chmod");
+/// A directory holding a `ps` that answers `sleep` for every pid, plus a `kill` that signals
+/// nothing. If either were consulted, `close` would refuse the kill as a recycled pid and then
+/// drop the entry — a running browser made unreachable by an environment variable.
+fn lying_tools_dir() -> std::path::PathBuf {
+    let dir = common::temp_path("close-lying-tools", "d");
+    std::fs::create_dir_all(&dir).expect("the stubs' own directory");
+    for (name, body) in [
+        ("ps", "#!/bin/sh\necho sleep\n"),
+        ("kill", "#!/bin/sh\nexit 0\n"),
+    ] {
+        let stub = dir.join(name);
+        std::fs::write(&stub, body).expect("write the stub");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o700)).expect("chmod");
+        }
     }
     dir
 }
 
-/// A directory with no `ps` at all: the distroless case.
-fn absent_ps_dir() -> std::path::PathBuf {
-    let dir = common::temp_path("close-ps-absent", "d");
-    std::fs::create_dir_all(&dir).expect("the empty directory");
-    dir
-}
-
+/// The guard that decides whether `close` may signal used to resolve `ps` through the inherited
+/// `PATH`, so whatever set that variable decided the answer — for a check whose whole purpose is
+/// to stop a recycled pid being killed. It reads `/proc/<pid>/comm` or `/bin/ps` now, and this
+/// pins that a `PATH` holding a hostile `ps` and `kill` changes neither the verdict nor the act.
+///
+/// The converse case — a system where the tools genuinely are absent, so `close` keeps the entry
+/// it could not check — is no longer reachable from a test, since nothing a test may write moves
+/// `/bin`. `kill.rs`'s unit tests cover it at the classifier, where it is decided.
 #[test]
-fn a_close_that_cannot_read_the_process_table_keeps_the_browser_it_cannot_check() {
+fn a_hostile_path_does_not_reach_the_guard_that_decides_the_kill() {
     if !common::browser_ready() {
         return;
     }
     let browser = common::TestBrowser::new("close-truth");
     let launched = Command::new(common::binary())
-        .args(["--browser", browser.name(), "goto", &common::fixture_url("press_keys.html")])
+        .args([
+            "--browser",
+            browser.name(),
+            "goto",
+            &common::fixture_url("press_keys.html"),
+        ])
         .output()
         .expect("launch a browser to close");
-    assert!(launched.status.success(), "{}", String::from_utf8_lossy(&launched.stderr));
+    assert!(
+        launched.status.success(),
+        "{}",
+        String::from_utf8_lossy(&launched.stderr)
+    );
 
-    // `--purge` is passed on one of the two attempts below because it must NOT be honoured:
-    // a close that closed nothing must not delete a live Chrome's profile.
     let profile = std::env::var("HOME")
-        .map(|home| std::path::PathBuf::from(home).join(".chrome-agent/browsers").join(browser.name()))
+        .map(|home| {
+            std::path::PathBuf::from(home)
+                .join(".chrome-agent/browsers")
+                .join(browser.name())
+        })
         .expect("HOME");
-    assert!(profile.exists(), "the launch should have created {}", profile.display());
+    assert!(
+        profile.exists(),
+        "the launch should have created {}",
+        profile.display()
+    );
 
-    // Both cases in turn. Neither may signal, and neither may drop the session entry.
-    for (path_dir, purge) in [(refusing_ps_dir(), true), (absent_ps_dir(), false)] {
-        let mut args = vec!["--browser", browser.name(), "close", "--json"];
-        if purge {
-            args.push("--purge");
-        }
-        let out = Command::new(common::binary())
-            .args(&args)
-            .env("PATH", &path_dir)
-            .output()
-            .expect("run close with a process table that will not answer");
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        let response: serde_json::Value =
-            serde_json::from_str(stdout.trim()).unwrap_or_else(|e| panic!("{e}: {stdout}"));
-
-        assert_eq!(response["ok"], true, "the command ran: {stdout}");
-        assert_eq!(
-            response["signalled"], false,
-            "nothing was signalled, because nothing was checked: {stdout}"
-        );
-        let message = response["message"].as_str().unwrap_or_default();
-        assert!(!message.contains("Closed"), "nothing was closed: {message}");
-        assert!(
-            !message.contains("no longer running"),
-            "this is the sentence the whole lot exists to remove — it is a claim about a \
-             process this invocation never looked at: {message}"
-        );
-        assert!(message.contains("may still be running"), "{message}");
-        if purge {
-            // The purge must be refused, not attempted: an attempt would spend ~20 s in
-            // `purge_profile`'s retries and report an error rather than a refusal. The
-            // reason string is what separates the two, so the reason is asserted.
-            assert!(
-                message.contains("nothing was closed"),
-                "--purge on a close that closed nothing must be refused, not attempted: {message}"
-            );
-        }
-        assert!(
-            profile.exists(),
-            "the profile of a browser this command did not close was deleted under it: {}",
-            profile.display()
-        );
-        let _ = std::fs::remove_dir_all(&path_dir);
-    }
-
-    // The entry and the browser both survived: one more `close`, with a process table this
-    // time, has something to close.
+    let tools = lying_tools_dir();
     let out = Command::new(common::binary())
         .args(["--browser", browser.name(), "close", "--json"])
+        .env("PATH", &tools)
         .output()
-        .expect("close for real");
+        .expect("run close with a hostile PATH");
+    let _ = std::fs::remove_dir_all(&tools);
     let stdout = String::from_utf8_lossy(&out.stdout);
     let response: serde_json::Value =
         serde_json::from_str(stdout.trim()).unwrap_or_else(|e| panic!("{e}: {stdout}"));
+
+    assert_eq!(response["ok"], true, "the command ran: {stdout}");
     assert_eq!(
         response["signalled"], true,
-        "the entry was dropped by the close that could not check it, so the running Chrome \
-         it named is now unreachable: {stdout}"
+        "a `ps` on PATH answered for the guard, so the browser was left alive and its entry \
+         dropped — the exact outcome the guard exists to prevent: {stdout}"
     );
+    assert_eq!(
+        response["exited"], true,
+        "the stub `kill` was run instead of the real one, so nothing was signalled: {stdout}"
+    );
+    let message = response["message"].as_str().unwrap_or_default();
+    assert!(message.contains("Closed"), "{message}");
     assert!(
-        response["message"].as_str().unwrap_or_default().contains("Closed"),
-        "{stdout}"
+        !message.contains("another process"),
+        "the stub `ps` classified a real Chrome as a recycled pid: {message}"
     );
 }
 
@@ -127,10 +113,19 @@ fn a_close_that_waited_for_the_exit_removes_the_port_file() {
     }
     let browser = common::TestBrowser::new("close-port-file");
     let launched = Command::new(common::binary())
-        .args(["--browser", browser.name(), "goto", &common::fixture_url("press_keys.html")])
+        .args([
+            "--browser",
+            browser.name(),
+            "goto",
+            &common::fixture_url("press_keys.html"),
+        ])
         .output()
         .expect("launch a browser to close");
-    assert!(launched.status.success(), "{}", String::from_utf8_lossy(&launched.stderr));
+    assert!(
+        launched.status.success(),
+        "{}",
+        String::from_utf8_lossy(&launched.stderr)
+    );
 
     let port_file = std::path::PathBuf::from(std::env::var("HOME").expect("HOME"))
         .join(".chrome-agent/browsers")

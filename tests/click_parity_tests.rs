@@ -9,7 +9,10 @@ mod common;
 use common::TestBrowser;
 
 fn run_cli(args: &[&str]) -> (String, i32) {
-    let output = Command::new(common::binary()).args(args).output().expect("Failed to run chrome-agent");
+    let output = Command::new(common::binary())
+        .args(args)
+        .output()
+        .expect("Failed to run chrome-agent");
     (
         String::from_utf8_lossy(&output.stdout).to_string(),
         output.status.code().unwrap_or(-1),
@@ -42,7 +45,14 @@ fn a_selector_click_lands_where_a_real_pointer_would() {
     if !open(b.name(), "click_overlay.html") {
         return;
     }
-    let (stdout, code) = run_cli(&["--browser", b.name(), "--json", "click", "--selector", "#target"]);
+    let (stdout, code) = run_cli(&[
+        "--browser",
+        b.name(),
+        "--json",
+        "click",
+        "--selector",
+        "#target",
+    ]);
     assert_eq!(code, 0, "the click itself still succeeds: {stdout}");
 
     assert_eq!(
@@ -76,11 +86,21 @@ fn the_uid_path_and_the_selector_path_agree_on_who_receives_the_click() {
 
     let (_, code) = run_cli(&["--browser", b.name(), "eval", "window.receiver = null; 1"]);
     assert_eq!(code, 0);
-    let (stdout, code) = run_cli(&["--browser", b.name(), "--json", "click", "--selector", "#target"]);
+    let (stdout, code) = run_cli(&[
+        "--browser",
+        b.name(),
+        "--json",
+        "click",
+        "--selector",
+        "#target",
+    ]);
     assert_eq!(code, 0, "{stdout}");
     let by_selector = eval(b.name(), "window.receiver");
 
-    assert_eq!(by_uid, by_selector, "two spellings of `click` must not do different things");
+    assert_eq!(
+        by_uid, by_selector,
+        "two spellings of `click` must not do different things"
+    );
 }
 
 #[test]
@@ -89,7 +109,14 @@ fn an_uncovered_element_is_still_clicked_by_selector() {
     if !open(b.name(), "verdict_states.html") {
         return;
     }
-    let (stdout, code) = run_cli(&["--browser", b.name(), "--json", "click", "--selector", "#add"]);
+    let (stdout, code) = run_cli(&[
+        "--browser",
+        b.name(),
+        "--json",
+        "click",
+        "--selector",
+        "#add",
+    ]);
     assert_eq!(code, 0, "{stdout}");
     assert_eq!(
         eval(b.name(), "!!document.querySelector('h4')"),
@@ -110,7 +137,14 @@ fn an_element_with_no_layout_box_still_gets_its_handler() {
     let (_, code) = run_cli(&["--browser", b.name(), "eval", setup]);
     assert_eq!(code, 0);
 
-    let (stdout, code) = run_cli(&["--browser", b.name(), "--json", "click", "--selector", "#zero"]);
+    let (stdout, code) = run_cli(&[
+        "--browser",
+        b.name(),
+        "--json",
+        "click",
+        "--selector",
+        "#zero",
+    ]);
     assert_eq!(code, 0, "{stdout}");
     assert_eq!(
         eval(b.name(), "window.zeroClicked === true"),
@@ -125,7 +159,14 @@ fn a_selector_that_matches_nothing_is_an_error() {
     if !open(b.name(), "verdict_states.html") {
         return;
     }
-    let (stdout, code) = run_cli(&["--browser", b.name(), "--json", "click", "--selector", "#nope"]);
+    let (stdout, code) = run_cli(&[
+        "--browser",
+        b.name(),
+        "--json",
+        "click",
+        "--selector",
+        "#nope",
+    ]);
     assert_ne!(code, 0, "a missing element is a failure: {stdout}");
     assert!(stdout.contains("No element matches selector"), "{stdout}");
 }
@@ -138,7 +179,14 @@ fn a_smooth_scrolling_page_still_gets_its_click() {
     if !open(b.name(), "smooth_scroll_click.html") {
         return;
     }
-    let (stdout, code) = run_cli(&["--browser", b.name(), "--json", "click", "--selector", "#target"]);
+    let (stdout, code) = run_cli(&[
+        "--browser",
+        b.name(),
+        "--json",
+        "click",
+        "--selector",
+        "#target",
+    ]);
     assert_eq!(code, 0, "{stdout}");
     assert_eq!(
         eval(b.name(), "document.title"),

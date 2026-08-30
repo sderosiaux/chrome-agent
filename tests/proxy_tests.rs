@@ -10,7 +10,9 @@ use common::TestBrowser;
 /// speculative sockets that carry no request, and a managed Chrome also routes its own
 /// background traffic through the proxy.
 fn serve(mut stream: std::net::TcpStream) {
-    stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
     let mut request = [0_u8; 8192];
     let _ = stream.read(&mut request);
     let body = "<html><title>Scout proxy fixture</title><main>proxied</main></html>";
@@ -74,8 +76,12 @@ fn managed_browser_routes_navigation_through_proxy() {
     // Asserted on the PAGE, not on a request line: `.invalid` is reserved by RFC 6761 and
     // resolves nowhere, so a document carrying the fixture's title can only have come from this
     // proxy. `goto` alone proves nothing — it reports where it landed, not what served it.
-    let response: serde_json::Value = serde_json::from_slice(&output.stdout)
-        .unwrap_or_else(|e| panic!("goto did not answer JSON ({e}): {:?}", String::from_utf8_lossy(&output.stdout)));
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|e| {
+        panic!(
+            "goto did not answer JSON ({e}): {:?}",
+            String::from_utf8_lossy(&output.stdout)
+        )
+    });
     assert_eq!(
         response["title"], "Scout proxy fixture",
         "the page did not come from the proxy: {response}"

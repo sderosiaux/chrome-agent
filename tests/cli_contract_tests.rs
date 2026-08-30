@@ -1,17 +1,17 @@
-//! The output and exit-code contract of the CLI, on the three points where it was broken.
+//! The output and exit-code contract of the CLI, on the points where it was broken.
 //!
 //! 1. `check`/`uncheck`/`upload` took a uid AND a `--selector` and silently acted on the
-//!    selector, while `click`/`fill`/`select`/`dblclick` refuse the same pair.
+//!    selector, while `click`/`fill`/`select`/`dblclick` refuse the same pair. All nine verbs
+//!    now declare a clap `ArgGroup`, so the refusal is a usage error on stderr and no browser is
+//!    opened for it — the wording and the exit code are pinned in
+//!    `cli_tests::an_invalid_invocation_is_refused_before_a_browser_is_resolved`. What is left
+//!    here is the fact that made the old refusal worth having: a refused invocation must not
+//!    have acted on the target it discarded.
 //! 2. Every `--json` response funnels through one writer, which answered a serialization
 //!    failure with an empty line (unit-tested in `src/run_helpers.rs`, since a `Value` cannot
 //!    be made to fail from out here).
 //! 3. The CLI `batch` exited 0 even when `--stop-on-error` cut the run short, and printed raw
 //!    JSON in text mode.
-//!
-//! The refusals in (1) live in `run::run`'s second match, which runs AFTER the browser is
-//! resolved — so `CHROME_AGENT_PARSE_ONLY` returns before reaching them and these tests own a
-//! real browser. Moving them into clap (`ArgGroup`, the way `download` does it) would make
-//! them parse-time; it would also give them clap's wording instead of the sibling commands'.
 
 mod common;
 
@@ -74,87 +74,69 @@ fn open(browser: &str, fixture: &str) -> bool {
 // 1. Two ways to name one target is a refusal, not a ranking
 // ---------------------------------------------------------------------------
 
+/// The page is the evidence: whatever the message says, a refused invocation must leave the
+/// target it discarded alone. Before the fix `check n1 --selector "#native"` checked `#native`
+/// and never mentioned the uid.
 #[test]
-fn check_refuses_a_uid_and_a_selector_together() {
-    let b = TestBrowser::new("contract-check-both");
+fn a_refused_target_pair_never_acts_on_the_selector_it_discarded() {
+    let b = TestBrowser::new("contract-target-pair");
     if !open(b.name(), "checkable_kinds.html") {
         return;
     }
-    // `#native` starts unchecked. Before the fix this checked it and never mentioned the uid.
-    let (stdout, stderr, code) = run(b.name(), &["check", "n1", "--selector", "#native"]);
-    assert_eq!(code, 1, "stdout={stdout} stderr={stderr}");
-    assert!(
-        stderr.contains("Only one of uid or --selector can be provided."),
-        "the same wording click/fill/select/dblclick already use: {stderr}"
-    );
+    // `#native` starts unchecked, `#native_on` starts checked, so acting on either is visible.
+    for (args, selector, state) in [
+        (
+            vec!["check", "n1", "--selector", "#native"],
+            "#native",
+            "--unchecked",
+        ),
+        (
+            vec!["uncheck", "n1", "--selector", "#native_on"],
+            "#native_on",
+            "--checked",
+        ),
+    ] {
+        let (stdout, stderr, code) = run(b.name(), &args);
+        assert_eq!(code, 1, "stdout={stdout} stderr={stderr}");
+        assert!(
+            stderr.contains("cannot be used with"),
+            "clap's group refusal, not a message from after the browser was opened: {stderr}"
+        );
+        assert!(
+            stdout.trim().is_empty(),
+            "a usage error belongs on stderr: {stdout}"
+        );
 
-    let (stdout, stderr, code) =
-        run(b.name(), &["assert", "state", "--selector", "#native", "--unchecked"]);
-    assert_eq!(
-        code, 0,
-        "a refused invocation must not have acted on the selector it discarded: {stdout} {stderr}"
-    );
+        let (stdout, stderr, code) = run(
+            b.name(),
+            &["assert", "state", "--selector", selector, state],
+        );
+        assert_eq!(
+            code, 0,
+            "the discarded selector was acted on anyway: {stdout} {stderr}"
+        );
+    }
 }
 
+/// Stated rather than hidden: a malformed invocation no longer answers `{"ok":false}` on
+/// stdout under `--json`. It is a clap usage error on stderr, exit 1, like every missing
+/// positional and every `assert` group already was.
 #[test]
-fn uncheck_refuses_a_uid_and_a_selector_together() {
-    let b = TestBrowser::new("contract-uncheck-both");
+fn a_usage_refusal_under_json_is_on_stderr_not_stdout() {
+    let b = TestBrowser::new("contract-usage-json");
     if !open(b.name(), "checkable_kinds.html") {
         return;
     }
-    // `#native_on` starts checked, so acting on the selector would be visible.
-    let (stdout, stderr, code) = run(b.name(), &["uncheck", "n1", "--selector", "#native_on"]);
-    assert_eq!(code, 1, "stdout={stdout} stderr={stderr}");
-    assert!(
-        stderr.contains("Only one of uid or --selector can be provided."),
-        "{stderr}"
-    );
-
-    let (stdout, stderr, code) =
-        run(b.name(), &["assert", "state", "--selector", "#native_on", "--checked"]);
-    assert_eq!(
-        code, 0,
-        "the discarded selector was left alone: {stdout} {stderr}"
-    );
-}
-
-#[test]
-fn upload_refuses_a_uid_and_a_selector_together() {
-    let b = TestBrowser::new("contract-upload-both");
-    if !open(b.name(), "checkable_kinds.html") {
-        return;
-    }
-    let file = common::temp_path("contract-upload", "txt");
-    std::fs::write(&file, b"payload").expect("write the upload source");
-    let path = file.to_string_lossy().into_owned();
     let (stdout, stderr, code) = run(
         b.name(),
-        &["upload", &path, "--uid", "n1", "--selector", "#native"],
+        &["--json", "check", "n1", "--selector", "#native"],
     );
-    let _ = std::fs::remove_file(&file);
     assert_eq!(code, 1, "stdout={stdout} stderr={stderr}");
     assert!(
-        stderr.contains("Only one of --uid or --selector can be provided."),
-        "`upload` names its uid with a flag, so the wording matches fill/select: {stderr}"
+        stdout.trim().is_empty(),
+        "nothing on stdout for a usage error: {stdout}"
     );
-}
-
-#[test]
-fn a_refusal_under_json_is_ok_false_on_stdout() {
-    let b = TestBrowser::new("contract-check-both-json");
-    if !open(b.name(), "checkable_kinds.html") {
-        return;
-    }
-    let (stdout, stderr, code) =
-        run(b.name(), &["--json", "check", "n1", "--selector", "#native"]);
-    assert_eq!(code, 1, "stdout={stdout} stderr={stderr}");
-    let v: serde_json::Value =
-        serde_json::from_str(stdout.trim()).unwrap_or_else(|e| panic!("{e}: {stdout}"));
-    assert_eq!(v["ok"], false, "{stdout}");
-    assert!(
-        v["error"].as_str().unwrap_or_default().contains("Only one of"),
-        "{stdout}"
-    );
+    assert!(stderr.contains("cannot be used with"), "{stderr}");
 }
 
 // ---------------------------------------------------------------------------
@@ -163,8 +145,7 @@ fn a_refusal_under_json_is_ok_false_on_stdout() {
 
 /// A uid no snapshot ever produced: the first command fails, deterministically and without
 /// depending on the page.
-const FAILING: &str =
-    r#"[{"cmd":"click","uid":"n999999"},{"cmd":"text","selector":"h1"}]"#;
+const FAILING: &str = r#"[{"cmd":"click","uid":"n999999"},{"cmd":"text","selector":"h1"}]"#;
 
 #[test]
 fn a_batch_stopped_on_an_error_exits_1() {
@@ -207,9 +188,15 @@ fn a_batch_that_ran_every_command_still_exits_0() {
     assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
     let v: serde_json::Value =
         serde_json::from_str(stdout.trim()).unwrap_or_else(|e| panic!("{e}: {stdout}"));
-    assert_eq!(v["ok"], false, "a failed command still makes it not ok: {stdout}");
+    assert_eq!(
+        v["ok"], false,
+        "a failed command still makes it not ok: {stdout}"
+    );
     assert_eq!(v["results"].as_array().map(Vec::len), Some(2), "{stdout}");
-    assert!(v.get("stopped_at").is_none(), "nothing was skipped: {stdout}");
+    assert!(
+        v.get("stopped_at").is_none(),
+        "nothing was skipped: {stdout}"
+    );
 }
 
 #[test]

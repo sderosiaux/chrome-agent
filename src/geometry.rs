@@ -23,7 +23,12 @@ pub struct Rect {
 #[must_use]
 pub fn quad_bounds(quad: &Quad) -> Rect {
     if quad.len() < 8 {
-        return Rect { x: 0.0, y: 0.0, width: 0.0, height: 0.0 };
+        return Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 0.0,
+            height: 0.0,
+        };
     }
     let xs = [quad[0], quad[2], quad[4], quad[6]];
     let ys = [quad[1], quad[3], quad[5], quad[7]];
@@ -31,7 +36,12 @@ pub fn quad_bounds(quad: &Quad) -> Rect {
     let max_x = xs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     let min_y = ys.iter().copied().fold(f64::INFINITY, f64::min);
     let max_y = ys.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-    Rect { x: min_x, y: min_y, width: max_x - min_x, height: max_y - min_y }
+    Rect {
+        x: min_x,
+        y: min_y,
+        width: max_x - min_x,
+        height: max_y - min_y,
+    }
 }
 
 /// Downscale factor so `width` fits within `max_width`; never upscales. A `None` cap, a
@@ -57,9 +67,14 @@ pub async fn clip_for_uid(
         .backend_node_id()
         .ok_or_else(|| format!("Element uid={uid} has no resolvable backend node."))?;
     let result: GetBoxModelResult = client
-        .call("DOM.getBoxModel", json!({ "backendNodeId": backend_node_id }))
+        .call(
+            "DOM.getBoxModel",
+            json!({ "backendNodeId": backend_node_id }),
+        )
         .await
-        .map_err(|e| format!("Element uid={uid} has no box model (not rendered / zero-size): {e}"))?;
+        .map_err(|e| {
+            format!("Element uid={uid} has no box model (not rendered / zero-size): {e}")
+        })?;
     Ok(border_clip(&result.model))
 }
 
@@ -68,7 +83,9 @@ pub async fn clip_for_selector(
     client: &CdpClient,
     selector: &str,
 ) -> Result<Rect, crate::BoxError> {
-    let doc: serde_json::Value = client.call("DOM.getDocument", json!({ "depth": 0 })).await?;
+    let doc: serde_json::Value = client
+        .call("DOM.getDocument", json!({ "depth": 0 }))
+        .await?;
     let root_id = doc
         .get("root")
         .and_then(|r| r.get("nodeId"))
@@ -76,15 +93,22 @@ pub async fn clip_for_selector(
         .ok_or("DOM.getDocument returned no root nodeId")?;
 
     let found: serde_json::Value = client
-        .call("DOM.querySelector", json!({ "nodeId": root_id, "selector": selector }))
+        .call(
+            "DOM.querySelector",
+            json!({ "nodeId": root_id, "selector": selector }),
+        )
         .await?;
-    let node_id = found.get("nodeId").and_then(serde_json::Value::as_i64).unwrap_or(0);
+    let node_id = found
+        .get("nodeId")
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(0);
     if node_id == 0 {
         return Err(format!("No element matches selector: {selector}").into());
     }
 
-    let result: GetBoxModelResult =
-        client.call("DOM.getBoxModel", json!({ "nodeId": node_id })).await?;
+    let result: GetBoxModelResult = client
+        .call("DOM.getBoxModel", json!({ "nodeId": node_id }))
+        .await?;
     Ok(border_clip(&result.model))
 }
 
@@ -101,7 +125,15 @@ mod tests {
         // A 100x50 box at (10, 20): [x1,y1 .. x4,y4] clockwise.
         let quad = vec![10.0, 20.0, 110.0, 20.0, 110.0, 70.0, 10.0, 70.0];
         let r = quad_bounds(&quad);
-        assert_eq!(r, Rect { x: 10.0, y: 20.0, width: 100.0, height: 50.0 });
+        assert_eq!(
+            r,
+            Rect {
+                x: 10.0,
+                y: 20.0,
+                width: 100.0,
+                height: 50.0
+            }
+        );
     }
 
     #[test]
@@ -109,13 +141,29 @@ mod tests {
         // Unordered points still give the min/max envelope.
         let quad = vec![110.0, 70.0, 10.0, 20.0, 110.0, 20.0, 10.0, 70.0];
         let r = quad_bounds(&quad);
-        assert_eq!(r, Rect { x: 10.0, y: 20.0, width: 100.0, height: 50.0 });
+        assert_eq!(
+            r,
+            Rect {
+                x: 10.0,
+                y: 20.0,
+                width: 100.0,
+                height: 50.0
+            }
+        );
     }
 
     #[test]
     fn quad_bounds_malformed_is_zero() {
         let r = quad_bounds(&vec![1.0, 2.0, 3.0]);
-        assert_eq!(r, Rect { x: 0.0, y: 0.0, width: 0.0, height: 0.0 });
+        assert_eq!(
+            r,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 0.0,
+                height: 0.0
+            }
+        );
     }
 
     #[test]

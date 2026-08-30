@@ -12,7 +12,10 @@ mod common;
 use common::TestBrowser;
 
 fn run_cli(args: &[&str]) -> (String, i32) {
-    let output = Command::new(common::binary()).args(args).output().expect("Failed to run chrome-agent");
+    let output = Command::new(common::binary())
+        .args(args)
+        .output()
+        .expect("Failed to run chrome-agent");
     (
         String::from_utf8_lossy(&output.stdout).to_string(),
         output.status.code().unwrap_or(-1),
@@ -62,13 +65,24 @@ fn a_click_that_landed_is_not_reported_as_failed_because_the_read_timed_out() {
         return;
     }
     let (stdout, code) = run_cli(&[
-        "--browser", b.name(), "--timeout", "2", "--json", "click", "--selector", "#block",
+        "--browser",
+        b.name(),
+        "--timeout",
+        "2",
+        "--json",
+        "click",
+        "--selector",
+        "#block",
     ]);
-    let v: Value = serde_json::from_str(&stdout).unwrap_or_else(|e| panic!("not JSON ({e}): {stdout}"));
+    let v: Value =
+        serde_json::from_str(&stdout).unwrap_or_else(|e| panic!("not JSON ({e}): {stdout}"));
 
     assert_eq!(code, 0, "the action succeeded: {v}");
     assert_eq!(v["ok"], true, "{v}");
-    assert_eq!(v["verdict"], "unknown", "and the report says why it cannot say more: {v}");
+    assert_eq!(
+        v["verdict"], "unknown",
+        "and the report says why it cannot say more: {v}"
+    );
     assert_eq!(v["verdict_reason"], "read_failed", "{v}");
     assert!(v["changed"].is_null(), "nothing was compared: {v}");
 
@@ -92,20 +106,43 @@ fn a_confirmed_write_on_a_page_that_could_not_be_read_says_inspect() {
     let (_, code) = run_cli(&["--browser", b.name(), "inspect"]);
     assert_eq!(code, 0, "baseline");
     let (stdout, code) = run_cli(&[
-        "--browser", b.name(), "--timeout", "2", "--json", "fill", "--selector", "#slow",
+        "--browser",
+        b.name(),
+        "--timeout",
+        "2",
+        "--json",
+        "fill",
+        "--selector",
+        "#slow",
         "ada@example.com",
     ]);
-    let v: Value = serde_json::from_str(&stdout).unwrap_or_else(|e| panic!("not JSON ({e}): {stdout}"));
+    let v: Value =
+        serde_json::from_str(&stdout).unwrap_or_else(|e| panic!("not JSON ({e}): {stdout}"));
 
     assert_eq!(code, 0, "the write landed: {v}");
-    assert_eq!(v["value"]["verbatim"], true, "read back on the field itself: {v}");
-    assert_eq!(v["verdict"], "changed", "so the verdict is not an admission of ignorance: {v}");
+    assert_eq!(
+        v["value"]["verbatim"], true,
+        "read back on the field itself: {v}"
+    );
+    assert_eq!(
+        v["verdict"], "changed",
+        "so the verdict is not an admission of ignorance: {v}"
+    );
     assert_eq!(v["verdict_reason"], "value_kept", "{v}");
     assert!(v["changed"].is_null(), "and yet nothing was compared: {v}");
-    assert_eq!(v["next"], "inspect", "carrying on while blind is the one refusal: {v}");
+    assert_eq!(
+        v["next"], "inspect",
+        "carrying on while blind is the one refusal: {v}"
+    );
     let hint = v["verdict_hint"].as_str().unwrap_or_default();
-    assert!(hint.contains("what else moved"), "the hint names what is unknown: {v}");
-    assert!(hint.contains("inspect"), "and the command that resolves it: {v}");
+    assert!(
+        hint.contains("what else moved"),
+        "the hint names what is unknown: {v}"
+    );
+    assert!(
+        hint.contains("inspect"),
+        "and the command that resolves it: {v}"
+    );
 
     wait_until_the_page_answers_again(b.name());
 }
@@ -132,7 +169,12 @@ fn pipe_and_cli_agree_when_the_read_fails() {
         .stderr(Stdio::null())
         .spawn()
         .expect("spawn pipe");
-    child.stdin.as_mut().unwrap().write_all(script.as_bytes()).unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(script.as_bytes())
+        .unwrap();
     drop(child.stdin.take());
     let out = child.wait_with_output().expect("pipe output");
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -156,7 +198,14 @@ fn an_action_that_did_not_happen_is_still_an_error() {
     if !open_busy_page(b.name()) {
         return;
     }
-    let (stdout, code) = run_cli(&["--browser", b.name(), "--json", "click", "--selector", "#missing"]);
+    let (stdout, code) = run_cli(&[
+        "--browser",
+        b.name(),
+        "--json",
+        "click",
+        "--selector",
+        "#missing",
+    ]);
     assert_ne!(code, 0, "{stdout}");
     assert!(stdout.contains("\"ok\":false"), "{stdout}");
 }

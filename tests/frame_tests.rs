@@ -54,7 +54,12 @@ fn frame_switch_scopes_eval_location_to_iframe() {
     );
 
     assert_eq!(responses.len(), 3, "expected 3 responses: {responses:?}");
-    assert_eq!(responses[1]["ok"], Value::Bool(true), "frame switch: {:?}", responses[1]);
+    assert_eq!(
+        responses[1]["ok"],
+        Value::Bool(true),
+        "frame switch: {:?}",
+        responses[1]
+    );
 
     let href = responses[2]["result"].as_str().unwrap_or_default();
     assert!(
@@ -244,7 +249,10 @@ fn frame_missing_target_field_errors() {
     assert_eq!(responses.len(), 2, "responses: {responses:?}");
     assert_eq!(responses[1]["ok"], Value::Bool(false), "{:?}", responses[1]);
     let err = responses[1]["error"].as_str().unwrap_or_default();
-    assert!(err.contains("target"), "expected missing-target error, got: {err:?}");
+    assert!(
+        err.contains("target"),
+        "expected missing-target error, got: {err:?}"
+    );
 }
 
 #[test]

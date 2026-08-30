@@ -59,11 +59,7 @@ pub async fn run(
         .await?;
 
     if let Some(exception) = &result.exception_details {
-        return Err(format!(
-            "Readability failed: {}",
-            exception.text
-        )
-        .into());
+        return Err(format!("Readability failed: {}", exception.text).into());
     }
 
     let raw = result
