@@ -903,7 +903,7 @@ mod tests {
     use super::*;
 
     fn ev(method: &str) -> CdpEvent {
-        CdpEvent { method: method.to_string(), params: serde_json::Value::Null, session_id: None }
+        CdpEvent { method: method.to_string(), params: serde_json::Value::Null }
     }
 
     /// A `Page.frameNavigated` as Chrome sends it: the top frame carries no `parentId`, a
@@ -916,7 +916,6 @@ mod tests {
         CdpEvent {
             method: "Page.frameNavigated".to_string(),
             params: serde_json::json!({"frame": frame}),
-            session_id: None,
         }
     }
 

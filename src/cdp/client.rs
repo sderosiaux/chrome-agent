@@ -639,10 +639,14 @@ async fn route_message(
 /// even when the shape around it did not.
 ///
 /// **Status, honestly: this has not been observed in the field.** The trigger was never measured
-/// — it is reasoned from the struct definitions — and with `CdpError::data` now typed `Value`,
-/// every remaining narrowly-typed field of the envelope (`id`, `code`, `message`, `method`,
-/// `sessionId`) is one CDP does pin, so there is no shape today's Chrome is expected to send that
-/// would reach this function at all. What is fixed is the CONSEQUENCE: whatever produces an unreadable message next —
+/// — it is reasoned from the struct definitions — and every remaining narrowly-typed field of the
+/// envelope (`id`, `method`, and `code`/`message` inside an `error`) is one CDP does pin, so there
+/// is no shape today's Chrome is expected to send that would reach this function at all. That
+/// list keeps getting shorter for a reason worth naming: the envelope now declares only what
+/// something reads, so `types.rs`'s unread fields — `sessionId` and `CdpError::data` among them,
+/// the two this paragraph used to be about — are undeclared rather than loosely typed, and serde
+/// ignores whatever JSON type they arrive with. What is fixed is the CONSEQUENCE: whatever
+/// produces an unreadable message next —
 /// a protocol change, a Chrome much newer than the bundled Chromium, a field we type too
 /// narrowly — costs one error naming the cause instead of thirty seconds and a sentence blaming
 /// the page. The `eprintln!` below is what would confirm the residual half on a real machine.
@@ -680,7 +684,7 @@ async fn resolve_unreadable(message: &str, pending: &PendingMap) {
 /// never.
 ///
 /// What that complaint gives, precisely, is the type mismatch and a byte offset — `invalid type:
-/// integer 42, expected a string at line 1 column 22` — and NOT the field's name, which serde
+/// string "-32000", expected i64 at line 1 column 32` — and NOT the field's name, which serde
 /// does not carry without a dependency this crate will not take (the musl graph is guarded, and
 /// a field name is not worth a crate). The key list is added beside it because it closes most of
 /// the gap for free: the mismatch says what was wrong and the keys say where to look for it,
@@ -745,11 +749,14 @@ mod tests {
     /// naming what could not be read — where it used to resolve nothing at all and leave the
     /// caller to its deadline.
     ///
-    /// `sessionId` is the vector because it is now the only optional field on an incoming
-    /// message that is not a `Value` (`CdpError::data` was the other, and typing it `Value` is
-    /// half of this fix). Today's Chrome cannot send this: the test is of the CLASS, which is
-    /// any field we type more narrowly than the protocol guarantees, and the class is the part
-    /// that survives a protocol change.
+    /// `error` is the vector because it is now the only optional field on an incoming message
+    /// that is not a `Value`. It used to be `sessionId`, and before that `CdpError::data`; the
+    /// first was typed `Value` and the second was deleted with the rest of `types.rs`'s unread
+    /// fields, which is why this fixture has been rewritten twice without the mechanism under it
+    /// changing. Today's Chrome cannot send this: the test is of the CLASS, which is any field we
+    /// type more narrowly than the protocol guarantees, and the class is the part that survives a
+    /// protocol change. The class shrinks each time an unread field goes, and `error.code` is
+    /// what is left of it — a field something really reads, so it cannot be deleted away.
     #[tokio::test]
     async fn an_unreadable_answer_fails_its_call_instead_of_timing_out() {
         let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
@@ -757,7 +764,8 @@ mod tests {
         pending.lock().await.insert(7, tx);
         let (events_tx, _events_rx) = broadcast::channel::<CdpEvent>(16);
 
-        route_message(r#"{"id":7,"sessionId":42}"#, &pending, &events_tx).await;
+        route_message(r#"{"id":7,"error":{"code":"-32000","message":"x"}}"#, &pending, &events_tx)
+            .await;
 
         // Under a second, and by a wide margin: the point is that nothing waits on a deadline.
         let reply = tokio::time::timeout(Duration::from_secs(1), rx)
@@ -768,11 +776,11 @@ mod tests {
             panic!("a message that fits neither variant is not a readable response");
         };
         assert!(
-            detail.contains("invalid type: integer `42`, expected a string"),
+            detail.contains("invalid type: string \"-32000\", expected i64"),
             "the error must say what could not be read: {detail}"
         );
         assert!(
-            detail.contains("message keys: id, sessionId"),
+            detail.contains("message keys: error, id"),
             "and where to look for it, since serde does not name the field: {detail}"
         );
         assert!(
@@ -895,8 +903,11 @@ mod tests {
     }
 
     /// `CdpError::data` is the instance that motivated the class. A response whose `data` is an
-    /// object used to take the whole message out of both variants; it is now an ordinary
-    /// protocol error, delivered as one.
+    /// object used to take the whole message out of both variants, because `data` was declared
+    /// `Option<String>`; it is now an ordinary protocol error, delivered as one. The field is no
+    /// longer declared at all — nothing read it — which closes the hole a second time and by a
+    /// route no typing can reopen, and leaves this test asserting the outcome rather than the
+    /// mechanism, which is what it was always for.
     #[tokio::test]
     async fn a_structured_error_detail_is_a_protocol_error_and_not_a_lost_message() {
         let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
@@ -923,7 +934,6 @@ mod tests {
         CdpEvent {
             method: method.to_string(),
             params: Value::Null,
-            session_id: None,
         }
     }
 
