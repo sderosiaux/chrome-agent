@@ -199,7 +199,7 @@ pub async fn fill_object_with(
         }".replace("WINDOW_MS", &READ_BACK_MS.to_string())
         .replace("SECRET_EXPR", SECRET_FIELD);
 
-    let nav_events = client.events();
+    let nav_events = client.page_events();
     let result: serde_json::Value = client
         .call(
             "Runtime.callFunctionOn",
@@ -311,7 +311,7 @@ pub async fn type_text_with(
     // Before the insert, and skipped when the caller already asserted secrecy: one round trip,
     // and after typing `document.activeElement` may be somewhere else entirely.
     let sensitive = asserted_secret || focused_is_secret(client).await;
-    let nav_events = client.events();
+    let nav_events = client.page_events();
     // An input event, so: the input-event deadline rather than `--timeout`, and the dispatch mark
     // that both starts the observation window and clears the previous action's settle wait.
     client.mark_dispatch();
@@ -390,7 +390,7 @@ pub async fn press_key(client: &CdpClient, key: &str) -> Result<(), ElementError
     if let Some(t) = text {
         key_down["text"] = json!(t);
     }
-    let nav_events = client.events();
+    let nav_events = client.page_events();
     // Same as `type_text_with`: a keyboard event is an input event, deadline and mark included.
     client.mark_dispatch();
     client
@@ -460,7 +460,7 @@ fn main_frame_navigated(event: &CdpEvent) -> bool {
 
 /// Wait for the page to stabilize: a 50 ms probe for a TOP-frame navigation, then ≤10 s for its
 /// load. The wait is handed to the connection so the response can report `waited_ms`.
-/// `nav_events` MUST be subscribed (`client.events()`) BEFORE dispatching — `broadcast` only
+/// `nav_events` MUST be subscribed (`client.page_events()`) BEFORE dispatching — `broadcast` only
 /// delivers post-subscribe messages. The probe reads its whole window rather than stopping at
 /// the first event: a click that spawns a tracker AND navigates emits the subframe's first.
 pub async fn wait_for_stabilization(client: &CdpClient, nav_events: broadcast::Receiver<CdpEvent>) {

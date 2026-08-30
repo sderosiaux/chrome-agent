@@ -172,7 +172,7 @@ async fn wait_network_idle(
     timeout_secs: u64,
     idle_ms: u64,
 ) -> Result<String, crate::BoxError> {
-    let mut rx = client.events();
+    let mut rx = client.network_events();
     client.enable("Network").await?;
 
     let deadline = wait_deadline(timeout_secs)?;
@@ -216,7 +216,7 @@ async fn wait_network_idle(
             }
             Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(missed))) => {
                 return Err(format!(
-                    "Network-idle wait lost {missed} CDP event(s); in-flight state is unknown"
+                    "Network-idle wait lost {missed} Network event(s); in-flight state is unknown"
                 )
                 .into());
             }

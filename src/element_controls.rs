@@ -446,7 +446,7 @@ pub async fn set_checked_handle(
             }),
         )
         .await
-        .map_err(|e| ElementError::Action(format!("set_checked_selector failed: {e}")))?;
+        .map_err(|e| ElementError::Action(format!("set checked state failed: {e}")))?;
 
     check_js_exception(&result)?;
     let probe = parse_probe(&result);
@@ -507,7 +507,7 @@ pub async fn set_file_input(
 ) -> Result<(), ElementError> {
     validate_upload_paths(files)?;
     let resolved = resolve_uid(client, uid_map, uid).await?;
-    let nav_events = client.events();
+    let nav_events = client.page_events();
     client
         .send(
             "DOM.setFileInputFiles",
@@ -532,7 +532,7 @@ pub async fn set_file_input_handle(
         .backend_node_id
         .ok_or_else(|| ElementError::Action("Resolved file input has no backend node id".into()))?;
 
-    let nav_events = client.events();
+    let nav_events = client.page_events();
     client
         .send(
             "DOM.setFileInputFiles",
@@ -596,7 +596,7 @@ pub async fn drag(
 
     // Five pointer events, each of which would pay the background-tab timer without this.
     client.ensure_foreground().await;
-    let nav_events = client.events();
+    let nav_events = client.page_events();
     client
         .send_input(
             "Input.dispatchMouseEvent",

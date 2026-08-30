@@ -167,7 +167,7 @@ async fn dispatch_click_at(client: &CdpClient, cx: f64, cy: f64) -> Result<(), E
     // in single-digit ms. Costs 3 ms, once per connection (`CdpClient::ensure_foreground`).
     client.ensure_foreground().await;
     // Subscribe BEFORE dispatching so a fast navigation isn't missed.
-    let nav_events = client.events();
+    let nav_events = client.page_events();
     client.mark_dispatch();
     if client.touch_emulation_enabled() {
         client
@@ -241,7 +241,7 @@ pub async fn click_at_coords(client: &CdpClient, x: f64, y: f64) -> Result<(), E
 
 /// Fallback: click an element via JS `.click()` when mouse events can't be dispatched.
 pub async fn js_click(client: &CdpClient, object_id: &str) -> Result<(), ElementError> {
-    let nav_events = client.events();
+    let nav_events = client.page_events();
     client.mark_dispatch();
     let result: serde_json::Value = client
         .call(
@@ -264,7 +264,7 @@ pub async fn js_click(client: &CdpClient, object_id: &str) -> Result<(), Element
 }
 
 pub async fn js_dblclick(client: &CdpClient, object_id: &str) -> Result<(), ElementError> {
-    let nav_events = client.events();
+    let nav_events = client.page_events();
     client.mark_dispatch();
     client
         .call::<_, serde_json::Value>(
@@ -286,7 +286,7 @@ pub async fn dblclick_at_coords(client: &CdpClient, x: f64, y: f64) -> Result<()
     // A background tab answers a pointer event on a fixed five-second timer, the foreground tab
     // in single-digit ms. Costs 3 ms, once per connection (`CdpClient::ensure_foreground`).
     client.ensure_foreground().await;
-    let nav_events = client.events();
+    let nav_events = client.page_events();
     client.mark_dispatch();
     for click_count in [1, 2] {
         client

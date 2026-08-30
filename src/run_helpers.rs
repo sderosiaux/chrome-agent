@@ -298,12 +298,12 @@ fn print_action(
     obj: &serde_json::Value,
     assessment: crate::verdict::Assessment,
 ) {
-    println!("{msg}");
+    out_line!("{msg}");
     if !trailer.is_empty() {
-        println!("{}", trailer.trim_end());
+        out_line!("{}", trailer.trim_end());
     }
     for line in crate::render::action_lines(obj, assessment, crate::render::Paint::for_stdout()) {
-        println!("{line}");
+        out_line!("{line}");
     }
 }
 
@@ -360,15 +360,15 @@ pub async fn output_goto(
         json_output(&obj);
     } else {
         if title.is_empty() {
-            println!("{url}");
+            out_line!("{url}");
         } else {
-            println!("{url} — {title}");
+            out_line!("{url} — {title}");
         }
         if let Some(line) = landed.and_then(|landing| landing.text_line(browser_name)) {
-            println!("{line}");
+            out_line!("{line}");
         }
         if let Some(shown) = shown {
-            println!("{shown}");
+            out_line!("{shown}");
         }
     }
     Ok(())
@@ -381,11 +381,11 @@ pub async fn output_goto(
 /// breaks the `--json` contract in the one direction an agent cannot recover from: it reads as
 /// "no response" rather than as a failure. The fallback names what happened instead.
 pub fn json_output(value: &serde_json::Value) {
-    println!("{}", json_line(value));
+    out_line!("{}", json_line(value));
 }
 
 /// The line `json_output` prints, split out so the failure branch can be proven by a test
-/// instead of merely asserted — nothing about `println!` is observable from one.
+/// instead of merely asserted — nothing about `out_line!` is observable from one.
 ///
 /// Generic over `Serialize` rather than taking a `Value`: a `Value` is very nearly
 /// infallible to serialize, so a test could not reach the branch through one.
@@ -429,7 +429,7 @@ impl std::error::Error for BatchStopped {}
 /// one-line form and dropping it would lose what the caller asked for.
 pub fn print_batch_text(out: &serde_json::Value, stopped_at: Option<u64>) {
     for line in batch_text_lines(out, stopped_at) {
-        println!("{line}");
+        out_line!("{line}");
     }
 }
 
@@ -569,7 +569,7 @@ pub fn cmd_status(json_mode: bool) -> Result<(), crate::BoxError> {
         }));
     } else {
         if store.browsers.is_empty() {
-            println!("No active browser sessions.");
+            out_line!("No active browser sessions.");
         } else {
             for (name, browser) in &store.browsers {
                 let status = if let Some(pid) = browser.pid {
@@ -582,7 +582,7 @@ pub fn cmd_status(json_mode: bool) -> Result<(), crate::BoxError> {
                 } else {
                     "headed"
                 };
-                println!(
+                out_line!(
                     "browser={name}  {status}  {mode}  pages={}  ws={}",
                     browser.pages.len(),
                     browser.ws_endpoint
@@ -591,13 +591,14 @@ pub fn cmd_status(json_mode: bool) -> Result<(), crate::BoxError> {
         }
 
         for orphan in orphans.iter().flatten() {
-            println!(
+            out_line!(
                 "orphan={}  pid={}  no session entry — close with `chrome-agent close --orphans`",
-                orphan.name, orphan.pid
+                orphan.name,
+                orphan.pid
             );
         }
 
-        println!(
+        out_line!(
             "daemon: {}",
             if daemon_alive { "running" } else { "stopped" }
         );
@@ -623,7 +624,7 @@ pub async fn cmd_stop(json_mode: bool) -> Result<(), crate::BoxError> {
         if json_mode {
             json_output(&json!({"ok": true, "message": msg}));
         } else {
-            println!("{msg}");
+            out_line!("{msg}");
         }
         return Ok(());
     }
@@ -654,7 +655,7 @@ pub async fn cmd_stop(json_mode: bool) -> Result<(), crate::BoxError> {
             if json_mode {
                 json_output(&json!({"ok": true, "message": msg}));
             } else {
-                println!("{msg}");
+                out_line!("{msg}");
             }
             return Ok(());
         };
@@ -669,7 +670,7 @@ pub async fn cmd_stop(json_mode: bool) -> Result<(), crate::BoxError> {
         if json_mode {
             json_output(&json!({"ok": true, "message": msg}));
         } else {
-            println!("{msg}");
+            out_line!("{msg}");
         }
         Ok(())
     } // #[cfg(unix)]
@@ -742,7 +743,7 @@ pub fn cmd_purge_orphans(json_mode: bool) -> Result<(), crate::BoxError> {
     if json_mode {
         json_output(&json!({"ok": true, "message": message, "purged": removed, "failed": failed}));
     } else {
-        println!("{message}");
+        out_line!("{message}");
         for failure in &failed {
             eprintln!("warning: {failure}");
         }
@@ -836,7 +837,7 @@ pub fn cmd_close(browser_name: &str, purge: bool, json_mode: bool) -> Result<(),
         }
         json_output(&response);
     } else {
-        println!("{message}");
+        out_line!("{message}");
     }
 
     session::save_session(&mut store)?;
@@ -952,7 +953,7 @@ mod tests {
 
     #[test]
     fn batch_text_names_each_entry_and_what_was_skipped() {
-        // Captured through the pure builder rather than through `println!`, which a test
+        // Captured through the pure builder rather than through `out_line!`, which a test
         // cannot observe. Same two fields the JSON carries.
         let out = json!({
             "ok": false,

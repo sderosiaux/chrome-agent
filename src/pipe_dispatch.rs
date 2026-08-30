@@ -393,7 +393,7 @@ pub async fn history_step(ctx: &mut PageCtx<'_>, delta: i64) -> Result<Value, cr
         })?;
     // Subscribe BEFORE navigating: a cached history entry can fire Page.loadEventFired
     // before a late subscription exists, stalling until the timeout.
-    let mut rx = client.events();
+    let mut rx = client.page_events();
     client
         .send("Page.navigateToHistoryEntry", json!({"entryId": entry_id}))
         .await?;

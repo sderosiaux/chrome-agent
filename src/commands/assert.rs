@@ -703,7 +703,7 @@ pub async fn run_cli(
     if json_mode {
         crate::run_helpers::json_output(&outcome.to_json());
     } else {
-        println!("{}", outcome.message());
+        out_line!("{}", outcome.message());
     }
     Ok(())
 }

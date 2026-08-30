@@ -18,8 +18,8 @@ pub struct NetworkEntry {
     pub content_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
-    /// Why `body` is absent although capture was requested: binary, unavailable from CDP, or
-    /// unfinished when the live window ended.
+    /// Why `body` is absent although capture was requested: binary, unavailable from CDP, or no
+    /// `loadingFinished` observed before capture stopped.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body_omitted: Option<String>,
     pub size: u64,
@@ -30,6 +30,12 @@ pub struct NetworkEntry {
 // itself a selection and overrides this list: the allowlist keeps an unfiltered `--body`
 // from pulling every image and font into the response, not to veto an explicit ask.
 const CAPTURABLE_TYPES: &[&str] = &["json", "text", "javascript", "xml"];
+/// Once `--limit` is reached, observe completion events for bodies already selected, but never
+/// wait out the caller's whole live window for an SSE or long poll.
+const BODY_EVENT_GRACE: Duration = Duration::from_secs(1);
+/// Body reads happen after event collection so a CDP round trip cannot make the receiver lag.
+/// One deadline covers the whole set, rather than charging it once per entry.
+const BODY_READ_GRACE: Duration = Duration::from_secs(1);
 
 fn is_capturable_type(ct: &str) -> bool {
     let lower = ct.to_ascii_lowercase();
@@ -159,15 +165,26 @@ pub async fn run_retroactive(
     Ok(results)
 }
 
+struct LiveCapture {
+    entries: Vec<NetworkEntry>,
+    lost_events: u64,
+}
+
+struct BodyRead {
+    request_id: String,
+    index: usize,
+    loading_finished_observed: bool,
+}
+
 /// Live capture: enable `Network`, collect `responseReceived` for `timeout_secs`.
-pub async fn run_live(
+async fn run_live(
     client: &CdpClient,
     filter: Option<&str>,
     capture_body: bool,
     limit: usize,
     timeout_secs: u64,
-) -> Result<Vec<NetworkEntry>, crate::BoxError> {
-    let mut rx = client.events();
+) -> Result<LiveCapture, crate::BoxError> {
+    let mut rx = client.network_events();
     client.enable("Network").await?;
     let deadline = tokio::time::Instant::now()
         .checked_add(Duration::from_secs(timeout_secs))
@@ -178,10 +195,17 @@ pub async fn run_live(
     // request id -> index into `entries`, for bodies still in flight.
     let mut pending_bodies: std::collections::HashMap<String, usize> =
         std::collections::HashMap::new();
+    let mut body_reads = Vec::new();
+    let mut limit_deadline = None;
+    let mut lost_events = 0_u64;
 
     loop {
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if remaining.is_zero() || (entries.len() >= limit && pending_bodies.is_empty()) {
+        if entries.len() >= limit && pending_bodies.is_empty() {
+            break;
+        }
+        let receive_deadline = limit_deadline.map_or(deadline, |grace| deadline.min(grace));
+        let remaining = receive_deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
             break;
         }
 
@@ -190,7 +214,8 @@ pub async fn run_live(
         let event = match event {
             Ok(Ok(event)) => event,
             Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(missed))) => {
-                return Err(event_loss("Network capture", missed).into());
+                lost_events = lost_events.saturating_add(missed);
+                break;
             }
             Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => {
                 return Err("Event channel closed".into());
@@ -198,9 +223,9 @@ pub async fn run_live(
             Err(_) => break, // timeout
         };
 
-        // The entry is pushed at `responseReceived` (where the metadata is) but its body is
-        // fetched at `loadingFinished`: `getResponseBody` answers "No data found" for
-        // anything still in flight, which is most responses.
+        // The entry is pushed at `responseReceived` (where the metadata is), then queued for a
+        // body read once `loadingFinished` is observed. The CDP calls themselves happen after
+        // event collection, because awaiting one here can overflow the receiver.
         if event.method == "Network.loadingFinished" {
             let request_id = event
                 .params
@@ -208,7 +233,25 @@ pub async fn run_live(
                 .and_then(Value::as_str)
                 .unwrap_or("");
             if let Some(index) = pending_bodies.remove(request_id) {
-                fill_body(client, request_id, &mut entries[index]).await;
+                body_reads.push(BodyRead {
+                    request_id: request_id.to_string(),
+                    index,
+                    loading_finished_observed: true,
+                });
+            }
+            continue;
+        }
+
+        if event.method == "Network.loadingFailed" {
+            let request_id = event
+                .params
+                .get("requestId")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            if let Some(index) = pending_bodies.remove(request_id) {
+                entries[index].body_omitted = Some(
+                    "Network.loadingFailed was observed before the body completed".to_string(),
+                );
             }
             continue;
         }
@@ -217,7 +260,7 @@ pub async fn run_live(
             continue;
         }
 
-        // The limit bounds returned entries, not the observation needed to finish bodies already
+        // The limit bounds returned entries, not the bounded observation grace for bodies already
         // selected. Keep draining their loadingFinished events without admitting more responses.
         if entries.len() >= limit {
             continue;
@@ -239,7 +282,11 @@ pub async fn run_live(
             continue;
         }
 
-        let status = response.get("status").and_then(Value::as_u64).unwrap_or(0) as u16;
+        let status = match response.get("status").and_then(Value::as_u64) {
+            Some(raw) => u16::try_from(raw)
+                .map_err(|_| format!("Network.responseReceived status {raw} is out of range"))?,
+            None => 0,
+        };
         let content_type = response
             .get("mimeType")
             .and_then(Value::as_str)
@@ -281,20 +328,68 @@ pub async fn run_live(
             size: encoded_length,
             duration_ms: 0, // not available from responseReceived
         });
+
+        if entries.len() >= limit && !pending_bodies.is_empty() {
+            limit_deadline = Some(
+                tokio::time::Instant::now()
+                    .checked_add(BODY_EVENT_GRACE)
+                    .ok_or("Network body grace deadline overflow")?,
+            );
+        }
     }
 
-    for (_, index) in pending_bodies {
-        entries[index].body_omitted = Some(format!(
-            "body did not finish within the {timeout_secs}s live capture window"
-        ));
+    body_reads.extend(
+        pending_bodies
+            .into_iter()
+            .map(|(request_id, index)| BodyRead {
+                request_id,
+                index,
+                loading_finished_observed: false,
+            }),
+    );
+
+    let mut completed_reads = 0_usize;
+    let read_result = tokio::time::timeout(BODY_READ_GRACE, async {
+        for read in &body_reads {
+            fill_body(
+                client,
+                &read.request_id,
+                &mut entries[read.index],
+                read.loading_finished_observed,
+            )
+            .await;
+            completed_reads += 1;
+        }
+    })
+    .await;
+    if read_result.is_err() {
+        for read in &body_reads[completed_reads..] {
+            let observation = if read.loading_finished_observed {
+                "Network.loadingFinished was observed"
+            } else {
+                "Network.loadingFinished was not observed before capture stopped"
+            };
+            entries[read.index].body_omitted = Some(format!(
+                "{observation}; body read did not answer within the {}s post-capture window",
+                BODY_READ_GRACE.as_secs()
+            ));
+        }
     }
 
-    Ok(entries)
+    Ok(LiveCapture {
+        entries,
+        lost_events,
+    })
 }
 
 /// Fetch and classify one entry's body in place. CDP can discard a completed body; that refusal
 /// is part of this entry instead of becoming an unexplained absent field or erasing other entries.
-async fn fill_body(client: &CdpClient, request_id: &str, entry: &mut NetworkEntry) {
+async fn fill_body(
+    client: &CdpClient,
+    request_id: &str,
+    entry: &mut NetworkEntry,
+    loading_finished_observed: bool,
+) {
     match fetch_response_body(client, request_id).await {
         Ok(FetchedBody::Text(text)) => entry.body = Some(text),
         Ok(FetchedBody::Binary { bytes }) => {
@@ -303,7 +398,14 @@ async fn fill_body(client: &CdpClient, request_id: &str, entry: &mut NetworkEntr
                 entry.url
             ));
         }
-        Err(error) => entry.body_omitted = Some(format!("body unavailable from CDP: {error}")),
+        Err(error) => {
+            let observation = if loading_finished_observed {
+                "after Network.loadingFinished"
+            } else {
+                "Network.loadingFinished was not observed before capture stopped;"
+            };
+            entry.body_omitted = Some(format!("{observation} body unavailable from CDP: {error}"));
+        }
     }
 }
 
@@ -315,7 +417,10 @@ pub enum Capture {
         seconds: u64,
         urls: Vec<String>,
     },
-    Requests(Vec<NetworkEntry>),
+    Requests {
+        entries: Vec<NetworkEntry>,
+        lost_events: u64,
+    },
 }
 
 impl Capture {
@@ -324,7 +429,20 @@ impl Capture {
     pub fn to_json(&self) -> serde_json::Value {
         match self {
             Self::Blocked { urls, .. } => json!({"ok": true, "blocked": urls.len(), "urls": urls}),
-            Self::Requests(entries) => json!({"ok": true, "requests": entries}),
+            Self::Requests {
+                entries,
+                lost_events: 0,
+            } => json!({"ok": true, "requests": entries}),
+            Self::Requests {
+                entries,
+                lost_events,
+            } => json!({
+                "ok": false,
+                "error": event_loss("Network capture", "Network", *lost_events),
+                "complete": false,
+                "lostEvents": lost_events,
+                "requests": entries,
+            }),
         }
     }
 
@@ -345,10 +463,35 @@ impl Capture {
                 }
                 out + &format!("Blocked {} request(s)", urls.len())
             }
-            Self::Requests(entries) => format_text(entries),
+            Self::Requests {
+                entries,
+                lost_events: 0,
+            } => format_text(entries),
+            Self::Requests {
+                entries,
+                lost_events,
+            } => format!(
+                "{}\n\nIncomplete: lost {lost_events} Network event(s); entries are partial.",
+                format_text(entries)
+            ),
         }
     }
+
+    #[must_use]
+    pub const fn is_complete(&self) -> bool {
+        !matches!(
+            self,
+            Self::Requests {
+                lost_events: 1..,
+                ..
+            }
+        )
+    }
 }
+
+#[derive(Debug, thiserror::Error)]
+#[error("network capture was incomplete and has already been reported")]
+pub struct IncompleteCapture;
 
 /// One `network` invocation, whichever of its three shapes was asked for. The single entry point
 /// for CLI, pipe and batch — the branch used to be written out in both.
@@ -370,11 +513,17 @@ pub async fn collect(
             urls,
         });
     }
-    let entries = match live {
-        Some(secs) => run_live(client, filter, body, limit, secs).await?,
-        None => run_retroactive(client, filter, limit).await?,
+    let (entries, lost_events) = match live {
+        Some(secs) => {
+            let capture = run_live(client, filter, body, limit, secs).await?;
+            (capture.entries, capture.lost_events)
+        }
+        None => (run_retroactive(client, filter, limit).await?, 0),
     };
-    Ok(Capture::Requests(entries))
+    Ok(Capture::Requests {
+        entries,
+        lost_events,
+    })
 }
 
 /// Render the entries as a table.
@@ -471,7 +620,7 @@ pub async fn run_route_abort(
         .checked_add(std::time::Duration::from_secs(timeout_secs))
         .ok_or("Network abort timeout is too large")?;
     // Subscribe before enabling Fetch: a matching request can pause as soon as enable lands.
-    let mut rx = client.events();
+    let mut rx = client.fetch_events();
     client
         .send("Fetch.enable", fetch_enable_params(pattern))
         .await?;
@@ -489,7 +638,7 @@ pub async fn run_route_abort(
                         Ok(ev) if ev.method == "Fetch.requestPaused" => return Ok(ev),
                         Ok(_) => continue,
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
-                            return Err(event_loss("Network abort", missed));
+                            return Err(event_loss("Network abort", "Fetch", missed));
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                             return Err("Event channel closed during network abort".to_string());
@@ -543,8 +692,8 @@ pub async fn run_route_abort(
     }
 }
 
-fn event_loss(operation: &str, missed: u64) -> String {
-    format!("{operation} lost {missed} CDP event(s); refusing an incomplete result")
+fn event_loss(operation: &str, domain: &str, missed: u64) -> String {
+    format!("{operation} lost {missed} {domain} event(s); result is incomplete")
 }
 
 #[cfg(test)]
@@ -583,9 +732,32 @@ mod tests {
 
     #[test]
     fn event_loss_is_an_explicit_refusal() {
-        let message = event_loss("Network capture", 42);
-        assert!(message.contains("lost 42 CDP event(s)"));
-        assert!(message.contains("refusing an incomplete result"));
+        let message = event_loss("Network capture", "Network", 42);
+        assert!(message.contains("lost 42 Network event(s)"));
+        assert!(message.contains("result is incomplete"));
+    }
+
+    #[test]
+    fn event_loss_keeps_partial_entries_but_never_answers_ok() {
+        let capture = Capture::Requests {
+            entries: vec![NetworkEntry {
+                url: "https://example.test/observed".to_string(),
+                resource_type: "XHR".to_string(),
+                status: 200,
+                content_type: "application/json".to_string(),
+                body: None,
+                body_omitted: None,
+                size: 12,
+                duration_ms: 0,
+            }],
+            lost_events: 7,
+        };
+        let answer = capture.to_json();
+        assert_eq!(answer["ok"], false);
+        assert_eq!(answer["complete"], false);
+        assert_eq!(answer["lostEvents"], 7);
+        assert_eq!(answer["requests"].as_array().map(Vec::len), Some(1));
+        assert!(!capture.is_complete());
     }
 
     #[test]

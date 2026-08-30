@@ -8,6 +8,8 @@
   setInterval(() => {
     if (new URLSearchParams(location.search).has("slow")) {
       fetch(base + "/slow.json").catch(() => {});
+    } else if (new URLSearchParams(location.search).has("hang")) {
+      fetch(base + "/hang.json").catch(() => {});
     } else {
       fetch(base + "/config.yaml").catch(() => {});
       fetch(base + "/blob.bin").catch(() => {});

@@ -251,6 +251,38 @@ fn no_test_resolves_the_binary_under_test_itself() {
     );
 }
 
+/// Stdout must stay on the binary's non-panicking writer. Its macro names are intentionally
+/// distinct from the prelude's, so a module moved above their declarations fails to compile.
+#[test]
+fn production_stdout_never_uses_the_standard_print_macros() {
+    let mut offenders = Vec::new();
+    for (name, text) in sources() {
+        if !name.starts_with("src/") {
+            continue;
+        }
+        for (n, line) in text.lines().enumerate() {
+            for needle in ["print!(", "println!("] {
+                for (column, _) in line.match_indices(needle) {
+                    let prefix = &line[..column];
+                    if prefix
+                        .chars()
+                        .next_back()
+                        .is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+                    {
+                        continue;
+                    }
+                    offenders.push(format!("{name}:{}: {}", n + 1, line.trim()));
+                }
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "stdout must use `out_line!`/`out!`, which preserve cleanup on delivery failure:\n{}",
+        offenders.join("\n")
+    );
+}
+
 /// The name has to be unique per call, not merely per process: the harness runs tests on
 /// parallel threads, so one pid covers several tests at once.
 #[test]

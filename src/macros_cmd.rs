@@ -20,16 +20,16 @@ pub async fn run_cli(cli: &Cli, action: &MacroAction) -> Result<(), crate::BoxEr
                     .iter()
                     .map(|name| crate::macros::summary(name))
                     .collect();
-                println!("{}", json!({"ok": true, "macros": summaries}));
+                out_line!("{}", json!({"ok": true, "macros": summaries}));
             } else if names.is_empty() {
-                println!(
+                out_line!(
                     "No macros yet. Record one from a session that worked: \
                      `chrome-agent macro record <name> --from-recording <file>`."
                 );
             } else {
                 for name in &names {
                     let summary = crate::macros::summary(name);
-                    println!(
+                    out_line!(
                         "{name}  steps={}  unguarded={}  site={}",
                         summary["steps"],
                         summary["unguarded_steps"],
@@ -41,9 +41,9 @@ pub async fn run_cli(cli: &Cli, action: &MacroAction) -> Result<(), crate::BoxEr
         MacroAction::Show { name } => {
             let macro_file = Macro::load(name)?;
             if json_mode {
-                println!("{}", json!({"ok": true, "macro": macro_file}));
+                out_line!("{}", json!({"ok": true, "macro": macro_file}));
             } else {
-                print!("{}", render(&macro_file));
+                out!("{}", render(&macro_file));
             }
         }
         MacroAction::Record {
@@ -53,9 +53,9 @@ pub async fn run_cli(cli: &Cli, action: &MacroAction) -> Result<(), crate::BoxEr
         } => {
             let report = record_from_recording(name, from_recording, *from)?;
             if json_mode {
-                println!("{report}");
+                out_line!("{report}");
             } else {
-                print!("{}", render_record(&report));
+                out!("{}", render_record(&report));
             }
         }
         MacroAction::Run { name, var } => {
@@ -63,9 +63,9 @@ pub async fn run_cli(cli: &Cli, action: &MacroAction) -> Result<(), crate::BoxEr
             let report = crate::macros_run::run(cli, name, &vars).await?;
             if report.get("ok").and_then(Value::as_bool) == Some(true) {
                 if json_mode {
-                    println!("{report}");
+                    out_line!("{report}");
                 } else {
-                    print!("{}", crate::macros_run::render_run(&report));
+                    out!("{}", crate::macros_run::render_run(&report));
                 }
             } else {
                 // A guard that did not hold fails the run, so a chaining shell sees it. Which

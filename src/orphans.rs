@@ -136,7 +136,7 @@ pub fn cmd_close_orphans(json_mode: bool) -> Result<(), crate::BoxError> {
         }));
     } else {
         for (orphan, _) in &closed {
-            println!("Closed orphan={}  pid={}", orphan.name, orphan.pid);
+            out_line!("Closed orphan={}  pid={}", orphan.name, orphan.pid);
         }
         for (orphan, outcome) in &skipped {
             let reason = match outcome {
@@ -153,7 +153,7 @@ pub fn cmd_close_orphans(json_mode: bool) -> Result<(), crate::BoxError> {
                 orphan.name, orphan.pid
             );
         }
-        println!("{message}");
+        out_line!("{message}");
     }
     Ok(())
 }

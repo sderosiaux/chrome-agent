@@ -12,7 +12,10 @@ use crate::session::{self, SessionStore};
 
 /// Run pipe mode: persistent CDP connection, reading JSON commands from stdin.
 pub async fn run_pipe(cli: &Cli) -> Result<(), crate::BoxError> {
-    let mut session = open_session(cli).await?;
+    let mut session = match open_session(cli).await {
+        Ok(session) => session,
+        Err(error) => return terminal_startup_error("pipe", &error),
+    };
     // A stored device configuration that no longer applies must not fail the session before
     // stdin is read: the recovery state reports it per command, while still admitting the
     // `emulate device`/`emulate reset` that repair it.
@@ -24,81 +27,84 @@ pub async fn run_pipe(cli: &Cli) -> Result<(), crate::BoxError> {
     // What `macro record` distils at the end of the session. Slim entries, so it stays small.
     let mut history: Vec<crate::macros_record::Observed> = Vec::new();
 
-    loop {
-        let line = match lines.next_line().await {
-            Ok(Some(line)) => line,
-            Ok(None) => break,
-            Err(error) => return Err(format!("Failed to read pipe input: {error}").into()),
-        };
-        let line = line.trim().to_string();
-        if line.is_empty() {
-            continue;
-        }
-
-        let mut cmd: Value = match serde_json::from_str(&line) {
-            Ok(v) => v,
-            Err(e) => {
-                emit(&json!({"ok": false, "error": format!("Invalid JSON: {e}")}))?;
+    let processing: Result<(), crate::BoxError> = async {
+        loop {
+            let line = match lines.next_line().await {
+                Ok(Some(line)) => line,
+                Ok(None) => break,
+                Err(error) => return Err(format!("Failed to read pipe input: {error}").into()),
+            };
+            let line = line.trim().to_string();
+            if line.is_empty() {
                 continue;
             }
-        };
 
-        // A recording that cannot be opened refuses the command: running it unrecorded is
-        // not what the caller asked for, and the gap would only surface at `replay` time.
-        let record_path = match take_record_path(&mut cmd) {
-            Ok(path) => path,
-            Err(e) => {
-                emit(&json!({"ok": false, "error": e}))?;
+            let mut cmd: Value = match serde_json::from_str(&line) {
+                Ok(v) => v,
+                Err(e) => {
+                    emit(&json!({"ok": false, "error": format!("Invalid JSON: {e}")}))?;
+                    continue;
+                }
+            };
+
+            // A recording that cannot be opened refuses the command: running it unrecorded is
+            // not what the caller asked for, and the gap would only surface at `replay` time.
+            let record_path = match take_record_path(&mut cmd) {
+                Ok(path) => path,
+                Err(e) => {
+                    emit(&json!({"ok": false, "error": e}))?;
+                    continue;
+                }
+            };
+            if let Some(ref path) = record_path
+                && let Err(e) = commands::record::start_recording(path)
+            {
+                emit(
+                    &json!({"ok": false, "error": format!("{e}"), "hint": "Check the --record path's directory exists and is writable."}),
+                )?;
                 continue;
             }
-        };
-        if let Some(ref path) = record_path
-            && let Err(e) = commands::record::start_recording(path)
-        {
-            emit(
-                &json!({"ok": false, "error": format!("{e}"), "hint": "Check the --record path's directory exists and is writable."}),
-            )?;
-            continue;
+
+            // Answered before `dispatch`: `macro` acts on the session's history, not the page,
+            // so it can be asked for after the fact.
+            if cmd.get("cmd").and_then(Value::as_str) == Some("macro") {
+                let answer = crate::macros_cmd::dispatch_pipe(&cmd, &history)
+                    .unwrap_or_else(|e| json!({"ok": false, "error": e.to_string()}));
+                emit(&answer)?;
+                continue;
+            }
+
+            let mut response = dispatch_on(&mut session, cli, &cmd, &mut emulation_recovery).await;
+
+            if let Some(ref path) = record_path
+                && let Err(e) = commands::record::log_entry(path, &cmd, &response)
+            {
+                // The command ran; only the record of it was lost. Failing here would
+                // invite a retry of real work.
+                response["recording_error"] = json!(format!("{e}"));
+            }
+
+            // Slim on purpose (`macros_record::Observed`): kept for the session's whole life, and
+            // retains only what the whitelist reads, so it cannot leak the page's text.
+            let snapshot = session
+                .store
+                .browsers
+                .get(&cli.browser)
+                .and_then(|b| b.pages.get(&cli.page))
+                .and_then(|p| p.last_snapshot.clone());
+            history.push(crate::macros_record::Observed::read_with_snapshot(
+                &cmd,
+                &response,
+                snapshot.as_deref(),
+            ));
+
+            emit(&response)?;
         }
-
-        // Answered before `dispatch`: `macro` acts on the session's history, not the page,
-        // so it can be asked for after the fact.
-        if cmd.get("cmd").and_then(Value::as_str) == Some("macro") {
-            let answer = crate::macros_cmd::dispatch_pipe(&cmd, &history)
-                .unwrap_or_else(|e| json!({"ok": false, "error": e.to_string()}));
-            emit(&answer)?;
-            continue;
-        }
-
-        let mut response = dispatch_on(&mut session, cli, &cmd, &mut emulation_recovery).await;
-
-        if let Some(ref path) = record_path
-            && let Err(e) = commands::record::log_entry(path, &cmd, &response)
-        {
-            // The command ran; only the record of it was lost. Failing here would
-            // invite a retry of real work.
-            response["recording_error"] = json!(format!("{e}"));
-        }
-
-        // Slim on purpose (`macros_record::Observed`): kept for the session's whole life, and
-        // retains only what the whitelist reads, so it cannot leak the page's text.
-        let snapshot = session
-            .store
-            .browsers
-            .get(&cli.browser)
-            .and_then(|b| b.pages.get(&cli.page))
-            .and_then(|p| p.last_snapshot.clone());
-        history.push(crate::macros_record::Observed::read_with_snapshot(
-            &cmd,
-            &response,
-            snapshot.as_deref(),
-        ));
-
-        emit(&response)?;
+        Ok(())
     }
+    .await;
 
-    session::save_session(&mut session.store)?;
-    Ok(())
+    finalize_session(&mut session.store, processing, "pipe")
 }
 
 /// Everything a session needs to dispatch commands: the two clients, the store, the page.
@@ -221,42 +227,48 @@ pub async fn run_replay(
         .filter_map(|pair| pair.split_once('='))
         .collect();
 
-    let mut session = open_session(cli).await?;
+    let mut session = match open_session(cli).await {
+        Ok(session) => session,
+        Err(error) => return terminal_startup_error("replay", &error),
+    };
     // Same recovery state as a live pipe: a recording may begin with the `emulate`
     // device/reset command that repairs its stored configuration.
     let mut emulation_recovery =
         EmulationRecovery::new(&session.client, &session.store, &cli.browser, &cli.page).await;
 
-    for line in content.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
+    let processing: Result<(), crate::BoxError> = async {
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let mut resolved = line.to_string();
+            for (key, val) in &replacements {
+                resolved = resolved.replace(&format!("{{{{{key}}}}}"), val);
+            }
+
+            let parsed: Value = serde_json::from_str(&resolved)
+                .map_err(|e| format!("Invalid JSON in replay: {e}"))?;
+
+            let mut cmd = if parsed.get("cmd").is_some_and(Value::is_object)
+                && parsed.get("response").is_some()
+            {
+                parsed.get("cmd").cloned().unwrap_or_default()
+            } else {
+                parsed
+            };
+            // A recording made before `_record` was stripped still carries it; replay never records,
+            // so drop it rather than let the protocol refuse the line.
+            let _ = take_record_path(&mut cmd);
+
+            let response = dispatch_on(&mut session, cli, &cmd, &mut emulation_recovery).await;
+            emit(&response)?;
         }
-        let mut resolved = line.to_string();
-        for (key, val) in &replacements {
-            resolved = resolved.replace(&format!("{{{{{key}}}}}"), val);
-        }
-
-        let parsed: Value =
-            serde_json::from_str(&resolved).map_err(|e| format!("Invalid JSON in replay: {e}"))?;
-
-        let mut cmd = if parsed.get("cmd").is_some_and(Value::is_object)
-            && parsed.get("response").is_some()
-        {
-            parsed.get("cmd").cloned().unwrap_or_default()
-        } else {
-            parsed
-        };
-        // A recording made before `_record` was stripped still carries it; replay never records,
-        // so drop it rather than let the protocol refuse the line.
-        let _ = take_record_path(&mut cmd);
-
-        let response = dispatch_on(&mut session, cli, &cmd, &mut emulation_recovery).await;
-        emit(&response)?;
+        Ok(())
     }
+    .await;
 
-    session::save_session(&mut session.store)?;
-    Ok(())
+    finalize_session(&mut session.store, processing, "replay")
 }
 
 // --- Helpers ---
@@ -293,6 +305,53 @@ fn emit(value: &Value) -> Result<(), crate::BoxError> {
     writeln!(handle, "{line}")?;
     handle.flush()?;
     Ok(())
+}
+
+fn terminal_error(phase: &str, error: &str) -> Value {
+    json!({"ok": false, "terminal": true, "phase": phase, "error": error})
+}
+
+fn terminal_startup_error(phase: &str, error: &crate::BoxError) -> Result<(), crate::BoxError> {
+    let message = format!("Failed to start {phase} session: {error}");
+    let delivery = emit(&terminal_error("startup", &message));
+    match delivery {
+        Ok(()) => Err(message.into()),
+        Err(delivery_error) => Err(format!(
+            "{message}; also failed to deliver terminal error: {delivery_error}"
+        )
+        .into()),
+    }
+}
+
+/// Save after every processing outcome. A final persistence failure happens after the last
+/// command response, so it gets its own documented terminal protocol object rather than being
+/// visible only as process exit 1 on stderr.
+fn finalize_session(
+    store: &mut SessionStore,
+    processing: Result<(), crate::BoxError>,
+    phase: &str,
+) -> Result<(), crate::BoxError> {
+    let saved = session::save_session(store);
+    let message = match processing {
+        Ok(()) => match saved {
+            Ok(()) => return Ok(()),
+            Err(error) => format!("Failed to persist {phase} session at end of input: {error}"),
+        },
+        Err(error) => match saved {
+            Ok(()) => format!("{phase} session ended early: {error}"),
+            Err(save_error) => format!(
+                "{phase} session ended early: {error}; also failed to persist it: {save_error}"
+            ),
+        },
+    };
+    let delivery = emit(&terminal_error("finalize", &message));
+    match delivery {
+        Ok(()) => Err(message.into()),
+        Err(delivery_error) => Err(format!(
+            "{message}; also failed to deliver terminal error: {delivery_error}"
+        )
+        .into()),
+    }
 }
 
 async fn connect_browser(
@@ -344,4 +403,18 @@ async fn connect_browser(
     // Browser-level Target.* calls obey the caller's --timeout like page calls do.
     client.set_call_timeout(std::time::Duration::from_secs(cli.timeout));
     Ok((conn, client))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn terminal_failures_are_machine_readable_failures() {
+        let response = terminal_error("finalize", "session store is read-only");
+        assert_eq!(response["ok"], false);
+        assert_eq!(response["terminal"], true);
+        assert_eq!(response["phase"], "finalize");
+        assert_eq!(response["error"], "session store is read-only");
+    }
 }

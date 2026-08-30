@@ -647,6 +647,7 @@ pub struct BatchArgs {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser as _;
     use serde_json::json;
 
     fn err(cmd: &Value) -> String {
@@ -794,25 +795,70 @@ mod tests {
     }
 
     #[test]
-    fn target_groups_match_the_cli() {
-        for command in [
-            json!({"cmd": "click"}),
-            json!({"cmd": "click", "uid": "n1", "selector": "#go"}),
-            json!({"cmd": "fill", "value": "x"}),
-            json!({"cmd": "fill", "value": "x", "uid": "n1", "selector": "#field"}),
-            json!({"cmd": "select", "value": "x", "uid": "n1", "selector": "select"}),
-            json!({"cmd": "check", "uid": "n1", "selector": "#box"}),
-            json!({"cmd": "uncheck", "uid": "n1", "selector": "#box"}),
-            json!({"cmd": "upload", "files": [], "uid": "n1", "selector": "input"}),
-            json!({"cmd": "text", "uid": "n1", "selector": "main"}),
-            json!({"cmd": "screenshot", "uid": "n1", "selector": "main"}),
-            json!({"cmd": "download", "url": "https://example.test", "uid": "n1"}),
-        ] {
-            let message = err(&command);
-            assert!(message.contains("provide"), "{command}: {message}");
+    fn target_groups_are_exercised_through_both_parsers() {
+        let cases: &[(&[&str], Value)] = &[
+            (&["click"], json!({"cmd": "click"})),
+            (
+                &["click", "n1", "--selector", "#go"],
+                json!({"cmd": "click", "uid": "n1", "selector": "#go"}),
+            ),
+            (&["click", "n1"], json!({"cmd": "click", "uid": "n1"})),
+            (&["fill", "x"], json!({"cmd": "fill", "value": "x"})),
+            (
+                &["fill", "x", "--uid", "n1", "--selector", "#field"],
+                json!({"cmd": "fill", "value": "x", "uid": "n1", "selector": "#field"}),
+            ),
+            (
+                &["fill", "x", "--uid", "n1"],
+                json!({"cmd": "fill", "value": "x", "uid": "n1"}),
+            ),
+            (
+                &["select", "x", "--uid", "n1", "--selector", "select"],
+                json!({"cmd": "select", "value": "x", "uid": "n1", "selector": "select"}),
+            ),
+            (
+                &["check", "n1", "--selector", "#box"],
+                json!({"cmd": "check", "uid": "n1", "selector": "#box"}),
+            ),
+            (
+                &["uncheck", "n1", "--selector", "#box"],
+                json!({"cmd": "uncheck", "uid": "n1", "selector": "#box"}),
+            ),
+            (
+                &["upload", "--uid", "n1", "--selector", "input"],
+                json!({"cmd": "upload", "files": [], "uid": "n1", "selector": "input"}),
+            ),
+            (
+                &["text", "n1", "--selector", "main"],
+                json!({"cmd": "text", "uid": "n1", "selector": "main"}),
+            ),
+            (&["text"], json!({"cmd": "text"})),
+            (
+                &["screenshot", "--uid", "n1", "--selector", "main"],
+                json!({"cmd": "screenshot", "uid": "n1", "selector": "main"}),
+            ),
+            (&["screenshot"], json!({"cmd": "screenshot"})),
+            (
+                &["download", "https://example.test", "--uid", "n1"],
+                json!({"cmd": "download", "url": "https://example.test", "uid": "n1"}),
+            ),
+            (
+                &["download", "https://example.test"],
+                json!({"cmd": "download", "url": "https://example.test"}),
+            ),
+        ];
+
+        for (argv, command) in cases {
+            let cli = crate::cli::Cli::try_parse_from(
+                std::iter::once("chrome-agent").chain(argv.iter().copied()),
+            );
+            let pipe = parse(command);
+            assert_eq!(
+                cli.is_ok(),
+                pipe.is_ok(),
+                "CLI {argv:?} and pipe {command} disagree"
+            );
         }
-        assert!(parse(&json!({"cmd": "text"})).is_ok());
-        assert!(parse(&json!({"cmd": "screenshot"})).is_ok());
     }
 
     #[test]

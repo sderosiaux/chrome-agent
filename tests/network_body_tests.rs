@@ -39,37 +39,45 @@ fn spawn_server() -> u16 {
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(mut stream) = stream else { continue };
-            let mut request = [0u8; 2048];
-            let Ok(n) = stream.read(&mut request) else {
-                continue;
-            };
-            let request = String::from_utf8_lossy(&request[..n]);
-            let (mime, body, delay): (&str, Vec<u8>, Option<std::time::Duration>) =
-                if request.starts_with("GET /config.yaml") {
-                    (
-                        "application/yaml",
-                        b"retries: 3\nname: chrome-agent-e2e\n".to_vec(),
-                        None,
-                    )
-                } else if request.starts_with("GET /slow.json") {
-                    (
-                        "application/json",
-                        br#"{"complete":true}"#.to_vec(),
-                        Some(std::time::Duration::from_millis(750)),
-                    )
-                } else {
-                    ("application/octet-stream", (0u8..=255).collect(), None)
+            std::thread::spawn(move || {
+                let mut request = [0u8; 2048];
+                let Ok(n) = stream.read(&mut request) else {
+                    return;
                 };
-            let header = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: {mime}\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n",
-                body.len()
-            );
-            let _ = stream.write_all(header.as_bytes());
-            let _ = stream.flush();
-            if let Some(delay) = delay {
-                std::thread::sleep(delay);
-            }
-            let _ = stream.write_all(&body);
+                let request = String::from_utf8_lossy(&request[..n]);
+                let (mime, body, delay): (&str, Vec<u8>, Option<std::time::Duration>) =
+                    if request.starts_with("GET /config.yaml") {
+                        (
+                            "application/yaml",
+                            b"retries: 3\nname: chrome-agent-e2e\n".to_vec(),
+                            None,
+                        )
+                    } else if request.starts_with("GET /slow.json") {
+                        (
+                            "application/json",
+                            br#"{"complete":true}"#.to_vec(),
+                            Some(std::time::Duration::from_millis(750)),
+                        )
+                    } else if request.starts_with("GET /hang.json") {
+                        (
+                            "application/json",
+                            br#"{"eventually":true}"#.to_vec(),
+                            Some(std::time::Duration::from_secs(10)),
+                        )
+                    } else {
+                        ("application/octet-stream", (0u8..=255).collect(), None)
+                    };
+                let header = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: {mime}\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(header.as_bytes());
+                let _ = stream.flush();
+                if let Some(delay) = delay {
+                    std::thread::sleep(delay);
+                }
+                let _ = stream.write_all(&body);
+            });
         }
     });
     port
@@ -194,5 +202,50 @@ fn reaching_the_entry_limit_does_not_report_a_requested_body_as_absent() {
         slow["body"],
         serde_json::json!(r#"{"complete":true}"#),
         "ok:true omitted the requested body without an explanation: {slow}"
+    );
+}
+
+#[test]
+fn entry_limit_does_not_wait_out_the_live_window_for_an_open_body() {
+    if !common::browser_ready() {
+        return;
+    }
+    let port = spawn_server();
+    let guard = TestBrowser::new("network-body-open");
+    let browser = guard.name().to_string();
+    let probe = format!(
+        "{}?hang#http://127.0.0.1:{port}",
+        common::fixture_url("network_body_probe.html")
+    );
+
+    assert_eq!(
+        run_json(&["--browser", &browser, "--json", "goto", &probe])["ok"],
+        true
+    );
+
+    let started = std::time::Instant::now();
+    let captured = run_json(&[
+        "--browser",
+        &browser,
+        "--json",
+        "network",
+        "--live",
+        "30",
+        "--body",
+        "--filter",
+        "hang.json",
+        "--limit",
+        "1",
+    ]);
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "--limit waited out the live window: {captured}"
+    );
+    let hanging = entry_for(&captured, "/hang.json");
+    let omitted = hanging["bodyOmitted"].as_str().unwrap_or("");
+    assert!(
+        omitted.contains("Network.loadingFinished was not observed")
+            && omitted.contains("body unavailable from CDP"),
+        "the omission must say what was and was not observed: {hanging}"
     );
 }

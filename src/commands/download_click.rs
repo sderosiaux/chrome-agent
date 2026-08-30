@@ -139,7 +139,7 @@ pub async fn arm(client: &CdpClient) -> Result<Armed, crate::BoxError> {
     let dir = incoming_dir(&tmp);
     crate::secure_fs::create_private_dir_all(&dir)?;
     // Before the CDP call: the subscription must predate anything that can produce an event.
-    let events = client.events();
+    let events = client.browser_events();
     let path = dir.display().to_string();
     if let Err(error) = client
         .call::<_, Value>(

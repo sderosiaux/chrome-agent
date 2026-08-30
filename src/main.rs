@@ -1,6 +1,7 @@
-/// All stdout writes share one non-panicking sink. A closed consumer is a delivery failure and
-/// exits 1; Rust's standard print macros panic and would violate the 0/1/2/130 contract with 101.
-macro_rules! println {
+/// All stdout writes share one non-panicking sink. The names deliberately do not shadow Rust's
+/// standard macros: moving a module above these declarations must fail compilation, not silently
+/// switch that module back to a writer that panics on a closed consumer.
+macro_rules! out_line {
     () => {
         $crate::write_stdout(format_args!(""), true)
     };
@@ -9,7 +10,7 @@ macro_rules! println {
     };
 }
 
-macro_rules! print {
+macro_rules! out {
     ($($arg:tt)*) => {
         $crate::write_stdout(format_args!($($arg)*), false)
     };
@@ -78,8 +79,15 @@ use serde_json::json;
 use crate::cli::Cli;
 use crate::run_helpers::error_hint;
 
+static STDOUT_FAILED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 fn write_stdout(args: std::fmt::Arguments<'_>, newline: bool) {
     use std::io::Write as _;
+    use std::sync::atomic::Ordering;
+
+    if STDOUT_FAILED.load(Ordering::Relaxed) {
+        return;
+    }
 
     let stdout = std::io::stdout();
     let mut handle = stdout.lock();
@@ -87,14 +95,27 @@ fn write_stdout(args: std::fmt::Arguments<'_>, newline: bool) {
         writeln!(handle, "{args}")
     } else {
         write!(handle, "{args}")
-    };
-    if let Err(error) = result {
+    }
+    .and_then(|()| handle.flush());
+    if let Err(error) = result
+        && !STDOUT_FAILED.swap(true, Ordering::Relaxed)
+    {
         let _ = writeln!(
             std::io::stderr().lock(),
             "error: failed to write stdout: {error}"
         );
-        std::process::exit(1);
     }
+}
+
+fn exit_after_stdout(code: i32) -> ! {
+    use std::sync::atomic::Ordering;
+
+    let code = if STDOUT_FAILED.load(Ordering::Relaxed) {
+        1
+    } else {
+        code
+    };
+    std::process::exit(code);
 }
 
 #[tokio::main]
@@ -153,40 +174,48 @@ async fn main() {
         }
     });
 
-    if let Err(e) = run::run(cli).await {
+    let result = run::run(cli).await;
+    if result.is_ok() && STDOUT_FAILED.load(std::sync::atomic::Ordering::Relaxed) {
+        kill::reap_unpersisted();
+        std::process::exit(1);
+    }
+    if let Err(e) = result {
         // Same window, reached by returning rather than by signal: the launch succeeded and
         // the connect failed. A browser that DID reach the store is left alone.
         kill::reap_unpersisted();
         // Exit 2 for "a claim this tool made did not hold", distinct from 1 "the browser never
         // started". Checked before the generic handler, which would exit 1.
         if let Some(not_held) = e.downcast_ref::<commands::assert::NotHeld>() {
-            std::process::exit(not_held.report());
+            exit_after_stdout(not_held.report());
         }
         // A stopped macro has its own report (step, guard, observation, `next`). Printed
         // here so the handler below does not flatten it to its first sentence. A macro guard
         // is the same claim class as an assertion, so a guard that ran and did not hold exits
         // 2 as well; a step that never ran exits 1. `Stopped` reads that off its report.
         if let Some(stopped) = e.downcast_ref::<macros_run::Stopped>() {
-            std::process::exit(stopped.report());
+            exit_after_stdout(stopped.report());
         }
         // A CLI batch stopped by `--stop-on-error` already printed its one response; only the
         // exit code is left to say. 1, not 2: 2 is reserved for "the page is not in that
         // state", and a stopped batch is an error like any other.
-        if e.downcast_ref::<run_helpers::BatchStopped>().is_some() {
-            std::process::exit(1);
+        if e.downcast_ref::<run_helpers::BatchStopped>().is_some()
+            || e.downcast_ref::<commands::network::IncompleteCapture>()
+                .is_some()
+        {
+            exit_after_stdout(1);
         }
         // `--on-intercept refuse` carries who was in the way, so it prints structured rather
         // than as a bare sentence. Still `ok:false` and exit 1: nothing was dispatched.
         if let Some(refused) = hit_test::refusal_in(&e) {
             if json_mode {
-                println!("{}", refused.to_json(&browser));
+                out_line!("{}", refused.to_json(&browser));
             } else {
                 eprintln!("error: {refused}");
                 for line in refused.text_lines(&browser) {
                     eprintln!("{line}");
                 }
             }
-            std::process::exit(1);
+            exit_after_stdout(1);
         }
         let msg = e.to_string();
         if json_mode {
@@ -204,6 +233,6 @@ async fn main() {
                 eprintln!("hint: {hint}");
             }
         }
-        std::process::exit(1);
+        exit_after_stdout(1);
     }
 }

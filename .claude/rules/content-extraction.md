@@ -10,9 +10,9 @@ paths:
   - "vendor/extract.js"
   - "tests/js/**"
   - "tests/extract_tests.rs"
-  - "tests/network_body_tests.rs"
   - "tests/js_suite_tests.rs"
   - "tests/console_bounds_tests.rs"
+  - "tests/network_body_tests.rs"
 ---
 
 # Getting content out of a page: read, extract, text, network, console
@@ -29,8 +29,11 @@ paths:
 
 Retroactive via the Performance API (stealth-safe), or live via the Network domain.
 
-`--body` fetches bodies at `Network.loadingFinished`, not `responseReceived`: at response time
+`--body` queues bodies at `Network.loadingFinished`, not `responseReceived`: at response time
 `getResponseBody` answers "No data found" for anything still in flight, which is most responses.
+The queued CDP reads run after event collection so their round trips cannot make the receiver lag.
 
 - A `--filter` overrides the textual-MIME allowlist. The allowlist protects an unfiltered `--body` from the page's images and fonts; it does not veto an explicit ask (issue #27's `application/yaml`).
 - `base64Encoded` from Chrome means "not on Chrome's own text list", not "binary", so the decoded content decides: valid UTF-8 prints, raw bytes become `body_omitted` with the size and the `download` command.
+- Live capture receives only Network-domain events. If that receiver lags, the response keeps the entries actually observed but says `ok:false`, `complete:false` and `lostEvents:N`; CLI exits 1. Unrelated Page/Runtime/DOM traffic cannot produce that verdict.
+- Reaching `--limit` admits no more responses. Bodies already selected get a 1 s completion-event grace and the whole set of body reads gets one further 1 s deadline, so SSE/long-poll responses cannot hold the command until `--live` expires. `body_omitted` distinguishes "loadingFinished was not observed" from a CDP body-read refusal; neither is worded as proof the response itself did not finish.
