@@ -26,7 +26,7 @@ pub async fn run(client: &CdpClient, opts: &PdfOpts<'_>) -> Result<String, crate
             json!({
                 "landscape": opts.landscape,
                 "printBackground": opts.background,
-                // Return the bytes inline (base64) rather than a stream handle.
+                // Bytes inline, not a stream handle.
                 "transferMode": "ReturnAsBase64",
             }),
         )
@@ -100,7 +100,7 @@ mod tests {
         let n = output_name(None);
         assert!(n.starts_with("page-"));
         assert!(n.ends_with(".pdf"));
-        // Guard against a "page-.pdf" bug: the stem between prefix and ext is all digits.
+        // The stem between prefix and extension must be all digits, never empty.
         let digits = n.trim_start_matches("page-").trim_end_matches(".pdf");
         assert!(!digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()));
     }

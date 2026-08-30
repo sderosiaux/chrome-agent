@@ -1,24 +1,21 @@
-use std::collections::HashMap;
-
 use serde_json::{json, Value};
 
 use crate::cdp::client::CdpClient;
-use crate::element_ref::ElementRef;
 use crate::session::{self, SessionStore};
 use crate::commands;
+// One definition each, in the module the CLI already reads them from: both used to exist here
+// too, and `pipe_dispatch_actions` called BOTH spellings of `get_uid_map`.
+use crate::run_helpers::{get_uid_map, merge_into};
 pub use crate::pipe_emulation::{EmulationRecovery, dispatch_emulate};
 pub use crate::pipe_report::{attach_change_report, mutates_page};
 
-// Split out to stay under the 1000-line file cap; callers keep using `pipe_dispatch::*`.
 pub use crate::pipe_dispatch_actions::{
     dispatch_assert, dispatch_check, dispatch_dblclick, dispatch_drag, dispatch_fill_and_submit,
     dispatch_fill_form, dispatch_history, dispatch_hover, dispatch_navigate_and_read,
     dispatch_select, dispatch_upload, dispatch_webmcp_call, dispatch_webmcp_list, run_batch,
 };
 
-// ---------------------------------------------------------------------------
-// Per-command dispatchers
-// ---------------------------------------------------------------------------
+// --- Per-command dispatchers ---
 
 pub async fn dispatch_goto(
     client: &CdpClient,
@@ -50,15 +47,14 @@ pub async fn dispatch_goto(
     if let Some(selector) = cmd.get("wait_for").and_then(Value::as_str) {
         commands::wait::run(client, "selector", selector, timeout, 500).await?;
     }
-    // Navigation destroys any bound frame's isolated world — clear it so
-    // subsequent eval/inspect target the freshly loaded top document (issue #8).
+    // Navigation destroys any bound frame's isolated world, so eval/inspect must fall back
+    // to the freshly loaded top document (issue #8).
     client.set_frame_context(None);
     let _ = commands::history::append(&result.url, &result.title, page_name);
 
     let mut obj = json!({"ok": true, "url": result.url, "title": result.title});
-    // `goto` stays out of `mutates_page`, so nothing else will speak for it: `landed` rides
-    // on its own response, in the one dispatcher pipe and batch share. The browser name goes
-    // with it because every command inside a hint has to reach the session that produced it.
+    // `goto` is outside `mutates_page`, so nothing else speaks for it: `landed` rides on its
+    // own response. The browser name goes with it so hints name a reachable session.
     result.landed.attach(&mut obj, browser_name);
     if inspect {
         let snapshot = attach_snapshot(client, store, browser_name, page_name, target_id, max_depth).await?;
@@ -79,8 +75,8 @@ pub async fn dispatch_click(
 ) -> Result<Value, crate::BoxError> {
     let inspect = cmd.get("inspect").and_then(Value::as_bool).unwrap_or(false);
     let max_depth = cmd_max_depth(cmd).or(global_max_depth);
-    // Hoist the `?` out of the `else if let` so the non-Send ControlFlow residual
-    // isn't held across the awaits below (keeps the future Send).
+    // Hoisted out of the `else if let` below: the non-Send `?` residual must not be held
+    // across an await, or the future stops being Send.
     let xy = parse_xy(cmd)?;
     let on_intercept = crate::hit_test::OnIntercept::from_cmd(cmd, report.on_intercept);
 
@@ -175,16 +171,16 @@ pub async fn dispatch_inspect(
     } else {
         commands::inspect::views(client, verbose, max_depth, uid, role_filter.as_deref()).await?
     };
-    // `--urls` annotates the lines it returns. Applied to the baseline it would make every
-    // link read as changed on the next diff, which reads no url= token.
+    // `--urls` annotates only the lines it returns: applied to the baseline it would make
+    // every link read as changed on the next diff, which reads no url= token.
     let shown = if urls {
         commands::inspect::resolve_urls(client, views.shown(), &views.full.uid_map).await
     } else {
         views.shown().to_string()
     };
 
-    // Persist the FULL snapshot so diff and uid lookups stay complete;
-    // filter/max_depth/uid/urls and paging only affect what we return.
+    // Persist the FULL snapshot so diff and uid lookups stay complete: display flags and
+    // paging affect only what is returned.
     if let Some(browser_s) = store.browsers.get_mut(browser_name) {
         let page = session::ensure_page(browser_s, page_name, target_id);
         let full = views.full;
@@ -279,8 +275,7 @@ pub async fn dispatch_read(client: &CdpClient, cmd: &Value) -> Result<Value, cra
     let mut obj = json!({"ok": true, "title": result.title, "text": result.text_content});
     if let Some(excerpt) = &result.excerpt { obj["excerpt"] = json!(excerpt); }
     if let Some(byline) = &result.byline { obj["byline"] = json!(byline); }
-    // When --html is requested, `read::run` keeps the cleaned HTML; surface it
-    // (pipe/batch is JSON-only, so this is the only place --html can be observed).
+    // pipe/batch is JSON-only, so this is the only place `--html` can be observed.
     if let Some(content) = &result.content { obj["content"] = json!(content); }
     Ok(obj)
 }
@@ -336,8 +331,8 @@ pub async fn dispatch_screenshot(
     Ok(json!({"ok": true, "path": path}))
 }
 
-/// `download` in pipe and batch. Same entry point as the CLI (`commands::download::dispatch`),
-/// so the URL and the click paths cannot drift into two response shapes across the three modes.
+/// `download` in pipe and batch, through the CLI's entry point
+/// (`commands::download::dispatch`) so the URL and click paths keep one response shape.
 pub async fn dispatch_download(
     client: &CdpClient,
     store: &SessionStore,
@@ -422,8 +417,8 @@ pub async fn dispatch_pdf(client: &CdpClient, cmd: &Value) -> Result<Value, crat
 
 pub async fn dispatch_wait(client: &CdpClient, _default_timeout: u64, cmd: &Value) -> Result<Value, crate::BoxError> {
     let (what, pattern) = parse_wait(cmd)?;
-    // Match the CLI `wait --timeout` default (10s), not the global page-load
-    // timeout (30s): waits are per-condition and should not inherit --timeout.
+    // The CLI `wait --timeout` default (10s), not the global 30s page-load timeout: a wait
+    // is per-condition and does not inherit --timeout.
     let timeout = cmd.get("timeout").and_then(Value::as_u64).unwrap_or(WAIT_DEFAULT_TIMEOUT);
     let idle_ms = cmd.get("idle_ms").and_then(Value::as_u64).unwrap_or(500);
     let msg = commands::wait::run(client, &what, &pattern, timeout, idle_ms).await?;
@@ -442,9 +437,8 @@ pub async fn dispatch_back(client: &CdpClient) -> Result<Value, crate::BoxError>
         .and_then(|e| e.get("id"))
         .and_then(Value::as_i64)
         .ok_or("Could not find previous history entry")?;
-    // Subscribe BEFORE navigating: a fast (cached) history entry can fire
-    // Page.loadEventFired before a late subscription exists, which would stall
-    // until the timeout (same race the CLI history path has).
+    // Subscribe BEFORE navigating: a cached history entry can fire Page.loadEventFired
+    // before a late subscription exists, stalling until the timeout.
     let mut rx = client.events();
     client.send("Page.navigateToHistoryEntry", json!({"entryId": prev_entry_id})).await?;
     client.set_frame_context(None); // history navigation invalidates any bound frame
@@ -557,8 +551,8 @@ pub async fn dispatch_extract(client: &CdpClient, cmd: &Value) -> Result<Value, 
     let limit = cmd.get("limit").and_then(Value::as_u64).unwrap_or(10) as usize;
     let scroll = cmd.get("scroll").and_then(Value::as_bool).unwrap_or(false);
     let a11y = cmd.get("a11y").and_then(Value::as_bool).unwrap_or(false);
-    // Match the CLI: `run_a11y` scrolls internally, so only the DOM path needs
-    // an explicit scroll_to_load — otherwise --a11y --scroll would scroll twice.
+    // `run_a11y` scrolls internally, so only the DOM path needs an explicit scroll_to_load;
+    // otherwise --a11y --scroll scrolls twice.
     let result = if a11y {
         commands::extract::run_a11y(client, limit, scroll).await?
     } else {
@@ -569,19 +563,12 @@ pub async fn dispatch_extract(client: &CdpClient, cmd: &Value) -> Result<Value, 
 }
 
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+// --- Helpers ---
 
 /// Attach the tree a command's `inspect: true` asked for, and store the baseline.
 ///
-/// This is the pipe/batch half of the rule `run_helpers::output_action_with` states for the
-/// CLI: the caller's `max_depth` decides what is RETURNED, never what is stored. It used to
-/// store the truncated rendering, which the change report then overwrote with a full one —
-/// so the bug only surfaced where nothing overwrote it: `goto` (deliberately outside
-/// `mutates_page`) and any action run under `--verdict off`. Measured on
-/// `snapshot_filter_baseline.html`, `{"cmd":"goto","inspect":true,"max_depth":1}` then one
-/// injected button then `diff` answered `added=10` where the truth is 1.
+/// The pipe/batch half of the rule `run_helpers::output_action_with` states for the CLI:
+/// `max_depth` decides what is RETURNED, never what is stored.
 pub async fn attach_snapshot(
     client: &CdpClient, store: &mut SessionStore, browser_name: &str, page_name: &str,
     target_id: &str, max_depth: Option<usize>,
@@ -598,13 +585,6 @@ pub async fn attach_snapshot(
         page.last_snapshot_loader = l;
     }
     Ok(shown)
-}
-
-pub fn get_uid_map(store: &SessionStore, browser_name: &str, page_name: &str) -> HashMap<String, ElementRef> {
-    store.browsers.get(browser_name)
-        .and_then(|b| b.pages.get(page_name))
-        .map(|p| p.uid_map.clone())
-        .unwrap_or_default()
 }
 
 pub fn cmd_max_depth(cmd: &Value) -> Option<usize> {
@@ -627,7 +607,6 @@ fn parse_scroll(cmd: &Value) -> Result<ScrollArgs<'_>, crate::BoxError> {
     Ok(ScrollArgs { target, px })
 }
 
-/// Parsed `text` arguments.
 struct TextArgs<'a> {
     uid: Option<&'a str>,
     selector: Option<&'a str>,
@@ -681,7 +660,6 @@ fn parse_wait(cmd: &Value) -> Result<(String, String), crate::BoxError> {
     }
 }
 
-/// Error for an empty or unrecognized `cmd` name.
 fn unknown_cmd_error(name: &str) -> crate::BoxError {
     if name.is_empty() {
         "Missing \"cmd\" field".into()
@@ -690,9 +668,7 @@ fn unknown_cmd_error(name: &str) -> crate::BoxError {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Frame
-// ---------------------------------------------------------------------------
+// --- Frame ---
 
 pub async fn dispatch_frame(
     client: &CdpClient,
@@ -703,9 +679,7 @@ pub async fn dispatch_frame(
     Ok(json!({"ok": true, "message": msg}))
 }
 
-// ---------------------------------------------------------------------------
-// Batch
-// ---------------------------------------------------------------------------
+// --- Batch ---
 
 #[allow(clippy::too_many_arguments)]
 pub async fn dispatch_batch(
@@ -731,19 +705,40 @@ pub async fn dispatch_batch(
     .await)
 }
 
-/// Copy an optional field set into a response object.
-pub fn merge_into(obj: &mut Value, details: Option<&Value>) {
-    if let (Some(target), Some(fields)) = (obj.as_object_mut(), details.and_then(Value::as_object)) {
-        for (key, value) in fields {
-            target.insert(key.clone(), value.clone());
-        }
-    }
+/// One dispatched command's future, type-erased.
+///
+/// `batch` is itself a command, so `dispatch_single` → `dispatch_batch` → `run_batch` →
+/// `dispatch_single` is a cycle, and rustc cannot size a future whose type contains itself.
+/// Erasing it here is what lets the two front ends share ONE dispatcher: `pipe.rs` used to keep
+/// a second copy of the whole match purely to own the `batch` arm, and the two had already
+/// drifted — a `batch` nested in a `batch` answered `Unknown command: batch`.
+/// `Send` is part of the contract, not decoration: the clippy nursery enforces it across the
+/// whole crate, and erasing it here would make `run` itself non-`Send`.
+pub type Dispatched<'a> = std::pin::Pin<Box<dyn std::future::Future<Output = Value> + Send + 'a>>;
+
+/// Dispatch one command. The single dispatcher behind pipe, pipe `batch` and CLI `batch`.
+#[allow(clippy::too_many_arguments)]
+pub fn dispatch_single<'a>(
+    client: &'a CdpClient,
+    browser_client: &'a CdpClient,
+    store: &'a mut SessionStore,
+    browser_name: &'a str,
+    page_name: &'a str,
+    target_id: &'a str,
+    timeout: u64,
+    global_max_depth: Option<usize>,
+    report: crate::run_helpers::ReportPolicy,
+    cmd: &'a Value,
+    emulation_recovery: &'a mut EmulationRecovery,
+) -> Dispatched<'a> {
+    Box::pin(dispatch_one(
+        client, browser_client, store, browser_name, page_name, target_id, timeout,
+        global_max_depth, report, cmd, emulation_recovery,
+    ))
 }
 
-/// Public entry point for dispatching a single pipe command.
-/// Used by batch mode (both CLI and pipe).
 #[allow(clippy::too_many_arguments)]
-pub async fn dispatch_single(
+async fn dispatch_one(
     client: &CdpClient,
     browser_client: &CdpClient,
     store: &mut SessionStore,
@@ -754,10 +749,11 @@ pub async fn dispatch_single(
     global_max_depth: Option<usize>,
     report: crate::run_helpers::ReportPolicy,
     cmd: &Value,
+    emulation_recovery: &mut EmulationRecovery,
 ) -> Value {
     let cmd_name = cmd.get("cmd").and_then(Value::as_str).unwrap_or("");
-    // Capture the baseline before dispatching: a command run with `inspect` refreshes it
-    // itself, and comparing against the refreshed copy would report that nothing moved.
+    // Capture the baseline before dispatching: a command run with `inspect` refreshes it,
+    // and comparing against the refreshed copy would report that nothing moved.
     let baseline = if report.changes && mutates_page(cmd_name) {
         store
             .browsers
@@ -792,11 +788,13 @@ pub async fn dispatch_single(
         "press" => dispatch_press(client, cmd).await,
         "dblclick" => dispatch_dblclick(client, store, browser_name, page_name, target_id, global_max_depth, report, cmd).await,
         "select" => dispatch_select(client, store, browser_name, page_name, target_id, global_max_depth, cmd).await,
-        "check" => dispatch_check(client, store, browser_name, page_name, report, cmd).await,
-        "uncheck" => {
-            let mut c = cmd.clone();
-            if let Some(m) = c.as_object_mut() { m.insert("desired".into(), Value::Bool(false)); }
-            dispatch_check(client, store, browser_name, page_name, report, &c).await
+        // The verb decides the desired state; only `check` may be talked out of it by an
+        // explicit `"desired"`. Both front ends used to clone the command Value and insert the
+        // field, which is a second way of saying the same thing in two places at once.
+        "check" | "uncheck" => {
+            let desired = cmd_name == "check"
+                && cmd.get("desired").and_then(Value::as_bool).unwrap_or(true);
+            dispatch_check(client, store, browser_name, page_name, report, desired, cmd).await
         }
         "upload" => dispatch_upload(client, store, browser_name, page_name, cmd).await,
         "drag" => dispatch_drag(client, store, browser_name, page_name, cmd).await,
@@ -815,16 +813,21 @@ pub async fn dispatch_single(
         "assert" => dispatch_assert(client, store, browser_name, page_name, cmd).await,
         "webmcp_list" | "webmcp-list" => dispatch_webmcp_list(client).await,
         "webmcp_call" | "webmcp-call" => dispatch_webmcp_call(client, cmd).await,
+        "batch" => dispatch_batch(client, browser_client, store, browser_name, page_name, target_id, timeout, global_max_depth, report, cmd, emulation_recovery).await,
         other => Err(unknown_cmd_error(other)),
     };
-    // `result` must not outlive this block: BoxError is not Send, and an await with it
-    // still in scope would make every caller's future non-Send.
+    // `result` must not outlive this block: BoxError is not Send, and an await with it in
+    // scope would make every caller's future non-Send.
     match result {
         Ok(v) => v,
         Err(e) => {
-            // A refusal carries what it measured — the receiver, the aim point, the branch —
-            // and flattening it to its Display would drop all of it on the one path where
-            // nothing was dispatched and the caller has to re-plan.
+            // The wait this command paid for dies with it. `take_settle_wait_ms` is only
+            // reached from `attach_verdict_for`, which a failed command never gets to, so on a
+            // shared connection the slot survived and the NEXT command reported the wait as
+            // its own. `mark_dispatch` clears it going in; this clears it going out.
+            let _ = client.take_settle_wait_ms();
+            // A refusal carries what it measured (receiver, aim point, branch); its Display
+            // alone would drop all of it on the one path where nothing was dispatched.
             if let Some(refused) = crate::hit_test::refusal_in(&e) {
                 return refused.to_json(browser_name);
             }
@@ -835,10 +838,9 @@ pub async fn dispatch_single(
         }
     }
     };
-    // Same as pipe: switching the report off must not read like an empty page.
+    // Same as pipe: switching the report off must not read like an empty page. The hit test
+    // still ran, so an intercepted click still reports its receiver here.
     if !report.changes && mutates_page(cmd_name) {
-        // The hit test still ran: it is part of aiming the action, not part of the report.
-        // An intercepted click says so even here, where the page was never re-read.
         crate::pipe_report::attach_verdict_for(
             client,
             &mut value,
@@ -855,9 +857,7 @@ pub async fn dispatch_single(
     value
 }
 
-// ---------------------------------------------------------------------------
-// Tests — pure JSON→typed-args parsing (no live Chrome required)
-// ---------------------------------------------------------------------------
+// --- Tests: pure JSON → typed-args parsing, no live Chrome ---
 
 #[cfg(test)]
 mod tests {
@@ -969,8 +969,7 @@ mod tests {
 
     #[test]
     fn wait_default_timeout_is_ten() {
-        // Regression: pipe/batch `wait` must default to the CLI's 10s, not the
-        // global 30s page-load timeout.
+        // pipe/batch `wait` defaults to the CLI's 10s, not the global 30s page-load timeout.
         assert_eq!(WAIT_DEFAULT_TIMEOUT, 10);
     }
 

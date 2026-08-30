@@ -53,10 +53,8 @@ pub struct ScreenshotOpts<'a> {
 }
 
 pub async fn run(client: &CdpClient, opts: &ScreenshotOpts<'_>) -> Result<String, crate::BoxError> {
-    // Determine the clip rect and the base width used to compute the downscale.
-    // - element clip: use its own width
-    // - full page + max_width: build a clip over the whole document so scale applies
-    // - full page, no max_width: no clip (current behaviour, capture viewport)
+    // The clip rect and the base width the downscale is computed from. A full page with
+    // `max_width` needs a whole-document clip, since `scale` only applies to a clip.
     let (clip, base_width) = match (opts.clip, opts.max_width) {
         (Some(rect), _) => (Some(rect), rect.width),
         (None, Some(_)) => {
@@ -72,7 +70,7 @@ pub async fn run(client: &CdpClient, opts: &ScreenshotOpts<'_>) -> Result<String
         json!({ "x": r.x, "y": r.y, "width": r.width, "height": r.height, "scale": scale })
     });
 
-    // JPEG quality only applies to JPEG; PNG is lossless so CDP ignores/rejects it.
+    // CDP rejects `quality` on PNG.
     let quality = match opts.format {
         ImgFormat::Jpeg => opts.quality,
         ImgFormat::Png => None,
@@ -113,7 +111,7 @@ fn output_name(filename: Option<&str>, format: ImgFormat) -> String {
     let ext = format.ext();
     match filename {
         Some(name) => {
-            // Sanitize: strip any path component to prevent traversal.
+            // Strip any path component, so a name cannot traverse.
             let stem = std::path::Path::new(name)
                 .file_name()
                 .and_then(|n| n.to_str())
@@ -134,7 +132,7 @@ fn output_name(filename: Option<&str>, format: ImgFormat) -> String {
     }
 }
 
-/// Full-document rectangle (accounts for content beyond the viewport).
+/// Full-document rectangle, including content beyond the viewport.
 async fn full_page_rect(client: &CdpClient) -> Result<Rect, crate::BoxError> {
     let eval: crate::cdp::types::EvaluateResult = client
         .call(
@@ -184,9 +182,8 @@ mod tests {
     fn output_name_forces_extension() {
         assert_eq!(output_name(Some("shot"), ImgFormat::Png), "shot.png");
         assert_eq!(output_name(Some("shot"), ImgFormat::Jpeg), "shot.jpg");
-        // Already-correct extension is preserved, not doubled.
+        // A correct extension is preserved, a mismatched one is appended to.
         assert_eq!(output_name(Some("shot.jpg"), ImgFormat::Jpeg), "shot.jpg");
-        // A png name captured as jpeg gets the jpeg extension appended.
         assert_eq!(output_name(Some("shot.png"), ImgFormat::Jpeg), "shot.png.jpg");
     }
 

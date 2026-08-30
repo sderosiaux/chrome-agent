@@ -1,41 +1,35 @@
 LLM USAGE GUIDE:
-  Workflow: inspect -> read uids -> act (click/fill/select/check).
-  An action tells you what it changed on the page, so you usually do NOT need to inspect
-  again to find out whether it landed. Re-inspect when you need fresh uids after a
-  navigation, or when the change report says document_changed.
-  Headless by default. Add --stealth for bot-protected sites. Use --json for structured output.
+  Workflow: inspect -> read uids -> act (click/fill/select/check) -> assert.
+  Headless by default. --stealth for bot-protected sites. --json for structured output.
+  ok:true means the command ran, NOT that the page complied. Read `verdict` and `next`.
+  An action reports what it changed, so a second inspect is usually unnecessary. Re-inspect after
+  a navigation, or when the report says document_changed.
 
-  Reading an action's response (ok:true means the command ran, NOT that the page complied):
-    Branch on "next" — one token, closed set of six. Not on the verdict word.
-    verdict     reason                next      what to do
-    changed     tree_delta            proceed   the page moved; delta says how
+  Reading an action's response — branch on "next", never on the verdict word.
+  "next" is one token from a closed set of six: proceed inspect retry confirm dismiss stop.
+    verdict     reason                next      what it means
+    changed     tree_delta            proceed   the page moved; `delta` says how
     changed     nodes_moved           proceed   same nodes, reordered
-    changed     focus_only            proceed   only focus moved, onto a real ELEMENT: on a path
+    changed     focus_only            proceed   only focus moved, onto a real element -- on a path
                                                 with no hit test that is the sole sign it arrived.
-                                                focus.to names what RECEIVED focus, often a focusable
-                                                ANCESTOR of what you clicked (a span inside a link
-                                                focuses the link) -- never read it as the element you
-                                                aimed at. Focus onto the DOCUMENT does not reach this
-                                                row: it answers identical_tree.
-    changed     value_kept            proceed   the element held it when read back; no delta could
-                                                show it (a secret renders as a marker, and a first
-                                                action has no tree to compare). fill, select and
-                                                check all reach this row, via value.verbatim.
-                                                One exception to this table's one-next-per-reason
-                                                shape: if the PAGE read failed, the same verdict
-                                                answers next=inspect — the field is confirmed, the
-                                                page around it was never seen. Branch on "next".
-    changed     values_lost           confirm   moved AND emptied a filled field; values_lost names them
-    navigated   document_replaced     inspect   new document, every stored uid is dead
+                                                focus.to may be a focusable ANCESTOR (a span inside
+                                                a link focuses the link); read `uid` for your target.
+                                                Focus onto the DOCUMENT answers identical_tree.
+    changed     value_kept            proceed   read back on the element (value.verbatim); no delta
+                                                could show it. fill, select and check all reach it.
+                                                If the PAGE read also failed the same verdict
+                                                answers next=inspect -- the field is confirmed, the
+                                                page around it was never seen.
+    changed     values_lost           confirm   moved AND emptied a filled field; values_lost names
+                                                them. Submitted-and-cleared and discarded-without-
+                                                sending look identical: confirm before re-filling.
+    navigated   document_replaced     inspect   new document; every stored uid is dead
     intercepted hit_test_receiver     dismiss   intercepted_by got the event; target unknown
-    intercepted modal_dialog          dismiss   a <dialog> opened with showModal() owns the top layer;
-                                                Escape it first. Covered by a fixture, never yet seen
-                                                on a real site (0 of 61): a <div role=dialog> overlay
-                                                is NOT in the top layer and arrives as
-                                                hit_test_receiver instead.
+    intercepted modal_dialog          dismiss   a <dialog> opened with showModal() owns the top
+                                                layer; press Escape first
     not_kept    value_reverted        stop      element held NOTHING; read value.actual, do not re-fill
     not_kept    value_rewritten       stop      element holds something else (mask/normaliser)
-    no_effect   delivered_no_change   confirm   delivery PROVEN + tree still in observed_after_ms
+    no_effect   delivered_no_change   confirm   delivery PROVEN and tree still within observed_after_ms
     unchanged   identical_tree        confirm   identical tree, delivery not proven
     unknown     no_baseline           inspect   nothing to compare against yet
     unknown     read_failed           inspect   the action ran, the read after it failed
@@ -44,419 +38,272 @@ LLM USAGE GUIDE:
     unknown     scroll_not_settled    retry     nothing dispatched, and the miss is TRANSIENT
     not_checked reporting_disabled    proceed   you passed --verdict off
     # unknown = could not compare, never "nothing happened". scroll_not_settled is the ONE
-    # unknown that licenses a repeat, and "next" is where that shows.
-    # Both dispatch nothing, so neither can double an action -- but only the transient one can
-    # succeed on a repeat: scroll_not_settled means two readings of the aim point DISAGREED, so
-    # the movement ends and the next attempt aims at a settled box. aim_point_off_target means
-    # two readings AGREED and the point still could not be aimed at -- either it is outside the
-    # element's own boxes (wrapped inline box, clipped container) or it is outside the viewport
-    # and the page is holding it there (a position:fixed wall, a locked document scroll, which
-    # the probe's own scrollIntoView already failed to change). Read "aim": a coordinate off
-    # screen is the second shape. An identical retry misses identically -- look at the page.
+    # unknown that licenses a repeat: two readings of the aim point DISAGREED, so the next
+    # attempt aims at a settled box. aim_point_off_target means they AGREED -- the point is
+    # outside the element's own boxes (wrapped inline box, clipped container) or outside the
+    # viewport and pinned there; read `aim`. An identical retry misses identically.
     # verdict_reason is the machine token; verdict_hint names the next command in words.
 
-  "delivery" on a pointer-targeted action (click, dblclick, the check/uncheck click) — a hit test at the
-  coordinate about to be dispatched, and the only thing that licenses the two strong words:
-    target_hit   aimed at the target/descendant/label's control/shadow host — licenses no_effect
-    intercepted  aimed at an element outside the target's subtree -> intercepted_by names it
-    off_target   no point on the element could be aimed at and two readings AGREED: NOTHING WAS
-                 DISPATCHED, the miss is stable (outside its own rects, or outside the viewport
-                 and pinned there), so a repeat misses the same way -> inspect
-    not_settled  two readings of the aim point DISAGREED, it was still moving: NOTHING WAS
-                 DISPATCHED and the miss is transient, repeating is safe AND is the fix -> retry
-    js           went through a JS click()/MouseEvent: no hit test, licenses nothing
-    not_probed   no hit test, or its answer misses the document that matters (iframe target):
-                 absence of evidence, licenses NO conclusion
-    # --on-intercept: dispatch (default) sends it anyway (what a pointer does) and names the
-    # receiver in intercepted_by. refuse always errors on an interception instead. guard is the
-    # middle ground -- it reads intercepted_by.actionable (native interactive tag, ARIA
-    # interactive role, tabIndex>=0, or cursor:pointer -- computed in the same probe, no extra
-    # CDP call) and dispatches through a receiver that looks inert, refuses one that looks like
-    # a control. An <iframe> receiver ALWAYS refuses under guard even when its content happens
-    # to be inert: opaque from outside, so "inert" would be assumed, not measured. Default stays
-    # dispatch -- guard's predicate lacks dispatch's own measured record and flipping the
-    # default would change outcomes for every overlapping-button case, not only consent walls.
-    # A refusal (either mode) is ok:false (exit 1) and carries the SAME fields as a dispatch --
-    # delivery, intercepted_by, verdict, verdict_reason, next, verdict_hint, hint -- plus
-    # dispatched:false. Branch on "next" there too; nothing reached the page, so acting on the
-    # receiver and re-aiming duplicates nothing. dispatched:false is on every response that
-    # aimed and sent nothing, refusal or not.
-    # "waited_ms" appears when the action waited for the page to load after it, and only then.
-    # A click that navigates carries it; one that changed nothing on the top frame has no such
-    # field. It is the answer to "why did that take so long", and it is per action: pipe reuses
-    # one connection and the wait is never carried to the next command.
-    # A pointer event is answered in milliseconds on a healthy page. If Chrome does not answer
-    # one within 8s the command FAILS (ok:false) rather than waiting out --timeout, and the
-    # error says the event may already have reached the page: do NOT repeat it, run inspect and
-    # read the state the action was supposed to produce. click/dblclick/hover/drag also bring
-    # their page to the foreground first -- a background tab answers pointer events on a fixed
-    # 5s timer -- so acting on one page of a multi-page browser makes it the active one.
-    # Two blind spots no retry can fix: the read-back window is a fixed 60ms (a validator at
-    # 400ms is outside it -- use wait + assert value), and canvas/WebGL/CSS-only effects are
-    # invisible to the a11y tree (use screenshot or eval, never a second click).
+  "delivery" on a pointer-targeted action (click, dblclick, the check/uncheck click) is a hit test
+  at the coordinate about to be dispatched, and the only thing that licenses the two strong words:
+    target_hit   the target, a descendant, its label's control or its shadow host -- licenses no_effect
+    intercepted  an element outside the target's subtree -> intercepted_by names it
+    off_target   no aimable point, two readings AGREED: NOTHING DISPATCHED, miss stable -> inspect
+    not_settled  two readings DISAGREED, still moving: NOTHING DISPATCHED, miss transient -> retry
+    js           a JS click()/MouseEvent: no hit test, licenses nothing
+    not_probed   no hit test, or it misses the document that matters (iframe): licenses nothing
+    # --on-intercept: dispatch (default) sends it anyway and names the receiver; refuse always
+    # errors; guard reads intercepted_by.actionable (interactive tag, ARIA role, tabIndex>=0, or
+    # cursor:pointer), dispatches through an inert receiver and refuses one that looks like a
+    # control -- an <iframe> receiver always refuses under guard. A refusal is ok:false (exit 1)
+    # with the SAME fields as a dispatch plus dispatched:false; nothing reached the page, so
+    # re-aiming duplicates nothing.
+    # "waited_ms" appears only when the action waited for a load after it -- that is why a
+    # command took ten seconds. Per action, never carried to the next pipe command.
+    # A pointer event Chrome does not answer within 8s FAILS (ok:false) instead of waiting out
+    # --timeout; it may already have landed, so run inspect, do not repeat it. click/dblclick/
+    # hover/drag bring their page to the foreground, making it the active tab (a background tab
+    # answers pointer events on a 5s timer).
+    # Two blind spots no retry fixes: the read-back window is a fixed 60ms (a validator at 400ms
+    # is outside it -- use wait + assert value), and canvas/WebGL/CSS-only effects are invisible
+    # to the a11y tree (use screenshot or eval, never a second click).
 
-  Macros — a path that already worked, kept and replayable:
-    chrome-agent macro record <name> --from-recording <file>  # distil a recorded session
-    chrome-agent macro run <name> --var k=v                   # run it, guarding every step
-    chrome-agent macro list                                   # what exists, without relearning it
-    chrome-agent macro show <name>                            # one macro's steps and its guards
-    chrome-agent replay <file>                                # the raw form: re-run a pipe --record
-                                                              # file step by step, with no guards
-                                                              # and no parameters
-    In pipe: {"cmd":"macro","action":"record","name":"x"} distils THIS session — no marker is
-    needed beforehand, and "from" overrides where the task is taken to start (default: the last
-    successful navigation, reported as started_at).
-    A step keeps only what survives tomorrow: delivery target_hit, the verdict WORD (never the
-    reason), value.verbatim, and a url_matches built from the PATH. Never the changed counters,
-    never a uid, never a duration -- a macro that pins those breaks on a page that still works.
-    A step aimed by uid is recorded by role+name or REFUSED; --xy is never recordable.
-    A secret field is declared as a parameter and never stored: the run refuses without --var.
-    A guard that does not hold STOPS the run: the report gives the step index, the guard, what
-    was observed, and the action's own next. Nothing is repaired, retried or skipped.
-    Steps that promise nothing say so (unguarded), in the file and in both reports.
+  Flag position: global flags (--json, --browser, --verdict, --budget, --stealth, --on-intercept,
+  --page, --dialog ...) parse on either side of the verb. --timeout and --max-depth are the two
+  exceptions: a command that declares its own takes it after the verb (`wait selector ".x"
+  --timeout 5`), everywhere else they come BEFORE it. Passing one where it is not declared is an
+  exit-1 usage error naming the invocation that works.
 
-  Flag position: the flags on the top-level command (--json, --browser, --verdict, --budget,
-  --stealth, --on-intercept, --page, --dialog ...) are accepted on either side of the verb, so
-  `fill --selector "#q" x --json` works as well as `--json fill --selector "#q" x`. Two are the
-  exception: --timeout and --max-depth. A command that declares its own takes it after the verb
-  (`wait selector ".x" --timeout 5`, `click n1 --max-depth 2`); everywhere else those two must
-  come BEFORE it. Passing one where it is not declared is an exit-1 usage error that names the
-  invocation which works.
+  Targeting (3 modes: uid from inspect, CSS selector, coordinates):
+    chrome-agent click n40
+    chrome-agent click --selector "button.submit"
+    chrome-agent click --xy 100,200
+    chrome-agent fill --uid n20 "value"
+    chrome-agent fill-form n20="a@b.com" n30="pass"
+    chrome-agent hover n30
+    chrome-agent dblclick n42
+    chrome-agent drag n10 n20
+    # Every targeted action returns the `uid` it actually resolved -- check it against the delta.
+    # drag uses mouse events: works with Sortable.js and React DnD, NOT with HTML5 drag-and-drop.
 
-  Quick start:
-    chrome-agent goto https://example.com --inspect
-    chrome-agent click n12                         # reports what changed; no second call needed
-    chrome-agent fill --uid n20 "hello@example.com"
-    chrome-agent select --uid n15 "California"
-    chrome-agent read                              # article content (Readability)
-    chrome-agent eval "document.title"
-
-  Stealth (bypass Cloudflare/bot detection):
-    chrome-agent --stealth goto https://protected-site.com --inspect
-    # Patches navigator.webdriver, chrome.runtime, UA, WebGL, input leak, skips Runtime.enable
-
-  Logged-in sites (X.com, Gmail, dashboards — use your Chrome cookies):
-    chrome-agent --stealth --copy-cookies goto x.com/home --inspect
-    # Copies cookies from your real Chrome profile. No manual login needed.
-
-  Heavy bot protection (DataDome, Kasada — when --stealth isn't enough):
-    # Use your real Chrome instead of bundled Chromium:
-    google-chrome --remote-debugging-port=9222 &
-    chrome-agent --connect http://127.0.0.1:9222 goto https://protected-site.com --inspect
-    # Real Chrome passes fingerprint checks that Chromium can't
-
-  Extra Chrome flags (experimental CDP/feature flags, e.g. WebMCP):
-    chrome-agent --chrome-arg --enable-features=WebMCP,WebMCPTesting goto https://example.com
-    # Repeatable, applies only to the Chrome chrome-agent launches itself (no effect under
-    # --connect, refused with an error rather than silently ignored). Fixed for the life of a
-    # named browser like --proxy-server: a follow-up command that omits it inherits whatever
-    # the browser already runs with, and one naming DIFFERENT flags is refused rather than
-    # relaunched out from under you — close or purge the browser to change them.
-    # Refused outright: --user-data-dir, --remote-debugging-port, --remote-debugging-pipe,
-    # --proxy-server (use --proxy-server instead), --headless (use --headed instead) — chrome-agent
-    # depends on its own values for these to find and reconnect to the browser it launched.
-
-  WebMCP tools (document.modelContext.getTools()/.executeTool()):
-    chrome-agent webmcp list
-    chrome-agent inspect                                       # baseline first, like any action
-    chrome-agent webmcp call add_to_cart --args '{"item":"X"}'
-    # The protocol defines no outputSchema: a tool's declared return is a freeform string with
-    # nothing to check it against. `webmcp call` reports the tool's own declared_result next to
-    # verdict/delta/next from the SAME machinery every other action gets. A tool that declares
-    # success and moves nothing reads verdict=unchanged/identical_tree, never a stronger claim —
-    # canvas repaints, CSS-only changes, and late handlers all look the same to this measurement.
-    # `webmcp call` resolves the RegisteredTool object and validates --args as JSON itself, so
-    # the spec's own TypeError ("not of type 'RegisteredTool'") and SyntaxError ("Failed to
-    # parse input arguments") are not reachable through it.
-    # Under `frame`, webmcp hits the same isolated-world blindness eval already has: a tool the
-    # frame's own main-world script registered can be invisible. Response carries
-    # frame_scoped:true when this applies — an empty list there is unproven, not "none".
-    # Most installed Chrome has no native WebMCP: use --chrome-arg above, or a page's polyfill.
-
-  Targeting elements (3 modes):
-    chrome-agent click n40                              # by uid from inspect
-    chrome-agent click --selector "button.submit"      # by CSS selector
-    chrome-agent click --xy 100,200                    # by coordinates
-    chrome-agent fill --uid n20 "value"                 # fill by uid
-    chrome-agent fill --selector "input[name=q]" "val" # fill by CSS selector
-
-  Dropdowns (<select> elements only):
-    chrome-agent select --uid n15 "Option text"        # select by value or visible text
-    chrome-agent select --selector "#country" "France" # by CSS selector
-    # For custom dropdowns (React, MUI, etc.): click to open, then click the option.
-
-  Checkboxes and radios (idempotent, uid only):
-    chrome-agent check n20                              # ensure checked (no-op if already)
-    chrome-agent uncheck n20                            # ensure unchecked (no-op if already)
-    # Prefer check/uncheck over click — they guarantee the target state.
-
-  File upload:
-    chrome-agent upload --uid n30 /path/to/file.pdf    # by uid
-    chrome-agent upload --selector "input[type=file]" /path/to/file.pdf
-    # File inputs are often hidden from the a11y tree. Use --selector to target them.
-
-  Double-click:
-    chrome-agent dblclick n42                           # by uid
-    chrome-agent dblclick --selector ".editable-cell"  # by CSS selector
-    chrome-agent dblclick --xy 300,200                  # by coordinates
-    # Useful for: text selection, inline editing, expanding tree nodes.
-
-  Drag and drop (mouse-event based):
-    chrome-agent drag n10 n20                           # drag from uid to uid
-    # Works with: Sortable.js, React DnD (mouse backend), custom mousedown handlers.
-    # Does NOT work with HTML5 Drag and Drop API (sites using dragstart/dragover/drop).
-    # For HTML5 DnD sites, use eval with custom JS to dispatch drag events.
+  Form controls:
+    chrome-agent select --uid n15 "Option text"
+    chrome-agent check n20
+    chrome-agent uncheck n20
+    chrome-agent upload --uid n30 /path/to/file.pdf
+    # select matches option value first, then visible text, and refuses if the page reverts it.
+    # Custom dropdowns (React, MUI) are not <select>: click to open, then click the option.
+    # check/uncheck are idempotent and read the state back -- prefer them over click. File
+    # inputs are usually hidden from the a11y tree: target them with --selector.
 
   Keyboard:
-    chrome-agent type "search term"                     # type into whatever holds focus
-    chrome-agent type "laptop" --selector "input.search" # focus that element first, then type
-    chrome-agent press Enter                            # Enter/Tab/Escape/ArrowDown/... by name
-    chrome-agent press a                                # a single printable character types it
-    # An unmapped key NAME is refused rather than dispatched with virtual key code 0.
+    chrome-agent type "search term"
+    chrome-agent press Enter
+    # A key NAME that is not mapped is refused rather than dispatched with virtual key code 0.
 
-  Device emulation (explicit CDP metrics; no bundled preset catalog):
+  Navigation:
+    chrome-agent goto https://example.com
+    chrome-agent goto https://spa.com --wait-for "main"
+    chrome-agent goto https://api.co --header "Authorization: Bearer XYZ"
+    chrome-agent back
+    chrome-agent forward
+    chrome-agent scroll down
+    chrome-agent wait text "Success"
+    chrome-agent wait network-idle --idle-ms 800 --timeout 20
+    chrome-agent history --filter "github"
+    # goto returns "landed": {requested, final, redirected, http_status, serving}. Check
+    # "redirected" -- an expired session bouncing to a login wall reads as a successful load.
+    # Fragment-only and trailing-slash differences are not redirects; http_status is the final
+    # hop's and is absent (never 0) when the browser reports none. A redirect onto /login,
+    # /signin, /auth or /sso adds a "hint" guessed from the URL: inspect to confirm. --header is
+    # repeatable; wait network-idle beats a fixed sleep for SPA/XHR settle.
+
+  "serving" on goto is what ANSWERED, and it never changes ok or the exit code:
+    page                nothing measured contradicts a served page -- NOT a certificate: a
+                        paywall, a cookie wall and an unknown captcha all read as page
+    challenge           an anti-bot vendor's frame/script and no form of the site's own;
+                        challenge_from names the vendor host. --stealth does not defeat these
+    error               the server answered 4xx/5xx. Read http_status
+    nothing_actionable  no link, no form control, no script, almost no text. An edge-served
+                        refusal and a page that had not rendered look identical: inspect first
+    unreadable          the shape probe did not run; nothing is known about the document
+    # challenge_from can also appear under serving:"page" (a captcha widget on a usable form):
+    # the word is the branch, the field is the evidence.
+
+  Inspection:
+    chrome-agent inspect
+    chrome-agent inspect --max-depth 2
+    chrome-agent inspect --filter "button,link"
+    chrome-agent inspect --uid n50 --urls
+    chrome-agent inspect --max-chars 4000 --offset 4000
+    chrome-agent diff
+    # --filter gives a flat list; --scroll --limit N loads infinite-scroll feeds; --urls
+    # resolves hrefs before you choose what to click;
+    # --max-chars caps the output and tells you the next --offset. Narrowing flags change only
+    # what is PRINTED: the stored snapshot is always the full tree, so `inspect --filter button`
+    # then `diff` still reports what really moved.
+
+  Content extraction (in order of preference):
+    chrome-agent extract
+    chrome-agent extract --a11y --scroll --limit 20
+    chrome-agent read
+    chrome-agent text --selector "main" --truncate 500
+    chrome-agent eval --selector "h1" "el.textContent"
+    # extract: repeating records (grids, feeds, tables). ~1,570 tokens for all 30 HN stories,
+    # against ~5,650 for a full inspect and ~8,730 for the raw HTML. Reach for it first.
+    # read: articles, via Readability. text --selector: scoped. eval: structured data. --a11y
+    # reads the a11y tree instead of the DOM (React SPAs like X.com); --scroll scrolls and waits
+    # on a MutationObserver for lazy content.
+
+  Network and console:
+    chrome-agent network
+    chrome-agent network --filter "graphql" --body
+    chrome-agent network --abort "*tracking*" --live 30
+    chrome-agent console --level error
+    # network with no --live lists resources already loaded (stealth-safe). --body without
+    # --filter fetches textual types only; WITH --filter every match is fetched. Binary bodies
+    # are never printed: body_omitted names the size and the download command.
+    # --abort is blocking for --live N seconds -- start it before navigating.
+
+  Assertions (exit code IS the answer: 0 held, 2 did not hold, 1 could not be checked):
+    chrome-agent assert value --selector "#email" --equals "ada@example.com"
+    chrome-agent assert text --contains "Order shipped"
+    chrome-agent assert text --selector "#status" --matches "Shipped on \d{4}"
+    chrome-agent assert url --matches "/orders/\d+$"
+    chrome-agent assert state --selector "#terms" --checked
+    chrome-agent assert state --uid n15 --selected "California"
+    chrome-agent assert exists --selector ".result" --count 10
+    chrome-agent assert exists --selector ".error" --min 1
+    # 2 = the page is not in that state (report or repair). 1 = nothing was compared: no browser,
+    # a selector matching nothing, an unparseable regex, a CDP timeout (retry). Only assert exits
+    # 2. assert is a read: no change report, no verdict, and it never clicks. --checked reads the
+    # same classification check/uncheck apply and --selected the same reading select uses, so an
+    # assertion cannot disagree with the action; --enabled/--disabled and --visible read state
+    # too. Secrets are compared, never printed. --matches is
+    # a Rust regex: \d \w \s ASCII-only, no \p or lookaround, "(?i)" for case-insensitive;
+    # --contains is a plain case-sensitive substring. Inside pipe/batch an assertion has no exit
+    # code of its own: the same assertion object arrives with ok:false, and a batch that stopped
+    # on it exits 1, not 2.
+
+  Files (written 0600 under ~/.chrome-agent/tmp; path on stdout, never base64):
+    chrome-agent screenshot --format jpeg --quality 60 --max-width 1024
+    chrome-agent screenshot --uid n42
+    chrome-agent pdf --filename page.pdf
+    chrome-agent download https://site/report.pdf
+    chrome-agent download https://site/data.zip --out ./data.zip --max-bytes 10485760
+    chrome-agent download --uid n47 --timeout 60
+    # download takes EXACTLY one target: a URL, --uid or --selector. Two is refused, not ranked.
+    # A URL is fetched in-page (the login is kept), capped at 64 MiB. --uid/--selector CLICKS the
+    # element and captures the browser-native download -- the only route to a Blob-built file or
+    # a POST no anchor names; same hit test, same --on-intercept. READ `downloaded`, NOT `ok`: a
+    # click that landed and produced no file answers ok:true with downloaded:false, so never
+    # repeat it blind. --timeout bounds the whole window (begin AND finish), --max-bytes cancels
+    # and removes the partial file. No verdict, no change report.
+
+  Macros (a path that already worked, kept and replayable):
+    chrome-agent macro list
+    chrome-agent macro record checkout --from-recording session.jsonl
+    chrome-agent macro run checkout --var email=ada@example.com
+    chrome-agent replay session.jsonl
+    # In pipe: {"cmd":"macro","action":"record","name":"x"} distils THIS session; "from"
+    # overrides where the task starts (default: the last successful navigation).
+    # A step keeps only what survives tomorrow: delivery target_hit, the verdict WORD,
+    # value.verbatim, a url_matches built from the PATH. Never counters, uids or durations.
+    # A step aimed by uid is recorded by role+name or REFUSED; --xy is never recordable. A secret
+    # field becomes a declared parameter and is never stored: run refuses without --var.
+    # A guard that does not hold STOPS the run, naming the step index, the guard, what was
+    # observed and the action's own next -- nothing is repaired, retried or skipped. Steps that
+    # promise nothing are marked unguarded. replay re-runs a `pipe --record` file raw: no guards,
+    # no parameters.
+
+  Pipe and batch (one connection, ~10x faster, uids stay valid across commands):
+    echo '{"cmd":"goto","url":"https://example.com","inspect":true}' | chrome-agent pipe
+    echo '[{"cmd":"goto","url":"https://example.com"},{"cmd":"inspect"}]' | chrome-agent --json batch
+    chrome-agent --json batch --stop-on-error
+    # pipe answers one JSON line per command; batch answers ONE object holding every result,
+    # and prints it as JSON only under --json (text mode gets one line per entry). With
+    # --stop-on-error the response adds stopped_at and skipped AND the process exits 1 -- 1,
+    # never 2, which is only ever an assertion that did not hold. Without --stop-on-error it
+    # ran everything and exits 0 even when an entry failed: read ok. In pipe that flag is
+    # {"cmd":"batch","stop_on_error":true,"commands":[...]}. Each CLI batch invocation is a
+    # fresh connection, so uids change between them.
+
+  Iframes (the binding lives on the connection: use pipe or batch, not separate CLI calls):
+    chrome-agent frame "#payment-iframe"
+    chrome-agent frame main
+    # frame scopes eval and inspect; it does NOT scope --selector targeting. Re-inspect after
+    # switching, then act by uid (backendNodeId is page-global and works cross-frame). A nested
+    # selector resolves inside the bound frame, so `frame main` first to reach a sibling. The
+    # isolated world sees the frame's DOM but not its main-world JS variables. <iframe> only,
+    # not legacy <frame>/<frameset>.
+
+  Device emulation (explicit CDP metrics, no preset catalog):
     chrome-agent --page mobile emulate device --label "checkout phone" --width 412 --height 915 --dpr 2.625 --mobile --touch
     chrome-agent --page mobile emulate status
     chrome-agent --page mobile emulate reset
-    # Persisted per named page, reapplied at the start of each connection (Chrome reverts
-    # overrides when the session that set them detaches). Sibling pages keep their own metrics.
-    # Acting on an emulated page activates its tab (Chromium reports orientation only for the
-    # active target), which backgrounds siblings like a tab switch does.
-    # Under --touch, click/check dispatch touch taps; dblclick/hover/drag stay mouse events.
-    # Closing or restarting Chrome discards the configuration.
+    # Persisted per named page and reapplied on each connection (Chrome reverts overrides when
+    # the session that set them detaches); sibling pages keep their own metrics. Acting on an
+    # emulated page activates its tab, which backgrounds siblings. Under --touch, click/check
+    # dispatch touch taps; dblclick/hover/drag stay mouse events. A Chrome restart discards it.
 
-  Iframes:
-    chrome-agent frame "#payment-iframe"               # switch to iframe context
-    chrome-agent inspect                                # re-inspect to get iframe UIDs
-    chrome-agent fill --selector "input[name=card]" "4242..."  # interact inside iframe
-    chrome-agent frame main                             # switch back to main page
-    # Only works with <iframe>, not legacy <frame>/<frameset>.
-    # Always re-inspect after switching — UIDs are scoped to the frame.
+  WebMCP tools (document.modelContext.getTools()/.executeTool()):
+    chrome-agent webmcp list
+    chrome-agent inspect
+    chrome-agent webmcp call add_to_cart --args '{"item":"X"}'
+    # The protocol defines no outputSchema, so a tool's declared_result is a freeform string with
+    # nothing to check it against. webmcp call reports it beside verdict/delta/next from the same
+    # machinery every other action gets: a tool that declares success and moves nothing reads
+    # unchanged/identical_tree, never a stronger claim. Under `frame` it hits the isolated-world
+    # blindness eval has -- the response carries frame_scoped:true, so an empty list there is
+    # unproven, not "none". Most Chrome installs have no native WebMCP: use --chrome-arg.
 
-  Assertions (the exit code IS the answer: 0 held, 2 did not hold, 1 could not be checked):
-    chrome-agent assert value --selector "#email" --equals "ada@example.com"
-    chrome-agent assert value --uid n20 --contains "@"
-    chrome-agent assert text --contains "Order shipped"           # whole-page text
-    chrome-agent assert text --selector "#status" --matches "Shipped on \d{4}"
-    chrome-agent assert url --matches "/orders/\d+$"
-    chrome-agent assert url --equals "https://shop.example.com/cart"
-    chrome-agent assert state --selector "#terms" --checked        # native OR aria-checked
-    chrome-agent assert state --uid n15 --selected "California"    # dropdown's current option
-    chrome-agent assert state --selector "#submit" --enabled       # or --disabled
-    chrome-agent assert state --selector ".modal" --visible        # rendered, opaque, not hidden
-    chrome-agent assert exists --selector ".result" --count 10     # exactly 10
-    chrome-agent assert exists --selector ".result" --min 1        # at least 1
-    chrome-agent assert exists --selector ".error" --count 0       # assert absence
-    # 2 means the page is not in that state. 1 means nothing was compared: no browser, a
-    # selector that matches nothing, an unparseable regex, a CDP timeout. Retry on 1;
-    # report or repair on 2. Every other command still exits 0 or 1 only.
-    # assert reads the page: no change report, no verdict, and it never clicks anything.
-    # --checked reads the same classification check/uncheck apply; --selected the same
-    # reading select uses. An assertion cannot disagree with the action.
-    # --matches is a Rust regex: \d \w \s are ASCII-only, no \p or lookaround. Use
-    # "(?i)" for case-insensitive. --contains is a plain substring, case-sensitive.
-    # Secret fields (password, cc-number, cc-csc, one-time-code) are compared but the
-    # value is never printed: the response says redacted with both lengths.
-    # In pipe/batch there is no exit code: {"cmd":"assert","what":"value","selector":"#a",
-    # "equals":"x"} answers ok:false with the same assertion object.
-
-  Inspection + filtering:
-    chrome-agent inspect                               # full accessibility tree
-    chrome-agent inspect --max-depth 2                 # limit depth (saves tokens)
-    chrome-agent inspect --filter "button,link"        # only these roles (flat list)
-    chrome-agent inspect --uid n50                     # subtree only
-    chrome-agent inspect --filter "link" --urls        # links with resolved href URLs
-    chrome-agent inspect --filter "article" --scroll --limit 50  # infinite scroll (X.com, feeds)
-    chrome-agent inspect --max-chars 4000              # cap output; appends a tail with the next --offset
-    chrome-agent inspect --max-chars 4000 --offset 4000  # page through a huge tree deterministically
-
-  Content extraction (choose the right tool):
-    chrome-agent read                                  # article/main content (Readability)
-    chrome-agent read --truncate 1000                  # capped at N chars
-    chrome-agent text --selector "main" --truncate 500 # visible text of CSS-matched element
-    chrome-agent text                                  # full page innerText (verbose)
-    chrome-agent extract                                # auto-detect repeating data (tables, cards, lists)
-    chrome-agent extract --scroll                      # scroll first for lazy-loaded pages
-    chrome-agent extract --a11y --scroll --limit 20    # React SPAs (X.com) -- uses a11y tree, not DOM
-    chrome-agent eval "JSON.stringify(...)"            # structured data via JS
-    chrome-agent eval --selector "h1" "el.textContent" # eval scoped to a CSS element (el = matched)
-    chrome-agent network --filter "api" --body         # intercept API responses directly
-    chrome-agent console --level error                 # see JS errors from the page
-
-  Network capture and blocking:
-    chrome-agent network                               # resources already loaded (stealth-safe)
-    chrome-agent network --filter "graphql" --body     # filter + response bodies
-    chrome-agent network --live 5 --body               # capture live traffic for 5 seconds
-    # --body without --filter fetches textual types only (json/text/js/xml); WITH --filter
-    # every match is fetched — the filter is the selection (application/yaml included).
-    # Binary bodies are never printed: body_omitted names the size and the download command.
-    chrome-agent network --abort "*tracking*" --live 30 # block requests matching pattern
-
-  Console capture (stealth-safe):
-    chrome-agent console                               # all messages
-    chrome-agent console --level error                 # errors + exceptions only
-
-  Batch mode (execute multiple commands at once):
-    echo '[{"cmd":"goto","url":"https://example.com"},{"cmd":"inspect"},{"cmd":"click","uid":"n12"}]' | chrome-agent batch
-    chrome-agent batch --stop-on-error                  # stop at the first ok:false (default: run all)
-    # With --stop-on-error the response adds stopped_at (index) and skipped (count).
-    # In pipe mode: {"cmd":"batch","stop_on_error":true,"commands":[...]}
-    # Returns one JSON line per command. Faster than separate CLI calls.
-    # UIDs from inspect are valid for subsequent commands in the same batch.
-    # After goto in a batch, UIDs change — use the ones from the next inspect.
-
-  Pipe mode (persistent connection, 10x faster):
-    echo '{"cmd":"goto","url":"https://example.com","inspect":true}' | chrome-agent pipe
-    # Returns one JSON line per command: {"ok":true,...}
-
-  Navigation:
-    chrome-agent goto https://example.com              # navigate
-    # goto also returns "landed": {"requested","final","redirected","http_status","serving"}.
-    # Check "redirected" before trusting the page — an expired session bouncing to a
-    # login wall otherwise reads as a successful load. Fragment-only and trailing-slash
-    # differences are not redirects. "http_status" is the final hop's status as the
-    # browser reports it, and is absent (never 0) when it reports none. A redirect onto /login, /signin,
-    # /auth or /sso adds a "hint": a guess from the URL, so inspect to confirm.
-    #
-    # "serving" is what answered, and it is the field to branch on. ok:true only means the
-    # navigation happened.
-    #   page                a page was served; nothing measured says otherwise. NOT a
-    #                       certificate — a paywall or an unknown captcha reads as page too.
-    #   challenge           an anti-bot vendor's frame/script is here and there is no form of
-    #                       the site's own. "challenge_from" names the vendor's host. --stealth
-    #                       does not defeat these; use --connect to a real Chrome.
-    #   error               the server answered 4xx/5xx. Read http_status for which.
-    #   nothing_actionable  no link, no form control, no script, almost no text. What an
-    #                       edge-served refusal looks like — and what a page that had not
-    #                       rendered yet looks like. A measurement, not a claim you were
-    #                       blocked: inspect before giving up.
-    #   unreadable          the shape probe did not run; nothing is known about the document.
-    # "challenge_from" can also appear under serving:"page" — a captcha widget on a usable
-    # form. The word is the branch; the field is the evidence.
-    chrome-agent goto https://spa.com --wait-for "main" # wait for selector after nav
-    chrome-agent goto https://api.co --header "Authorization: Bearer XYZ"  # extra HTTP headers (repeatable)
-    chrome-agent back                                  # history back
-    chrome-agent forward                               # history forward
-    chrome-agent scroll down                           # scroll page
-    chrome-agent wait text "Success"                   # wait for content
-    chrome-agent wait network-idle                     # wait until network quiets (SPA/XHR settle)
-    chrome-agent wait network-idle --idle-ms 800 --timeout 20  # tune the quiet window
-
-  Downloads, PDF, screenshots (files land in ~/.chrome-agent/tmp; paths on stdout):
-    chrome-agent download https://site/report.pdf     # fetch in-page, keeps cookies/auth; rejects over 64 MiB by default
-    chrome-agent download https://site/f.csv --out ./data.csv   # choose the destination path
-    chrome-agent download https://site/data.zip --max-bytes 10485760   # set a smaller byte limit
-    chrome-agent download --selector "#export" --out ./export.csv   # CLICK it and capture the file
-    chrome-agent download --uid n47 --timeout 60       # same, by uid, with a longer window
-    chrome-agent pdf --filename page.pdf                    # print current page to PDF (Page.printToPDF)
-    chrome-agent pdf --landscape --background          # orientation + background graphics
-    chrome-agent screenshot                            # full page, PNG
-    chrome-agent screenshot --format jpeg --quality 60 --max-width 1024  # smaller file (fewer tokens if re-read)
-    chrome-agent screenshot --uid n42                  # capture just one element (or --selector "css")
-
-  Dialogs (alert/confirm/prompt/beforeunload) — auto-handled so the page never hangs:
-    # Default: --dialog accept. A native dialog otherwise blocks with no DOM signal.
-    chrome-agent --dialog dismiss click n20            # cancel every dialog instead
-    chrome-agent --dialog accept --dialog-text "hi" click n20   # answer prompt() with text
-    chrome-agent --dialog manual click n20             # opt out (legacy: dialogs left alone)
-
-  Multi-tab:
+  Sessions, tabs and cleanup:
+    chrome-agent status
+    chrome-agent tabs
     chrome-agent --page tab2 goto https://other.com
-    chrome-agent --page tab2 inspect
+    chrome-agent --browser agent1 goto https://example.com
+    chrome-agent close --purge
+    chrome-agent close --orphans
+    # Parallel agents MUST use distinct --browser names; sharing "default" corrupts sessions.
+    # status lists browsers no session entry claims as orphan=<name>; --orphans closes them and
+    # --purge also deletes cookies and the profile.
 
-  Parallel agents (avoid session conflicts):
-    chrome-agent --browser agent1 goto https://example.com  # isolated browser per agent
-    chrome-agent --browser agent2 goto https://other.com    # separate Chrome instance
+  Bot protection:
+    chrome-agent --stealth goto https://protected-site.com --inspect
+    chrome-agent --stealth --copy-cookies goto https://x.com/home --inspect
+    chrome-agent --connect http://127.0.0.1:9222 goto https://protected-site.com --inspect
+    chrome-agent --chrome-arg --enable-features=WebMCP,WebMCPTesting goto https://example.com
+    # --stealth is 7 CDP-level patches (navigator.webdriver, chrome.runtime, UA, WebGL, input
+    # leak, and it skips Runtime.enable). Measured: it clears a Cloudflare JS challenge
+    # ("Just a moment...", shop.app: 403 without, real page with), and does NOT clear a managed
+    # Turnstile (nowsecure.nl: identical either way) or DataDome (leboncoin.fr: 403 either way).
+    # For those, --connect to a real Chrome started with --remote-debugging-port=9222.
+    # --copy-cookies reads your real Chrome profile's cookies -- no manual login needed.
+    # --chrome-arg is repeatable, applies only to the Chrome chrome-agent launches (refused, not
+    # ignored, under --connect) and is fixed for the life of a named browser. Refused outright:
+    # --user-data-dir, --remote-debugging-port, --remote-debugging-pipe, --proxy-server (use the
+    # global one), --headless (use --headed).
 
-  JSON mode:
+  Dialogs (alert/confirm/prompt/beforeunload) are auto-accepted so the page never hangs:
+    chrome-agent --dialog dismiss click n20
+    chrome-agent --dialog accept --dialog-text "hi" click n20
+    # --dialog manual opts out. The handler logs to stderr, so --json output stays clean.
+
+  JSON mode and exit codes:
     chrome-agent --json goto https://example.com
-    -> {"ok":true,"url":"...","title":"..."}
-    Errors: {"ok":false,"error":"...","hint":"..."} (exit 1, JSON still on stdout)
-    Exit codes: 0 success · 1 error (also a bad flag) · 2 an assertion did not hold · 130 Ctrl+C
-    A failed assertion: {"ok":false,"assertion":{"kind":"value","expected":"x","actual":"",
-    "held":false},"hint":"..."} on stdout with exit 2. Without --json the line goes to
-    stderr and stdout stays empty, so a shell pipeline reads the exit code alone.
+    # -> {"ok":true,"url":"...","title":"..."}; errors are {"ok":false,"error":"...","hint":"..."}
+    # on stdout with exit 1. Exit codes: 0 success · 1 error (also a bad flag) · 2 an assertion
+    # did not hold · 130 Ctrl+C. A failed assertion prints {"ok":false,"assertion":{...}} on
+    # stdout with exit 2; without --json that line goes to stderr and stdout stays empty.
+    # A batch --stop-on-error that stopped exits 1, with its response still on stdout.
 
-  More commands:
-    chrome-agent hover n30                             # hover over element
-    chrome-agent fill-form n20="a@b.com" n30="pass"   # fill multiple fields at once
-    chrome-agent diff                                  # what changed since last inspect
-    chrome-agent tabs                                  # list open tabs
-    chrome-agent history [--filter "pattern"]          # browsing history
-    chrome-agent status                                # session info
-    chrome-agent screenshot [--filename name]          # screenshot to file
-    chrome-agent pdf [--filename name] [--landscape]        # current page to PDF
-    chrome-agent download <url> [--out path] [--max-bytes N]   # auth-preserving; default max 64 MiB
-    chrome-agent download --uid n47 [--out path]            # or CLICK it, capture the browser-native download
-    chrome-agent download --selector "css" [--out path]     # same by selector — exactly one target, never two
-
-  Cleanup:
-    chrome-agent close                                 # stop browser
-    chrome-agent close --purge                         # stop + delete cookies/profile
-    chrome-agent close --orphans                       # close browsers no session entry claims
-                                                       # (status lists them as orphan=<name>)
-
-  Important tips:
-    - Use --stealth on a Cloudflare JS challenge (the "Just a moment..." interstitial):
-      measured on shop.app, 403 without it and the real page with it. It does NOT clear a
-      managed Turnstile (nowsecure.nl: identical with and without) nor DataDome
-      (leboncoin.fr: 403 either way) -- for those, --connect to a real Chrome.
-    - UIDs (n47, n123) are stable across inspects on the same page.
-    - After SPA navigation (back, forward, click that triggers route change), re-inspect — UIDs change.
-    - For SPA product pages, prefer `goto <direct-url>` over `click` (avoids modal routing).
-    - Use `extract` for repeating records, `read` for articles, `text --selector` for scoped
-      extraction, `eval` for structured data. Reach for `extract` first on any list page:
-      on the HN front page it returns all 30 stories in ~1,570 tokens, against ~5,650 for a
-      full inspect and ~8,730 for the raw HTML.
-    - Prefer inspect over screenshot: a screenshot gives you no uids to act on, so you end up
-      paying for the image and then inspecting anyway.
-    - Actions report changes by default, and `verdict`/`next` interpret those counts for you --
-      see the response table at the top of this guide. `added`/`removed`/`changed` of 0 does
-      NOT mean the action had no effect: an overlay that swallowed the click, an effect the
-      a11y tree cannot see, and a handler that ran after the window all look exactly like it.
-      Never retry on `unchanged` or `unknown` without checking first: the action may have
-      landed and a repeat is a second real action.
-    - Read `value.verbatim` after every fill, select and check before you report it worked --
-      all three read the element back and report it in that same field -- and read `uid`
-      on every targeted action -- it names the node actually resolved, even when you aimed
-      with --selector, so you can check the delta describes the element you meant.
-    - --budget N caps that change report (default 1200 chars); --verdict off turns it off
-      entirely and restores the older, faster, quieter behaviour.
-    - A full inspect is not cheap on a real page (~5,650 tokens on the HN front page). Narrow
-      it with --filter or --max-depth when you only need the interactive elements
-      (--filter button,link on that same page is ~1,735).
-    - Use --urls on inspect to get link destinations before deciding which to click.
-    - A submit that reports `values_lost` cleared a field you had filled. That is what a form
-      does after a successful send AND what a form does when it throws the input away -- the
-      tool cannot tell those apart. Confirm with `assert text --contains` on the page's own
-      confirmation, or `network`, before re-filling: a re-submit may send the work twice.
-    - After a fill/select/check whose report looks wrong, `assert` is the cheap confirmation:
-      it re-reads one thing instead of the whole tree, and exit 2 names what the page holds.
-      A page that reverts a value later than the 60ms read-back window (a validator at 400ms)
-      is caught by `wait` + `assert value`, which no single action can do.
-    - check/uncheck are idempotent — prefer over click for checkboxes.
-    - select matches by option value first, then by visible text.
-    - After `frame <selector>`, re-inspect to get iframe UIDs. `frame main` to return.
-    - --max-depth works on goto/click/fill --inspect too (not just standalone inspect).
-    - --filter gives a flat list — great for finding interactive elements quickly.
-    - inspect --max-chars caps output and tells you the next --offset to page through.
-    - Narrowing an inspect (--filter, --max-depth, --uid, --limit, --urls, --max-chars) only
-      changes what is PRINTED. The snapshot stored for the next `diff` is always the full
-      tree, and every uid on the page stays actionable — so `inspect --filter button` then
-      `diff` reports what really moved, not the nodes the filter hid from you.
-    - wait network-idle beats fixed sleeps for SPA/XHR settle (opt-in, off the stealth hot path).
-    - download <url> uses an in-page fetch, so it keeps the page's login, and rejects
-      responses over 64 MiB by default (--max-bytes N overrides it).
-    - download --uid/--selector CLICKS the element and captures the browser-native download.
-      Use it when the file has no URL to fetch: built in the page with a Blob, or served by a
-      POST no anchor names. It runs the same click as `click` (same hit test, same
-      --on-intercept), so a covered button reports its receiver in intercepted_by.
-      READ `downloaded`, NOT `ok`. A click that landed and produced no file answers ok:true
-      with downloaded:false — an error there would invite a second real click, and the page
-      cannot tell that from a second deliberate action. Never repeat it blind.
-      --timeout bounds the whole window: the transfer must begin AND finish inside it.
-      --max-bytes cancels a transfer that goes past it and removes the partial file.
-      download carries no verdict and no change report: `downloaded` and `path` are the
-      result, exactly as `landed` is for goto.
-    - JS dialogs auto-accept by default. Use --dialog dismiss/manual to change behavior.
-    - screenshot --format jpeg --max-width shrinks captures; --uid/--selector clips to one element.
+  Cost and correctness notes:
+    - UIDs (n47, n123) are stable across inspects of the same page; an SPA route change (back,
+      forward, a click that re-renders) reassigns them. Re-inspect.
+    - For SPA product/detail pages prefer `goto <direct-url>` over clicking a link.
+    - `added`/`removed`/`changed` of 0 does NOT mean the action had no effect: an overlay that
+      swallowed the click, an effect the a11y tree cannot see, and a late handler look the same.
+    - Read value.verbatim after every fill, select and check before reporting success.
+    - --budget N caps the change report (default 1200 chars); --verdict off removes it entirely,
+      and every guarantee above with it. A full inspect is ~5,650 tokens on the HN front page,
+      --filter button,link ~1,735.

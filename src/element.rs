@@ -27,7 +27,6 @@ pub async fn resolve_uid(
         ElementError::NotFound(format!("Element uid={uid} has no resolvable backend node."))
     })?;
 
-    // Resolve to a JS object
     let result: ResolveNodeResult = client
         .call("DOM.resolveNode", ResolveNodeParams {
             node_id: None,
@@ -71,17 +70,9 @@ pub struct ResolvedElement {
     pub backend_node_id: i64,
 }
 
-/// Click an element by uid.
-///
-/// The aim point comes from `hit_test::aim`, which scrolls the element into view, measures
-/// where a click on it would go, and says what sits there — one round trip, replacing the
-/// separate `scrollIntoViewIfNeeded` call and second `DOM.getBoxModel` this used to do. What
-/// the probe reports is what the response reports: a click delivered to something else is
-/// `intercepted` rather than a success indistinguishable from a real one, and an aim point
-/// still moving under a smooth scroll is refused rather than dispatched into empty space.
-///
-/// An element with no layout box still falls back to a JS `.click()`, where there is no point
-/// to aim at and no hit test to run.
+/// Click an element by uid. `hit_test::aim` scrolls the element into view, measures where the click would go and says what
+/// sits there, in one round trip. A click delivered elsewhere reports `intercepted`; an aim point
+/// still moving under a smooth scroll is refused. No layout box falls back to a JS `.click()`.
 pub async fn click(
     client: &CdpClient,
     uid_map: &HashMap<String, ElementRef>,
@@ -105,10 +96,8 @@ pub async fn click(
     Ok(outcome.named(Some(uid.to_string()), None, None))
 }
 
-/// Aim at a resolved handle and single-click it. Shared by the uid and the selector paths, so
-/// the two spellings of `click` cannot drift apart again.
-///
-/// `fallback_center` is the box model's centre, used only when the probe itself could not run.
+/// Aim at a resolved handle and single-click it. Shared by the uid and selector paths.
+/// `fallback_center` is the box model's centre, used only when the probe could not run.
 pub async fn click_handle(
     client: &CdpClient,
     object_id: &str,
@@ -135,8 +124,8 @@ pub async fn click_handle(
     };
 
     if matches!(delivery, Delivery::NotSettled | Delivery::OffTarget) {
-        // `unaimable` is what separates a box a pointer cannot reach from a box the page is
-        // holding off screen. Same verdict, same absence of a dispatch, different recovery.
+        // `unaimable` separates a box a pointer cannot reach from a box the page holds off
+        // screen: same verdict, same absence of a dispatch, different recovery.
         return Ok(Dispatched::skipped(delivery, point, None).unaimed(unaimable));
     }
     if delivery == Delivery::Intercepted
@@ -153,10 +142,8 @@ pub async fn click_handle(
     Ok(Dispatched::landed(delivery, point, receiver))
 }
 
-/// The error a refused pointer action returns, carrying what the probe measured.
-///
-/// One place for both verbs: a refusal that names the receiver on `click` and not on
-/// `dblclick` is the same class of asymmetry the verdict module exists to remove.
+/// The error a refused pointer action returns, carrying what the probe measured. One place for
+/// both verbs, so `click` and `dblclick` refuse in the same words.
 fn refusal(
     dispatched: crate::hit_test::Dispatched,
     verb: &str,
@@ -170,9 +157,8 @@ fn refusal(
 
 /// A click at coordinates somebody else decided on: mouse normally, touch under emulation.
 async fn dispatch_click_at(client: &CdpClient, cx: f64, cy: f64) -> Result<(), ElementError> {
-    // A pointer event on a page that is not the foreground tab is answered on a fixed
-    // five-second timer; on the foreground tab, in single-digit milliseconds. Once per
-    // connection, 3 ms — see `CdpClient::ensure_foreground` for the measurements.
+    // A background tab answers a pointer event on a fixed five-second timer, the foreground tab
+    // in single-digit ms. Costs 3 ms, once per connection (`CdpClient::ensure_foreground`).
     client.ensure_foreground().await;
     // Subscribe BEFORE dispatching so a fast navigation isn't missed.
     let nav_events = client.events();
@@ -250,26 +236,17 @@ pub async fn js_click(client: &CdpClient, object_id: &str) -> Result<(), Element
     Ok(())
 }
 
-/// What the page holds after a fill, next to what was asked for.
-///
-/// A write is a request. Masks reformat, `maxlength` truncates, controlled components
-/// rewrite, and number inputs discard what they cannot parse. Reporting only "filled"
-/// hides all four, and reporting failure would be wrong for all four too — the value did
-/// land, just not verbatim.
+/// What the page holds after a fill, next to what was asked for. A write is a request: masks reformat, `maxlength` truncates, controlled components rewrite,
+/// number inputs discard what they cannot parse. The value landed, just not verbatim.
 pub struct FillOutcome {
     pub requested: String,
     pub actual: Option<String>,
-    /// The field holds a secret, so neither value may be reported. The response still says
-    /// whether the write landed verbatim and how long it is, which is what the caller
-    /// needs, without putting a password on stdout, into an agent transcript and into any
-    /// `--record` file.
+    /// The field holds a secret, so neither value may be reported; verbatim-ness and length are.
     pub sensitive: bool,
-    /// Set when the value that landed could not have been typed by a person: `maxlength`
-    /// constrains the editing pipeline, not the value setter, so a programmatic fill walks
-    /// straight past it and the form will reject the field on submit.
+    /// Set when the landed value could not have been typed: `maxlength` constrains the editing
+    /// pipeline, not the value setter, so the form will reject it on submit.
     pub caveat: Option<String>,
-    /// How long after the write the value was read. "The field holds X" is only ever true
-    /// as of a moment, and this is the moment.
+    /// How long after the write the value was read; "the field holds X" is only true of a moment.
     pub observed_after_ms: u64,
 }
 
@@ -284,7 +261,6 @@ impl FillOutcome {
         }
     }
 
-    /// Mark the outcome as holding a secret.
     pub const fn secret(mut self, sensitive: bool) -> Self {
         self.sensitive = sensitive;
         self
@@ -313,35 +289,19 @@ impl FillOutcome {
 }
 
 /// Whether a field holds something that must never be printed, as a JS expression over `el`.
-///
-/// One reader, four callers: `fill` by uid and by selector, `assert value`, and the
-/// `values_lost` report. The predicate decides whether a value reaches stdout, an agent
-/// transcript and any `--record` file, so four copies of it that agree today is four chances
-/// for one of them to be widened alone — the same reason `CHECKABLE_PROBE` and `SELECT_READ`
-/// are shared between their action and their assertion.
-///
-/// `type=password` is masked by Chrome in the accessibility tree as well; the `autocomplete`
-/// half is not, so a one-time code or a card number in a `type=text` field is only redacted
-/// because this predicate names it.
+/// Shared by `fill` (uid and selector), `assert value` and the `values_lost` report, because it
+/// gates what reaches stdout, the transcript and any `--record` file.
+/// Chrome masks `type=password` in the accessibility tree; the `autocomplete` half it does not,
+/// so a one-time code or card number in a `type=text` field is redacted only by this.
 pub const SECRET_FIELD: &str =
     r"(el.type === 'password' || /password|cc-number|cc-csc|one-time-code/i.test(el.autocomplete || ''))";
 
-/// How long a read-back waits before looking at what the page kept.
-///
-/// The three read-back paths used to disagree: `fill` read synchronously (0ms), so a value
-/// reverted one microtask later was reported as kept — verbatim:true on a field the page
-/// had already emptied. `check --selector` waited 60ms, `check <uid>` waited for however
-/// long a CDP round trip happened to take.
-///
-/// 60ms catches a revert on the microtask queue, in a `setTimeout(0)`, or in an animation
-/// frame — the shapes a controlled component uses. It does NOT catch a validator that
-/// fires at 400ms (`tests/fixtures/form_value_late_revert.html`), and no fixed window
-/// could: a page may revert at any time. That is why every read-back reports
-/// `observed_after_ms` alongside the value rather than asserting persistence. Raising it
-/// would buy a few more shapes at the cost of that much latency on every fill and check.
+/// How long every read-back waits before looking at what the page kept.
+/// 60 ms catches a revert on the microtask queue, in `setTimeout(0)` or in an animation frame,
+/// and NOT a validator firing at 400 ms — no fixed window could. Hence read-backs report
+/// `observed_after_ms` rather than asserting persistence. Raising it costs every fill and check.
 pub const READ_BACK_MS: u64 = 60;
 
-/// Fill an element (input/textarea) by uid.
 pub async fn fill(
     client: &CdpClient,
     uid_map: &HashMap<String, ElementRef>,
@@ -350,10 +310,8 @@ pub async fn fill(
 ) -> Result<FillOutcome, ElementError> {
     let resolved = resolve_uid(client, uid_map, uid).await?;
 
-    // Focus, clear, set value, dispatch events.
-    // Use the native HTMLInputElement/HTMLTextAreaElement value setter so React's
-    // synthetic onChange fires (React wraps the descriptor; direct assignment is
-    // intercepted by React but the setter via Object.getOwnPropertyDescriptor is not).
+    // The native value setter, so React's synthetic onChange fires: React intercepts direct
+    // assignment but not the setter reached through Object.getOwnPropertyDescriptor.
     let js = r"function(v) {
             if (this.matches(':disabled')) throw new Error('Element is disabled and cannot be filled');
             if (this.readOnly) throw new Error('Element is readonly and cannot be filled');
@@ -370,8 +328,8 @@ pub async fn fill(
             this.dispatchEvent(new Event('input', {bubbles: true}));
             this.dispatchEvent(new Event('change', {bubbles: true}));
             var el = this;
-            // Read after the window, not on the next line: a controlled component that
-            // reverts in a promise callback has not run yet when the write returns.
+            // Read after the window, not on the next line: a controlled component reverting in
+            // a promise callback has not run yet when the write returns.
             return new Promise(function (resolve) {
                 setTimeout(function () {
                     resolve({
@@ -399,7 +357,6 @@ pub async fn fill(
         .await
         .map_err(|e| ElementError::Action(format!("fill failed: {e}")))?;
 
-    // Check for exception
     if let Some(exception) = result.get("exceptionDetails") {
         let text = exception
             .get("exception")
@@ -420,12 +377,8 @@ pub async fn fill(
     Ok(FillOutcome::new(value, actual).with_max_length(max_length).secret(sensitive))
 }
 
-/// Refuse to type when nothing editable holds focus.
-///
-/// `Input.insertText` goes to whatever is focused. With focus on BODY it goes nowhere, and
-/// the old message was built from `text.len()` — a claim about the request, never about the
-/// page. Verified: `type "hello"` with nothing focused reported "Typed 5 chars" and left
-/// the page untouched.
+/// Refuse to type when nothing editable holds focus. `Input.insertText` goes to whatever is focused; with focus on BODY it goes nowhere, and a
+/// character count is a claim about the request, never about the page.
 pub async fn require_editable_focus(client: &CdpClient) -> Result<(), ElementError> {
     let probe = r"(() => {
         const a = document.activeElement;
@@ -457,14 +410,16 @@ pub async fn require_editable_focus(client: &CdpClient) -> Result<(), ElementErr
     }
 }
 
-/// Type text character by character using Input.insertText.
 pub async fn type_text(
     client: &CdpClient,
     text: &str,
 ) -> Result<(), ElementError> {
     let nav_events = client.events();
+    // An input event, so: the input-event deadline rather than `--timeout`, and the dispatch mark
+    // that both starts the observation window and clears the previous action's settle wait.
+    client.mark_dispatch();
     client
-        .send("Input.insertText", json!({ "text": text }))
+        .send_input("Input.insertText", json!({ "text": text }))
         .await
         .map_err(|e| ElementError::Action(format!("insertText failed: {e}")))?;
 
@@ -472,12 +427,10 @@ pub async fn type_text(
     Ok(())
 }
 
-/// Press a key (Enter, Tab, Escape, etc.).
 pub async fn press_key(
     client: &CdpClient,
     key: &str,
 ) -> Result<(), ElementError> {
-    // Map common key names to their virtual key codes and text values
     let (vk_code, text) = match key {
         "Enter" | "Return" => (13, Some("\r")),
         "Tab" => (9, None),
@@ -506,14 +459,11 @@ pub async fn press_key(
         "F10" => (121, None),
         "F11" => (122, None),
         "F12" => (123, None),
-        // A single printable character types itself. Without `text` the page sees a keydown
-        // and nothing is inserted, so `press a` reported success and typed nothing.
+        // A single printable character needs `text`, or nothing is inserted.
         _ if key.chars().count() == 1 => {
             let ch = key.chars().next().unwrap_or(' ');
-            // Only alphanumerics have a virtual key code equal to their uppercase ASCII
-            // byte. Deriving one for punctuation lands on an editing or navigation key:
-            // '.' is 46, which is VK_DELETE, so `press .` deleted a character and reported
-            // success. Send 0 and let Chrome insert from `text` alone.
+            // Only alphanumerics have a virtual key code equal to their uppercase ASCII byte;
+            // deriving one for punctuation lands on an editing key ('.' is 46, VK_DELETE).
             let vk = if ch.is_ascii_alphanumeric() {
                 u32::from(ch.to_ascii_uppercase() as u8)
             } else {
@@ -521,8 +471,7 @@ pub async fn press_key(
             };
             (vk, Some(key))
         }
-        // Anything else would go out with virtual key code 0, which no handler reads as a
-        // key. Saying so beats reporting success for an event that means nothing.
+        // Anything else would go out with virtual key code 0, which no handler reads as a key.
         other => {
             return Err(ElementError::Action(format!(
                 "Unknown key '{other}'. Use a single character, or one of: Enter, Tab, Escape, \
@@ -532,7 +481,6 @@ pub async fn press_key(
         }
     };
 
-    // keyDown (with virtual key code for proper event dispatch)
     let mut key_down = json!({
         "type": "keyDown",
         "key": key,
@@ -545,14 +493,15 @@ pub async fn press_key(
         key_down["text"] = json!(t);
     }
     let nav_events = client.events();
+    // Same as `type_text`: a keyboard event is an input event, deadline and mark included.
+    client.mark_dispatch();
     client
-        .send("Input.dispatchKeyEvent", key_down)
+        .send_input("Input.dispatchKeyEvent", key_down)
         .await
         .map_err(|e| ElementError::Action(format!("keyDown failed: {e}")))?;
 
-    // keyUp
     client
-        .send(
+        .send_input(
             "Input.dispatchKeyEvent",
             json!({
                 "type": "keyUp",
@@ -566,7 +515,6 @@ pub async fn press_key(
     Ok(())
 }
 
-/// Hover over an element by uid.
 pub async fn hover(
     client: &CdpClient,
     uid_map: &HashMap<String, ElementRef>,
@@ -580,9 +528,8 @@ pub async fn hover(
         ))
     })?;
 
-    // A pointer event on a page that is not the foreground tab is answered on a fixed
-    // five-second timer; on the foreground tab, in single-digit milliseconds. Once per
-    // connection, 3 ms — see `CdpClient::ensure_foreground` for the measurements.
+    // A background tab answers a pointer event on a fixed five-second timer, the foreground tab
+    // in single-digit ms. Costs 3 ms, once per connection (`CdpClient::ensure_foreground`).
     client.ensure_foreground().await;
     client
         .send_input("Input.dispatchMouseEvent", DispatchMouseEventParams {
@@ -598,11 +545,9 @@ pub async fn hover(
     Ok(())
 }
 
-/// Wait (≤`timeout`) for one event satisfying `matches` on an already-open subscription.
-/// `true` if it arrived. Lagged: keep going, the event may follow.
-///
-/// A predicate rather than a method name, because the name alone was not enough to tell the
-/// two navigations apart — see [`main_frame_navigated`].
+/// Wait (≤`timeout`) for one event satisfying `matches` on an already-open subscription. `true`
+/// if it arrived; on Lagged, keep going — the event may follow. A predicate rather than a method
+/// name, because the name alone cannot tell the two navigations apart ([`main_frame_navigated`]).
 async fn recv_event_where(
     rx: &mut broadcast::Receiver<CdpEvent>,
     matches: impl Fn(&CdpEvent) -> bool + Send + Sync,
@@ -626,20 +571,10 @@ async fn recv_event(rx: &mut broadcast::Receiver<CdpEvent>, method: &str, timeou
     recv_event_where(rx, |event| event.method == method, timeout).await
 }
 
-/// A `Page.frameNavigated` for the TOP frame, which is the only one whose load we can wait for.
-///
-/// `Page.loadEventFired` is a main-frame event: it carries a timestamp and nothing else, and it
-/// fires once per top-level document. A subframe navigating produces `Page.frameNavigated` with
-/// a `parentId` and, later, `Page.frameStoppedLoading` — never a load event. So a wait armed by
-/// a subframe's navigation is a wait for something that cannot arrive, and it ran to the full
-/// ceiling every time.
-///
-/// That is not a corner case. Measured on shop.app: clicking a product tile appends a tracking
-/// iframe, which navigates to `about:blank` and then to `chrome-error://chromewebdata/` — two
-/// `frameNavigated` events for a SUBFRAME, 4 ms apart, no load event ever. The click took
-/// 10.10 s, of which 10.05 s was this wait; a click at an inert coordinate on the same page in
-/// the same session took 0.14 s. `tests/fixtures/click_spawns_subframe.html` is that shape,
-/// offline.
+/// A `Page.frameNavigated` for the TOP frame, the only one whose load can be waited for.
+/// `Page.loadEventFired` fires once per top-level document; a subframe gets `frameNavigated` and
+/// `frameStoppedLoading` but never a load event, so a wait armed by one runs the full 10 s
+/// ceiling (measured 10.10 s on a click appending a tracking iframe, 0.14 s for an inert one).
 fn main_frame_navigated(event: &CdpEvent) -> bool {
     event.method == "Page.frameNavigated"
         && event
@@ -648,34 +583,24 @@ fn main_frame_navigated(event: &CdpEvent) -> bool {
             .is_some_and(|frame| frame.get("parentId").is_none())
 }
 
-/// Wait for the page to stabilize after an action. `nav_events` MUST be
-/// subscribed (`client.events()`) BEFORE dispatching the action — `broadcast`
-/// only delivers post-subscribe messages, so a fast `frameNavigated`/
-/// `loadEventFired` firing before we wait would be missed (the `goto` race).
-/// 50ms probe for a TOP-frame navigation; only then wait (≤10s) for its load.
-///
-/// The probe keeps reading for its whole window rather than returning on the first
-/// `frameNavigated`: a click that spawns a tracking iframe AND navigates the page produces the
-/// subframe's event first, and stopping there would now skip a wait that is owed.
-///
-/// The wait is measured and handed to the connection, so the response can say how long it took
-/// (`waited_ms`). A ten-second action that explains itself is a page being slow; a ten-second
-/// action that says nothing is the tool being broken, and the caller cannot tell them apart.
+/// Wait for the page to stabilize: a 50 ms probe for a TOP-frame navigation, then ≤10 s for its
+/// load. The wait is handed to the connection so the response can report `waited_ms`.
+/// `nav_events` MUST be subscribed (`client.events()`) BEFORE dispatching — `broadcast` only
+/// delivers post-subscribe messages. The probe reads its whole window rather than stopping at
+/// the first event: a click that spawns a tracker AND navigates emits the subframe's first.
 pub async fn wait_for_stabilization(
     client: &CdpClient,
     nav_events: broadcast::Receiver<CdpEvent>,
 ) {
-    // Boxed: this future holds a subscription and two nested timeouts, and it is awaited from
-    // thirteen action paths that `run::run` holds live in one match arm. Inline, it is counted
-    // thirteen times in that frame.
+    // Boxed: thirteen action paths await this inside one `run::run` match arm, where inline its
+    // subscription and two nested timeouts would be counted thirteen times over.
     if let Some(waited) = Box::pin(settle_after_navigation(nav_events)).await {
         client.note_settle_wait(waited);
     }
 }
 
-/// The wait itself: `Some(duration)` when a top-frame navigation armed it, `None` when none
-/// was seen. Split from the wrapper so the rule can be tested with a broadcast channel and no
-/// Chrome — which is how the subframe case is pinned.
+/// The wait itself: `Some(duration)` when a top-frame navigation armed it, `None` otherwise.
+/// Split from the wrapper so it can be tested with a broadcast channel and no Chrome.
 async fn settle_after_navigation(
     mut nav_events: broadcast::Receiver<CdpEvent>,
 ) -> Option<Duration> {
@@ -689,13 +614,9 @@ async fn settle_after_navigation(
 
 #[derive(Debug, thiserror::Error)]
 pub enum ElementError {
-    /// `--on-intercept refuse` stopped a pointer action before it dispatched.
-    ///
-    /// A variant of its own, and not a `NotInteractable(String)`, because everything the
-    /// caller needs to act — the receiver, its uid, the aim point, the branch — had been
-    /// measured and was being thrown away at the point where the message was formatted. It
-    /// rides through the error channel the way `commands::assert::NotHeld` carries exit 2, and
-    /// the three error boundaries unpack it with `hit_test::refusal_in`.
+    /// `--on-intercept` stopped a pointer action before it dispatched. A variant of its own, so
+    /// the receiver, its uid, the aim point and the branch survive instead of being flattened
+    /// into a message; the error boundaries unpack it with `hit_test::refusal_in`.
     #[error("{0}")]
     Refused(Box<crate::hit_test::Refused>),
     #[error("{0}")]
@@ -709,9 +630,8 @@ pub enum ElementError {
 }
 
 impl ElementError {
-    /// Carry the identity of the node an action resolved onto the refusal it produced.
-    ///
-    /// A no-op for every other variant: only a refusal has a structured response to put it on.
+    /// Carry the identity of the node an action resolved onto the refusal it produced. A no-op
+    /// for every other variant: only a refusal has a structured response to put it on.
     #[must_use]
     pub fn naming(
         self,
@@ -726,10 +646,8 @@ impl ElementError {
     }
 }
 
-/// Click at explicit (x, y) coordinates using Input.dispatchMouseEvent.
-///
-/// No hit test: `--xy` names no element, so there is nothing for a receiver to differ from.
-/// Only "received by X" could be reported, never an interception.
+/// Click at explicit (x, y) coordinates. No hit test: `--xy` names no element, so there is
+/// nothing for a receiver to differ from.
 pub async fn click_at_coords(
     client: &CdpClient,
     x: f64,
@@ -738,24 +656,17 @@ pub async fn click_at_coords(
     dispatch_click_at(client, x, y).await
 }
 
-// Selector-based actions (click/dblclick/fill/focus) live in `element_selector`
-// to keep this file under the 1000-line module cap; re-exported here so callers
-// keep using `crate::element::*`.
+// Selector-based actions live in `element_selector`, re-exported so callers keep using
+// `crate::element::*`.
 pub use crate::element_selector::{
     click_selector, dblclick_selector, fill_selector, focus_selector,
 };
-// Split out for the 1000-line file cap; callers keep using `element::*`.
 pub use crate::element_controls::{
     drag, select_option, select_option_selector, set_checked, set_checked_selector, CheckOutcome,
     SelectOutcome, set_file_input, set_file_input_selector,
 };
 
-// ---------------------------------------------------------------------------
-// Double-click
-// ---------------------------------------------------------------------------
-
-/// Double-click an element by uid. Aimed by the same probe as `click` — a double-click that
-/// lands on a scrim is the same false success twice over.
+/// Double-click an element by uid. Aimed by the same probe as `click`.
 pub async fn dblclick(
     client: &CdpClient,
     uid_map: &HashMap<String, ElementRef>,
@@ -806,8 +717,8 @@ pub async fn dblclick_handle(
     };
 
     if matches!(delivery, Delivery::NotSettled | Delivery::OffTarget) {
-        // `unaimable` is what separates a box a pointer cannot reach from a box the page is
-        // holding off screen. Same verdict, same absence of a dispatch, different recovery.
+        // `unaimable` separates a box a pointer cannot reach from a box the page holds off
+        // screen: same verdict, same absence of a dispatch, different recovery.
         return Ok(Dispatched::skipped(delivery, point, None).unaimed(unaimable));
     }
     if delivery == Delivery::Intercepted
@@ -843,11 +754,9 @@ pub async fn js_dblclick(client: &CdpClient, object_id: &str) -> Result<(), Elem
     Ok(())
 }
 
-/// Double-click at coordinates.
 pub async fn dblclick_at_coords(client: &CdpClient, x: f64, y: f64) -> Result<(), ElementError> {
-    // A pointer event on a page that is not the foreground tab is answered on a fixed
-    // five-second timer; on the foreground tab, in single-digit milliseconds. Once per
-    // connection, 3 ms — see `CdpClient::ensure_foreground` for the measurements.
+    // A background tab answers a pointer event on a fixed five-second timer, the foreground tab
+    // in single-digit ms. Costs 3 ms, once per connection (`CdpClient::ensure_foreground`).
     client.ensure_foreground().await;
     let nav_events = client.events();
     client.mark_dispatch();
@@ -878,11 +787,8 @@ pub async fn dblclick_at_coords(client: &CdpClient, x: f64, y: f64) -> Result<()
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Select
-// ---------------------------------------------------------------------------
-
-/// Select a dropdown option by uid and value/text.
+/// Turn an `exceptionDetails` on a CDP result into an `ElementError`, keeping the first line of
+/// the thrown text and dropping the stack.
 pub fn check_js_exception(result: &serde_json::Value) -> Result<(), ElementError> {
     if let Some(exception) = result.get("exceptionDetails") {
         let text = exception
@@ -906,8 +812,7 @@ mod tests {
         CdpEvent { method: method.to_string(), params: serde_json::Value::Null }
     }
 
-    /// A `Page.frameNavigated` as Chrome sends it: the top frame carries no `parentId`, a
-    /// subframe does.
+    /// As Chrome sends it: the top frame carries no `parentId`, a subframe does.
     fn navigated(parent: Option<&str>) -> CdpEvent {
         let frame = match parent {
             Some(id) => serde_json::json!({"id": "F1", "parentId": id, "url": "about:blank"}),
@@ -937,25 +842,23 @@ mod tests {
         let (tx, _) = broadcast::channel::<CdpEvent>(16);
         let mut rx = tx.subscribe();
         tx.send(ev("Runtime.consoleAPICalled")).unwrap();
-        // Only an unrelated event → probe returns false quickly (no navigation).
+        // An unrelated event only → returns false quickly.
         assert!(!recv_event(&mut rx, "Page.frameNavigated", Duration::from_millis(20)).await);
     }
     #[tokio::test]
     async fn stabilization_sees_navigation_buffered_before_wait() {
         let (tx, _) = broadcast::channel::<CdpEvent>(16);
-        let rx = tx.subscribe(); // subscribe first (pre-action)
+        let rx = tx.subscribe(); // pre-action subscription
         tx.send(navigated(None)).unwrap();
         tx.send(ev("Page.loadEventFired")).unwrap();
-        // Both events already buffered → completes promptly, does not hang.
         let waited = tokio::time::timeout(Duration::from_secs(1), settle_after_navigation(rx))
             .await
             .expect("should not hang when nav events are already buffered");
         assert!(waited.is_some(), "a top-frame navigation arms the wait");
     }
 
-    /// The ten seconds. A subframe navigating is not something `Page.loadEventFired` will ever
-    /// answer for, so arming the wait on it meant waiting the full ceiling on every page that
-    /// spawns a tracking iframe when clicked — 10.10 s on shop.app, measured.
+    /// `Page.loadEventFired` never answers for a subframe, so arming the wait on one costs the
+    /// full 10 s ceiling.
     #[tokio::test]
     async fn a_subframe_navigation_arms_no_wait() {
         let (tx, _) = broadcast::channel::<CdpEvent>(16);
@@ -968,9 +871,8 @@ mod tests {
         assert_eq!(waited, None, "nothing was waited for, and nothing is reported");
     }
 
-    /// And the case that makes the probe read its whole window instead of returning on the
-    /// first event: a click that spawns a tracker AND navigates. The subframe's event comes
-    /// first; the wait is still owed to the top frame's.
+    /// Why the probe reads its whole window: a click that spawns a tracker AND navigates emits
+    /// the subframe's event first, and the top frame's wait is still owed.
     #[tokio::test]
     async fn a_subframe_event_does_not_hide_the_navigation_behind_it() {
         let (tx, _) = broadcast::channel::<CdpEvent>(16);
@@ -988,8 +890,7 @@ mod tests {
     fn only_the_top_frame_is_a_navigation_we_can_wait_for() {
         assert!(main_frame_navigated(&navigated(None)));
         assert!(!main_frame_navigated(&navigated(Some("F0"))));
-        // A frameNavigated whose shape we cannot read is not a top-frame claim either way;
-        // `params` absent means no `frame`, and the predicate must not panic on it.
+        // An unreadable frameNavigated is not a top-frame claim, and must not panic.
         assert!(!main_frame_navigated(&ev("Page.frameNavigated")));
         assert!(!main_frame_navigated(&ev("Page.loadEventFired")));
     }

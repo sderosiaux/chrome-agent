@@ -3,12 +3,11 @@ use serde_json::{Value, json};
 use crate::cdp::client::CdpClient;
 use crate::session::SessionStore;
 
-/// Tracks command recovery after a stored device configuration fails to reapply.
+/// Tracks recovery after a stored device configuration fails to reapply.
 ///
-/// A pipe must stay alive long enough to accept `emulate device` or `emulate reset`; failing the
-/// process during startup would make the invalid configuration impossible to repair through it.
-/// Until repair succeeds, all commands that could observe or mutate the misconfigured page are
-/// answered with the original reapply error instead of being dispatched.
+/// The pipe must stay alive to accept `emulate device` or `emulate reset`, or the invalid
+/// configuration is unrepairable through it. Until repair succeeds, every command that could
+/// observe or mutate the misconfigured page is answered with the original reapply error.
 pub struct EmulationRecovery {
     reapply_error: Option<String>,
 }
@@ -45,12 +44,9 @@ impl EmulationRecovery {
             })
     }
 
-    /// Clear an existing failure after a recovery command completes successfully.
-    ///
-    /// `emulate device` has already applied and persisted its replacement configuration when it
-    /// returns `ok: true`; `emulate reset` has already cleared both. Reapplying here would issue the
-    /// same CDP commands twice and could turn a successful response into a failure for the next
-    /// command.
+    /// Clear an existing failure after a recovery command succeeds. It does not reapply:
+    /// `emulate device` has already applied and persisted its replacement on `ok: true` and
+    /// `emulate reset` has cleared both, so reapplying would issue the CDP commands twice.
     pub fn update_after(&mut self, cmd: &Value, response: &Value) {
         if self.reapply_error.is_some()
             && repairs_reapply_failure(cmd)
@@ -61,11 +57,9 @@ impl EmulationRecovery {
     }
 }
 
-/// Return whether the outer dispatcher must defer reapply handling to this command.
-///
-/// Device and reset replace the stored state directly. A batch is admitted as a container, then
-/// the shared `EmulationRecovery` evaluates each nested command in order; commands preceding the
-/// repair remain blocked rather than being silently skipped.
+/// Whether the outer dispatcher must defer reapply handling to this command. `device` and
+/// `reset` replace the stored state directly. A batch is admitted as a container and its
+/// nested commands are each evaluated in order, so those preceding the repair stay blocked.
 fn handles_reapply_failure(cmd: &Value) -> bool {
     repairs_reapply_failure(cmd) || cmd.get("cmd").and_then(Value::as_str) == Some("batch")
 }
@@ -117,8 +111,8 @@ pub async fn dispatch_emulate(
         .into()),
     }?;
 
-    // Pipe state otherwise reaches disk only when stdin closes. Commit configuration changes here
-    // so a concurrent CLI invocation sees them while this long-lived connection is still open.
+    // Pipe state otherwise reaches disk only when stdin closes. Commit here so a concurrent
+    // CLI invocation sees the change while this connection is still open.
     if matches!(action, "device" | "reset") {
         crate::session::save_session(store)?;
     }
@@ -126,7 +120,7 @@ pub async fn dispatch_emulate(
 }
 
 /// Parse optional JSON fields without coercion. Missing and null mean "use the CLI default";
-/// a present value of the wrong type is a caller error rather than an invitation to guess.
+/// a present value of the wrong type is a caller error, never a guess.
 fn parse_device_config(cmd: &Value) -> Result<crate::emulation::DeviceEmulation, crate::BoxError> {
     let label = optional_string(cmd, "label")?;
     let width = required_u32(cmd, "width")?;

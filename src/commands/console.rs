@@ -12,24 +12,9 @@ pub struct ConsoleEntry {
 
 /// What a `console` read found, and whether anything was listening when it ran.
 ///
-/// The buffer used to be read as `window.__chrome_agent_console || []`, so a page
-/// where the interceptor had never been installed answered with the same empty
-/// list as a page that simply had not logged. "No console messages captured" is a
-/// statement about the page, and an agent uses it to conclude the page is healthy;
-/// on a page with no interceptor it is a statement about nothing. The asymmetry
-/// showed it was not a choice — the same read already checked `exceptionDetails`
-/// for its OWN evaluation and checked nothing for the injection.
-///
-/// **The scope of `installed: false` is exactly one thing: the bootstrap did not
-/// take on this page.** It is the same gesture as `verdict: unknown / read_failed`
-/// — a report that the measurement did not happen, not a claim about what would
-/// have been measured. In particular it does NOT cover the other half of the
-/// silence: anything the page logged BEFORE a chrome-agent connection existed is
-/// gone whatever this field says, because the interceptor captures forward only.
-/// `installed: true` therefore means "something was listening from the moment it
-/// was installed", never "nothing was missed".
-///
-/// Derefs to the entries so a caller that only wants the list is unaffected.
+/// `installed: false` means only that the bootstrap did not take on this page, so an empty
+/// list is a missing listener rather than a quiet page. The interceptor captures forward
+/// only, so `installed: true` never means "nothing was missed". Derefs to the entries.
 #[derive(Debug)]
 pub struct ConsoleReading {
     /// Whether `window.__chrome_agent_console` existed in the page at read time.
@@ -52,8 +37,8 @@ struct RawReading {
     entries: Vec<ConsoleEntry>,
 }
 
-/// JS snippet that monkey-patches console.log/warn/error/info and captures
-/// unhandled errors + promise rejections into `window.__chrome_agent_console`.
+/// Monkey-patches console.log/warn/error/info and captures unhandled errors and promise
+/// rejections into `window.__chrome_agent_console`, capped at 200 entries.
 const INTERCEPTOR_JS: &str = r"
     if (!window.__chrome_agent_console_installed) {
     window.__chrome_agent_console_installed = true;
@@ -92,22 +77,11 @@ const INTERCEPTOR_JS: &str = r"
     } // end guard: __chrome_agent_console_installed
 ";
 
-/// Inject the console interceptor into the page.
-///
-/// 1. `addScriptToEvaluateOnNewDocument` — survives future navigations.
-/// 2. `Runtime.evaluate` with a guard — bootstraps on the current page immediately.
-///
-/// Does NOT require `Runtime.enable`, so it is stealth-safe.
-///
-/// Both errors stay discarded here, and the check lives in [`run`] instead. That
-/// is deliberate, not an omission: propagating them would catch the two ways CDP
-/// can refuse the call and miss the way the bootstrap actually fails most quietly
-/// — a JS exception raised while the snippet runs, which `send` never sees
-/// because `Runtime.evaluate` answers `Ok` and reports it in `exceptionDetails`.
-/// A probe at read time catches all three at once, and catches the fourth thing
-/// no injection-time check can: a page that dropped the buffer afterwards.
+/// Inject the console interceptor: `addScriptToEvaluateOnNewDocument` for future navigations,
+/// plus a guarded `Runtime.evaluate` for the current page. No `Runtime.enable`, so
+/// stealth-safe. Errors are discarded on purpose; [`run`] probes at read time instead, which
+/// also catches a JS exception in the snippet and a page that dropped the buffer later.
 pub async fn inject(client: &CdpClient) {
-    // Runs on every future navigation automatically
     let _ = client
         .send(
             "Page.addScriptToEvaluateOnNewDocument",
@@ -115,7 +89,7 @@ pub async fn inject(client: &CdpClient) {
         )
         .await;
 
-    // Bootstrap on the current page (guard prevents double-init)
+    // Bootstrap on the current page; the guard prevents double-init.
     let guarded = format!(
         "if (!window.__chrome_agent_console) {{ {INTERCEPTOR_JS} }}"
     );
@@ -127,14 +101,10 @@ pub async fn inject(client: &CdpClient) {
         .await;
 }
 
-/// Read captured console messages from the injected interceptor.
-/// Optionally filter by level and clear after reading.
+/// Read captured console messages, optionally filtered by level and cleared after.
 ///
-/// The probe rides on the expression that already reads the buffer — same call,
-/// same round trip, no added cost — and its answer is reported beside the list
-/// rather than raised: this is a read command, and a missing interceptor does not
-/// stop it reading. See [`ConsoleReading`] for what `installed: false` does and
-/// does not claim.
+/// The `installed` probe rides on the same round trip as the buffer read, and is reported
+/// beside the list rather than raised: a missing interceptor does not stop a read.
 pub async fn run(
     client: &CdpClient,
     level_filter: Option<&str>,
@@ -177,8 +147,7 @@ pub async fn run(
         .map_err(|e| format!("Failed to parse console buffer: {e}"))?;
 
     if !installed {
-        // stderr, never stdout, so --json stays clean — the channel the dialog
-        // handler already uses for a fact the response has no field for.
+        // stderr, never stdout, so `--json` stays clean.
         eprintln!(
             "warning: console interceptor not installed on this page \
              (window.__chrome_agent_console is undefined), so nothing was capturing \
@@ -200,18 +169,11 @@ pub async fn run(
     Ok(ConsoleReading { installed, entries: limited })
 }
 
-/// Empty the page's buffer, and say on stderr when that did not happen.
+/// Empty the page's buffer, saying on stderr when that did not happen — a failed clear
+/// otherwise reports the entries as consumed and the next read returns them again.
 ///
-/// The result used to be discarded, which made every read that asked for a clear
-/// report the entries as consumed: on a failure they are still in the page and
-/// the next read returns them again, which reads as the page having logged them
-/// twice. Three things can go wrong and all three are answered here — the call
-/// can fail, the expression can throw, and the buffer can be absent.
-///
-/// The guard is load-bearing, not defensive: the old expression ASSIGNED an empty
-/// array, so clearing a page with no interceptor CREATED the buffer and the next
-/// read would have probed `installed: true` on a page where nothing is listening.
-/// Emptying in place also holds for any reference the interceptor captured.
+/// The `installed` guard is load-bearing: assigning an empty array would CREATE the buffer on
+/// a page with no interceptor. Emptying in place also holds for the interceptor's reference.
 async fn clear_buffer(client: &CdpClient, installed: bool) {
     if !installed {
         eprintln!(
@@ -246,9 +208,8 @@ async fn clear_buffer(client: &CdpClient, installed: bool) {
     }
 }
 
-/// Keep the most-recent `limit` entries of a chronological (oldest→newest)
-/// buffer, preserving order. Mirrors `history::run` so the agent sees the
-/// newest messages it just triggered rather than the oldest.
+/// Keep the most recent `limit` entries of an oldest→newest buffer, preserving order, so the
+/// agent sees the messages it just triggered.
 fn keep_recent(mut entries: Vec<ConsoleEntry>, limit: usize) -> Vec<ConsoleEntry> {
     let start = entries.len().saturating_sub(limit);
     entries.split_off(start)
@@ -263,11 +224,8 @@ fn format_time(ts: u64) -> String {
     format!("{h:02}:{m:02}:{s:02}")
 }
 
-/// Format a reading for text output.
-///
-/// The two silences are told apart here, because they are two different facts and
-/// only one of them is about the page. Takes the whole reading rather than the
-/// slice for exactly that reason.
+/// Format a reading for text output. Takes the whole reading, not the slice, so the two
+/// silences (quiet page, absent listener) stay distinguishable.
 #[must_use]
 pub fn format_text(reading: &ConsoleReading) -> String {
     if !reading.installed {
@@ -308,12 +266,11 @@ mod tests {
 
     #[test]
     fn keep_recent_returns_newest_n_in_order() {
-        // Chronological buffer: oldest ("m0") → newest ("m4").
+        // Oldest ("m0") → newest ("m4").
         let entries: Vec<ConsoleEntry> = (0..5).map(|i| entry(&format!("m{i}"), i)).collect();
 
         let limited = keep_recent(entries, 3);
 
-        // Must be the 3 most-recent, preserving oldest→newest order.
         let msgs: Vec<&str> = limited.iter().map(|e| e.message.as_str()).collect();
         assert_eq!(msgs, vec!["m2", "m3", "m4"]);
     }
@@ -346,8 +303,7 @@ mod tests {
 
     #[test]
     fn the_blind_report_claims_nothing_about_what_the_page_logged() {
-        // The measurement is "nothing was listening". "The page logged things you missed" is
-        // a different claim, and this tool has no way to make it.
+        // The measurement is "nothing was listening", not "you missed messages".
         let text = format_text(&ConsoleReading { installed: false, entries: vec![] }).to_lowercase();
         for forbidden in ["missed", "lost", "were logged"] {
             assert!(!text.contains(forbidden), "over-claims: {text}");
@@ -361,7 +317,7 @@ mod tests {
             entries: vec![entry("boom", 0)],
         };
         assert!(format_text(&reading).contains("LOG: boom"), "{}", format_text(&reading));
-        // And the reading is still usable as the slice every caller wants.
+        // Still usable as a slice.
         assert_eq!(reading.len(), 1);
     }
 }

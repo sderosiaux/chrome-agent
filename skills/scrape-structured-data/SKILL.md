@@ -9,18 +9,11 @@ metadata:
 
 # Scrape structured data from a page
 
-`chrome-agent extract` finds the repeating record pattern on a page and returns it as
-JSON. You don't write selectors and you don't read the HTML into the model to find them.
-
-## Install check
+`chrome-agent extract` finds the repeating record pattern on a page and returns it as JSON. No
+selectors to write, no HTML read into the model to find them.
 
 ```bash
 which chrome-agent || npm install -g chrome-agent
-```
-
-## The whole thing
-
-```bash
 chrome-agent goto https://news.ycombinator.com
 chrome-agent --json extract --limit 50
 ```
@@ -32,12 +25,13 @@ chrome-agent --json extract --limit 50
 ]}
 ```
 
-Check `count` against what the page actually shows. If it's wildly off, the page has
-more than one repeating pattern and you should scope it. See below.
+Check `count` against what the page shows. Wildly off means the page has more than one repeating
+pattern — scope it with `--selector`.
 
-## Why not just read the page
+## Why extract rather than read the page
 
-On the Hacker News front page, measured with `./scripts/measure.sh`:
+Measured on the Hacker News front page. All three contain the same 30 stories; only the first
+hands them over as records.
 
 | approach | tokens | what you get |
 |---|---|---|
@@ -45,82 +39,64 @@ On the Hacker News front page, measured with `./scripts/measure.sh`:
 | `inspect` (accessibility tree) | ~5,650 | the tree, stories mixed into the page chrome |
 | raw HTML | ~8,730 | everything, including markup you'll never read |
 
-All three contain the same 30 stories. Only the first hands them over as records; the
-others hand over the page and leave the model to find the stories in it, which costs
-twice — once in input tokens, again in the reasoning to parse them.
+3.6x against the tree, 5.6x against raw HTML here. The margin narrows on pages that are nothing
+but a list: on a blog archive, ~12,500 tokens against ~16,100 for the tree. The win comes from
+pages where the records sit inside a lot of other markup.
 
-That's 5.6x against raw HTML and 3.6x against the accessibility tree on this page. It is
-not always that wide: on a blog archive that is nothing *but* a list, `extract` returns
-~12,500 tokens against ~16,100 for the tree, because there's little page chrome to strip.
-The win comes from pages where the records sit inside a lot of other markup.
-
-## When extract returns nothing
-
-It looks for a repeating pattern, so a page without one gives you an empty list and a
-hint. That's the correct answer for an article or a landing page. Fall back in this order:
-
-```bash
-chrome-agent read                          # articles, blog posts, via Mozilla Readability
-chrome-agent text --selector "main"        # scoped visible text
-chrome-agent eval "JSON.stringify([...document.querySelectorAll('.x')].map(e=>e.textContent))"
-chrome-agent network --filter "api"        # the page called an API: take the payload instead
-```
-
-`network` is worth trying early on any site that loads its data over XHR. The JSON the
-page fetched is cleaner than anything scraped out of the rendered DOM.
-
-## Scoping when a page has several patterns
+## Scoping, lazy loading, infinite scroll
 
 ```bash
 chrome-agent extract --selector ".product-grid"     # restrict to one container
 chrome-agent extract --limit 100                    # default is 10
+chrome-agent extract --scroll                       # scrolls, waits for new nodes, then extracts
+chrome-agent extract --a11y --scroll --limit 50     # React/SPA feeds where the DOM is noise
 ```
 
-## Lazy loading and infinite scroll
+`--a11y` reads the accessibility tree instead of the DOM. Use it when a site renders into nested
+generated `<div>`s (X.com, most React apps) and plain `extract` returns junk.
+
+## When extract returns nothing
+
+A page with no repeating pattern gives an empty list and a hint — the correct answer for an
+article or a landing page. Fall back in this order:
 
 ```bash
-chrome-agent extract --scroll                # scrolls, waits for new nodes, then extracts
-chrome-agent extract --a11y --scroll --limit 50   # React/SPA feeds where the DOM is noise
+chrome-agent network --filter "api"        # the page called an API: take the payload instead
+chrome-agent read                          # articles, blog posts, via Mozilla Readability
+chrome-agent text --selector "main"        # scoped visible text
+chrome-agent eval "JSON.stringify([...document.querySelectorAll('.x')].map(e=>e.textContent))"
 ```
 
-`--a11y` reads the accessibility tree instead of the DOM. Use it when a site renders into
-nested generated `<div>`s (X.com, most React apps) and plain `extract` returns junk.
+Try `network` early on any site that loads its data over XHR: the JSON the page fetched is cleaner
+than anything scraped out of the rendered DOM.
 
-## Sites that need a login
+## Logins and bot protection
 
 ```bash
 chrome-agent --copy-cookies goto https://app.example.com/reports
-chrome-agent --json extract
-```
-
-`--copy-cookies` reads cookies from your real Chrome profile, so anything you're already
-logged into in your browser works here. On macOS the OS will prompt for Keychain access, and
-that prompt is the consent step. It can't be skipped silently.
-
-## Sites that block automation
-
-```bash
-chrome-agent --stealth goto https://example.com     # Cloudflare, Turnstile
+chrome-agent --stealth goto https://example.com     # Cloudflare JS challenge
 chrome-agent --connect http://127.0.0.1:9222 goto https://example.com   # DataDome, Kasada
 ```
 
-For `--connect`, the user launches their own Chrome first:
-`google-chrome --remote-debugging-port=9222`. That's a real browser with a real
-fingerprint, which is what the hardest protections check.
+`--copy-cookies` reads cookies from your real Chrome profile, so anything you are already logged
+into works. On macOS the OS prompts for Keychain access; that prompt is the consent step and
+cannot be skipped silently.
 
-## Output
+For `--connect`, the user launches their own Chrome first with
+`google-chrome --remote-debugging-port=9222`. A real browser with a real fingerprint is what the
+hardest protections check.
 
-`--json` gives `{"ok":true,"count":N,"pattern":"...","items":[...]}`. Each item has
-`title`, `url` when there is one, and `fields` with the rest of the row's text. Errors
-exit 1 and still print JSON on stdout with an `error` and a `hint`.
+## Output and limits
 
-## Limits worth knowing
+`--json` gives `{"ok":true,"count":N,"pattern":"...","items":[...]}`. Each item has `title`, `url`
+when there is one, and `fields` with the rest of the row's text. Errors exit 1 and still print JSON
+on stdout with an `error` and a `hint`.
 
-- `extract` finds *one* pattern, the highest-scoring one. Pages with two equally strong
-  lists need `--selector` to pick.
-- It reads what's rendered. Content that only appears on hover or after a click isn't there
+- `extract` finds *one* pattern, the highest-scoring one. Two equally strong lists need
+  `--selector` to pick.
+- It reads what is rendered. Content that appears only on hover or after a click is not there
   until you click it.
-- Record fields are positional text, not a typed schema. If you need specific attributes,
-  `eval` with a selector is the honest tool.
-- Clicking a download link doesn't work; get the href with `inspect --urls` and pass the
-  URL to `chrome-agent download`.
+- Record fields are positional text, not a typed schema. For specific attributes, `eval` with a
+  selector is the honest tool.
+- Clicking a download link does not work here: get the href with `inspect --urls` and pass the URL
+  to `chrome-agent download`.

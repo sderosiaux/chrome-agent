@@ -1,10 +1,4 @@
-//! No in-page promise can wedge the tool forever.
-//!
-//! `CdpClient::call` awaited its response channel with no deadline, so an evaluation that
-//! never resolved left the command hanging with no error, no output and no recovery — in
-//! pipe mode, for the rest of the session. Chrome was fine; the caller simply never heard
-//! back. The reachable instance was `inspect --limit`, whose scroll probe re-armed a 400ms
-//! debounce on every mutation and therefore never fired on a page that mutates forever.
+//! Every CDP call has a deadline, so no in-page promise can wedge the tool forever.
 
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -15,14 +9,8 @@ use common::TestBrowser;
 /// Generous enough that a real answer always beats it, short enough that a hang is caught.
 const HANG_LIMIT: Duration = Duration::from_secs(45);
 
-fn binary() -> String {
-    let mut path = std::env::current_exe().unwrap().parent().unwrap().parent().unwrap().to_path_buf();
-    path.push("chrome-agent");
-    path.to_string_lossy().into_owned()
-}
-
 fn run_cli(args: &[&str]) -> (String, i32) {
-    let output = Command::new(binary()).args(args).output().expect("Failed to run chrome-agent");
+    let output = Command::new(common::binary()).args(args).output().expect("Failed to run chrome-agent");
     (
         String::from_utf8_lossy(&output.stdout).to_string(),
         output.status.code().unwrap_or(-1),
@@ -32,7 +20,7 @@ fn run_cli(args: &[&str]) -> (String, i32) {
 /// Run and fail the test rather than the suite if the command hangs.
 fn run_bounded(args: &[&str]) -> (String, i32, Duration) {
     let started = Instant::now();
-    let mut child = Command::new(binary())
+    let mut child = Command::new(common::binary())
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -68,8 +56,7 @@ fn open(browser: &str, fixture: &str) -> bool {
     true
 }
 
-/// A promise that never resolves is the simplest form of the defect: `eval` awaits it, and
-/// the response channel had no deadline behind it.
+/// `eval` on a promise that never resolves errors instead of hanging.
 #[test]
 fn a_promise_that_never_resolves_becomes_an_error_not_a_hang() {
     let b = TestBrowser::new("cdp-timeout-eval");
@@ -90,7 +77,6 @@ fn a_promise_that_never_resolves_becomes_an_error_not_a_hang() {
     );
 }
 
-/// The caller's own `--timeout` is the deadline, so a short one fails fast.
 #[test]
 fn the_deadline_is_the_one_the_caller_asked_for() {
     let b = TestBrowser::new("cdp-timeout-short");
@@ -110,23 +96,21 @@ fn the_deadline_is_the_one_the_caller_asked_for() {
     );
 }
 
-/// `inspect --limit` scrolls, then waits for mutations to stop. Its debounce re-armed on
-/// every mutation with no ceiling, so a page that mutates forever never let it return.
+/// `inspect --limit` returns on a page whose mutations never stop: its settle debounce has
+/// a hard ceiling.
 #[test]
 fn inspect_limit_returns_on_a_page_that_never_stops_mutating() {
     let b = TestBrowser::new("cdp-timeout-ticker");
     if !open(b.name(), "goto_ticker.html") {
         return;
     }
-    // The limit has to exceed what the page holds, or the collector returns before it ever
-    // reaches the scroll probe — which is why an earlier version of this test passed
-    // against the unfixed code.
+    // The limit must exceed what the page holds, or the collector returns before it reaches
+    // the scroll probe and the test proves nothing.
     let (stdout, code, _) = run_bounded(&["--browser", b.name(), "--timeout", "10", "--json", "inspect", "--limit", "500"]);
     assert_eq!(code, 0, "the page is alive, not broken: {stdout}");
     assert!(stdout.contains("snapshot"), "{stdout}");
 }
 
-/// An ordinary command must not pay for the deadline.
 #[test]
 fn a_normal_command_is_unaffected() {
     let b = TestBrowser::new("cdp-timeout-normal");

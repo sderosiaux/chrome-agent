@@ -1,13 +1,8 @@
 //! Running a macro: the same dispatcher as `pipe`, one guard check per step, and a full stop.
 //!
-//! What this deliberately does NOT do is as much of the design as what it does. There is no
-//! repair, no retry, no branch and no skip. A guard that does not hold ends the run at that
-//! step and says which step, what was expected, what was there instead, and what the action's
-//! own `next` said. Anything more would make this a compiler with a repair loop, which is the
-//! thing this project has not built and must not pretend to have.
-//!
-//! A step's `do` is a pipe command and is dispatched by `pipe::dispatch_on` — the execution
-//! semantics are not re-implemented here, only the guarding is.
+//! No repair, no retry, no branch, no skip. A guard that does not hold ends the run there and
+//! reports the step, the expectation, what was there instead, and the action's own `next`. Only
+//! the guarding lives here; `pipe::dispatch_on` executes.
 
 use std::collections::BTreeMap;
 
@@ -18,12 +13,9 @@ use crate::commands::assert::{Assertion, Comparator, Kind};
 use crate::macros::{Guards, Macro, Step};
 use crate::pipe_emulation::EmulationRecovery;
 
-/// A macro that stopped: it has already printed its own report, and `main` only needs the
-/// exit code.
-///
-/// The same shape as `commands::assert::NotHeld`, and for the same reason: the report is rich,
-/// the caller has to see it once, and a generic error handler printing a second line after it
-/// is how `--json` output stops being one JSON object per command.
+/// A macro that stopped: it has already printed its own report, and `main` only needs the exit
+/// code. Same shape as `commands::assert::NotHeld` — a generic handler printing a second line
+/// after it is how `--json` stops being one object per command.
 #[derive(Debug)]
 pub struct Stopped {
     report: Value,
@@ -68,18 +60,16 @@ struct GuardFailure {
     observed: String,
 }
 
-/// Run a macro end to end.
-///
-/// Returns the report as JSON rather than printing it: the CLI prints, and the shape is the
-/// same in both modes for the same reason every other command in this tool has one shape.
+/// Run a macro end to end. Returns the report as JSON rather than printing it; the CLI prints,
+/// and the shape is the same in both modes.
 pub async fn run(
     cli: &Cli,
     name: &str,
     vars: &BTreeMap<String, String>,
 ) -> Result<Value, crate::BoxError> {
     let macro_file = Macro::load(name)?;
-    // Before the browser, not after: a run that cannot finish for want of a password should
-    // not first open a page and act on it. Half a task is worse than none.
+    // Before the browser: a run that cannot finish for want of a password must not first open
+    // a page and act on it.
     macro_file.bind(vars)?;
 
     let mut session = crate::pipe::open_session(cli).await?;
@@ -91,12 +81,9 @@ pub async fn run(
     )
     .await;
 
-    // A verdict is a comparison, and a comparison needs a baseline: the recording session had
-    // one because the agent had inspected while exploring, and the distiller drops exploration.
-    // Without this, the first guarded step of every run reports `unknown / no_baseline` and a
-    // macro could never promise `verdict` at all — measured on the first end-to-end run of this
-    // feature. One snapshot at the start and one after each navigation, which is what the
-    // session it was recorded from paid too.
+    // A verdict is a comparison and needs a baseline, which distillation drops with the
+    // exploration that produced it. Without this, every run's first guarded step reports
+    // `unknown / no_baseline`. One snapshot at the start and one after each navigation.
     let mut needs_baseline = true;
     let mut steps_done = Vec::new();
     for (index, step) in macro_file.steps.iter().enumerate() {
@@ -115,8 +102,7 @@ pub async fn run(
             needs_baseline = false;
         }
         let outcome = execute(&mut session, cli, step, &action, &mut recovery).await;
-        // A navigation replaces the document, so the tree the next step would be compared
-        // against belongs to the previous page.
+        // A navigation replaces the document, so the next step's baseline is the old page.
         if outcome.response.get("landed").is_some()
             || outcome.response.get("verdict").and_then(Value::as_str) == Some("navigated")
         {
@@ -150,8 +136,8 @@ pub async fn run(
         "macro": macro_file.name,
         "steps_run": steps_done.len(),
         "steps": steps_done,
-        // Stated on success too: a run of five steps of which two promised nothing is not the
-        // same evidence as five guarded ones, and only the report can say so.
+        // Stated on success too: five steps of which two promised nothing is not the same
+        // evidence as five guarded ones.
         "unguarded_steps": unguarded,
     }))
 }
@@ -168,8 +154,8 @@ async fn execute(
     if response.get("ok").and_then(Value::as_bool) != Some(true) {
         return StepOutcome { response, failure: None };
     }
-    // Response-first: a guard settled by a field already on the response costs nothing, and a
-    // step that already failed one does not pay for a page read to fail a second.
+    // Response-first: these cost nothing, and a step that already failed one does not pay for
+    // a page read to fail a second.
     for (guard, expected) in step.expect.response_guards() {
         let observed = observed_for(guard, &response);
         if observed.as_deref() != Some(expected.as_str()) {
@@ -212,17 +198,14 @@ fn observed_for(guard: &str, response: &Value) -> Option<String> {
     }
 }
 
-/// The guards that need a look at the page, read through `assert`'s own readers.
-///
-/// Not a second implementation: `assert url --matches`, `assert text --contains` and
-/// `assert exists --min` already answer these three questions, and a macro asking them a
-/// different way is how two answers to one question start to disagree.
+/// The guards that need a look at the page, read through `assert`'s own readers rather than a
+/// second implementation that could disagree with them.
 async fn check_page_guards(
     session: &crate::pipe::Session,
     guards: &Guards,
 ) -> Result<Option<GuardFailure>, crate::BoxError> {
-    // Empty on purpose: every assertion built below targets a selector or the URL, never a
-    // uid — a macro carries no uid, which is the whole point of the locator rules.
+    // Empty on purpose: a macro carries no uid, so every assertion below targets a selector
+    // or the URL.
     let uid_map = std::collections::HashMap::new();
     let mut checks: Vec<(&'static str, Assertion)> = Vec::new();
     if let Some(pattern) = &guards.url_matches {
@@ -273,12 +256,9 @@ fn compact(value: Option<&Value>) -> String {
     }
 }
 
-/// Turn a `role` + `name` locator into the uid the dispatcher takes.
-///
-/// A macro never carries a uid, because a uid is numbered per document; so a step recorded by
-/// role and accessible name resolves it again on the page it finds, and the resolution is where
-/// it refuses. A single match is a target; several are an ambiguity a macro must not settle by
-/// picking one, and none is a page that no longer has the control.
+/// Turn a `role` + `name` locator into the uid the dispatcher takes, resolved against the page
+/// it finds. One match is the target; none is a page that no longer has the control, and several
+/// are an ambiguity a macro may not settle by picking one.
 async fn resolve_locator(
     session: &mut crate::pipe::Session,
     cli: &Cli,
@@ -291,8 +271,8 @@ async fn resolve_locator(
     ) else {
         return Ok(action.clone());
     };
-    // Through the dispatcher, so the snapshot it takes is the one the store keeps and the uid
-    // it hands back is one the next command can resolve.
+    // Through the dispatcher, so the snapshot is the one the store keeps and the uid it hands
+    // back resolves for the next command.
     let snapshot = crate::pipe::dispatch_on(session, cli, &json!({"cmd": "inspect"}), recovery).await;
     let text = snapshot.get("snapshot").and_then(Value::as_str).unwrap_or_default();
     let matches = find(text, role, name);
@@ -324,11 +304,8 @@ async fn resolve_locator(
     Ok(resolved)
 }
 
-/// Every uid in a snapshot whose line is exactly this role with this accessible name.
-///
-/// The snapshot's own shape: `uid=n12 button "Manage billing"`. Matched on the whole name
-/// rather than a substring — "Save" and "Save draft" are different controls, and a macro that
-/// clicks the wrong one is the failure this feature exists to prevent.
+/// Every uid in a snapshot whose line is exactly this role with this accessible name. Matched on
+/// the whole name, never a substring: "Save" and "Save draft" are different controls.
 fn find(snapshot: &str, role: &str, name: &str) -> Vec<String> {
     snapshot
         .lines()
@@ -347,8 +324,8 @@ fn find(snapshot: &str, role: &str, name: &str) -> Vec<String> {
         .collect()
 }
 
-/// The report of a run that stopped, with everything needed to decide what to do — and nothing
-/// that pretends to have decided it.
+/// The report of a run that stopped: everything needed to decide what to do, and nothing that
+/// pretends to have decided it.
 fn stopped(
     macro_file: &Macro,
     index: usize,
@@ -380,9 +357,8 @@ fn stopped(
             response.get("error").and_then(Value::as_str).unwrap_or("the command failed")
         ));
     }
-    // The action's own words, carried rather than summarised: `next` is the token this tool
-    // tells every agent to branch on, and a macro that swallowed it would be asking its caller
-    // to guess what one command away is already saying.
+    // The action's own words, carried rather than summarised: `next` is the token agents branch
+    // on, and swallowing it would make the caller guess what the response already says.
     for key in ["next", "verdict", "verdict_reason", "verdict_hint", "hint", "delivery", "intercepted_by"] {
         if let Some(value) = response.get(key) {
             report[key] = value.clone();
@@ -409,11 +385,8 @@ fn guard_names(guards: &Guards) -> Vec<&'static str> {
     names
 }
 
-/// One run, for a person: what ran, and where it stopped.
-///
-/// The failing step first, because that is what the reader is looking for, then the action's
-/// own `next` — the token this tool tells every agent to branch on — then the sentence that
-/// says the rest did not happen. A macro that stopped is not a macro that half-worked.
+/// One run, for a person: what ran, and where it stopped. The failing step first, then the
+/// action's own `next`, then the sentence saying the rest did not happen.
 #[must_use]
 pub fn render_run(report: &Value) -> String {
     if report["ok"].as_bool().unwrap_or(false) {
@@ -450,8 +423,8 @@ mod tests {
 
     const SNAPSHOT: &str = "uid=n1 RootWebArea \"Account\"\n  uid=n12 button \"Manage billing\"\n  uid=n13 button \"Save\"\n  uid=n14 button \"Save draft\"\n  uid=n15 link \"Manage billing\"\n";
 
-    /// The resolver matches the WHOLE name and the role: "Save" and "Save draft" are two
-    /// controls, and a macro that clicks the wrong one is the failure this exists to prevent.
+    /// The resolver matches the role and the WHOLE name: "Save" and "Save draft" are two
+    /// controls.
     #[test]
     fn a_locator_matches_one_role_and_the_whole_name() {
         assert_eq!(find(SNAPSHOT, "button", "Manage billing"), vec!["n12"]);
@@ -467,7 +440,7 @@ mod tests {
         assert_eq!(find(two, "button", "Delete").len(), 2);
     }
 
-    /// The stop report carries the action's own words rather than a summary of them.
+    /// The stop report carries the action's own words rather than a summary.
     #[test]
     fn a_stopped_run_names_the_step_the_guard_and_what_the_action_said() {
         let macro_file = Macro::parse(

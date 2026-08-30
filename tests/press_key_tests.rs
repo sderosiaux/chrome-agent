@@ -5,14 +5,8 @@ use serde_json::Value;
 mod common;
 use common::TestBrowser;
 
-fn binary() -> String {
-    let mut path = std::env::current_exe().unwrap().parent().unwrap().parent().unwrap().to_path_buf();
-    path.push("chrome-agent");
-    path.to_string_lossy().into_owned()
-}
-
 fn run_cli(args: &[&str]) -> (String, i32) {
-    let output = Command::new(binary()).args(args).output().expect("Failed to run chrome-agent");
+    let output = Command::new(common::binary()).args(args).output().expect("Failed to run chrome-agent");
     (
         String::from_utf8_lossy(&output.stdout).to_string(),
         output.status.code().unwrap_or(-1),
@@ -31,8 +25,7 @@ fn open_and_focus(browser: &str) -> bool {
     code == 0
 }
 
-/// A printable key has to type. Without `text` on the CDP event the page sees a keydown
-/// and nothing is inserted, so the command reported success and left the field empty.
+/// Without `text` on the CDP event the page sees a keydown and inserts nothing.
 #[test]
 fn pressing_a_printable_character_types_it() {
     let b = TestBrowser::new("press-char");
@@ -47,8 +40,7 @@ fn pressing_a_printable_character_types_it() {
     assert_eq!(value.trim().trim_matches('"'), "hi", "the characters should have been typed");
 }
 
-/// An unmapped key name used to go out with virtual key code 0, which no handler reads as
-/// a key, and the command still reported success.
+/// An unmapped key name must be refused, not dispatched with virtual key code 0.
 #[test]
 fn an_unknown_key_name_is_refused_rather_than_sent_as_nothing() {
     let b = TestBrowser::new("press-unknown");
@@ -64,7 +56,6 @@ fn an_unknown_key_name_is_refused_rather_than_sent_as_nothing() {
     );
 }
 
-/// Navigation keys that were missing entirely used to fall into the same hole.
 #[test]
 fn navigation_keys_reach_the_page() {
     let b = TestBrowser::new("press-nav");
@@ -81,9 +72,8 @@ fn navigation_keys_reach_the_page() {
     }
 }
 
-/// A full stop is ASCII 46, which is also `VK_DELETE`. Deriving a virtual key code from the
-/// character's byte therefore turned `press .` into a delete: verified, a field holding
-/// "XYZ" with the caret at 0 became "YZ", reported as success.
+/// A full stop is ASCII 46, which is also `VK_DELETE`: deriving the virtual key code from the
+/// character's byte turns `press .` into a delete.
 #[test]
 fn punctuation_types_instead_of_deleting() {
     let b = TestBrowser::new("press-punct");
@@ -105,8 +95,7 @@ fn punctuation_types_instead_of_deleting() {
     );
 }
 
-/// Text insertion goes to whatever holds focus. With focus on BODY it goes nowhere,
-/// and the message was built from the request rather than from the page.
+/// Text insertion goes to whatever holds focus, so with focus on BODY it goes nowhere.
 #[test]
 fn typing_with_nothing_focused_is_refused() {
     let b = TestBrowser::new("type-nofocus");

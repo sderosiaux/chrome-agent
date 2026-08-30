@@ -1,12 +1,11 @@
 use std::borrow::Cow;
 
-/// Truncate a string to at most `max_chars` characters, appending `suffix` if truncated.
-/// Safe on all UTF-8 strings — never panics on multi-byte characters.
+/// Truncate to at most `max_chars` characters, appending `suffix` if truncated.
+/// Counts characters, not bytes, so it never splits a multi-byte sequence.
 pub fn truncate_str<'a>(s: &'a str, max_chars: usize, suffix: &str) -> Cow<'a, str> {
     if s.chars().count() <= max_chars {
         return Cow::Borrowed(s);
     }
-    // Use char_indices for zero-copy byte index
     let byte_idx = s.char_indices().nth(max_chars).map_or(s.len(), |(i, _)| i);
     Cow::Owned(format!("{}{suffix}", &s[..byte_idx]))
 }
@@ -23,7 +22,7 @@ mod tests {
 
     #[test]
     fn bug_truncate_utf8_multibyte() {
-        // Each Japanese char is 3 bytes. Byte slicing at arbitrary positions panics.
+        // Each char is 3 bytes; byte slicing would panic.
         let japanese = "日本語テストデータ";
         let result = truncate_str(japanese, 3, "...");
         assert_eq!(result, "日本語...");

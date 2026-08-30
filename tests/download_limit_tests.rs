@@ -10,20 +10,8 @@ use std::time::Duration;
 mod common;
 use common::TestBrowser;
 
-fn binary() -> PathBuf {
-    let mut path = std::env::current_exe()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .to_path_buf();
-    path.push("chrome-agent");
-    path
-}
-
 fn run(browser: &str, args: &[&str]) -> Output {
-    Command::new(binary())
+    Command::new(common::binary())
         .args(["--browser", browser])
         .args(args)
         .output()

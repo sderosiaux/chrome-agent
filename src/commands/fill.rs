@@ -13,11 +13,8 @@ pub async fn run(
     Ok((format!("Filled uid={uid} with {}", value.len()), outcome))
 }
 
-/// Fill several fields, keeping what each one held afterwards.
-///
-/// The outcomes used to be dropped on the floor and the answer was a count. A count is
-/// right about how many writes were attempted and silent about the mask that reformatted
-/// one of them — the very thing `fill` returns `value` to expose.
+/// Fill several fields, returning each one's read-back rather than a count — a count cannot
+/// show the mask that reformatted one of them.
 pub async fn run_form(
     client: &CdpClient,
     uid_map: &HashMap<String, ElementRef>,

@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>A checkbox whose click navigates the page</title>
+</head>
+<body>
+  <h1>Check me and the page leaves</h1>
+  <!-- A `check` that DISPATCHES, WAITS for the load, and then FAILS: the handler navigates, so
+       `element::dispatch_click_at` records a settle wait, and the read-back 60 ms later runs
+       `Runtime.callFunctionOn` against an object id belonging to a document that no longer
+       exists. Exactly the shape that used to hand its `waited_ms` to the NEXT pipe command. -->
+  <label><input type="checkbox" id="leaver"> Leave on check</label>
+  <script>
+    document.getElementById('leaver').addEventListener('click', () => {
+      location.href = 'click_spawns_subframe.html';
+    });
+  </script>
+</body>
+</html>

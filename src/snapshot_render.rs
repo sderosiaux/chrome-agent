@@ -1,9 +1,8 @@
-//! Rendering an accessibility tree into the compact text a snapshot is.
+//! Render an accessibility tree into the compact text a snapshot is.
 //!
-//! Split from `snapshot.rs` for the 1000-line file cap. Everything here is pure: it takes
-//! `&[AXNode]` and produces text plus the uid maps, with no CDP call and no I/O — which is
-//! what lets `snapshot::take_views` render ONE reading twice, once at full depth for the
-//! diff baseline and once through the caller's `--filter`/`--max-depth`/`--uid`.
+//! Pure: `&[AXNode]` in, text plus uid maps out, no CDP call and no I/O. That is what lets
+//! `snapshot::take_views` render ONE reading twice — full depth for the diff baseline, and
+//! again through the caller's `--filter`/`--max-depth`/`--uid`.
 
 use std::collections::HashMap;
 
@@ -11,20 +10,15 @@ use crate::cdp::types::AXNode;
 use crate::element_ref::ElementRef;
 use crate::snapshot::Redaction;
 
-/// Format `AXNode` list into indented text + uid map.
+/// Format a flat `AXNode` list (CDP links them by `parentId`/`childIds`) into indented text
+/// plus the uid map.
 ///
-/// CDP returns a flat list of `AXNodes` with parent/child relationships
-/// via `parentId` and `childIds`. We reconstruct the tree and format it.
-///
-/// When `focus_uid` is set, we first do a full pass to assign uids (so
-/// the numbering matches a normal inspect), then find the node whose uid
-/// matches and re-render only that subtree from depth 0.
+/// `focus_uid` triggers a full pass to assign uids, then a re-render of that node's subtree
+/// from depth 0, so numbering matches a normal inspect.
 ///
 /// `preassigned` maps an `AXNode` id to the `e{n}` uid a previous rendering of the SAME tree
-/// gave it. Anonymous uids come from a counter walked in traversal order, so a rendering
-/// that skips nodes renumbers the ones it keeps; passing the full rendering's assignment in
-/// keeps the printed uid and the stored one the same node. Returns its own assignment as the
-/// third element so a caller can feed it forward.
+/// gave it; anonymous uids are counted in traversal order, so a rendering that skips nodes
+/// would renumber the rest. The third return value is this rendering's own assignment.
 pub fn format_ax_tree(
     nodes: &[AXNode],
     verbose: bool,
@@ -34,13 +28,11 @@ pub fn format_ax_tree(
     redaction: &Redaction,
     preassigned: Option<&HashMap<String, String>>,
 ) -> (String, HashMap<String, ElementRef>, HashMap<String, String>) {
-    // Build lookup: nodeId → AXNode
     let node_by_id: HashMap<&str, &AXNode> = nodes
         .iter()
         .map(|n| (n.node_id.as_str(), n))
         .collect();
 
-    // Find root (node with no parentId, or first node)
     let root_id = nodes
         .iter()
         .find(|n| n.parent_id.is_none())
@@ -51,11 +43,11 @@ pub fn format_ax_tree(
     };
 
     if let Some(focus) = focus_uid {
-        // First pass: assign uids without max_depth to find the target node
+        // First pass: assign uids with no depth limit, and map uid → nodeId so the subtree
+        // root can be found.
         let mut uid_map_full = HashMap::new();
         let mut uid_counter: u32 = 0;
         let mut discard = String::new();
-        // Map uid → AXNode nodeId so we can find the subtree root
         let mut uid_to_node_id: HashMap<String, String> = HashMap::new();
         let mut anon_full: HashMap<String, String> = HashMap::new();
         format_node_with_tracking(
@@ -73,19 +65,15 @@ pub fn format_ax_tree(
             &mut anon_full,
         );
 
-        // Find the AXNode nodeId for the focus uid
         let focus_node_id = uid_to_node_id.get(focus);
         if let Some(focus_node_id) = focus_node_id {
-            // Second pass: render only the subtree
             let mut uid_map = HashMap::new();
             let mut output = String::new();
             let mut uid_counter2: u32 = 0;
             let mut tracking2: HashMap<String, String> = HashMap::new();
             let mut anon2: HashMap<String, String> = HashMap::new();
-            // The subtree inherits the assignment of whichever rendering came first — the
-            // caller's, or failing that this function's own full pass above. A subtree walked
-            // from depth 0 would otherwise restart the counter and hand `e1` to a node the
-            // stored map knows under another name.
+            // The subtree inherits the caller's assignment, or the full pass above; otherwise
+            // it restarts the counter and hands `e1` to an already-named node.
             let inherited = preassigned.unwrap_or(&anon_full);
             format_node_with_tracking(
                 focus_node_id,
@@ -104,10 +92,8 @@ pub fn format_ax_tree(
             return (apply_role_filter(output, role_filter, max_depth), uid_map, anon2);
         }
 
-        // uid not found — return the diagnostic verbatim. Do NOT route it
-        // through the role filter: the message begins with "uid=" and would be
-        // stripped as a non-matching node, producing silent empty output — the
-        // exact confusion the filter's own empty-guard (below) tries to prevent.
+        // uid not found. Do NOT route this through the role filter: the message begins with
+        // "uid=" and would be stripped as a non-matching node, leaving empty output.
         return (
             format!("uid={focus} not found in accessibility tree\n"),
             uid_map_full,
@@ -115,7 +101,6 @@ pub fn format_ax_tree(
         );
     }
 
-    // Normal (no focus_uid) path
     let mut uid_map = HashMap::new();
     let mut output = String::new();
     let mut uid_counter: u32 = 0;
@@ -134,24 +119,22 @@ pub fn format_ax_tree(
         &mut anon,
     );
 
-    // Post-filter by role if requested
     let output = apply_role_filter(output, role_filter, max_depth);
 
     (output, uid_map, anon)
 }
 
-/// Post-process rendered snapshot text, keeping only lines whose role matches
-/// `role_filter` (with alias expansion). Returns `output` unchanged when no
-/// filter is requested. When the filter matches nothing but a `max_depth` was
-/// set, returns a hint instead of silent empty output.
+/// Keep only lines whose role matches `role_filter`, expanding aliases. Returns `output`
+/// unchanged when no filter is requested, and a hint rather than empty output when the
+/// filter matches nothing under a `max_depth`.
 ///
-/// Applied on every rendering path — including the `focus_uid` subtree — so
+/// Applied on every rendering path including the `focus_uid` subtree, so
 /// `inspect --uid nN --filter button` scopes to both the subtree and the role.
 fn apply_role_filter(output: String, role_filter: Option<&[&str]>, max_depth: Option<usize>) -> String {
     let Some(roles) = role_filter else {
         return output;
     };
-    // Expand role aliases so agents don't need to know exact ARIA role names
+    // Aliases, so agents need not know exact ARIA role names.
     let expanded: Vec<String> = roles.iter().flat_map(|&r| {
         let mut v = vec![(*r).to_string()];
         match r.to_lowercase().as_str() {
@@ -182,8 +165,8 @@ fn apply_role_filter(output: String, role_filter: Option<&[&str]>, max_depth: Op
             acc.push('\n');
             acc
         });
-    // Warn if filter matched nothing — likely the matching elements are deeper
-    // than max_depth. This prevents silent empty output that confuses agents.
+    // No match under a depth limit usually means the elements are deeper; say so rather
+    // than print nothing.
     if filtered.is_empty() && max_depth.is_some() {
         format!("No elements matching filter {:?} found within --max-depth {}. Try increasing depth or removing --max-depth.\n",
             roles, max_depth.unwrap_or(0))
@@ -230,9 +213,8 @@ fn format_node_with_tracking(
         return;
     };
 
-    // Skip ignored nodes unless verbose
+    // Skip ignored nodes unless verbose, but still recurse: they can have visible children.
     if node.ignored && !verbose {
-        // Still recurse into children — some ignored nodes have visible children
         if let Some(child_ids) = &node.child_ids {
             for child_id in child_ids {
                 format_node_with_tracking(child_id, nodes, depth, verbose, max_depth, uid_counter, uid_map, output, uid_to_node_id, redaction, preassigned, anon);
@@ -244,7 +226,7 @@ fn format_node_with_tracking(
     let role = node.role_name().unwrap_or("");
     let mut name = node.name_value().unwrap_or("").to_string();
 
-    // Skip noise roles unless verbose — these repeat parent content and waste tokens
+    // Noise roles repeat parent content; skipping them cuts tokens ~66%.
     const NOISE_ROLES: &[&str] = &["none", "StaticText", "InlineTextBox"];
     if !verbose && NOISE_ROLES.contains(&role) {
         if let Some(child_ids) = &node.child_ids {
@@ -255,7 +237,7 @@ fn format_node_with_tracking(
         return;
     }
 
-    // If name is empty and we're filtering noise, pull text from StaticText children
+    // Unnamed node with noise filtered: recover its text from StaticText children.
     if !verbose && name.is_empty()
         && let Some(child_ids) = &node.child_ids {
             let texts: Vec<&str> = child_ids
@@ -269,7 +251,6 @@ fn format_node_with_tracking(
             }
         }
 
-    // Skip generic containers with no name unless verbose
     if !verbose && role == "generic" && name.is_empty() {
         if let Some(child_ids) = &node.child_ids {
             for child_id in child_ids {
@@ -279,10 +260,8 @@ fn format_node_with_tracking(
         return;
     }
 
-    // Assign uid — stable (based on backendNodeId) when available, sequential fallback.
-    // The fallback is positional, so a rendering that skips nodes would renumber the ones it
-    // keeps: `preassigned` carries the numbering of the rendering that ran first over the
-    // same tree, so the printed uid and the stored one name the same node.
+    // Stable `n{backendNodeId}` when available, else a positional `e{n}` that a truncated
+    // traversal would renumber — so `preassigned` wins whenever it knows this node.
     let uid = if let Some(backend_id) = node.backend_dom_node_id {
         let uid = format!("n{backend_id}");
         uid_map.insert(uid.clone(), ElementRef::backend_node(backend_id));
@@ -296,10 +275,8 @@ fn format_node_with_tracking(
         uid
     };
 
-    // Track uid → AXNode nodeId for focus_uid lookup
     uid_to_node_id.insert(uid.clone(), node_id.to_string());
 
-    // Build attribute string
     let indent = "  ".repeat(depth);
     output.push_str(&indent);
     output.push_str("uid=");
@@ -320,9 +297,8 @@ fn format_node_with_tracking(
         output.push('"');
     }
 
-    // Value (for inputs). The marker stays inside the quotes: `diff` reads a value through the
-    // `value="` prefix, and an unquoted marker would read as a field that holds nothing —
-    // turning every secret into a `values_lost` on the next comparison.
+    // Input values. The redaction marker stays INSIDE the quotes: `diff` reads a value via
+    // the `value="` prefix, and an unquoted marker would read as an empty field.
     if let Some(value_ax) = &node.value
         && let Some(val) = value_ax.value.as_ref().and_then(|v| v.as_str())
             && !val.is_empty() {
@@ -331,7 +307,6 @@ fn format_node_with_tracking(
                 output.push('"');
             }
 
-    // Properties: focused, disabled, expanded, selected, level, checked
     if let Some(props) = &node.properties {
         for prop in props {
             let prop_val = prop.value.value.as_ref();
@@ -379,7 +354,6 @@ fn format_node_with_tracking(
                     }
                 }
                 _ => {
-                    // Include all properties in verbose mode
                     if verbose
                         && let Some(val) = prop_val {
                             output.push(' ');
@@ -403,13 +377,11 @@ fn format_node_with_tracking(
 
     output.push('\n');
 
-    // Depth limit: skip children if we've reached max_depth
     if let Some(max) = max_depth
         && depth >= max {
             return;
         }
 
-    // Recurse children
     if let Some(child_ids) = &node.child_ids {
         for child_id in child_ids {
             format_node_with_tracking(
@@ -493,9 +465,8 @@ mod tests {
 
     #[test]
     fn input_alias_covers_all_input_roles() {
-        // CLAUDE.md contract: "input→all input roles". A checkbox/radio/slider
-        // silently dropped by --filter input looks like the page has no such
-        // control at all.
+        // Contract: "input→all input roles". A checkbox dropped by --filter input reads
+        // as a page with no such control.
         let output = "uid=n1 textbox \"Name\"\n\
                       uid=n2 checkbox \"Agree\"\n\
                       uid=n3 radio \"Choice A\"\n\
@@ -614,7 +585,6 @@ mod tests {
                 ..default_ax_node()
             },
         ];
-        // n1=WebArea, n2=heading, n3=button — focus on n3
         let (text, _, _) = format_ax_tree(&nodes, false, None, Some("n3"), None, &Redaction::none(), None);
         assert!(text.contains("Submit"));
         assert!(!text.contains("Title"));
@@ -622,9 +592,8 @@ mod tests {
 
     #[test]
     fn focus_uid_applies_role_filter() {
-        // Regression (A10e): the focus_uid branch rendered the subtree but never
-        // applied role_filter. `inspect --uid n1 --filter button` must return only
-        // button-role descendants, not the whole subtree.
+        // `inspect --uid n1 --filter button` must return only button-role descendants,
+        // not the whole subtree.
         let nodes = vec![
             AXNode {
                 node_id: "1".into(),
@@ -654,7 +623,6 @@ mod tests {
                 ..default_ax_node()
             },
         ];
-        // Focus the form (n1) AND filter to buttons: only the Submit button remains.
         let (text, _, _) = format_ax_tree(&nodes, false, None, Some("n1"), Some(&["button"]), &Redaction::none(), None);
         assert!(text.contains("uid=n3 button \"Submit\""));
         assert!(!text.contains("Please sign up")); // heading filtered out
@@ -703,7 +671,6 @@ mod tests {
             },
         ];
         let (text, uid_map, _) = format_ax_tree(&nodes, false, None, None, None, &Redaction::none(), None);
-        // All nodes ignored = empty output
         assert!(text.is_empty());
         assert!(uid_map.is_empty());
     }
@@ -719,7 +686,6 @@ mod tests {
             backend_dom_node_id: Some(1),
             ..default_ax_node()
         }];
-        // Filter for "button" but only heading exists
         let (text, _, _) = format_ax_tree(&nodes, false, None, None, Some(&["button"]), &Redaction::none(), None);
         assert!(text.is_empty() || !text.contains("heading"));
     }
@@ -771,10 +737,8 @@ mod tests {
 
     #[test]
     fn anonymous_uids_are_renumbered_by_a_truncated_traversal() {
-        // The behaviour the preassignment exists to correct. `e{n}` comes from a counter
-        // walked in traversal order: the deep node takes `e1` when the whole tree is walked
-        // and never appears when the walk stops at depth 1, so the shallow node moves from
-        // `e2` to `e1`. Two renderings of ONE tree, and `e1` naming two different nodes.
+        // The behaviour preassignment exists to correct: the deep node takes `e1` on a full
+        // walk and disappears at depth 1, moving the shallow node from `e2` to `e1`.
         let nodes = tree_with_anonymous_nodes();
         let (full, _, _) = format_ax_tree(&nodes, false, None, None, None, &Redaction::none(), None);
         assert!(full.contains("uid=e1 banner \"Deep anonymous\""), "got {full}");
@@ -787,11 +751,8 @@ mod tests {
 
     #[test]
     fn a_preassigned_anonymous_uid_survives_a_truncated_traversal() {
-        // What `take_views` relies on: the baseline is rendered first, the caller's reduced
-        // view second, and the second inherits the first's numbering. Without it the uid
-        // printed for a node and the uid stored for it are different nodes — the uid map
-        // would resolve `e1` to the deep node while the output offered `e1` for the shallow
-        // one.
+        // What `take_views` relies on: the reduced view inherits the baseline's numbering,
+        // so the uid printed and the uid stored name the same node.
         let nodes = tree_with_anonymous_nodes();
         let (_, _, anon) = format_ax_tree(&nodes, false, None, None, None, &Redaction::none(), None);
         let (shallow, _, _) =

@@ -1,8 +1,7 @@
 //! `assert` end to end: the exit contract, and the readers it shares with the actions.
 //!
-//! The exit code is the feature. Every test here checks the code as well as the JSON,
-//! because a caller that reads only stdout cannot tell a page that is wrong from a tool
-//! that is broken — which is precisely what the third code exists to fix.
+//! Every test checks the exit code as well as the JSON: 0 held, 2 did not hold, 1 could not
+//! be checked.
 
 use std::process::Command;
 
@@ -11,14 +10,8 @@ use serde_json::Value;
 mod common;
 use common::TestBrowser;
 
-fn binary() -> String {
-    let mut path = std::env::current_exe().unwrap().parent().unwrap().parent().unwrap().to_path_buf();
-    path.push("chrome-agent");
-    path.to_string_lossy().into_owned()
-}
-
 fn run_cli(args: &[&str]) -> (String, i32) {
-    let output = Command::new(binary()).args(args).output().expect("Failed to run chrome-agent");
+    let output = Command::new(common::binary()).args(args).output().expect("Failed to run chrome-agent");
     (
         String::from_utf8_lossy(&output.stdout).to_string(),
         output.status.code().unwrap_or(-1),
@@ -52,11 +45,8 @@ fn cli(browser: &str, args: &[&str]) -> (Value, i32) {
     (serde_json::from_str(&out).unwrap_or(Value::Null), code)
 }
 
-/// The whole point: 2 is "the page is not in that state", 1 is "I could not check".
-///
-/// The fixture reverts the value in a promise callback, so `fill` reports
-/// `verbatim:false` and the field is empty by the time anything looks — the same
-/// microtask revert the fill report exists to expose, now assertable.
+/// A value the page contradicts is exit 2, and the report names what the page kept. The
+/// fixture reverts in a promise callback, so the field is empty when read.
 #[test]
 fn a_value_the_page_did_not_keep_exits_2_and_names_what_it_kept() {
     let b = TestBrowser::new("assert-exit-2");
@@ -74,19 +64,17 @@ fn a_value_the_page_did_not_keep_exits_2_and_names_what_it_kept() {
     assert_eq!(v["assertion"]["expected"], "hello@example.com");
     assert_eq!(v["assertion"]["actual"], "", "the page kept nothing, and the report says so: {v}");
     assert!(v["hint"].is_string(), "a failed assertion says what to do next: {v}");
-    // The node it read is named, whichever way the caller aimed — same contract as an action.
+    // The node it read is named, whichever way the caller aimed.
     assert!(v["assertion"]["uid"].as_str().is_some_and(|u| u.starts_with('n')), "{v}");
 
-    // The complement, on the same page and the same field: what the page DOES hold holds.
+    // The complement: what the page does hold, holds.
     let (v, code) = assert_cmd(b.name(), &["value", "--selector", "#micro", "--equals", ""]);
     assert_eq!(code, 0, "{v}");
     assert_eq!(v["ok"], true, "{v}");
     assert_eq!(v["assertion"]["held"], true, "{v}");
 }
 
-/// A selector that matches nothing, an unparseable selector and an unparseable regex are all
-/// the same kind of answer: the claim was never checked. Exit 1, never 2 — a caller retrying
-/// on 1 and reporting on 2 must not have those swapped.
+/// No match, a bad selector, a bad regex and an unknown uid are all exit 1, never 2.
 #[test]
 fn an_unanswerable_claim_exits_1_not_2() {
     let b = TestBrowser::new("assert-exit-1");
@@ -110,23 +98,19 @@ fn an_unanswerable_claim_exits_1_not_2() {
     }
 }
 
-/// Assertion and action must agree about what "checked" means, by sharing the reader.
-///
-/// `el.checked` is undefined on a `<div role=checkbox>`, so a naive assertion would call a
-/// checked ARIA box unchecked — and an agent trusting it would click the box OFF. Both
-/// targeting modes are checked because both must resolve to the same answer.
+/// `check` and `assert state --checked` share one reader, so a `<div role=checkbox>` reads
+/// the same either way. Both targeting modes.
 #[test]
 fn what_check_did_is_what_assert_reads_by_uid_and_by_selector() {
     let b = TestBrowser::new("assert-agreement");
     if !open(b.name(), "checkable_kinds.html") {
         return;
     }
-    // A uid resolves through the stored snapshot, like every other uid-targeted command, so
-    // inspect first — `goto` deliberately clears the map.
+    // A uid resolves through the stored snapshot, and `goto` clears the map, so inspect first.
     let (_, code) = run_cli(&["--browser", b.name(), "inspect"]);
     assert_eq!(code, 0, "inspect populates the uid map");
 
-    // Native checkbox: turn it on with the tool, then assert it both ways.
+    // Native checkbox: turn it on, then assert it both ways.
     let (checked, code) = cli(b.name(), &["check", "--selector", "#native"]);
     assert_eq!(code, 0, "{checked}");
     let uid = checked["uid"].as_str().expect("check names the node it hit").to_string();
@@ -141,12 +125,12 @@ fn what_check_did_is_what_assert_reads_by_uid_and_by_selector() {
         assert_eq!(v["assertion"]["reading"], "native", "{v}");
     }
 
-    // The ARIA checkbox that starts checked: the shared classification reads the attribute.
+    // The ARIA checkbox that starts checked: the reading is the attribute.
     let (v, code) = assert_cmd(b.name(), &["state", "--selector", "#aria_on", "--checked"]);
     assert_eq!(code, 0, "an aria-checked=true div is checked: {v}");
     assert_eq!(v["assertion"]["reading"], "aria", "{v}");
 
-    // And the one that starts off: --unchecked holds, --checked is a plain exit 2.
+    // The one that starts off: --unchecked holds, --checked is exit 2.
     let (v, code) = assert_cmd(b.name(), &["state", "--selector", "#aria_off", "--unchecked"]);
     assert_eq!(code, 0, "{v}");
     let (v, code) = assert_cmd(b.name(), &["state", "--selector", "#aria_off", "--checked"]);
@@ -154,8 +138,7 @@ fn what_check_did_is_what_assert_reads_by_uid_and_by_selector() {
     assert_eq!(v["assertion"]["actual"], "false", "{v}");
 }
 
-/// Asking whether a text input is checked is as unanswerable as asking to check it, and it
-/// is refused by the same guard — exit 1, with the message that names what is required.
+/// `--checked` on a text input is exit 1 with a message naming what would be checkable.
 #[test]
 fn a_state_the_element_cannot_hold_is_refused_not_answered() {
     let b = TestBrowser::new("assert-unanswerable");
@@ -169,7 +152,6 @@ fn a_state_the_element_cannot_hold_is_refused_not_answered() {
     assert!(err.contains("checkbox"), "the message names what would be checkable: {v}");
 }
 
-/// `select` and `assert state --selected` read the selection through one JS reader.
 #[test]
 fn what_select_chose_is_what_assert_reads() {
     let b = TestBrowser::new("assert-selected");
@@ -179,7 +161,7 @@ fn what_select_chose_is_what_assert_reads() {
     let (sel, code) = cli(b.name(), &["select", "--selector", "#state", "California"]);
     assert_eq!(code, 0, "{sel}");
 
-    // Both spellings select accepts are both spellings assert accepts.
+    // Both spellings `select` accepts, `assert` accepts.
     for expected in ["California", "CA"] {
         let (v, code) = assert_cmd(b.name(), &["state", "--selector", "#state", "--selected", expected]);
         assert_eq!(code, 0, "selected by {expected}: {v}");
@@ -191,8 +173,8 @@ fn what_select_chose_is_what_assert_reads() {
     assert_eq!(v["assertion"]["actual"], "California", "the report names what IS selected: {v}");
 }
 
-/// `:disabled` plus `aria-disabled`, because `el.disabled` is wrong in both directions: it
-/// is false for an input inside a disabled `<fieldset>` and undefined on a div.
+/// Disabled is `:disabled` plus `aria-disabled`, not `el.disabled`, which is false inside a
+/// disabled `<fieldset>` and undefined on a div.
 #[test]
 fn disabled_is_read_the_way_fill_refuses_and_includes_aria() {
     let b = TestBrowser::new("assert-disabled");
@@ -204,7 +186,6 @@ fn disabled_is_read_the_way_fill_refuses_and_includes_aria() {
         ("#dead", "--disabled", 0, "disabled"),
         // The property says false here; the pseudo-class knows about the ancestor.
         ("#in_disabled_fieldset", "--disabled", 0, "disabled"),
-        // Inert to everything that reads the page, so never "enabled".
         ("#aria_dead", "--disabled", 0, "aria-disabled"),
         ("#aria_dead", "--enabled", 2, "aria-disabled"),
     ] {
@@ -214,8 +195,7 @@ fn disabled_is_read_the_way_fill_refuses_and_includes_aria() {
     }
 }
 
-/// `--visible` separates the three ways a page hides something, and says in the response
-/// what it does not mean.
+/// `--visible` separates the three ways a page hides something, and says what it does not mean.
 #[test]
 fn visible_names_which_flavour_of_hidden_it_found() {
     let b = TestBrowser::new("assert-visible");
@@ -239,7 +219,7 @@ fn visible_names_which_flavour_of_hidden_it_found() {
     }
 }
 
-/// A count is a claim: an exact count, a floor, bare presence, and `--count 0` for absence.
+/// `exists` with an exact count, a floor, bare presence, and `--count 0` for absence.
 #[test]
 fn exists_counts_and_absence() {
     let b = TestBrowser::new("assert-exists");
@@ -252,20 +232,18 @@ fn exists_counts_and_absence() {
         (vec!["exists", "--selector", ".row", "--min", "3"], 0),
         (vec!["exists", "--selector", ".row", "--min", "4"], 2),
         (vec!["exists", "--selector", ".row"], 0),
-        // Absence, asserted deliberately — and the same selector under bare presence fails.
         (vec!["exists", "--selector", ".ghost", "--count", "0"], 0),
         (vec!["exists", "--selector", ".ghost"], 2),
     ] {
         let (v, code) = assert_cmd(b.name(), &args);
         assert_eq!(code, expect, "{args:?}: {v}");
     }
-    // The count itself travels, so a failure says how many there were.
+    // A failure reports how many there were.
     let (v, _) = assert_cmd(b.name(), &["exists", "--selector", ".row", "--count", "2"]);
     assert_eq!(v["assertion"]["actual"], 3, "{v}");
     assert_eq!(v["assertion"]["expected"], 2, "{v}");
 }
 
-/// Text and URL: the two reads that need no element.
 #[test]
 fn text_and_url_after_a_navigation() {
     let b = TestBrowser::new("assert-text-url");
@@ -286,9 +264,6 @@ fn text_and_url_after_a_navigation() {
     assert_eq!(code, 2, "{v}");
 }
 
-/// A password is compared but never printed. The response reaches stdout, the agent
-/// transcript and any recording, and `fill` redacts on exactly this test — an assertion that
-/// echoed the value would be a way around it.
 #[test]
 fn a_secret_field_is_compared_without_echoing_the_secret() {
     let b = TestBrowser::new("assert-secret");
@@ -300,7 +275,7 @@ fn a_secret_field_is_compared_without_echoing_the_secret() {
     assert_eq!(v["assertion"]["redacted"], true, "{v}");
     let printed = serde_json::to_string(&v).unwrap();
     assert!(!printed.contains("hunter2"), "the secret must not appear anywhere in the response: {printed}");
-    // Lengths still travel: they are what separates "the mask reformatted it" from "empty".
+    // Lengths separate "the mask reformatted it" from "empty".
     assert_eq!(v["assertion"]["actual_length"], 7, "{v}");
 
     let (v, code) = assert_cmd(b.name(), &["value", "--selector", "#secret", "--equals", "wrong"]);
@@ -309,8 +284,7 @@ fn a_secret_field_is_compared_without_echoing_the_secret() {
     assert!(!printed.contains("hunter2"), "not even on the failure path: {printed}");
 }
 
-/// An element with no `value` property is a refusal that names the alternative, not a
-/// silent `null` compared against the expectation.
+/// `assert value` on an element with no `value` property is refused and names `assert text`.
 #[test]
 fn a_value_assertion_on_something_that_holds_no_value_is_refused() {
     let b = TestBrowser::new("assert-novalue");
@@ -322,13 +296,14 @@ fn a_value_assertion_on_something_that_holds_no_value_is_refused() {
     let err = v["error"].as_str().unwrap_or_default();
     assert!(err.contains("no value property"), "{v}");
     assert!(err.contains("assert text"), "the refusal names what to use instead: {v}");
-    // And the text of that same element does hold.
+    // The text of that same element does hold.
     let (v, code) = assert_cmd(b.name(), &["text", "--selector", "#editable", "--contains", "typed here"]);
     assert_eq!(code, 0, "{v}");
 }
 
-/// In batch and pipe there is no exit code, so `held` rides on `ok` — and `stop_on_error`
-/// stops at the first one that is false, saying where.
+/// An assertion inside a batch has no exit code of its own, so `held` rides on `ok`;
+/// `--stop-on-error` stops at the first one (and makes the process itself exit 1, which
+/// `tests/cli_contract_tests.rs` pins).
 #[test]
 fn batch_stops_at_the_first_failed_assertion_only_when_asked() {
     let b = TestBrowser::new("assert-batch");
@@ -337,9 +312,9 @@ fn batch_stops_at_the_first_failed_assertion_only_when_asked() {
     }
     let commands = r#"[{"cmd":"assert","what":"exists","selector":".ghost"},{"cmd":"assert","what":"exists","selector":".row","min":3}]"#;
 
-    // Default: every command runs, exactly as before this flag existed.
-    let out = Command::new(binary())
-        .args(["--browser", b.name(), "--verdict", "off", "batch"])
+    // Default: every command runs.
+    let out = Command::new(common::binary())
+        .args(["--browser", b.name(), "--verdict", "off", "--json", "batch"])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .spawn()
@@ -355,8 +330,8 @@ fn batch_stops_at_the_first_failed_assertion_only_when_asked() {
     assert!(v.get("stopped_at").is_none(), "nothing was skipped: {v}");
 
     // Opt in, and the second command never runs.
-    let out = Command::new(binary())
-        .args(["--browser", b.name(), "--verdict", "off", "batch", "--stop-on-error"])
+    let out = Command::new(common::binary())
+        .args(["--browser", b.name(), "--verdict", "off", "--json", "batch", "--stop-on-error"])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .spawn()
@@ -373,15 +348,13 @@ fn batch_stops_at_the_first_failed_assertion_only_when_asked() {
     assert_eq!(v["results"][0]["assertion"]["held"], false, "{v}");
 }
 
-/// A read carries no verdict and no change report: nothing moved, and claiming a verdict
-/// would put an action's vocabulary on an observation.
 #[test]
 fn an_assertion_reports_no_verdict_and_no_change() {
     let b = TestBrowser::new("assert-no-verdict");
     if !open(b.name(), "assert_page.html") {
         return;
     }
-    // Note: no `--verdict off` here — the default is on, and a read must still stay silent.
+    // No `--verdict off` here: reporting is on by default and the read must still stay silent.
     let (out, code) = run_cli(&["--browser", b.name(), "--json", "assert", "exists", "--selector", ".row"]);
     let v: Value = serde_json::from_str(&out).unwrap_or(Value::Null);
     assert_eq!(code, 0, "{v}");
@@ -390,15 +363,14 @@ fn an_assertion_reports_no_verdict_and_no_change() {
     }
 }
 
-/// Text mode keeps stdout clean on a failure: the line goes to stderr like every other
-/// refusal this binary prints, and the exit code is the answer.
+/// In text mode a failed assertion goes to stderr and stdout stays empty.
 #[test]
 fn text_mode_puts_a_failed_assertion_on_stderr() {
     let b = TestBrowser::new("assert-stderr");
     if !open(b.name(), "assert_page.html") {
         return;
     }
-    let out = Command::new(binary())
+    let out = Command::new(common::binary())
         .args(["--browser", b.name(), "assert", "url", "--equals", "https://example.com/"])
         .output()
         .expect("run assert");

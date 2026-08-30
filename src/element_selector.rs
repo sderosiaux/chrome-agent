@@ -1,15 +1,11 @@
-//! CSS-selector-based element actions (click, double-click, fill, focus).
-//!
-//! Split out of `element.rs` to keep that file under the 1000-line module cap.
-//! Re-exported from `element` (`pub use`) so callers keep using
-//! `crate::element::click_selector` etc.
+//! CSS-selector-based element actions (click, double-click, fill, focus). Re-exported from
+//! `element`.
 
 use serde_json::json;
 
 use crate::cdp::client::CdpClient;
 
-/// Thrown JS arrives as "Error: message\n    at <anonymous>:3:19". The stack is noise in a
-/// field an agent reads to decide what to do next.
+/// Thrown JS arrives as `Error: message\n    at <anonymous>:3:19`; the stack is noise.
 fn first_line(text: &str) -> String {
     text.lines().next().unwrap_or(text).trim_start_matches("Error: ").to_string()
 }
@@ -17,17 +13,10 @@ use crate::element::{wait_for_stabilization, ElementError};
 
 /// Single-click an element matched by a CSS selector.
 ///
-/// Resolves ONE handle to the element and then does everything through it: the aim probe, the
-/// dispatch, and the uid on the response. It used to be three independent `querySelector`
-/// evaluations — pre-probe, action, post-probe — which a re-render between round trips could
-/// bind to three different nodes while the response described one.
-///
-/// Before that it called `el.click()`, which fires the handler on the node whatever is stacked
-/// on top of it: a click on a button under a modal scrim reported success with the same shape
-/// as a click a user could have made. The consequence of the fix is deliberate and worth
-/// stating: a covered element hands the click to whatever covers it, so `--selector` on a
-/// button behind a cookie banner clicks the banner — and now says so, naming it. Falls back to
-/// a JS `click()` only when the element has no layout box, where there is no point to aim at.
+/// Resolves ONE handle and does everything through it — aim probe, dispatch, uid on the response
+/// — so a re-render between round trips cannot bind three different nodes. Dispatching real input
+/// rather than `el.click()` means a covered element hands the click to whatever covers it, and
+/// the response names it. Falls back to a JS `click()` only when there is no layout box.
 pub async fn click_selector(
     client: &CdpClient,
     selector: &str,
@@ -42,8 +31,7 @@ pub async fn click_selector(
         &format!("selector '{selector}'"),
     )
     .await
-    // The refusal is where the caller most needs to know which node was aimed at, and it was
-    // the one path that lost it: `named` below only ever ran on the way out through `Ok`.
+    // `named` below runs only on the `Ok` path, and a refusal needs the node too.
     .map_err(|e| e.naming(handle.uid.clone(), handle.role.clone(), handle.name.clone()))?;
     Ok(outcome.named(handle.uid, handle.role, handle.name))
 }
@@ -65,17 +53,13 @@ pub async fn dblclick_selector(
         &format!("selector '{selector}'"),
     )
     .await
-    // The refusal is where the caller most needs to know which node was aimed at, and it was
-    // the one path that lost it: `named` below only ever ran on the way out through `Ok`.
+    // `named` below runs only on the `Ok` path, and a refusal needs the node too.
     .map_err(|e| e.naming(handle.uid.clone(), handle.role.clone(), handle.name.clone()))?;
     Ok(outcome.named(handle.uid, handle.role, handle.name))
 }
 
-/// Fill an element matched by a CSS selector, and report what the page holds afterwards.
-///
-/// Probe, write and read-back happen in one evaluation so all three bind the same node: a
-/// re-render between separate `querySelector` calls would otherwise let them act on
-/// different elements while reporting one result.
+/// Fill an element matched by a CSS selector, and report what the page holds afterwards. Probe,
+/// write and read-back happen in one evaluation, so all three bind the same node.
 pub async fn fill_selector(
     client: &CdpClient,
     selector: &str,
@@ -99,8 +83,8 @@ pub async fn fill_selector(
             }}
             el.dispatchEvent(new Event('input', {{bubbles: true}}));
             el.dispatchEvent(new Event('change', {{bubbles: true}}));
-            // Read after the window rather than on the next line: a controlled component
-            // that reverts in a promise callback has not run yet when the write returns.
+            // Read after the window, not on the next line: a controlled component reverting in
+            // a promise callback has not run yet when the write returns.
             return new Promise(resolve => setTimeout(() => resolve({{
                 value: el.value === undefined ? null : String(el.value),
                 maxLength: typeof el.maxLength === 'number' ? el.maxLength : null,

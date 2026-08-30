@@ -9,10 +9,8 @@ use crate::session::{PageSession, SessionStore};
 // CDP's upper bound for the `screenWidth` and `screenHeight` fields in `override_params()`.
 const MAX_CDP_SCREEN_DIMENSION: u32 = 10_000_000;
 
-/// Explicit metrics persisted for one named page.
-///
-/// There is deliberately no preset identifier here: CDP accepts concrete metrics, while the
-/// familiar device catalog belongs to the `DevTools` frontend rather than the protocol.
+/// Explicit metrics persisted for one named page. No preset identifier: CDP accepts concrete
+/// metrics, and the device catalog belongs to the `DevTools` frontend, not the protocol.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeviceEmulation {
@@ -124,9 +122,9 @@ impl DeviceEmulation {
             DeviceOrientation::Portrait => ("portraitPrimary", 0),
             DeviceOrientation::Landscape => ("landscapePrimary", 90),
         };
-        // `screenWidth`, `screenHeight`, and `screenOrientation` are experimental CDP fields.
-        // The basic viewport override does not update `window.screen` or the Screen Orientation
-        // API, so omitting them would expose contradictory dimensions to the page.
+        // `screenWidth`/`screenHeight`/`screenOrientation` are experimental CDP fields. The
+        // basic viewport override does not update `window.screen` or the Screen Orientation
+        // API, so omitting them exposes contradictory dimensions to the page.
         json!({
             "width": self.width,
             "height": self.height,
@@ -142,10 +140,8 @@ impl DeviceEmulation {
     }
 }
 
-/// Apply the complete override set to one CDP target.
-///
-/// The three commands form one logical operation. If any command fails, [`clear_overrides`]
-/// attempts every cleanup command before the original error is returned.
+/// Apply the complete override set to one CDP target. The three commands are one logical
+/// operation: on any failure [`clear_overrides`] runs before the original error is returned.
 async fn apply_overrides(
     client: &CdpClient,
     config: &DeviceEmulation,
@@ -161,8 +157,8 @@ async fn apply_overrides(
         return Err(error);
     }
 
-    // The public option promises touch capability, not a hardware finger count, so enabled uses
-    // CDP's default of one. Disabled omits `maxTouchPoints`; Chromium rejects an explicit zero.
+    // The option promises touch capability, not a finger count, so enabled uses CDP's default
+    // of one. Disabled omits `maxTouchPoints`; Chromium rejects an explicit zero.
     let touch_params = if config.touch {
         json!({"enabled": true, "maxTouchPoints": 1})
     } else {
@@ -176,9 +172,9 @@ async fn apply_overrides(
         return Err(error);
     }
 
-    // Chrome can leave `Input.dispatchMouseEvent` unanswered when this experimental switch is
-    // enabled. Keep the browser-side conversion off and let chrome-agent's input dispatcher emit
-    // explicit touch events instead; capability detection above remains target-scoped in CDP.
+    // Enabling this experimental switch can leave `Input.dispatchMouseEvent` unanswered
+    // forever. Keep the browser-side conversion off; the input dispatcher emits explicit
+    // touch events instead.
     if let Err(error) = client
         .send(
             "Emulation.setEmitTouchEventsForMouse",
@@ -194,10 +190,8 @@ async fn apply_overrides(
     Ok(())
 }
 
-/// Clear every override set by [`apply_overrides`].
-///
-/// Each command is attempted even if an earlier one fails. The first error is returned only after
-/// metrics, touch capability, and mouse-to-touch translation have all had a chance to reset.
+/// Clear every override set by [`apply_overrides`]. Each command is attempted even if an
+/// earlier one fails; the first error is returned only once all three have run.
 pub async fn clear_overrides(client: &CdpClient) -> Result<(), CdpClientError> {
     client.set_touch_emulation(false);
     let emit = client
@@ -221,24 +215,19 @@ pub async fn clear_overrides(client: &CdpClient) -> Result<(), CdpClientError> {
 
 /// Make the emulated page Chrome's active target before touching its overrides.
 ///
-/// Not cosmetic: the Screen Orientation API of a background target silently reports the ACTIVE
-/// target's orientation, so without this an `emulate status` on the mobile page right after a
-/// sibling page was created reads "landscape" off the sibling (the e2e suite pins this).
-/// The cost is stated rather than hidden: one target per browser is foreground, so every command
-/// on an emulated page backgrounds its siblings — their `visibilityState` flips and their rAF and
-/// timers throttle until they are acted on in turn. That is what a browser does when a user
-/// switches tabs, and side-by-side pages in one Chrome cannot both be foreground.
+/// Required, not cosmetic: a background target's Screen Orientation API reports the ACTIVE
+/// target's orientation, so `emulate status` on a mobile page reads "landscape" off a sibling
+/// created just before it (e2e-pinned). Cost: one target per browser is foreground, so every
+/// command on an emulated page backgrounds its siblings, throttling their rAF and timers.
 async fn activate_target(client: &CdpClient, target_id: &str) -> Result<(), CdpClientError> {
     client
         .send("Target.activateTarget", json!({"targetId": target_id}))
         .await
 }
 
-/// Apply and persist a configuration for one named page.
-///
-/// The session update is the commit point: it changes only after CDP accepts the complete override
-/// set and the page reports its effective values. Callers persist that update before reporting
-/// success. Before the commit, failure attempts to restore the configuration active at entry.
+/// Apply and persist a configuration for one named page. The session update is the commit
+/// point: it happens only after CDP accepts the full override set and the page reports its
+/// effective values. Any failure before that restores the configuration active at entry.
 pub async fn apply_and_store(
     client: &CdpClient,
     store: &mut SessionStore,
@@ -307,11 +296,9 @@ pub async fn clear(
     Ok(json!({"ok": true, "emulation": null}))
 }
 
-/// Reapply the configuration attached to this exact browser and named-page pair.
-///
-/// CDP does not guarantee these overrides across session disconnects, whereas the named page
-/// survives across CLI invocations. Every new connection therefore reapplies the stored values
-/// before executing ordinary commands.
+/// Reapply the configuration attached to this browser and named-page pair. Chrome drops every
+/// `Emulation.*` override when the CDP session that set it detaches, while the named page
+/// survives across invocations, so each new connection reapplies the stored values first.
 pub async fn reapply(
     client: &CdpClient,
     store: &SessionStore,
@@ -385,14 +372,11 @@ pub fn format_effective_metrics(value: &Value) -> String {
     )
 }
 
-/// Read the values observable by page script after Chromium has applied the overrides.
-///
-/// These values are measured rather than copied from the request so status exposes Chromium's
-/// effective behavior, including any normalization performed by the browser.
+/// Read the values page script observes after Chromium has applied the overrides. Measured
+/// rather than copied from the request, so status shows Chromium's normalization.
 async fn read_effective_metrics(client: &CdpClient) -> Result<Value, crate::BoxError> {
-    // Deliberately omit `contextId`: device emulation belongs to the page target, while `frame`
-    // binds ordinary eval calls to an iframe. Status must continue to describe the top document
-    // without clearing that caller-selected frame binding.
+    // No `contextId`: emulation belongs to the page target, while `frame` binds ordinary eval
+    // to an iframe. Status describes the top document without clearing that binding.
     let result: EvaluateResult = client
         .call(
             "Runtime.evaluate",

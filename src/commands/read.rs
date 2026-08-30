@@ -24,7 +24,7 @@ pub async fn run(
     html: bool,
     truncate: Option<usize>,
 ) -> Result<ReadResult, crate::BoxError> {
-    // Inject Readability.js into the page and parse
+    // Readability parses a clone, so the live document is untouched.
     #[allow(clippy::needless_raw_string_hashes)]
     let js = format!(
         r#"(() => {{
@@ -73,7 +73,7 @@ pub async fn run(
         .and_then(|v| v.as_str())
         .ok_or("Readability returned null — page may not have an article structure. Try: chrome-agent text --selector main")?;
 
-    // Check for in-JS error return
+    // An error the injected script returned rather than threw.
     let raw_value: serde_json::Value = serde_json::from_str(raw)?;
     if let Some(err) = raw_value.get("__error").and_then(|v| v.as_str()) {
         return Err(err.into());
@@ -81,11 +81,10 @@ pub async fn run(
 
     let mut parsed: ReadResult = serde_json::from_value(raw_value)?;
 
-    // Clean up: collapse whitespace runs in textContent
     parsed.text_content = collapse_whitespace(&parsed.text_content);
 
     if !html {
-        // Clear HTML content to save memory/tokens when not requested
+        // Dropped unless asked for: it is the largest field and costs tokens.
         parsed.content = None;
     }
 
@@ -96,12 +95,8 @@ pub async fn run(
 
 const MIN_READABLE_CHARS: usize = 200;
 
-/// Apply the min-content guard, then truncate.
-///
-/// Ordering matters: the guard must run BEFORE truncation, otherwise truncating a
-/// valid article down to `< MIN_READABLE_CHARS` would trip the guard and error out.
-/// Both the guard and the truncation are char-based (not byte-based) so multi-byte
-/// UTF-8 content is measured consistently and never split mid-codepoint.
+/// Apply the 200-char min-content guard, THEN truncate: the other order would reject a valid
+/// article truncated below the floor. Both are char-based, never byte-based.
 fn finalize_text(text: String, truncate: Option<usize>) -> Result<String, crate::BoxError> {
     if text.chars().count() < MIN_READABLE_CHARS {
         return Err("Page has minimal readable content — likely not an article. Try: chrome-agent text --selector main".into());
@@ -153,11 +148,10 @@ mod tests {
 
     #[test]
     fn guard_runs_before_truncation_valid_article_survives() {
-        // A valid article (>= 200 chars) truncated below 200 must NOT trip the
-        // min-content guard. Regression for A8: guard used to run after truncation.
+        // A valid article truncated below 200 chars must not trip the guard.
         let article = "x".repeat(500);
         let out = finalize_text(article, Some(50)).expect("valid article must not error");
-        // Truncated to 50 chars + "..." suffix.
+        // 50 chars plus the "..." suffix.
         assert_eq!(out.chars().count(), 53);
         assert!(out.ends_with("..."));
     }
@@ -171,8 +165,7 @@ mod tests {
 
     #[test]
     fn guard_is_char_based_not_byte_based() {
-        // 150 multi-byte chars = 450 bytes. Byte-based guard (< 200) would wrongly
-        // accept this short article; char-based (< 200) correctly rejects it.
+        // 150 chars, 450 bytes: a byte-based guard would wrongly accept it.
         let multibyte = "日".repeat(150);
         assert!(multibyte.len() > MIN_READABLE_CHARS); // 450 bytes
         assert!(multibyte.chars().count() < MIN_READABLE_CHARS); // 150 chars

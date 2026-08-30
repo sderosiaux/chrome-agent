@@ -1,19 +1,15 @@
 //! Turning a CLI invocation or a pipe command object into an [`Assertion`].
 //!
-//! Split out of `assert.rs` for the repo's 1000-line file cap, and re-exported from it so
-//! both front ends keep calling `commands::assert::from_cli` / `from_json`. Nothing here
-//! touches Chrome: an assertion that cannot be built is rejected before a browser is asked
-//! anything, which is why the refusals below are worth their own tests.
+//! Nothing here touches Chrome: an assertion that cannot be built is rejected before a
+//! browser is asked anything.
 
 use serde_json::Value;
 
 use super::assert::{Assertion, Comparator, Kind, Want};
 
 
-/// Build the assertion from the parsed CLI subcommand.
-///
-/// clap has already enforced "exactly one comparator" and "exactly one state" through arg
-/// groups; what is left is the checks a group cannot express.
+/// Build the assertion from the parsed CLI subcommand. clap's arg groups already enforce
+/// "exactly one comparator" and "exactly one state"; the rest is checked here.
 pub fn from_cli(what: &crate::cli::AssertWhat) -> Result<Assertion, crate::BoxError> {
     use crate::cli::AssertWhat as W;
     let assertion = match what {
@@ -59,10 +55,8 @@ pub fn from_cli(what: &crate::cli::AssertWhat) -> Result<Assertion, crate::BoxEr
     Ok(assertion)
 }
 
-/// Build the assertion from a pipe/batch command object.
-///
-/// Shape: `{"cmd":"assert","what":"value","selector":"#email","equals":"a@b.c"}` — `what`
-/// names the kind, mirroring `wait`.
+/// Build the assertion from a pipe/batch command object, shaped
+/// `{"cmd":"assert","what":"value","selector":"#email","equals":"a@b.c"}`.
 pub fn from_json(cmd: &Value) -> Result<Assertion, crate::BoxError> {
     let what = cmd
         .get("what")
@@ -128,11 +122,10 @@ pub fn from_json(cmd: &Value) -> Result<Assertion, crate::BoxError> {
     Ok(Assertion { kind, selector: field("selector"), uid: field("uid") })
 }
 
-/// Pick the one comparator that was given, and refuse the combinations that mean nothing.
+/// Pick the one comparator given, and refuse the combinations that mean nothing.
 ///
-/// `text --equals` is refused rather than implemented: equality against a whole page's
-/// `innerText` — or even one element's — holds only until a single space changes, and an
-/// assertion that brittle reports the page as broken when it is not.
+/// `text --equals` is refused: equality against `innerText` breaks on a cosmetic whitespace
+/// edit. `url --contains` too: a URL is either exact or a pattern.
 fn comparator(
     equals: Option<&str>,
     contains: Option<&str>,
@@ -178,7 +171,6 @@ mod tests {
         assert_eq!(comparator(Some("a"), None, None, "value").unwrap(), Comparator::Equals("a".into()));
         assert_eq!(comparator(None, Some("a"), None, "text").unwrap(), Comparator::Contains("a".into()));
         assert_eq!(comparator(None, None, Some("a"), "url").unwrap(), Comparator::Matches("a".into()));
-        // `url --contains` is refused: an URL is either exact or a pattern.
         assert!(comparator(None, Some("a"), None, "url").is_err());
     }
 

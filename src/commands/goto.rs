@@ -12,11 +12,8 @@ pub struct GotoResult {
     pub landed: crate::landing::Landing,
 }
 
-/// Parse a `"Name: Value"` header string into its (name, value) pair.
-///
-/// Splits on the FIRST colon so values may themselves contain colons
-/// (e.g. `"X-Trace: a:b:c"`). Both sides are trimmed. Errors when there is no
-/// colon or the name is empty.
+/// Parse `"Name: Value"` into its pair, splitting on the FIRST colon so values may contain
+/// colons. Both sides are trimmed. Errors on no colon or an empty name.
 pub fn parse_header(raw: &str) -> Result<(String, String), crate::BoxError> {
     let (name, value) = raw
         .split_once(':')
@@ -34,7 +31,7 @@ pub async fn run(
     timeout_secs: u64,
     headers: &[(String, String)],
 ) -> Result<GotoResult, crate::BoxError> {
-    // Auto-prefix https:// if no scheme is provided
+    // Auto-prefix https:// when no scheme is given.
     let url = if url.contains("://") {
         url.to_string()
     } else {
@@ -42,11 +39,10 @@ pub async fn run(
     };
     let url = url.as_str();
 
-    // Ensure Page domain is enabled so we receive loadEventFired
+    // For loadEventFired.
     client.enable("Page").await?;
 
-    // Apply extra HTTP headers (auth tokens, multi-tenant routing, etc.) before
-    // navigating. Requires the Network domain.
+    // Extra headers must be set before navigating, and need the Network domain.
     if !headers.is_empty() {
         client.enable("Network").await?;
         let map: serde_json::Map<String, serde_json::Value> = headers
@@ -58,9 +54,8 @@ pub async fn run(
             .await?;
     }
 
-    // Subscribe to events BEFORE navigating so a fast/cached load that fires
-    // Page.loadEventFired before we start waiting is not missed (which would
-    // otherwise stall until the full timeout).
+    // Subscribe BEFORE navigating: a cached load fires `Page.loadEventFired` immediately, and
+    // missing it stalls until the full timeout.
     let mut events = client.events();
 
     let nav_result: NavigateResult = client
@@ -76,14 +71,11 @@ pub async fn run(
         .await?;
 
     if let Some(error_text) = &nav_result.error_text {
-        // The URL is in the message because the hint needs it: `hints::error_hint` gets a
-        // string and nothing else, and rule 2 of its contract wants a command with real
-        // values in it. Without this, five distinct network failures could only ever be
-        // answered with a sentence that named neither the host nor the scheme.
+        // The URL is in the message because `hints::error_hint` gets a string and nothing
+        // else, and must name the host and scheme in the command it suggests.
         return Err(format!("Navigation failed for {url}: {error_text}").into());
     }
 
-    // Wait for Page.loadEventFired on the pre-navigate subscription.
     let _ = CdpClient::wait_for_event_on(
         &mut events,
         "Page.loadEventFired",
@@ -91,15 +83,10 @@ pub async fn run(
     )
     .await;
 
-    // Wait for the DOM to stabilize (SPAs often render after loadEventFired): resolve once
-    // nothing has changed for QUIET, and never later than HARD.
-    //
-    // Both bounds matter. The quiet window starts immediately, so a page where nothing ever
-    // mutates resolves in QUIET rather than being charged the whole budget to discover that.
-    // And the ceiling is never cleared by a mutation, so a page that never goes quiet — a
-    // chat window, a live dashboard, a rotating ad slot — still returns. `awaitPromise` has
-    // no deadline of its own, so a probe that can fail to resolve holds the command open
-    // for as long as the page keeps moving.
+    // Let the DOM settle, since SPAs render after loadEventFired: resolve after 200 ms quiet,
+    // never later than 3000 ms. The quiet window starts immediately, so a static page is not
+    // charged the whole budget; the ceiling is never cleared by a mutation, so a page that
+    // never goes quiet still returns. `awaitPromise` has no deadline of its own.
     let _ = client
         .call::<_, serde_json::Value>(
             "Runtime.evaluate",
@@ -129,26 +116,14 @@ pub async fn run(
         )
         .await;
 
-    // Read the settled page state from the renderer. Page.navigate only echoes
-    // the requested URL; after an HTTP/client-side redirect the authoritative
-    // URL is location.href.
+    // One read for three things, since `Page.navigate` only echoes the requested URL:
+    // `location.href` after redirects, the status from Navigation Timing (no `Network.enable`,
+    // so `--stealth` holds; absent on older Chrome and without an HTTP response), and the
+    // document shape `serving.rs` judges.
     //
-    // The status rides on the same read. Navigation Timing is the stealth-safe path the
-    // retroactive network capture already uses: no `Network.enable`, so `--stealth` keeps
-    // its promise, and no extra round trip. `responseStatus` is missing on older Chrome and
-    // 0 on a document with no HTTP response, both of which `Landing` reports as absence.
-    //
-    // The document's SHAPE rides on it too, for `serving.rs` to judge — three numbers, no
-    // interpretation in the page. Deliberately not the accessibility tree: `goto` takes no
-    // snapshot on purpose, `getFullAXTree` on every navigation is the cost that decision
-    // avoids, and the two signals that matter (a frame's `src`, whether an anchor resolves to
-    // http) are DOM facts the tree does not carry.
-    //
-    // Every measurement below over-counts rather than under-counts — hidden text is counted,
-    // an off-screen button is counted — because over-counting produces `serving: "page"`,
-    // which is silence, and silence is the direction this rule errs in. Text is walked with a
-    // TreeWalker and capped rather than read from `innerText`: `innerText` forces layout,
-    // and a bound of 4096 characters ends the walk on the first paragraph of any real page.
+    // Every count over-counts rather than under-counts (hidden text, off-screen buttons),
+    // because over-counting produces `serving: "page"`, which is silence. Text is walked with
+    // a TreeWalker capped at 4096 chars rather than read from `innerText`, which forces layout.
     let eval_result: EvaluateResult = client
         .call(
             "Runtime.evaluate",
@@ -162,11 +137,10 @@ pub async fn run(
                     let shape = null;
                     try {
                         const root = document.body || document.documentElement;
-                        // Frames AND scripts: Cloudflare's interstitial injects into an
-                        // `about:blank` frame whose `src` is empty, and its only vendor-hosted
-                        // URL is the Turnstile script (measured on nowsecure.nl). DataDome
-                        // puts the URL on the frame. Query strings are dropped: they carry a
-                        // per-visit id and nothing the vendor table matches on.
+                        // Frames AND scripts: DataDome puts the vendor URL on the frame, while
+                        // Cloudflare's interstitial uses an empty-src about:blank frame and
+                        // only the Turnstile script names the vendor. Query strings are
+                        // dropped; they carry a per-visit id the vendor table ignores.
                         const resources = [];
                         const collect = (selector, cap) => {
                             let taken = 0;
@@ -184,9 +158,8 @@ pub async fn run(
                         ).length;
                         let links = 0;
                         for (const a of root.querySelectorAll('a[href]')) {
-                            // A `javascript:` anchor is not a destination — the F5 refusal
-                            // notice's only link is one, and counting it would hide the page
-                            // this whole probe exists to see.
+                            // A `javascript:` anchor is not a destination; the F5 refusal
+                            // notice's only link is one.
                             if (a.protocol !== 'http:' && a.protocol !== 'https:') continue;
                             if (++links >= 64) break;
                         }
@@ -229,15 +202,14 @@ pub async fn run(
         .and_then(serde_json::Value::as_u64)
         .and_then(|code| u16::try_from(code).ok());
 
-    // Absent rather than defaulted: a zero-valued shape reads as "an empty document", which
-    // is the strongest thing `serving` can say, from having measured nothing at all.
+    // Absent rather than defaulted: a zero-valued shape would read as "an empty document",
+    // the strongest thing `serving` can say, from having measured nothing.
     let shape = crate::serving::PageShape::from_probe(
         page_state.and_then(|state| state.get("shape")),
     );
 
-    // `url`, not the caller's raw argument: the https:// prefixing above is the tool's own
-    // normalisation, and comparing against the pre-normalised form would report a redirect
-    // on every `goto example.com`.
+    // `url`, not the caller's raw argument: comparing against the pre-normalised form would
+    // report a redirect on every `goto example.com`.
     let landed = crate::landing::Landing::new(url, &settled_url, status, shape.as_ref());
 
     Ok(GotoResult {
@@ -274,7 +246,6 @@ mod tests {
 
     #[test]
     fn trims_nonempty_name_and_whitespace_value() {
-        // Guards against a partial-trim regression that the empty-name test can't catch.
         let (n, v) = parse_header("  X-Foo :   ").unwrap();
         assert_eq!(n, "X-Foo");
         assert_eq!(v, "");

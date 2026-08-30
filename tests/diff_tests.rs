@@ -3,14 +3,8 @@ use std::process::Command;
 mod common;
 use common::TestBrowser;
 
-fn binary() -> String {
-    let mut path = std::env::current_exe().unwrap().parent().unwrap().parent().unwrap().to_path_buf();
-    path.push("chrome-agent");
-    path.to_string_lossy().into_owned()
-}
-
 fn run_cli(args: &[&str]) -> (String, String, i32) {
-    let output = Command::new(binary()).args(args).output().expect("Failed to run chrome-agent");
+    let output = Command::new(common::binary()).args(args).output().expect("Failed to run chrome-agent");
     (
         String::from_utf8_lossy(&output.stdout).to_string(),
         String::from_utf8_lossy(&output.stderr).to_string(),
@@ -34,10 +28,8 @@ fn diff_json(browser: &str) -> Option<serde_json::Value> {
 
 // ─── diff across a navigation ───
 //
-// backendNodeId counters overlap between documents, so a naive line-by-line uid match
-// pairs an element on page A with an unrelated element carrying the same uid on page B
-// and reports it as "changed". Measured on real sites, that produced 328 bogus "~" lines
-// and cost more tokens than simply re-inspecting the destination page.
+// backendNodeId counters overlap between documents, so matching uids line by line pairs
+// unrelated elements across a navigation and reports them as changed.
 
 #[test]
 fn diff_reports_document_change_instead_of_pairing_unrelated_uids() {

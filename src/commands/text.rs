@@ -14,8 +14,7 @@ pub async fn run(
     uid_map: &HashMap<String, ElementRef>,
 ) -> Result<String, crate::BoxError> {
     let raw = if let Some(sel) = selector {
-        // Selector-based extraction with role-attribute fallback
-        // "main" also matches [role=main], "nav" also matches [role=navigation], etc.
+        // Falls back to `[role=<sel>]`, so "main" also matches `[role=main]`.
         let safe_sel = serde_json::to_string(sel).unwrap_or_default();
         let expr = format!(
             "(() => {{ let el = document.querySelector({safe_sel}); if (!el) {{ el = document.querySelector('[role=' + {safe_sel} + ']'); }} return el ? el.innerText || '' : ''; }})()"
@@ -43,7 +42,6 @@ pub async fn run(
     } else {
         match uid {
         None => {
-            // Whole page text
             let result: EvaluateResult = client
                 .call(
                     "Runtime.evaluate",
@@ -98,9 +96,8 @@ pub async fn run(
                 )
                 .await?;
 
-            // A throwing getter is an error, not an empty element — without this
-            // check the exception read as "" with ok:true, indistinguishable from
-            // a genuinely textless node.
+            // A throwing getter is an error, not an empty element: unchecked it reads as
+            // `""` with `ok:true`, indistinguishable from a textless node.
             crate::element::check_js_exception(&result)?;
 
             result
@@ -134,7 +131,6 @@ fn collapse_blank_lines(s: &str) -> String {
         result.push_str(line);
         result.push('\n');
     }
-    // Remove trailing newline
     if result.ends_with('\n') {
         result.pop();
     }
@@ -159,11 +155,8 @@ mod tests {
 
     #[test]
     fn bug_selector_injection_escaped() {
-        // The selector builder embeds `serde_json::to_string(sel)` into a JS
-        // string literal. Assert the exact escaping it produces so a payload
-        // cannot break out of that literal.
-
-        // Single quotes are data inside a double-quoted JS string: kept verbatim.
+        // The selector is embedded into a JS string literal via
+        // `serde_json::to_string`. Single quotes are data there and stay verbatim.
         let single = r"'); alert('xss";
         assert_eq!(
             serde_json::to_string(single).unwrap(),
@@ -171,14 +164,13 @@ mod tests {
             "single quotes must be preserved, not the breakout vector"
         );
 
-        // Double quotes ARE the breakout vector and must be backslash-escaped.
+        // Double quotes are the breakout vector and must be backslash-escaped.
         let double = r#"a"] ); fetch("evil"#;
         let escaped = serde_json::to_string(double).unwrap();
         assert_eq!(escaped, r#""a\"] ); fetch(\"evil""#);
-        // Every embedded double-quote is escaped: the payload stays inert data.
         assert_eq!(escaped.matches(r#"\""#).count(), 2);
 
-        // Backslashes and newlines can't smuggle in an unescaped quote either.
+        // Backslashes and newlines cannot smuggle in an unescaped quote either.
         assert_eq!(serde_json::to_string("x\\\"y").unwrap(), r#""x\\\"y""#);
         assert_eq!(serde_json::to_string("a\nb").unwrap(), r#""a\nb""#);
     }

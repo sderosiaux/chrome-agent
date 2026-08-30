@@ -8,12 +8,54 @@ paths:
 
 # The one command whose result is its exit code
 
-Moved out of `CLAUDE.md`'s **Key Design Decisions** — not rewritten and not summarised. The
-words are the ones that were there, minus the factual corrections made in the same change (a
-path that had stopped resolving, a count that had gone stale). What changed is *when* they
-load: this file is pulled in when you read a file its `paths:` block names, and costs nothing
-in a session that touches none of them.
+## Exit codes
 
-- **`assert` answers with an exit code: 0 held / 2 did not hold / 1 could not be checked** (`src/commands/assert.rs`) — `assert value|text|url|state|exists` is the only command whose *result* is the exit status, and the third code is the whole reason it exists: collapsing "the form kept a different value" into the same `1` as "Chrome never started" makes the two indistinguishable to a CI job or a recipe runner, and the recoveries are opposites (report/repair vs retry). `2` travels as `commands::assert::NotHeld` through the error channel — so no caller has to thread a second return type through `run::run` — and `main` recognises it before its generic handler. Consequence, deliberate: clap's own usage errors moved from `2` to `1` (`main` now uses `try_parse`), because a wrong flag is the caller's mistake, not a fact about the page, and `2` may mean exactly one thing. A selector that matches nothing is a `1`, not a `2`: "the field holds X" is unanswerable when there is no field, and answering `false` would let a typo read as a statement about the page — `assert exists` is where presence itself becomes the claim, and there `--count 0` is a legitimate absence assertion. `assert` is NOT in `mutates_page`: it is a read, so no change report and no verdict ride on the response (a verdict is an action's vocabulary). In pipe/batch there is no exit code, so `held` rides on `ok` and the response carries the same `assertion` object; an operational failure carries `error` instead, which is how the two are told apart. `--json` puts a failed assertion on stdout, text mode on stderr with stdout left empty, so a shell pipeline can use the exit code alone.
-- **An assertion reads through the action's own reader** — `assert state --checked` calls `element_controls::CHECKABLE_PROBE`, the classification `check`/`uncheck` apply before clicking (native `.checked`/`indeterminate`, `aria-checked`, or refuse), and `assert state --selected` calls `element_controls::SELECT_READ`, which `select`'s read-back was rewritten to use as well (`SELECT_APPLY` became `select_apply()` so it can embed it). Two implementations that agree today drift: an assertion that read `el.checked` on a `<div role=checkbox>` would report a checked box as unchecked — the exact bug `check` was fixed for — and an agent trusting it would click the box OFF. `--disabled` reads `:disabled` (what `fill` refuses on, so it catches an ancestor `<fieldset disabled>`) *plus* `aria-disabled`, reported as `enabled` / `disabled` / `aria-disabled`: a `<div role=button aria-disabled=true>` is inert to everything that reads the page, and only the CSS pseudo-class disagrees. `--visible` means rendered, opaque and not `visibility:hidden`, and says so in a `means` field — it is NOT "in the viewport" and NOT "nothing on top of it", which needs a hit test this command does not do. `assert value` refuses an element with no `value` property (naming `assert text` instead) and redacts secret fields on the same test `fill` uses, reporting lengths only: the response reaches stdout, the transcript and any `_record` file.
-- **`assert --matches` is a Rust regex, not a JS one** (`regex-lite`) — chosen over `regex` because it has zero transitive dependencies (the musl graph stays pure Rust, which the CI guard depends on) and none of the ~1 MB of Unicode tables, for a comparator that runs once per assertion. The cost is real and documented in `llm-guide.txt`: `\d`, `\w` and `\s` are ASCII-only (`^\w+$` does not match `Jean-Sébastien`) and there is no `\p{…}` or lookaround; `(?i)` works. Evaluating a JS `RegExp` in the page was the alternative and was rejected: every comparator test would then need Chrome, and `assert url --matches` would become a page evaluation. A malformed pattern is exit 1 — nothing was compared. `assert text --equals` is refused outright: equality against `innerText` breaks on a cosmetic whitespace edit, and an assertion that brittle reports a working page as broken.
+`assert value|text|url|state|exists` is the only command whose *result* is the exit status:
+**0 held, 2 did not hold, 1 could not be checked.**
+
+The third code is the reason the scheme exists. Collapsing "the form kept a different value" into
+the same `1` as "Chrome never started" makes the two indistinguishable to a CI job, and the
+recoveries are opposites (report/repair vs retry).
+
+- `2` travels as `commands::assert::NotHeld` through the error channel, so no caller threads a second return type through `run::run`. `main` recognises it before its generic handler.
+- Clap's usage errors moved from `2` to `1` (`main` uses `try_parse`): a wrong flag is the caller's mistake, not a fact about the page, and `2` may mean exactly one thing.
+- A selector that matches nothing is a `1`, not a `2`. "The field holds X" is unanswerable when there is no field, and answering `false` would let a typo read as a statement about the page. `assert exists` is where presence itself becomes the claim, and there `--count 0` is a legitimate absence assertion.
+
+`assert` is NOT in `mutates_page`: it is a read, so no change report and no verdict ride on the
+response (a verdict is an action's vocabulary).
+
+In pipe/batch an assertion has no exit code of its own, so `held` rides on `ok` and the response
+carries the same `assertion` object; an operational failure carries `error` instead, which is how
+the two are told apart. A CLI `batch --stop-on-error` that stopped on a failed assertion exits
+`1`, not `2`: the process is reporting that the batch stopped, not making a claim about the page,
+and `2` may mean exactly one thing. `--json` puts a failed assertion on stdout; text mode puts it on stderr with stdout empty,
+so a shell pipeline can use the exit code alone.
+
+## An assertion reads through the action's own reader
+
+Two implementations that agree today drift. An assertion that read `el.checked` on a
+`<div role=checkbox>` would report a checked box as unchecked — the exact bug `check` was fixed
+for — and an agent trusting it would click the box OFF.
+
+- `assert state --checked` calls `element_controls::CHECKABLE_PROBE`, the classification `check`/`uncheck` apply before clicking.
+- `assert state --selected` calls `element_controls::SELECT_READ`, which `select`'s read-back uses too (`SELECT_APPLY` became `select_apply()` so it can embed it).
+- `--disabled` reads `:disabled` (what `fill` refuses on, so it catches an ancestor `<fieldset disabled>`) *plus* `aria-disabled`, reported as `enabled` / `disabled` / `aria-disabled`. A `<div role=button aria-disabled=true>` is inert to everything that reads the page, and only the CSS pseudo-class disagrees.
+- `--visible` means rendered, opaque and not `visibility:hidden`, and says so in a `means` field. It is NOT "in the viewport" and NOT "nothing on top of it", which would need a hit test this command does not do.
+- `assert value` refuses an element with no `value` property (naming `assert text` instead) and redacts secret fields on the same test `fill` uses, reporting lengths only.
+
+## `--matches` is a Rust regex, not a JS one
+
+`regex-lite`, chosen over `regex` because it has zero transitive dependencies (the musl graph
+stays pure Rust, which the CI guard depends on) and none of the ~1 MB of Unicode tables, for a
+comparator that runs once per assertion.
+
+The cost is documented in `llm-guide.txt`: `\d`, `\w` and `\s` are ASCII-only (`^\w+$` does not
+match `Jean-Sébastien`), and there is no `\p{…}` or lookaround. `(?i)` works.
+
+Evaluating a JS `RegExp` in the page was rejected: every comparator test would then need Chrome,
+and `assert url --matches` would become a page evaluation.
+
+A malformed pattern is exit 1 — nothing was compared.
+
+`assert text --equals` is refused outright: equality against `innerText` breaks on a cosmetic
+whitespace edit, and an assertion that brittle reports a working page as broken.

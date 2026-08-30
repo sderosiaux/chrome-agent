@@ -3,7 +3,6 @@
 
 use std::io::{Read as _, Write as _};
 use std::net::{SocketAddr, TcpListener};
-use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -15,20 +14,8 @@ use serde_json::Value;
 mod common;
 use common::TestBrowser;
 
-fn binary() -> PathBuf {
-    let mut path = std::env::current_exe()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .to_path_buf();
-    path.push("chrome-agent");
-    path
-}
-
 fn run(browser: &str, args: &[&str]) -> Output {
-    Command::new(binary())
+    Command::new(common::binary())
         .args(["--browser", browser])
         .args(args)
         .output()
@@ -37,7 +24,7 @@ fn run(browser: &str, args: &[&str]) -> Output {
 
 
 fn run_pipe(browser: &str, commands: &[Value], timeout: Duration) -> Vec<Value> {
-    let mut child = Command::new(binary())
+    let mut child = Command::new(common::binary())
         .args(["--browser", browser, "pipe"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -87,16 +74,11 @@ struct RedirectServer {
 }
 
 /// Answer one connection: `/start` redirects to `/settled`, `/settled` is the destination.
-///
-/// A request that never arrives gets no response at all. Replying 404 to a speculative
-/// connection is what made this test flaky: `read` returning 0 (timeout, or a partial first
-/// line) fell through to the 404 branch, and the navigation reported
-/// `net::ERR_HTTP_RESPONSE_CODE_FAILURE` — an error about the fixture, dressed as an error
-/// about `goto`.
+/// A connection that carries no request gets no response, so Chrome's preconnects cannot be
+/// answered with a 404 that the navigation then reports as a failure.
 fn serve(mut stream: std::net::TcpStream) {
-    // On macOS/BSD an accepted socket inherits the listener's O_NONBLOCK, so `read` returns
-    // WouldBlock the instant the request has not landed yet. That is the flakiness: the
-    // handler saw an empty request and answered 404 to the navigation itself.
+    // On macOS/BSD an accepted socket inherits the listener's O_NONBLOCK, so a read before
+    // the request lands returns WouldBlock.
     stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
     let mut request = Vec::new();
     let mut chunk = [0_u8; 1024];
@@ -137,9 +119,8 @@ impl RedirectServer {
             let mut workers: Vec<JoinHandle<()>> = Vec::new();
             while !thread_stop.load(Ordering::Relaxed) {
                 match listener.accept() {
-                    // One thread per connection. Chrome opens speculative sockets that
-                    // carry no request; serving in the accept loop makes the next request
-                    // wait out this one's 2s read timeout (measured: 2.01s).
+                    // One thread per connection: serving in the accept loop makes the next
+                    // request wait out a silent socket's 2s read timeout.
                     Ok((stream, _)) => workers.push(std::thread::spawn(move || serve(stream))),
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         std::thread::sleep(Duration::from_millis(10));
@@ -193,12 +174,8 @@ fn goto_reports_the_settled_redirect_url() {
     assert_eq!(response["title"], "Settled page");
 }
 
-/// The fixture server must not turn a browser's speculative connection into an answer on
-/// the navigation. Chrome preconnects: it opens a socket and may send nothing on it. The
-/// first version of this server accepted in a single loop and replied 404 whenever the read
-/// came back empty, so `goto` reported `net::ERR_HTTP_RESPONSE_CODE_FAILURE` — a fixture bug
-/// wearing a `goto` bug's clothes. Seen twice under load, never on demand, which is why the
-/// property is pinned here instead of by re-running the browser test.
+/// A request must not queue behind a silent connection. Pins a property of the fixture
+/// server, which was the cause of a rare `goto` failure under load.
 #[test]
 fn the_fixture_server_serves_a_request_made_behind_a_silent_connection() {
     use std::net::TcpStream;
@@ -223,16 +200,13 @@ fn the_fixture_server_serves_a_request_made_behind_a_silent_connection() {
         "a real request must not wait behind a silent one, got: {response:?}"
     );
     assert!(response.contains("Location: /settled"), "got: {response:?}");
-    // The bound is the server's own 2s read timeout: serving connections in the accept loop
-    // makes this request wait for the silent one to time out. Loopback answers in ~1ms.
+    // The bound is the server's own 2s read timeout; loopback answers in ~1 ms.
     assert!(
         waited < Duration::from_secs(1),
         "the request queued behind the silent connection: waited {waited:?}"
     );
 }
 
-/// A connection that carries no request gets no response. It used to get a 404, and when
-/// that connection was the navigation's own, `goto` failed with an HTTP status error.
 #[test]
 fn the_fixture_server_answers_nothing_to_a_connection_that_sends_nothing() {
     use std::net::TcpStream;

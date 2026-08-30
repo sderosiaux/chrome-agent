@@ -1,11 +1,7 @@
-//! Read-backs have one window, and they say what it was.
+//! Every read-back path waits the same 60 ms window and reports `observed_after_ms`.
 //!
-//! Before this, `fill` read the value back synchronously (0ms), `check --selector` waited
-//! 60ms, and `check <uid>` waited however long a CDP round trip happened to take. None of
-//! the three said so, while CLAUDE.md and SKILL.md promised "the state is read back" with no
-//! window stated — a promise that cannot be kept, since a page can revert at any time.
-//!
-//! What can be promised is a bounded observation, reported with its bound.
+//! Persistence cannot be promised — a page can revert at any time — so what is asserted is a
+//! bounded observation reported with its bound.
 
 use std::process::Command;
 
@@ -17,14 +13,8 @@ use common::TestBrowser;
 /// The window every read-back waits before looking. Must match `element::READ_BACK_MS`.
 const WINDOW_MS: u64 = 60;
 
-fn binary() -> String {
-    let mut path = std::env::current_exe().unwrap().parent().unwrap().parent().unwrap().to_path_buf();
-    path.push("chrome-agent");
-    path.to_string_lossy().into_owned()
-}
-
 fn run_cli(args: &[&str]) -> (String, i32) {
-    let output = Command::new(binary()).args(args).output().expect("Failed to run chrome-agent");
+    let output = Command::new(common::binary()).args(args).output().expect("Failed to run chrome-agent");
     (
         String::from_utf8_lossy(&output.stdout).to_string(),
         output.status.code().unwrap_or(-1),
@@ -48,8 +38,7 @@ fn fill(browser: &str, selector: &str, value: &str) -> Value {
     serde_json::from_str(&stdout).unwrap_or_else(|e| panic!("not JSON ({e}): {stdout}"))
 }
 
-/// A revert one microtask after the write is invisible to a same-evaluation read, and the
-/// old fill reported the requested value back as though the page had kept it.
+/// A revert one microtask after the write is invisible to a same-evaluation read.
 #[test]
 fn a_value_reverted_on_the_microtask_queue_is_not_reported_as_kept() {
     let b = TestBrowser::new("window-microtask");
@@ -65,8 +54,6 @@ fn a_value_reverted_on_the_microtask_queue_is_not_reported_as_kept() {
     assert_eq!(v["value"]["verbatim"], false, "so it was not kept verbatim: {v}");
 }
 
-/// Every read-back states the window it observed, because "the value is X" is only ever
-/// true as of a moment.
 #[test]
 fn a_fill_reports_the_window_it_observed() {
     let b = TestBrowser::new("window-fill-declared");
@@ -78,8 +65,8 @@ fn a_fill_reports_the_window_it_observed() {
     assert_eq!(v["value"]["verbatim"], true, "a plain input keeps it: {v}");
 }
 
-/// A revert past the window must not be dressed up as an observation of persistence. The
-/// tool cannot see it — what it can do is say when it looked.
+/// A revert past the window is invisible to the read-back, so the claim stays scoped to when
+/// it was made.
 #[test]
 fn a_revert_past_the_window_is_still_bounded_by_a_stated_time() {
     let b = TestBrowser::new("window-late");
@@ -94,14 +81,8 @@ fn a_revert_past_the_window_is_still_bounded_by_a_stated_time() {
         "the claim is scoped to when it was made, not to the future: {v}"
     );
 
-    // And the claim is indeed only about that moment.
-    //
-    // Polled rather than read once. The first version assumed the round trip out of `fill`
-    // and back into `eval` always outlasts the fixture's 400ms timer — true on a developer
-    // machine, false on a CI runner, where it failed with the value still present. The
-    // property under test is "the page reverts after the window closed", not "it has
-    // already reverted by the time the next process starts", and only the first is the
-    // tool's business.
+    // Polled, not read once: the round trip out of `fill` and back into `eval` does not
+    // reliably outlast the fixture's 400ms timer on a loaded machine.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     let last;
     loop {
@@ -121,7 +102,6 @@ fn a_revert_past_the_window_is_still_bounded_by_a_stated_time() {
     );
 }
 
-/// The three read-back paths used to disagree about how long to wait. They no longer do.
 #[test]
 fn check_reports_the_same_window_as_fill() {
     let b = TestBrowser::new("window-check");

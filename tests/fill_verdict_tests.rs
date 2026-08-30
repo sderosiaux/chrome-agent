@@ -5,14 +5,8 @@ use serde_json::Value;
 mod common;
 use common::TestBrowser;
 
-fn binary() -> String {
-    let mut path = std::env::current_exe().unwrap().parent().unwrap().parent().unwrap().to_path_buf();
-    path.push("chrome-agent");
-    path.to_string_lossy().into_owned()
-}
-
 fn run_cli(args: &[&str]) -> (String, i32) {
-    let output = Command::new(binary()).args(args).output().expect("Failed to run chrome-agent");
+    let output = Command::new(common::binary()).args(args).output().expect("Failed to run chrome-agent");
     (
         String::from_utf8_lossy(&output.stdout).to_string(),
         output.status.code().unwrap_or(-1),
@@ -35,8 +29,8 @@ fn fill_on(browser: &str, fixture: &str, selector: &str, value: &str) -> Option<
     Some((serde_json::from_str(&out).unwrap_or(Value::Null), code))
 }
 
-/// Load a fixture, establish a baseline, then fill — with the change report ON, so the
-/// verdict is decided against a real comparison and the postcondition has to outrank it.
+/// Load a fixture, establish a baseline, then fill with the change report ON, so the verdict
+/// is decided against a real tree comparison.
 fn fill_with_verdict(browser: &str, fixture: &str, selector: &str, value: &str) -> Option<Value> {
     if !common::browser_ready() {
         return None;
@@ -52,10 +46,8 @@ fn fill_with_verdict(browser: &str, fixture: &str, selector: &str, value: &str) 
     Some(serde_json::from_str(&out).unwrap_or_else(|e| panic!("not JSON ({e}): {out}")))
 }
 
-/// The contradiction this file's verdict half exists for. The page empties the field, and the
-/// only movement in the tree is the focus the fill itself caused — which the ladder counted as
-/// `changed / focus_only`. So the response said `ok:true`, `verdict:"changed"` and
-/// `verbatim:false` at once, and an agent reading the first two read a success.
+/// A value the page emptied is `not_kept / value_reverted`: the failed read-back outranks the
+/// focus move the fill itself caused.
 #[test]
 fn a_value_the_page_emptied_is_not_reported_as_a_change() {
     let b = TestBrowser::new("fill-verdict-micro");
@@ -66,15 +58,14 @@ fn a_value_the_page_emptied_is_not_reported_as_a_change() {
     assert_eq!(v["value"]["verbatim"], false, "the page did empty it: {v}");
     assert_eq!(v["verdict"], "not_kept", "{v}");
     assert_eq!(v["verdict_reason"], "value_reverted", "{v}");
-    // The delta stays on the response — the trade-off is stated, not hidden.
+    // The delta stays on the response.
     assert!(v["changed"].is_object(), "the change report is still there to read: {v}");
     let hint = v["verdict_hint"].as_str().unwrap_or_default();
     assert!(hint.contains("value.actual"), "the hint names the field to read: {v}");
     assert!(hint.contains("Do not fill it again"), "and forbids the reflex: {v}");
 }
 
-/// The same verdict from the other revert shape: this fixture rewrites the value inside the
-/// dispatched `input` event, where even a synchronous read-back would have caught it.
+/// The other revert shape: this fixture rewrites the value inside the dispatched `input` event.
 #[test]
 fn a_controlled_component_that_takes_the_value_back_says_not_kept() {
     let b = TestBrowser::new("fill-verdict-controlled");
@@ -86,9 +77,7 @@ fn a_controlled_component_that_takes_the_value_back_says_not_kept() {
     assert_eq!(v["value"]["verbatim"], false, "{v}");
 }
 
-/// A mask is the same verdict and a different reason: the write landed, in the page's own
-/// shape. Reporting `value_reverted` here would be a machine-readable token saying something
-/// false, and reporting `changed` would be the false success again.
+/// A mask is `not_kept / value_rewritten`: the write landed, in the page's own shape.
 #[test]
 fn a_mask_that_reformats_the_value_says_rewritten_not_reverted() {
     let b = TestBrowser::new("fill-verdict-mask");
@@ -103,9 +92,8 @@ fn a_mask_that_reformats_the_value_says_rewritten_not_reverted() {
     );
 }
 
-/// The other side of the rung: a fill the page kept must still report what changed, and it must
-/// report it as the TREE delta — that names the node and the line, which is everything
-/// `value_kept` says plus where to look. `value_kept` is only for a write the tree cannot show.
+/// A fill the page kept reports `tree_delta`; `value_kept` is only for a write the tree
+/// cannot show.
 #[test]
 fn a_fill_the_page_kept_still_reports_the_change() {
     let b = TestBrowser::new("fill-verdict-plain");
@@ -122,12 +110,8 @@ fn a_fill_the_page_kept_still_reports_the_change() {
     );
 }
 
-/// The contradiction the `value_kept` rung exists for. A secret field renders as a fixed marker
-/// in the tree (fixed on purpose: a marker carrying a length would make every snapshot of an
-/// unchanged secret read as a change), so re-filling one produces NO value change to diff. The
-/// ladder fell through to `changed / focus_only` — "nothing moved but focus, which is the only
-/// sign the action arrived" — on a response whose own `value` object said `verbatim: true`.
-/// Two claims about one action, and the weaker one in the field an agent branches on.
+/// A secret renders as a fixed marker, so refilling one produces no diffable change and the
+/// read-back is the only evidence: `changed / value_kept`.
 #[test]
 fn a_secret_refill_the_tree_cannot_show_is_not_reported_as_focus_alone() {
     let b = TestBrowser::new("fill-verdict-secret-refill");
@@ -149,9 +133,8 @@ fn a_secret_refill_the_tree_cannot_show_is_not_reported_as_focus_alone() {
     );
 }
 
-/// The boundary, pinned: the marker APPEARING where the tree showed no value at all is a
-/// visible change, so an empty secret field filled for the first time keeps reporting the delta.
-/// Only a refill is invisible, which is why the rung is ranked below `tree_delta` and not above.
+/// The boundary: a FIRST fill of a secret field still reports `tree_delta`, because the
+/// marker appearing where the tree showed no value is visible. Only a refill is invisible.
 #[test]
 fn filling_an_empty_secret_field_still_reports_the_tree_delta() {
     let b = TestBrowser::new("fill-verdict-secret-first");
@@ -170,9 +153,8 @@ fn filling_an_empty_secret_field_still_reports_the_tree_delta() {
     );
 }
 
-/// A bulk fill is judged through the same rung, on its worst field — so a form of nothing but
-/// pre-filled secret fields is the shape where every per-field report says `verbatim: true` and
-/// the tree still shows nothing. `fill-form` and `fill_and_submit` share the code path.
+/// A bulk fill is judged on its worst field through the same rung: a form of pre-filled
+/// secret fields reports `verbatim: true` per field while the tree shows nothing.
 #[test]
 fn a_bulk_fill_of_secret_fields_reports_the_write_it_confirmed() {
     let b = TestBrowser::new("fill-verdict-bulk-secret");
@@ -212,15 +194,14 @@ fn a_bulk_fill_of_secret_fields_reports_the_write_it_confirmed() {
     assert!(!printed.contains("4242424242424242") && !printed.contains("hunter3secret"), "{v}");
 }
 
-/// A secret is redacted down to `verbatim` and two lengths — and that is enough to classify
-/// it. A password the page threw away must not be the one case that reports success.
+/// A secret is redacted to `verbatim` and two lengths, which is enough to classify it.
 #[test]
 fn a_password_the_page_discards_is_classified_without_being_printed() {
     let b = TestBrowser::new("fill-verdict-secret");
     let Some(v) = fill_with_verdict(b.name(), "form_value_password.html", "#p", "topsecret123") else {
         return;
     };
-    // This fixture keeps the value, so the postcondition holds and the ladder moves on.
+    // This fixture keeps the value, so the postcondition holds.
     assert_eq!(v["value"]["redacted"], true, "{v}");
     assert_eq!(v["value"]["verbatim"], true, "{v}");
     assert_ne!(v["verdict"], "not_kept", "the page kept it: {v}");
@@ -230,9 +211,8 @@ fn a_password_the_page_discards_is_classified_without_being_printed() {
     );
 }
 
-/// `--verdict off` never re-reads the page — but the read-back happens inside the fill, so the
-/// tool still knows the value was thrown away. Answering `not_checked` there would be silence
-/// about something measured.
+/// `--verdict off` skips the page read, but the read-back happens inside the fill, so a
+/// reverted value is still reported.
 #[test]
 fn a_reverted_value_is_reported_even_with_the_change_report_off() {
     let b = TestBrowser::new("fill-verdict-off");
@@ -245,8 +225,7 @@ fn a_reverted_value_is_reported_even_with_the_change_report_off() {
     assert!(v["changed"].is_null(), "off still means no page read: {v}");
 }
 
-/// Pipe and batch settle the verdict in their own code paths. Two modes of one tool
-/// disagreeing about whether a fill succeeded is the kind of thing an agent finds out late.
+/// Pipe settles its verdict in `pipe_report`, so it is checked separately from the CLI.
 #[test]
 fn pipe_says_not_kept_the_way_the_cli_does() {
     if !common::browser_ready() {
@@ -259,11 +238,9 @@ fn pipe_says_not_kept_the_way_the_cli_does() {
         serde_json::json!({"cmd": "inspect"}),
         serde_json::json!({"cmd": "fill", "selector": "#micro", "value": "hello@example.com"}),
     );
-    // Unique per process: a fixed name lets a second concurrent run of this suite drive the
-    // same browser and clobber this one's page.
     let guard = TestBrowser::new("fill-verdict-pipe");
     let browser = guard.name().to_string();
-    let mut child = Command::new(binary())
+    let mut child = Command::new(common::binary())
         .args(["--browser", &browser, "pipe"])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -283,9 +260,7 @@ fn pipe_says_not_kept_the_way_the_cli_does() {
     assert_eq!(last["verdict_reason"], "value_reverted", "{last}");
 }
 
-/// The same rung through the pipe, which settles its verdict in `pipe_report` rather than in
-/// `run_helpers`. Two modes disagreeing about whether a fill landed is what the central hook
-/// exists to prevent.
+/// The `value_kept` rung through the pipe, which classifies in `pipe_report` not `run_helpers`.
 #[test]
 fn pipe_says_value_kept_the_way_the_cli_does() {
     if !common::browser_ready() {
@@ -300,7 +275,7 @@ fn pipe_says_value_kept_the_way_the_cli_does() {
     );
     let guard = TestBrowser::new("fill-verdict-pipe-kept");
     let browser = guard.name().to_string();
-    let mut child = Command::new(binary())
+    let mut child = Command::new(common::binary())
         .args(["--browser", &browser, "pipe"])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -322,10 +297,8 @@ fn pipe_says_value_kept_the_way_the_cli_does() {
     assert!(!stdout.contains("4242424242424242"), "and nothing leaked on the way: {stdout}");
 }
 
-/// A control inside `<fieldset disabled>` is disabled, but `el.disabled` on the *input*
-/// reads false: the IDL property reflects the element's own attribute, not the state it
-/// inherits. So the value is set on a control the user could never have typed into, the
-/// read-back agrees with the request, and every naive signal reports success.
+/// A control inside `<fieldset disabled>` is refused. `el.disabled` on the input reads false:
+/// the IDL property reflects the element's own attribute, not the inherited state.
 #[test]
 fn filling_a_control_disabled_by_its_fieldset_is_refused() {
     let b = TestBrowser::new("fill-fieldset");
@@ -340,7 +313,7 @@ fn filling_a_control_disabled_by_its_fieldset_is_refused() {
     );
 }
 
-/// A readonly input refuses the value too, and for a reason we can read before acting.
+/// A readonly input is refused, with the reason named and no JS stack trace in the error.
 #[test]
 fn filling_a_readonly_input_is_refused() {
     let b = TestBrowser::new("fill-readonly");
@@ -358,9 +331,7 @@ fn filling_a_readonly_input_is_refused() {
     );
 }
 
-/// The one that matters most. A mask rewrites the value, and the request is neither
-/// refused nor honoured. Reporting plain success hides it; reporting failure is wrong too.
-/// The response has to carry what was asked for and what the page actually holds.
+/// A mask leaves the request neither refused nor honoured, so both strings are reported.
 #[test]
 fn a_mask_that_rewrites_the_value_reports_both_sides() {
     let b = TestBrowser::new("fill-mask");
@@ -375,7 +346,6 @@ fn a_mask_that_rewrites_the_value_reports_both_sides() {
     assert_eq!(v["value"]["verbatim"], false, "so the caller is told it is not verbatim: {v}");
 }
 
-/// A plain input must stay simple: the value went in exactly as asked.
 #[test]
 fn a_plain_input_reports_the_value_went_in_verbatim() {
     let b = TestBrowser::new("fill-plain");
@@ -388,9 +358,8 @@ fn a_plain_input_reports_the_value_went_in_verbatim() {
     assert_eq!(v["value"]["actual"], "hello@example.com", "{v}");
 }
 
-/// `maxlength` constrains the editing pipeline, not the value setter, so a programmatic
-/// fill walks straight past it. The value does land verbatim — and it is a value no person
-/// could have typed, which the form will reject on submit. Saying only "filled" hides that.
+/// `maxlength` constrains the editing pipeline, not the value setter, so the fill lands
+/// verbatim and a caveat names the cap the form will reject on.
 #[test]
 fn filling_past_maxlength_lands_verbatim_but_says_so() {
     let b = TestBrowser::new("fill-maxlen");
@@ -404,9 +373,7 @@ fn filling_past_maxlength_lands_verbatim_but_says_so() {
     assert!(caveat.contains("maxlength=5"), "the cap that was bypassed must be named: {v}");
 }
 
-/// The response goes to stdout, into the agent's transcript and into any `--record` file.
-/// A password must not travel with it. What the caller still needs is whether the write
-/// landed verbatim, and that survives redaction.
+/// A password is never echoed back; `verbatim` and the lengths survive redaction.
 #[test]
 fn a_password_field_is_never_echoed_back() {
     let b = TestBrowser::new("fill-secret");

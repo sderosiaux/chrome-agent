@@ -1,10 +1,7 @@
 use serde::{Deserialize, Serialize};
 
-/// Abstract element reference that decouples uid resolution from CDP internals.
-///
-/// Today this wraps a `backendNodeId`. Tomorrow it could wrap an objectId,
-/// a `WebDriver` `BiDi` reference, or a selector fallback — without changing
-/// the session format or CLI surface.
+/// Abstract element reference that decouples uid resolution from CDP internals. Today it wraps a
+/// `backendNodeId`; an objectId or a `BiDi` reference would not change the session format.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum ElementRef {

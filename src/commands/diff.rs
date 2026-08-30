@@ -1,59 +1,37 @@
 use std::collections::HashMap;
 
-/// A comparison of two snapshots: the rendered text and the counts behind it.
-///
-/// The counts are produced by the comparison itself. Deriving them from the rendered
-/// text instead would mean counting `+ ` / `- ` / `~ ` line prefixes, and accessibility
-/// names go into the snapshot unescaped, so a name containing a newline splits a node
-/// across two lines and the second half reads as its own record.
+/// A comparison of two snapshots: the rendered text and the counts behind it. The counts come
+/// from the comparison, never from re-reading the text — accessibility names go in unescaped, so
+/// a name containing a newline would leave a second half reading as its own `+`/`-`/`~` record.
 pub struct Diff {
     pub text: String,
     pub added: usize,
     pub removed: usize,
     pub changed: usize,
     pub unchanged: usize,
-    /// Which node lost focus, and which gained it. Either can be absent: a page with
-    /// nothing focused yet has no `from`, and blurring without refocusing has no `to`.
-    /// Kept out of `changed`, because focus rewrites two nodes on every click and says
-    /// nothing about content, so counting it drowns the real signal.
+    /// Which node lost focus, and which gained it. Either can be absent. Kept out of `changed`,
+    /// because focus rewrites two nodes on every click and says nothing about content.
     pub focus_from: Option<String>,
     pub focus_to: Option<String>,
-    /// True when the node that GAINED focus is the document itself (`RootWebArea`).
-    ///
-    /// Chrome marks the `RootWebArea` `focused` whenever the document — in DOM terms, `<body>`
-    /// — holds focus, which is what happens after a click that touched nothing focusable.
-    /// Measured on `tests/fixtures/focus_after_click.html`: clicking an inert paragraph
-    /// reports `focus: none -> n1` while the page's own `document.activeElement` is `BODY`;
-    /// reproduced identically on `en.wikipedia.org` as `none -> n27`, its `RootWebArea`.
-    ///
-    /// The reading is right and the fact stays on the response. What it must not do is
-    /// license `focus_only`, whose whole claim is that the click reached an element: the
-    /// document takes focus on the FIRST click anywhere in a fresh page, including one that
-    /// hit nothing at all, so it cannot separate the two.
+    /// True when the node that GAINED focus is the document itself (`RootWebArea`). Chrome marks
+    /// it `focused` whenever `<body>` holds focus, which is what a click on nothing focusable
+    /// leaves behind. The reading is right and stays on the response; it must not license
+    /// `focus_only`, whose claim is that the click reached an element.
     pub focus_to_document: bool,
-    /// Nodes carrying a sequential `e{n}` uid. Those are renumbered on every snapshot, so
-    /// they are never matched between two of them, only counted.
+    /// Nodes carrying a sequential `e{n}` uid. Renumbered on every snapshot, so never matched
+    /// between two of them, only counted.
     pub anonymous: usize,
     /// Nodes present on both sides whose position in the document changed. Without this a
-    /// drag-and-drop reorder reads as "No changes detected": every uid and every line is
-    /// still there.
+    /// drag-and-drop reorder reads as "No changes detected": every uid and line is still there.
     pub moved: usize,
-    /// Fields that held a value before the action and hold none after it.
-    ///
-    /// The evidence was always in the rendered text — the `value=` token simply stops
-    /// appearing after the `->`. A diff line is prose, though: an agent reading the JSON saw
-    /// `verdict:"changed"` and `ok:true` and never learnt that the field it had just filled
-    /// was empty again. `tests/fixtures/form_value_reset_on_submit.html` is the archetype: the
-    /// submit handler sets a status AND calls `form.reset()`, so both statements on the
-    /// response were true and the loss was contractually invisible.
+    /// Fields that held a value before the action and hold none after it. Also visible in the
+    /// rendered text (the `value=` token stops appearing after the `->`), but a diff line is prose.
     pub values_lost: Vec<LostValue>,
 }
 
-/// A field that held a value before an action and holds none after it.
-///
-/// `was` is what the accessibility tree reported, which is not always what the field held: a
-/// `type=password` value arrives here already masked by Chrome. Redaction is applied by the
-/// caller, which can ask the page what kind of field it is — see `pipe_report::values_lost`.
+/// A field that held a value before an action and holds none after it. `was` is what the
+/// accessibility tree reported, not always what the field held: a `type=password` arrives already
+/// masked. Redaction is the caller's job — see `pipe_report::attach_values_lost`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LostValue {
     pub uid: String,
@@ -73,10 +51,8 @@ pub struct LostValue {
 /// = 15 unchanged elements
 /// ```
 pub fn diff_snapshots(old: &str, new: &str) -> Diff {
-    // Walk both snapshots in document order. Looking uids up in a map is fine, but
-    // *iterating* one would order the output by hash, so the same page state would
-    // produce a different diff on every run: no golden test, and no prompt-cache hit
-    // for an agent that sees the same page twice.
+    // Walk both snapshots in document order. Looking uids up in a map is fine, but *iterating* one
+    // would order the output by hash: a different diff per run, no golden test, no cache hit.
     let old_lines = uid_lines(old);
     let new_lines = uid_lines(new);
     let anonymous = new_lines.iter().filter(|(uid, _)| is_anonymous(uid)).count();
@@ -129,8 +105,7 @@ pub fn diff_snapshots(old: &str, new: &str) -> Diff {
 
     let moved = count_moved(&old_lines, &new_lines);
 
-    // A focus move is not a content change, but it is something we observed, so the
-    // summary must not go on to say nothing happened.
+    // A focus move is not a content change, but the summary must not say nothing happened.
     let observed_something = !added.is_empty()
         || !removed.is_empty()
         || !changed.is_empty()
@@ -174,12 +149,9 @@ pub fn diff_snapshots(old: &str, new: &str) -> Diff {
     }
 }
 
-/// The value a node held before the action and no longer holds, if that is what changed.
-///
-/// Only a value that went from something to nothing counts. A value that was REPLACED is not a
-/// loss — that is a mask, a normaliser or a fresh write, and the `~` line already carries both
-/// sides. A node that disappeared entirely is not one either: it is reported as `removed`,
-/// which is not silent, and the value went with a node the caller can no longer act on.
+/// The value a node held before the action and no longer holds, if that is what changed. Only
+/// something → nothing counts: a REPLACED value is a mask or a fresh write and the `~` line has
+/// both sides, and a node that disappeared is reported as `removed`.
 fn lost_value(uid: &str, old_line: &str, new_line: &str) -> Option<LostValue> {
     let old_tokens = tokenize(old_line)?;
     let was = value_token(&old_tokens)?;
@@ -190,8 +162,8 @@ fn lost_value(uid: &str, old_line: &str, new_line: &str) -> Option<LostValue> {
     if !value_token(&new_tokens).is_none_or(str::is_empty) {
         return None;
     }
-    // `uid=n11 textbox "Email" …`: role is the token after the uid, the name the quoted one
-    // after it. Both are best effort — a node with neither still reports the loss.
+    // `uid=n11 textbox "Email" …`: role is the token after the uid, name the quoted one after it.
+    // Both best effort — a node with neither still reports the loss.
     Some(LostValue {
         uid: uid.to_string(),
         role: old_tokens.get(1).copied().unwrap_or_default().to_string(),
@@ -217,17 +189,15 @@ fn is_anonymous(uid: &str) -> bool {
     uid.starts_with('e') && uid[1..].chars().all(|c| c.is_ascii_digit()) && uid.len() > 1
 }
 
-/// `Some(true)` when the node gained focus, `Some(false)` when it lost it, `None` when
-/// anything else about the node also changed.
-/// Whether a snapshot line describes the document itself rather than an element in it.
-///
-/// The role is the token after the uid: `uid=n1 RootWebArea "Title" focused`. `RootWebArea`
-/// is the only role Chrome gives a document, and it is what carries `focused` when `<body>`
-/// holds focus.
+/// Whether a snapshot line describes the document itself rather than an element in it. The role
+/// is the token after the uid (`uid=n1 RootWebArea "Title" focused`), and `RootWebArea` is the
+/// only role Chrome gives a document.
 fn is_document_node(line: &str) -> bool {
     line.split_whitespace().nth(1) == Some("RootWebArea")
 }
 
+/// `Some(true)` when the node gained focus, `Some(false)` when it lost it, `None` when anything
+/// else about the node also changed.
 fn focus_only_change(old_line: &str, new_line: &str) -> Option<bool> {
     let (old_tokens, new_tokens) = (tokenize(old_line)?, tokenize(new_line)?);
     let had = old_tokens.contains(&"focused");
@@ -250,13 +220,10 @@ fn count_moved(old_lines: &[(&str, &str)], new_lines: &[(&str, &str)]) -> usize 
     old_order.iter().zip(&new_order).filter(|(a, b)| a != b).count()
 }
 
-/// Whether the live page is the same document the stored snapshot came from.
-///
-/// Tri-state on purpose. The URL comparison this replaces had no way to say "I don't know",
-/// so an unreadable signal took the confident branch and diffed two unrelated uid spaces.
-/// A URL is also the wrong signal twice over: it changes on a fragment jump and on
-/// `history.pushState` where the document and every uid survive, and it stays put across a
-/// reload or a form GET back to the same address where nothing survives.
+/// Whether the live page is the same document the stored snapshot came from. Tri-state on
+/// purpose: an unreadable signal must not take the confident branch and diff two unrelated uid
+/// spaces. A URL is the wrong signal both ways — it changes on a fragment jump and on
+/// `history.pushState` where every uid survives, and stays put across a reload where none does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Identity {
     /// Same frame, same loader: uids from the stored snapshot still refer to the same nodes.
@@ -299,20 +266,18 @@ pub struct Comparison {
     pub identity_known: bool,
     /// What the agent should do next, when that isn't obvious.
     pub hint: Option<&'static str>,
-    /// Fields this action emptied. Only ever populated on a real diff: across two documents
-    /// there is no "before" to have lost anything from.
+    /// Fields this action emptied. Only populated on a real diff: across two documents there is
+    /// no "before" to have lost anything from.
     pub values_lost: Vec<LostValue>,
 }
 
-/// Compare a stored snapshot against a fresh one, refusing to diff unless we know the
-/// document is the same one.
+/// Compare a stored snapshot against a fresh one, refusing to diff unless the document is known
+/// to be the same one.
 ///
-/// uids are Chrome `backendNodeId`s, and those counters overlap between documents. Diffing
-/// two different pages therefore pairs unrelated nodes that happen to share a uid and
-/// reports them as "changed" — on a real navigation that produced hundreds of bogus lines
-/// and cost more tokens than simply re-reading the destination page. So when the document
-/// changed, return the new snapshot and say so instead of pretending to diff.
-///
+/// uids are Chrome `backendNodeId`s and those counters overlap between documents, so diffing two
+/// pages pairs unrelated nodes sharing a uid and reports them as "changed" — hundreds of bogus
+/// lines on a real navigation, costing more tokens than re-reading the destination. When the
+/// document changed, return the new snapshot and say so.
 pub fn compare(identity: Identity, old_text: &str, new_text: &str) -> Comparison {
     if identity != Identity::Same {
         let hint = if identity == Identity::Different {
@@ -357,12 +322,9 @@ pub fn compare(identity: Identity, old_text: &str, new_text: &str) -> Comparison
     }
 }
 
-/// Render a changed node, writing the part that stayed the same only once.
-///
-/// A node that only gained a value goes from repeating ~60 characters twice to stating the
-/// attribute that moved, and changed lines are the bulk of a form-filling flow. When the
-/// two lines share no identity (different role, or a name we can't tokenize) the whole line
-/// is the honest rendering, because there is nothing meaningful to hoist.
+/// Render a changed node, writing the shared prefix once. Changed lines are the bulk of a
+/// form-filling flow. When the two lines share no identity (different role, or a name that will
+/// not tokenize) the whole line is the honest rendering.
 fn render_change(old_line: &str, new_line: &str) -> String {
     let whole = || format!("~ {old_line} -> {new_line}");
     let (Some(old_tokens), Some(new_tokens)) = (tokenize(old_line), tokenize(new_line)) else {
@@ -380,8 +342,8 @@ fn render_change(old_line: &str, new_line: &str) -> String {
     let prefix = old_tokens[..shared].join(" ");
     let old_rest = old_tokens[shared..].join(" ");
     let new_rest = new_tokens[shared..].join(" ");
-    // One side can be empty when the shared prefix covers the whole shorter line; writing
-    // it as an empty field would leave a stray double space.
+    // One side is empty when the shared prefix covers the whole shorter line; writing it as an
+    // empty field would leave a stray double space.
     match (old_rest.is_empty(), new_rest.is_empty()) {
         (true, _) => format!("~ {prefix} -> {new_rest}"),
         (_, true) => format!("~ {prefix} {old_rest} ->"),
@@ -389,11 +351,9 @@ fn render_change(old_line: &str, new_line: &str) -> String {
     }
 }
 
-/// Split a snapshot line into space-separated tokens, keeping quoted runs whole.
-///
-/// Returns `None` when the quotes don't balance. Accessibility names are written into
-/// snapshots unescaped, so a name containing a quote makes the token boundaries ambiguous,
-/// and guessing at them would mangle the output. Callers fall back to the whole line.
+/// Split a snapshot line into space-separated tokens, keeping quoted runs whole. `None` when the
+/// quotes do not balance: accessibility names go into snapshots unescaped, so a name containing a
+/// quote makes the boundaries ambiguous. Callers fall back to the whole line.
 fn tokenize(line: &str) -> Option<Vec<&str>> {
     let mut tokens = Vec::new();
     let mut in_quotes = false;
@@ -419,14 +379,13 @@ fn tokenize(line: &str) -> Option<Vec<&str>> {
     Some(tokens)
 }
 
-/// Extract uid -> trimmed line from snapshot text.
-/// `(uid, line)` pairs in the order they appear in the snapshot.
+/// `(uid, trimmed line)` pairs in the order they appear in the snapshot.
 fn uid_lines(text: &str) -> Vec<(&str, &str)> {
     let mut out = Vec::new();
     for line in text.lines() {
         let trimmed = line.trim_start();
         if let Some(rest) = trimmed.strip_prefix("uid=") {
-            // uid is the token before the first space
+            // The uid is the token before the first space.
             let uid = rest.find(' ').map_or(rest, |i| &rest[..i]);
             out.push((uid, trimmed));
         }
@@ -438,8 +397,8 @@ fn uid_lines(text: &str) -> Vec<(&str, &str)> {
 mod tests {
     use super::*;
 
-    /// Moving focus rewrites two nodes and means nothing about content. Left in the counts
-    /// it is the single loudest source of noise: every click on a page reports "2 changed".
+    /// Moving focus rewrites two nodes and means nothing about content: left in the counts, every
+    /// click reports "2 changed".
     #[test]
     fn moving_focus_is_reported_separately_from_content() {
         let old = "uid=n1 link \"A\" focused\nuid=n2 button \"B\"\n";
@@ -451,10 +410,8 @@ mod tests {
         assert!(!d.focus_to_document, "a button is not the document: {}", d.text);
     }
 
-    /// The document taking focus is what a click on nothing focusable leaves behind, and it
-    /// is indistinguishable from the first click anywhere in a fresh page. Measured on
-    /// `tests/fixtures/focus_after_click.html`: `focus: none -> n1` with the page's own
-    /// `document.activeElement` reading `BODY`, and identically on `en.wikipedia.org`.
+    /// The document taking focus is what a click on nothing focusable leaves behind, and it is
+    /// indistinguishable from the first click anywhere in a fresh page.
     #[test]
     fn focus_landing_on_the_document_is_marked_as_such() {
         let old = "uid=n1 RootWebArea \"Title\"\nuid=n2 paragraph \"text\"\n";
@@ -465,8 +422,8 @@ mod tests {
         assert!(d.text.contains("focus: none -> n1"), "the line is unchanged: {}", d.text);
     }
 
-    /// A blur is not the same event and keeps its evidence: if a real element LOST focus,
-    /// something reached the page. Only the destination is judged.
+    /// A blur keeps its evidence: a real element losing focus means something reached the page.
+    /// Only the destination is judged.
     #[test]
     fn losing_focus_to_the_document_is_not_a_document_gain() {
         let old = "uid=n1 RootWebArea \"Title\"\nuid=n2 textbox \"Email\" focused\n";
@@ -477,8 +434,7 @@ mod tests {
         assert!(!d.focus_to_document, "nothing gained focus at all: {}", d.text);
     }
 
-    /// The role is read as a whole token, so a node whose NAME contains the word does not
-    /// pass for the document.
+    /// The role is a whole token, so a node whose NAME contains the word is not the document.
     #[test]
     fn a_node_named_after_the_document_role_is_not_the_document() {
         let old = "uid=n5 heading \"About RootWebArea\"\n";
@@ -488,9 +444,7 @@ mod tests {
         assert!(!d.focus_to_document, "the role is the second token, not any token: {}", d.text);
     }
 
-    /// A node with no backendDOMNodeId falls back to a sequential `e{n}` uid, renumbered on
-    /// every snapshot. Matching `e1` to `e1` pairs two unrelated nodes, which is the same
-    /// defect as matching uids across documents, one scope down.
+    /// `e{n}` uids are renumbered per snapshot, so matching `e1` to `e1` pairs unrelated nodes.
     #[test]
     fn sequential_uids_are_never_matched_between_snapshots() {
         let old = "uid=n1 heading \"Same\"\nuid=e1 generic \"first pass\"\n";
@@ -500,8 +454,7 @@ mod tests {
         assert_eq!(d.anonymous, 1, "but their presence is worth reporting: {}", d.text);
     }
 
-    /// Reordering keeps every uid and every line, so pairing by uid alone reports a
-    /// drag-and-drop as "No changes detected".
+    /// Reordering keeps every uid and line, so pairing by uid alone reports "No changes detected".
     #[test]
     fn a_reorder_does_not_read_as_no_change() {
         let old = "uid=n1 listitem \"A\"\nuid=n2 listitem \"B\"\nuid=n3 listitem \"C\"\n";
@@ -511,8 +464,7 @@ mod tests {
         assert!(!d.text.contains("No changes"), "{}", d.text);
     }
 
-    /// The renderer hoists the shared prefix; when one side has nothing left it must not
-    /// leave a double space behind.
+    /// Hoisting the shared prefix must not leave a double space when one side has nothing left.
     #[test]
     fn a_changed_line_has_no_empty_side() {
         let old = "uid=n1 link \"A\"\n";
@@ -521,8 +473,7 @@ mod tests {
         assert!(!d.text.contains("  ->"), "empty left side leaves a double space: {:?}", d.text);
     }
 
-    /// A changed line repeats the node twice today. Only the part that moved matters, and
-    /// changed lines dominate a form-filling flow, so the shared prefix is written once.
+    /// Only the part that moved matters, so the shared prefix is written once.
     #[test]
     fn a_changed_line_states_only_what_moved() {
         let old = "uid=n11 textbox \"Email\" focusable value=\"\"\n";
@@ -535,9 +486,8 @@ mod tests {
         );
     }
 
-    /// Accessibility names are written unescaped, so a name can carry a stray quote and
-    /// make the token split ambiguous. When that happens, fall back to the whole line
-    /// rather than guess at token boundaries.
+    /// A name carrying a stray quote makes the token split ambiguous: fall back to the whole line
+    /// rather than guess at boundaries.
     #[test]
     fn an_unbalanced_quote_falls_back_to_the_whole_line() {
         let old = "uid=n7 link \"\"WCAG 2.1\" ref\n";
@@ -550,8 +500,7 @@ mod tests {
         );
     }
 
-    /// When every token differs there is no shared prefix to hoist, so the whole line is
-    /// the honest rendering.
+    /// No shared prefix to hoist means the whole line is the honest rendering.
     #[test]
     fn a_wholly_different_node_keeps_the_whole_line() {
         let old = "uid=n3 button \"Save\"\n";
@@ -561,9 +510,7 @@ mod tests {
         assert_eq!(line, "~ uid=n3 button \"Save\" -> uid=n3 link \"Cancel\"");
     }
 
-    /// The S3 shape: a submit handler sets a status and calls `form.reset()`. The `~` line
-    /// carried the evidence all along — the `value=` token simply stops appearing after the
-    /// arrow — but a diff line is prose, and an agent reading JSON never saw it.
+    /// A submit handler that sets a status and calls `form.reset()`.
     #[test]
     fn a_field_this_action_emptied_is_reported_as_a_lost_value() {
         let old = "uid=n2 textbox \"Email\" value=\"hello@example.com\" focused\nuid=n5 status \"\"\n";
@@ -577,8 +524,7 @@ mod tests {
         assert_eq!(lost.was, "hello@example.com");
     }
 
-    /// `value=""` is the same absence written differently, and every empty text input in a
-    /// snapshot has it. Treating it as a loss would fire on every form on the web.
+    /// `value=""` is the same absence written differently; every empty text input has it.
     #[test]
     fn an_emptied_value_token_counts_the_same_as_a_missing_one() {
         let old = "uid=n2 textbox \"Email\" value=\"a@b.c\"\n";
@@ -589,8 +535,7 @@ mod tests {
         assert!(d.values_lost.is_empty(), "a field being filled is not a field being emptied");
     }
 
-    /// A value that was REPLACED is not a value that was lost. A mask, a normaliser and a
-    /// fresh write all land here, and the `~` line already carries both sides.
+    /// A REPLACED value is a mask, a normaliser or a fresh write, and the `~` line has both sides.
     #[test]
     fn a_rewritten_value_is_not_a_lost_one() {
         let old = "uid=n2 textbox \"Phone\" value=\"5551234567\"\n";
@@ -598,8 +543,7 @@ mod tests {
         assert!(diff_snapshots(old, new).values_lost.is_empty());
     }
 
-    /// A node that disappeared entirely is reported as `removed`, which is not silent, and its
-    /// value went with a node the caller can no longer act on.
+    /// A vanished node is reported as `removed`, and its value went with a node nobody can act on.
     #[test]
     fn a_node_that_vanished_is_a_removal_not_a_lost_value() {
         let old = "uid=n2 textbox \"Email\" value=\"a@b.c\"\n";
@@ -609,8 +553,7 @@ mod tests {
         assert!(d.values_lost.is_empty(), "{}", d.text);
     }
 
-    /// Across two documents there is no "before" to have lost anything from: the uids belong
-    /// to different spaces, so a pairing would be an accident.
+    /// Across two documents the uids belong to different spaces, so a pairing is an accident.
     #[test]
     fn no_value_is_claimed_lost_across_a_document_change() {
         let old = "uid=n2 textbox \"Email\" value=\"a@b.c\"\n";
@@ -620,8 +563,7 @@ mod tests {
         }
     }
 
-    /// A value containing spaces survives tokenizing; a name with an unbalanced quote makes
-    /// the split ambiguous and must yield no claim rather than a mangled one.
+    /// A value with spaces survives tokenizing; an unbalanced quote yields no claim at all.
     #[test]
     fn lost_values_handle_spaces_and_refuse_ambiguous_lines() {
         let old = "uid=n2 textbox \"Address\" value=\"12 Rue de la Paix\"\n";
@@ -633,9 +575,8 @@ mod tests {
         assert!(diff_snapshots(old, new).values_lost.is_empty(), "no guess at token boundaries");
     }
 
-    /// An identity we could not read must not be reported as "same document". uids are only
-    /// comparable within one document, so guessing wrong here fabricates a diff between two
-    /// unrelated pages — the exact failure the URL check was added to prevent.
+    /// uids are comparable only within one document, so guessing "same" here fabricates a diff
+    /// between two unrelated pages.
     #[test]
     fn an_unreadable_identity_does_not_claim_the_document_is_the_same() {
         let old = "uid=n1 heading \"Old\"\n";
@@ -659,7 +600,6 @@ mod tests {
     }
 
     /// Same URL, different document: a reload, or a form GET that lands back on itself.
-    /// The URL comparison called these "same" and diffed two unrelated uid spaces.
     #[test]
     fn a_reload_to_the_same_url_is_a_different_document() {
         let old = "uid=n1 heading \"Before\"\n";
@@ -669,10 +609,8 @@ mod tests {
         assert_eq!((c.added, c.removed, c.changed), (0, 0, 0));
     }
 
-    /// When the document changed, `text` carries a whole snapshot rather than a diff.
-    /// Accessibility names go in unescaped (snapshot.rs writes `name` raw), so a name
-    /// containing a newline puts a line starting with "- " into that payload. Counts are
-    /// reported by the comparison itself, so such a line cannot be read back as a removal.
+    /// When the document changed, `text` carries a whole snapshot. A name containing a newline
+    /// puts a line starting with "- " into it, and the counts must not read that as a removal.
     #[test]
     fn a_changed_document_reports_no_edits_whatever_the_snapshot_contains() {
         let old = "uid=n1 heading \"Old page\"\n";
@@ -695,9 +633,8 @@ mod tests {
         assert_eq!(d.text.lines().filter(|l| l.starts_with("~ ")).count(), d.changed);
     }
 
-    /// Output order follows the page, not the hash of a uid. Without this the same page
-    /// state yields a different diff on every process, which defeats prompt caching and
-    /// makes the output impossible to assert on.
+    /// Output order follows the page, not a uid hash: otherwise the same page state yields a
+    /// different diff per process, defeating prompt caching and any assertion.
     #[test]
     fn lines_follow_document_order() {
         let old = "uid=n1 heading \"A\"\nuid=n2 button \"B\"\nuid=n3 link \"C\"\nuid=n4 link \"D\"\n";

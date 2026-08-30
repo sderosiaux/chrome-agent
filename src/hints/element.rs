@@ -1,34 +1,15 @@
 //! What to do about an error a page, an element or a click produced.
 //!
-//! Split out of `hints.rs` for the repo's 1000-line file cap and re-exported from [`super`], so
-//! every call site stays `crate::hints::error_hint` / `crate::hints::no_download_hint`. The seam
-//! is the one the navigation module draws from the other side: everything here happens once a
-//! document exists, so it has a uid, an element, a selector or a dispatched event to name.
-//!
-//! Two families live here, and only one of them is an error:
-//!
-//! * [`error_hint`], the chain every failed command's message is read by. It is the one function
-//!   the project's contract obliges a new error class to touch, which is why the file it lives in
-//!   is the one that needed the room.
-//! * The hints a *successful* click carries — a download that never began, one Chrome cancelled,
-//!   one still in flight, and a pointer action `--on-intercept` refused to dispatch. None of them
-//!   is reachable through [`error_hint`]: the command answered `ok:true` and the hint rides on the
-//!   response beside a field that says what did not happen. They are held to the same three rules
-//!   by the same scans, in [`super`].
+//! Everything here happens once a document exists, so it has a uid, an element, a selector or a
+//! dispatched event to name. Two families: [`error_hint`], the chain every failed command's
+//! message is read by, and the hints a *successful* click carries, which ride on an `ok:true`
+//! response and so never reach it. Both are held to the three rules by the scans in [`super`].
 
 use super::{invocation, uid_in};
 
-/// A `download --uid`/`--selector` whose click landed and produced no download.
-///
-/// Rule 3 carries this one. The click WAS dispatched, so the reflex — click again, maybe it
-/// works — is a second real click on a page that cannot tell it from a deliberate one, and on an
-/// "Export" button that means two orders, two exports, two of whatever the button does. So the
-/// prohibition is in words and comes before the command.
-///
-/// Rule 2 is satisfied by ONE command, `inspect --urls`, chosen because it answers both questions
-/// a caller has here with a single call: what the click did instead (the tree), and whether the
-/// element was a plain link whose href can be fetched with no click at all (the URLs). Offering
-/// two commands with no criterion is the shrug this contract exists to remove.
+/// A `download --uid`/`--selector` whose click landed and produced no download. The click was
+/// dispatched, so rule 3 forbids a second one first; `inspect --urls` then answers both what the
+/// click did and whether the element is a plain link whose href needs no click.
 #[must_use]
 pub fn no_download_hint(
     browser: &str,
@@ -36,9 +17,8 @@ pub fn no_download_hint(
     dispatched: &crate::hit_test::Dispatched,
 ) -> String {
     let run = invocation(browser);
-    // A hit test that named another receiver explains the silence, and the recovery is that
-    // element rather than the download machinery. It is stated first because it is the only
-    // branch where the caller's next action is not `inspect`.
+    // A named receiver explains the silence and is stated first: the recovery is that element,
+    // not the download machinery.
     let cause = match dispatched.receiver.as_ref() {
         Some(receiver) => format!(
             "The click was delivered, but {} occupied the point it was aimed at, so that element \
@@ -59,11 +39,8 @@ pub fn no_download_hint(
 
 /// A `download --uid`/`--selector` where the hit test refused to aim, so nothing was dispatched.
 ///
-/// The one branch on this command where a retry is safe, and the hint has to say so: `not_settled`
-/// (the aim point was still moving, or outside the viewport) and `off_target` (no point inside the
-/// element's own boxes) both stop before the dispatch, so the page never saw an event. Forbidding
-/// the retry here would strand the caller on a recoverable refusal — the mirror of the mistake the
-/// other three hints avoid.
+/// The one branch here where a retry is safe, and the hint says so: forbidding it would strand
+/// the caller on a recoverable refusal.
 #[must_use]
 pub fn undispatched_download_hint(browser: &str) -> String {
     let run = invocation(browser);
@@ -112,24 +89,9 @@ pub fn download_unfinished_hint(browser: &str) -> String {
     )
 }
 
-/// A pointer action `--on-intercept refuse` stopped before it dispatched.
-///
-/// The one error in this module whose fact is a measurement rather than a symptom: the hit test
-/// named the element sitting on the aim point, so rule 1 is satisfied by naming it rather than
-/// by describing the class of thing it is.
-///
-/// Rule 3 applies in its second flavour. A retry here is not dangerous — nothing was
-/// dispatched, so it cannot double an action — it is *futile*, and an agent that reads "safe to
-/// repeat" will repeat it until it runs out of turns. So the prohibition is on repeating the
-/// command *while the receiver is still there*, and the command named is the one that leads to
-/// getting rid of it.
-///
-/// Two wordings, because a modal dialog has one dismissal every page agrees on and a banner or
-/// scrim does not — the criterion is the receiver's own `modal` flag, which rule 2 requires
-/// stating rather than offering two commands and a shrug. `mode` picks a third wording within
-/// the non-modal case: `Guard` refused because the receiver looked like a control, `Refuse`
-/// because the caller asked for every interception to stop — the fact each names is different,
-/// so the words are too.
+/// A pointer action `--on-intercept refuse` stopped before it dispatched. The retry is futile
+/// rather than dangerous, so what is forbidden is repeating the command *while the receiver is
+/// there*. `modal` gets the Escape dismissal; `Guard` and `Refuse` name their different reasons.
 #[must_use]
 pub fn intercepted_refusal_hint(
     browser: &str,
@@ -163,20 +125,8 @@ pub fn intercepted_refusal_hint(
 
 /// A uid the snapshot PRINTED and never stored, because there is no DOM element behind it.
 ///
-/// One text, two routes, and until this release it had none. The message it was written for —
-/// `Element uid=e12 has no resolvable backend node.` — cannot currently be produced: all five
-/// sites that build it first do `uid_map.get(uid).ok_or_else(… "not found" …)`, and an `e…` uid
-/// is never in the map, so the "not found" arm claims every one of them. `ElementRef` also has a
-/// single variant today, so `backend_node_id()` never answers `None` for a uid that IS in the
-/// map. The branch stays — it is the guard for the day that enum grows — and the text is now
-/// also reached the way a caller actually gets here.
-///
-/// That route matters because `e…` uids are printed to the reader (`snapshot_render.rs`), so
-/// `click e12` is an ordinary thing to try. It used to answer "Run 'chrome-agent inspect' to get
-/// fresh uids", which is false advice for this uid in particular: the `e{n}` counter is
-/// positional, so re-inspecting renumbers rather than repairs, and the caller would run the
-/// command, get a different `e…`, and be exactly as stuck. What is true is that the node has no
-/// DOM element, and the way past it is its DOM owner under `--selector`.
+/// One text, two routes: the `e…` arm of "not found", and the `no resolvable backend node`
+/// guard. Re-inspecting only renumbers a positional `e{n}`; the way past is `--selector`.
 fn anonymous_node_hint(run: &str) -> String {
     format!(
         "This uid names an accessibility node with no DOM element behind it — the `e…` \
@@ -191,33 +141,13 @@ fn anonymous_node_hint(run: &str) -> String {
 #[must_use]
 pub fn error_hint(msg: &str, browser: &str) -> Option<String> {
     let run = invocation(browser);
-    // First in the chain, and the position is the point. Every other branch below recognises a
-    // sentence this binary wrote; this one recognises a fixed prefix (`CdpClientError::
-    // ResponseParse` is `#[error("response parse: {0}")]`) followed by text from serde, which
-    // in turn quotes the CDP payload that failed to parse. So the tail of this message is
-    // whatever Chrome happened to send, and any content-based predicate below could claim it —
-    // a payload carrying the word "timeout" would be read as a timeout, a payload carrying
-    // "uid=" and "not found" as a stale uid. Matching first costs nothing, because
-    // `response parse` is a string no other failure in this binary produces.
+    // Must stay first. Its tail is serde quoting the CDP payload, so it is the one message
+    // carrying text this binary did not write, and any content predicate below could claim it.
     if msg.contains("response parse") {
-        // "so the command never ran" is what this said, and it was false for a whole family:
-        // an acknowledgement we cannot read is still an acknowledgement, so a call that ACTED
-        // — an input event, a `Runtime.callFunctionOn` that writes a value — was dispatched
-        // and answered before the parse failed. Telling the caller it never ran is the exact
-        // invitation rule 3 forbids, on the one page that cannot tell a retry from a second
-        // deliberate action.
-        //
-        // Deliberately NOT split into two texts the way `cdp::client::timeout_message` splits
-        // its own. That split is made at the site that knows the CDP method and is read back
-        // out of the WORDING, which is why `INPUT_ACK_DEADLINE`'s message says "dispatched"
-        // first. `ResponseParse` carries a `serde_json::Error` and nothing else, so by the time
-        // the message reaches here the method is gone. Keying an `Input.` branch off a wording
-        // this binary does not produce would add exactly the unreachable branch the corpus scan
-        // in `super` exists to catch. If the error ever names the method, the split belongs
-        // here and should copy that function's shape rather than invent a third.
-        //
-        // So the criterion rule 2 asks for is stated in terms the caller can evaluate without
-        // it: they know whether the command they ran acts or reads.
+        // An acknowledgement this tool cannot read is still one: a call that ACTED was
+        // dispatched and answered before the parse failed. Not split into an acts/reads pair
+        // the way `cdp::client::timeout_message` is — `ResponseParse` carries only a
+        // `serde_json::Error`, so the CDP method is gone by here; the caller evaluates it.
         Some(format!(
             "Chrome answered this CDP call and this version could not read the answer, so what \
              became of the call is not known from here. If the command acts on the page — a \
@@ -230,15 +160,11 @@ pub fn error_hint(msg: &str, browser: &str) -> Option<String> {
              recorded, and a Chrome much newer or older than the bundled Chromium is the usual \
              one."
         ))
-    // Chrome 136+ refuses CDP on the *default* user profile. chrome-agent launches
-    // its own dedicated profile so this only bites when --connect points at a Chrome
-    // started on the normal profile. Matched before the generic "Connection refused"
-    // branch so the actionable hint wins.
+    // Chrome 136+ refuses CDP on the default user profile, so this bites only under --connect.
+    // Matched before the generic "Connection refused" branch so the actionable hint wins.
     } else if msg.contains("Failed to connect to page") || msg.contains("DevToolsActivePort") {
         Some("Could not attach over CDP. Chrome 136+ disables remote debugging on the default profile: drop --connect to let chrome-agent launch its own dedicated profile, or relaunch your Chrome with a separate --user-data-dir.".to_string())
     } else if msg.contains("Connection refused") || msg.contains("No such file") {
-        // Was "Is Chrome running? Try: chrome-agent goto <url>" — a question whose premise
-        // is false (this tool starts its own Chrome) and a command with a placeholder in it.
         Some(format!(
             "Nothing answered CDP at the endpoint this session recorded, so the browser it \
              named is gone — crashed, or killed from outside this tool. chrome-agent starts \
@@ -248,10 +174,8 @@ pub fn error_hint(msg: &str, browser: &str) -> Option<String> {
              to is the thing to start."
         ))
     } else if msg.contains("uid=") && msg.contains("not found") {
-        // Two failures wear one message. A uid that WAS in a snapshot and is not in this one
-        // is stale, and re-inspecting repairs it. A uid beginning with `e` never was: the
-        // snapshot printed it and stored nothing, so "get fresh uids" sends the reader round
-        // a loop that renumbers instead of resolving. See `anonymous_node_hint`.
+        // Two failures wear one message. A stale uid is repaired by re-inspecting; an `e…` uid
+        // was never stored, and re-inspecting only renumbers it. See `anonymous_node_hint`.
         if uid_in(msg).is_some_and(|uid| uid.starts_with('e')) {
             Some(anonymous_node_hint(&run))
         } else {
@@ -264,19 +188,14 @@ pub fn error_hint(msg: &str, browser: &str) -> Option<String> {
     } else if msg.contains("Navigation failed") {
         Some(super::navigation::navigation_failure(msg, &run))
     } else if msg.contains("No snapshot") || msg.contains("No inspect") || msg.contains("uid_map is empty") {
-        // Was "Run 'chrome-agent inspect' first" — the right command and no reason, so a
-        // caller who thought a uid should still work had nothing to correct.
         Some(format!(
             "No snapshot is stored for this page, so there are no uids to resolve and no \
              baseline to report a change against. Run `{run} inspect` first: it is what \
              creates both."
         ))
     } else if msg.contains("was dispatched and Chrome did not acknowledge it") {
-        // Rule 3, on the one failure in this module where the tool KNOWS the action may have
-        // landed. The generic timeout branch below would answer "use --timeout N for slow
-        // pages", which is wrong twice over: the budget was not the caller's to raise (an
-        // input event has its own, shorter one), and the advice reads as "try again with more
-        // patience" about an event the page may have already acted on.
+        // Must precede the generic timeout branch: its "use --timeout N" is wrong twice here —
+        // an input event has its own shorter budget, and the page may already have acted.
         Some(format!(
             "The event left this tool and Chrome never confirmed what became of it, so the \
              page may have received it and may not. Do not repeat the action: the page cannot \
@@ -289,8 +208,6 @@ pub fn error_hint(msg: &str, browser: &str) -> Option<String> {
     } else if msg.contains("Timeout") || msg.contains("timeout") {
         Some("Use --timeout N for slow pages".to_string())
     } else if msg.contains("not interactable") || msg.contains("no visible box model") {
-        // Was "Element may be hidden. Try: chrome-agent scroll <uid>" — a hedge about a
-        // state we measured, and a placeholder where the uid was already known.
         Some(match uid_in(msg) {
             Some(uid) => format!(
                 "This element has no box on screen, so there is no point to aim at and \
@@ -313,9 +230,7 @@ pub fn error_hint(msg: &str, browser: &str) -> Option<String> {
              matches before acting through it."
         ))
     } else if msg.contains("no resolvable backend node") {
-        // Was "Page structure issue. Try: chrome-agent click --selector or chrome-agent
-        // eval" — two options, no criterion, and the cause never named. The other route to
-        // this same text, and the only one a caller reaches today, is the `e…` uid arm above.
+        // The guard route to the same text; the `e…` uid arm above is the reachable one.
         Some(anonymous_node_hint(&run))
     } else if msg.contains("may not have an article") || msg.contains("Readability") {
         Some(format!(
@@ -325,9 +240,8 @@ pub fn error_hint(msg: &str, browser: &str) -> Option<String> {
     } else if msg.contains("Provide a uid") || msg.contains("Provide --uid") {
         Some("Specify what to target: uid (e.g. n47), --selector \"css\", or --xy x,y".to_string())
     } else if msg.contains("bound frame's isolated world") {
-        // Matched before the plain "document.modelContext is undefined" branch below (that
-        // text is also a substring of this one): a frame binding changes what the absence
-        // proves, from "this page has no WebMCP" to "not visible from here".
+        // Before the plain-absence branch below, whose text is a substring of this one: a frame
+        // binding downgrades the absence from "no WebMCP here" to "not visible from here".
         Some(format!(
             "This checked the bound frame's isolated world, where document.modelContext came \
              back undefined — the same blindness `eval` already has for a frame's main-world \
@@ -337,8 +251,7 @@ pub fn error_hint(msg: &str, browser: &str) -> Option<String> {
              that a frame's own WebMCP tools cannot currently be confirmed absent from outside it."
         ))
     } else if msg.contains("document.modelContext is undefined") {
-        // Matched before the generic JS-error branch: this is a specific, known cause
-        // (`webmcp list`/`webmcp call`'s own guard), not a page bug to debug.
+        // Before the generic JS-error branch: a known cause, not a page bug to debug.
         Some(format!(
             "This page's document.modelContext is undefined, so no WebMCP tool can be listed \
              or called here. Either this browser was not launched with --chrome-arg \
@@ -354,8 +267,7 @@ pub fn error_hint(msg: &str, browser: &str) -> Option<String> {
              also disappear if the page unregistered it since the last list."
         ))
     } else if msg.contains("not of type 'RegisteredTool'") {
-        // Native executeTool()'s own error, reachable only through raw `eval` — `webmcp call`
-        // resolves the tool object itself and cannot produce this.
+        // Native executeTool()'s own error, reachable only through raw `eval`.
         Some(format!(
             "WebMCP's executeTool() requires the actual tool object getTools() returned, not a \
              bare name — this TypeError is what results from passing one directly. Run \
@@ -363,9 +275,8 @@ pub fn error_hint(msg: &str, browser: &str) -> Option<String> {
              name from that list; it resolves the tool object for you before calling executeTool()."
         ))
     } else if msg.contains("executeTool") && (msg.contains("is not valid JSON") || msg.contains("Failed to parse input arguments")) {
-        // Also native executeTool()'s own error, also unreachable through `webmcp call`: it
-        // always hands executeTool a validated JSON string. The two spellings are two Chromes:
-        // a polyfill's own `JSON.parse` throws the first, native WebMCP answers the second.
+        // Also unreachable through `webmcp call`, which always passes a validated JSON string.
+        // Two spellings: a polyfill's `JSON.parse` throws the first, native WebMCP the second.
         Some(format!(
             "executeTool()'s second argument must be a JSON string, not an object — this is what \
              results from passing one directly. Run `{run} webmcp call` instead and give --args \
@@ -374,9 +285,6 @@ pub fn error_hint(msg: &str, browser: &str) -> Option<String> {
     } else if msg.contains("Evaluation error") || msg.contains("TypeError") || msg.contains("ReferenceError") || msg.contains("SyntaxError") {
         Some("JS error in page context. Check expression syntax. Use --selector to scope to an element.".to_string())
     } else if msg.contains("dispatcher task exited") || msg.contains("transport closed") {
-        // Was "Browser connection lost. Try running the command again." On a click or a fill
-        // the first attempt may already have been delivered, and the page cannot tell a
-        // deliberate second one from a retry.
         Some(format!(
             "The connection to Chrome dropped, so whether this command reached the page is \
              unknown. Do not repeat it blind: a click or a fill that was already delivered \
@@ -408,19 +316,18 @@ pub fn error_hint(msg: &str, browser: &str) -> Option<String> {
 mod tests {
     use super::*;
 
-    /// The uid is in the message; the hint used to print `<uid>` beside it.
+    /// The uid is in the message, so the hint substitutes it instead of printing `<uid>`.
     #[test]
     fn the_hint_for_an_unaimable_element_names_the_element() {
         let hint = error_hint("Element uid=n47 has no visible box model.", "default")
             .expect("a hint");
         assert!(hint.contains("chrome-agent scroll n47"), "{hint}");
-        // And it states the measurement instead of hedging about it.
+        // Rule 1: state the measurement, do not hedge about it.
         assert!(!hint.contains("may be hidden"), "{hint}");
     }
 
-    /// An input event whose acknowledgement expired is the second failure of that family, and
-    /// the generic timeout advice ("use --timeout N for slow pages") is exactly the wrong one:
-    /// it reads as "be more patient and try again" about an event the page may have acted on.
+    /// The generic timeout advice would read as "try again" about an event the page may have
+    /// acted on, so this branch forbids the retry instead.
     #[test]
     fn an_unacknowledged_input_forbids_the_retry_rather_than_raising_the_budget() {
         let msg = "Input.dispatchMouseEvent was dispatched and Chrome did not acknowledge it \
@@ -432,8 +339,7 @@ mod tests {
         assert!(!hint.contains("--timeout N"), "the generic branch must not swallow this: {hint}");
     }
 
-    /// A lost transport is the one failure where the tool knows least and the reflex costs
-    /// most: the command may have landed, and repeating it is a second real action.
+    /// A lost transport may have landed the command, so repeating it is a second real action.
     #[test]
     fn a_lost_connection_forbids_the_retry_and_says_what_to_read() {
         for msg in ["dispatcher task exited", "transport closed"] {
@@ -444,8 +350,7 @@ mod tests {
         }
     }
 
-    /// The premise of the old hint was false: this tool launches its own Chrome, so asking
-    /// whether Chrome is running sent the reader off to start one by hand.
+    /// Rule 1: this tool launches its own Chrome, so it never asks whether Chrome is running.
     #[test]
     fn a_refused_connection_does_not_ask_whether_chrome_is_running() {
         let hint = error_hint("Connection refused", "default").expect("a hint");
@@ -456,8 +361,7 @@ mod tests {
 
     #[test]
     fn connect_failure_hints_at_chrome_136() {
-        // The page-attach failure and the missing-port marker both point the user
-        // at the Chrome 136+ default-profile restriction and the --connect workaround.
+        // Both spellings point at the Chrome 136+ default-profile restriction.
         for msg in [
             "Failed to connect to page after 8 attempts: Connection refused",
             "DevToolsActivePort file doesn't exist",
@@ -468,9 +372,8 @@ mod tests {
         }
     }
 
-    /// Two failures that used to share one hint: a generated accessibility node with no DOM
-    /// element behind it, and a CDP reply we could not parse. Different causes, different
-    /// recoveries, and the old text named neither.
+    /// A generated node with no DOM element and an unparseable CDP reply are different causes
+    /// with different recoveries, so they get different hints.
     #[test]
     fn an_unresolvable_node_and_an_unparseable_reply_do_not_share_a_hint() {
         let node = error_hint("Element uid=e12 has no resolvable backend node.", "default")
@@ -484,14 +387,9 @@ mod tests {
         }
     }
 
-    /// The text above had no reachable caller for its whole life: every site that builds
-    /// "no resolvable backend node" first fails on "not found", and an `e…` uid is never in
-    /// the map. It is also the only text in this repo that explains what an `e…` uid IS —
-    /// and those uids are printed to the reader, so `click e12` is an ordinary thing to try.
-    ///
-    /// The message that reaches it is the ordinary one, so the two routes have to agree; and
-    /// the generic stale-uid advice, which is what this used to answer, must not: re-inspecting
-    /// renumbers an `e{n}` rather than repairing it.
+    /// `e…` uids are printed to the reader, so `click e12` is an ordinary thing to try. Both
+    /// routes to the explanation must agree, and neither may give the stale-uid advice:
+    /// re-inspecting renumbers an `e{n}` rather than repairing it.
     #[test]
     fn an_anonymous_uid_is_explained_rather_than_sent_round_a_re_inspect() {
         let printed = "Element uid=e12 not found. Run 'chrome-agent inspect' to get fresh uids.";
@@ -518,37 +416,31 @@ mod tests {
         assert!(stale.contains("uids change when the document is replaced"), "{stale}");
     }
 
-    /// An acknowledgement this tool could not read is still an acknowledgement.
-    ///
-    /// The hint used to end "so the command never ran", which is true of a read and false of
-    /// everything that acts: the event was dispatched and Chrome answered, and only our parse
-    /// of its answer failed. Told the command never ran, an agent clicks again — the one reflex
-    /// rule 3 exists to stop, on the one page that cannot tell the second click from the first.
+    /// An acknowledgement this tool could not read is still an acknowledgement: for anything
+    /// that acts, "the command never ran" is false and invites the retry rule 3 forbids.
     #[test]
     fn an_unreadable_acknowledgement_does_not_claim_the_command_never_ran() {
         let hint = error_hint("response parse: invalid type", "default").expect("a hint");
         assert!(!hint.contains("never ran"), "the false claim survived: {hint}");
         assert!(hint.contains("Do not repeat it"), "rule 3, in words: {hint}");
         assert!(hint.contains("dispatched and answered"), "the fact it got wrong: {hint}");
-        // Rule 2 allows two routes when the criterion that chooses is stated, and the caller
-        // can evaluate this one without knowing the CDP method the message has already lost.
+        // Rule 2 allows two routes when the criterion is stated, and the caller can evaluate
+        // this one without the CDP method the message has already lost.
         assert!(hint.contains("If the command acts on the page"), "{hint}");
         assert!(hint.contains("If the command only reads"), "{hint}");
         assert!(hint.contains("chrome-agent inspect"), "{hint}");
         assert!(hint.contains("chrome-agent status"), "{hint}");
     }
 
-    /// This message's tail is serde's, and serde's quotes the CDP payload that would not parse —
-    /// so it is the one message in the chain carrying text nobody here wrote. Every branch below
-    /// matches on content, so a payload holding the right word would be claimed by the wrong
-    /// one. Matching it first is what makes that impossible, and the decoys are what pin it.
+    /// The quoted CDP payload can carry any word a later branch matches on. Matching this
+    /// branch first is what stops that; the decoys below pin it.
     #[test]
     fn a_payload_quoted_into_a_parse_failure_cannot_be_read_as_another_failure() {
         let parse = error_hint("response parse: invalid type", "default").expect("a hint");
         for payload in [
-            // Would have hit the `Timeout`/`timeout` branch: the flagged collision.
+            // Aimed at the `Timeout`/`timeout` branch.
             "response parse: invalid type: string \"timeout\", expected u64 at line 1 column 42",
-            // And the same shape aimed at three other branches below it.
+            // The same shape aimed at three other branches below it.
             "response parse: missing field `result`, payload was {\"error\":\"uid=n5 not found\"}",
             "response parse: invalid value, payload was {\"message\":\"Navigation failed\"}",
             "response parse: invalid type, payload was {\"detail\":\"Connection refused\"}",
@@ -561,9 +453,8 @@ mod tests {
         }
     }
 
-    /// The four `WebMCP` branches all name their specific cause, and none of them falls through
-    /// to the generic "JS error in page context" catch-all that would otherwise claim them —
-    /// every `WebMCP` error is also an `Evaluation error`/`TypeError`/`SyntaxError`.
+    /// Every `WebMCP` error is also an `Evaluation error`/`TypeError`/`SyntaxError`, so each
+    /// branch must name its own cause rather than fall through to the generic JS-error hint.
     #[test]
     fn webmcp_errors_do_not_fall_through_to_the_generic_js_error_hint() {
         let generic = "JS error in page context. Check expression syntax. Use --selector to scope to an element.";
@@ -601,9 +492,7 @@ mod tests {
         assert_ne!(object_args, generic);
         assert!(object_args.contains("--args"), "{object_args}");
 
-        // Native WebMCP spells the same complaint differently — `commands::webmcp` records the
-        // fragment "Failed to parse input arguments" and not Chromium's sentence around it — and
-        // that spelling had no test at all until the scan next door found it uncovered.
+        // Native WebMCP spells the same complaint differently; one cause keeps one hint.
         let native_args = error_hint(
             "Evaluation error: Failed to parse input arguments (executeTool)",
             "default",
@@ -636,7 +525,7 @@ mod tests {
         assert!(!frame.contains("--chrome-arg"), "a frame binding is not a launch-flag problem: {frame}");
     }
 
-    /// A missing snapshot has one command and now also the reason it is needed.
+    /// A missing snapshot gets one command and the reason it is needed.
     #[test]
     fn the_missing_snapshot_hint_says_why_inspect_is_needed() {
         let hint = error_hint("No snapshot stored for this page", "default").expect("a hint");
@@ -651,10 +540,8 @@ mod tests {
         assert!(error_hint("something random", "default").is_none());
     }
 
-    /// Rule 3 is the whole point of the download set: the click reached the page, so the
-    /// reflex — click again, it probably failed — is a second real click. Every hint on a
-    /// DISPATCHED click has to forbid it in words, and the one on a click that was never
-    /// dispatched must not.
+    /// Every hint on a DISPATCHED click forbids the retry in words; the one on a click that was
+    /// never dispatched must not.
     #[test]
     fn a_delivered_click_forbids_the_second_one_and_an_undelivered_one_permits_it() {
         let dispatched = [
@@ -667,8 +554,7 @@ mod tests {
                 "a delivered click must forbid the retry: {hint}"
             );
         }
-        // Nothing was dispatched here, so the page never saw an event and aiming again is safe —
-        // saying otherwise would strand the caller on a recoverable refusal.
+        // Nothing was dispatched, so aiming again is safe and the hint has to say so.
         let safe = undispatched_download_hint("default");
         assert!(safe.contains("may be repeated"), "{safe}");
         assert!(!safe.contains("Do not click again"), "{safe}");
@@ -677,8 +563,7 @@ mod tests {
         assert!(unfinished.contains("raise the wait instead of clicking again"), "{unfinished}");
     }
 
-    /// Rule 1: when the hit test already measured why nothing downloaded, the hint states it
-    /// rather than sending the caller to `inspect` for a fact this response holds.
+    /// Rule 1: with no measured receiver, the hint states the wait window and claims nothing more.
     #[test]
     fn an_intercepted_click_names_its_receiver_in_the_hint() {
         let plain = no_download_hint("default", 5, &crate::hit_test::Dispatched::js());
@@ -686,8 +571,8 @@ mod tests {
         assert!(plain.contains("5s"), "the window is the fact: {plain}");
     }
 
-    /// The refusal hint holds the same three rules as every other, on the one error whose fact
-    /// is a measurement: the receiver was named by the hit test, so the hint names it too.
+    /// The hit test named the receiver, so the hint names it too — and runs against this
+    /// invocation's browser.
     #[test]
     fn the_refusal_hint_names_the_receiver_and_this_browser() {
         let receiver = crate::hit_test::Hit {
@@ -718,8 +603,8 @@ mod tests {
         }
     }
 
-    /// A modal has one dismissal every page agrees on; a banner does not. Two wordings, and
-    /// the criterion that picks between them is the receiver's own flag, not the reader's guess.
+    /// A modal has one dismissal every page agrees on; a banner does not. The receiver's own
+    /// `modal` flag picks between the two wordings.
     #[test]
     fn a_modal_receiver_gets_the_dismissal_a_modal_actually_has() {
         let mut dialog = crate::hit_test::Hit {
@@ -739,15 +624,14 @@ mod tests {
         assert!(modal.contains("`chrome-agent press Escape`"), "{modal}");
         dialog.modal = false;
         assert_ne!(modal, intercepted_refusal_hint("default", Some(&dialog), refuse));
-        // And with nothing to name, it is still a hint rather than a silence.
+        // With nothing to name, it is still a hint rather than a silence.
         let anonymous = intercepted_refusal_hint("default", None, refuse);
         assert!(anonymous.starts_with("Another element"), "{anonymous}");
         assert!(anonymous.contains("chrome-agent inspect"), "{anonymous}");
     }
 
-    /// `guard` refused for a different, measured reason than a caller who asked for `refuse`
-    /// outright — the words say which, or an agent cannot tell "the caller chose this" from
-    /// "the tool judged the receiver a control" from the response alone.
+    /// `guard` refused for a measured reason and `refuse` because the caller asked. The words
+    /// say which, or the response alone cannot tell them apart.
     #[test]
     fn a_guard_refusal_names_its_own_reason_not_the_callers_choice() {
         let receiver = crate::hit_test::Hit {

@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>drag fixture</title>
+  <style>
+    ul { list-style: none; margin: 0; padding: 0; width: 300px; }
+    li { height: 60px; line-height: 60px; border: 1px solid #999; margin: 4px; padding-left: 8px; }
+    #html5-source, #html5-target { width: 300px; height: 60px; border: 1px dashed #999; margin: 4px; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Drag fixture</h1>
+
+  <!-- Mousedown-based reordering, the shape Sortable.js and React DnD's mouse backend use.
+       No HTML5 drag events anywhere in here. -->
+  <ul id="list">
+    <li id="alpha">Alpha</li>
+    <li id="bravo">Bravo</li>
+    <li id="charlie">Charlie</li>
+  </ul>
+  <p id="order">alpha,bravo,charlie</p>
+  <p id="moves">0</p>
+
+  <!-- An HTML5 Drag and Drop pair, kept for probing and deliberately NOT asserted on.
+       The docs say `drag` cannot drive it, and that holds: measured 2026-08-30, headless
+       Chrome on macOS, three runs from a fresh browser — the move counter above reached 5
+       each time, so the drag really ran, and #html5status stayed "no drop". CDP mouse events
+       do not synthesise dragstart/dragover/drop. Not asserted on, because the negative would
+       pin a Chrome implementation detail rather than this tool's behaviour. -->
+  <div id="html5-source" draggable="true">html5 source</div>
+  <div id="html5-target">html5 target</div>
+  <p id="html5status">no drop</p>
+</main>
+<script>
+  const list = document.getElementById('list');
+  const order = document.getElementById('order');
+  const moves = document.getElementById('moves');
+  let held = null;
+  let moved = 0;
+
+  const report = () => {
+    order.textContent = Array.from(list.children).map((li) => li.id).join(',');
+  };
+
+  list.addEventListener('mousedown', (event) => {
+    const item = event.target.closest('li');
+    if (item) { held = item; moved = 0; }
+  });
+
+  document.addEventListener('mousemove', () => {
+    if (held) { moved += 1; moves.textContent = String(moved); }
+  });
+
+  document.addEventListener('mouseup', (event) => {
+    if (!held) { return; }
+    const under = document.elementFromPoint(event.clientX, event.clientY);
+    const target = under && under.closest ? under.closest('li') : null;
+    // A press and a release with nothing between them is a click, not a drag: the reorder needs
+    // the interpolated moves, which is what `drag` sends and what `click` does not.
+    if (target && target !== held && moved > 0) {
+      const after = target.compareDocumentPosition(held) & Node.DOCUMENT_POSITION_PRECEDING;
+      target.insertAdjacentElement(after ? 'afterend' : 'beforebegin', held);
+      report();
+    }
+    held = null;
+  });
+
+  document.getElementById('html5-target').addEventListener('dragover', (e) => e.preventDefault());
+  document.getElementById('html5-target').addEventListener('drop', () => {
+    document.getElementById('html5status').textContent = 'dropped';
+  });
+</script>
+</body>
+</html>

@@ -1,20 +1,15 @@
 use crate::cdp::client::{CdpClient, FrameContext};
 
-/// Switch execution context to an iframe or back to main frame.
-///
-/// On success this binds subsequent `eval`/`inspect` on the same connection to
-/// the target frame (via [`CdpClient::set_frame_context`]). Switching to
-/// `main` clears the binding, restoring the top document.
+/// Switch execution context to an iframe, or to `main` to clear the binding. Binds subsequent
+/// `eval`/`inspect` on the same connection to the target frame.
 pub async fn run(client: &CdpClient, target: &str) -> Result<String, crate::BoxError> {
     if target == "main" {
-        // Clear any frame binding — eval/inspect fall back to the top document.
         client.set_frame_context(None);
         Ok("Switched to main frame".into())
     } else {
-        // Resolve the iframe element by CSS selector, validating it exists and
-        // is an <iframe>. Return the element itself (returnByValue:false) so we
-        // get an objectId to map to its owner frame via DOM.describeNode — this
-        // targets the *specific* iframe matched, not merely the first child frame.
+        // Returns the element itself (`returnByValue:false`) so `DOM.describeNode` can map
+        // its objectId to the owner frame — this targets the iframe MATCHED, not the first
+        // child frame.
         let js = format!(
             r"(() => {{
                 const el = document.querySelector({sel});
@@ -25,8 +20,7 @@ pub async fn run(client: &CdpClient, target: &str) -> Result<String, crate::BoxE
             sel = serde_json::to_string(target).unwrap_or_default()
         );
         let mut params = serde_json::json!({"expression": js});
-        // Resolve a nested iframe selector inside the currently bound frame,
-        // rather than always querying the top document.
+        // Resolve inside the currently bound frame, so nested iframes can be descended into.
         if let Some(ctx) = client.frame_context() {
             params["contextId"] = serde_json::json!(ctx.context_id);
         }
@@ -56,8 +50,6 @@ pub async fn run(client: &CdpClient, target: &str) -> Result<String, crate::BoxE
             .ok_or("Could not determine the iframe's frameId")?
             .to_string();
 
-        // Create an isolated world in the target frame and bind subsequent
-        // eval/inspect on this connection to it.
         let world: serde_json::Value = client
             .call("Page.createIsolatedWorld", serde_json::json!({
                 "frameId": frame_id,

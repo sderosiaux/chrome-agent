@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>upload fixture</title></head>
+<body>
+<main>
+  <h1>Upload fixture</h1>
+  <label for="picker">Attachment</label>
+  <input type="file" id="picker" multiple>
+  <p id="picked">no file</p>
+  <p id="events">0</p>
+</main>
+<script>
+  // The page's own reading of what it received: the test asserts on this, not on the command's
+  // own message, so "uploaded" means the input really holds the file.
+  let changes = 0;
+  document.getElementById('picker').addEventListener('change', (event) => {
+    changes += 1;
+    document.getElementById('events').textContent = String(changes);
+    const files = Array.from(event.target.files).map((f) => f.name + ':' + f.size);
+    document.getElementById('picked').textContent = files.length ? files.join(',') : 'no file';
+  });
+</script>
+</body>
+</html>

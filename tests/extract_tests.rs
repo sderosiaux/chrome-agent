@@ -3,20 +3,8 @@ use std::process::Command;
 mod common;
 use common::TestBrowser;
 
-fn binary() -> String {
-    let mut path = std::env::current_exe()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .to_path_buf();
-    path.push("chrome-agent");
-    path.to_string_lossy().into_owned()
-}
-
 fn run_cli(args: &[&str]) -> (String, String, i32) {
-    let output = Command::new(binary())
+    let output = Command::new(common::binary())
         .args(args)
         .output()
         .expect("Failed to run chrome-agent");
@@ -67,9 +55,6 @@ fn extract_json_with_args(browser: &str, args: &[&str]) -> Option<serde_json::Va
     None
 }
 
-
-// ─── Product table: should extract TR rows with links and prices ───
-
 #[test]
 fn extract_table_finds_product_rows() {
     if !common::browser_ready() {
@@ -94,8 +79,6 @@ fn extract_table_finds_product_rows() {
     let pattern = json["pattern"].as_str().unwrap_or("");
     assert!(pattern.contains("TR") || pattern.contains("tr"), "Pattern should be TR-based, got: {pattern}");
 }
-
-// ─── Blog cards: should extract article elements ───
 
 #[test]
 fn extract_cards_finds_articles() {
@@ -127,8 +110,6 @@ fn extract_cards_finds_articles() {
     assert!(items.iter().any(|item| item.get("image").is_some()), "Should have image fields");
 }
 
-// ─── HN-like: should pick item-rows, not vote links or spacers ───
-
 #[test]
 fn extract_hn_like_finds_stories_not_vote_links() {
     if !common::browser_ready() {
@@ -155,8 +136,6 @@ fn extract_hn_like_finds_stories_not_vote_links() {
         assert!(!url.contains("/vote/"), "URL should be article URL, not vote: {url}");
     }
 }
-
-// ─── E-commerce: should prefer product cards over nav/footer links ───
 
 #[test]
 fn extract_ecommerce_finds_products_not_nav() {
@@ -185,8 +164,6 @@ fn extract_ecommerce_finds_products_not_nav() {
     assert!(items.iter().any(|item| item.get("image").is_some()), "Should have image fields");
 }
 
-// ─── Search results list ───
-
 #[test]
 fn extract_list_finds_search_results() {
     if !common::browser_ready() {
@@ -214,8 +191,6 @@ fn extract_list_finds_search_results() {
     }
 }
 
-// ─── Nav-heavy page: should extract feature cards, not nav links ───
-
 #[test]
 fn extract_nested_nav_prefers_content_over_navigation() {
     if !common::browser_ready() {
@@ -239,8 +214,6 @@ fn extract_nested_nav_prefers_content_over_navigation() {
     }
 }
 
-// ─── No pattern page: should return error ───
-
 #[test]
 fn extract_no_pattern_returns_error() {
     if !common::browser_ready() {
@@ -263,8 +236,6 @@ fn extract_no_pattern_returns_error() {
     }
 }
 
-// ─── Mixed page (dashboard): should extract activity feed ───
-
 #[test]
 fn extract_mixed_finds_activity_feed() {
     if !common::browser_ready() {
@@ -284,8 +255,6 @@ fn extract_mixed_finds_activity_feed() {
     assert!(items.iter().any(|item| item.get("image").is_some()), "Should have images");
 }
 
-// ─── Extract with --selector scoping ───
-
 #[test]
 fn extract_with_selector_scopes_correctly() {
     if !common::browser_ready() {
@@ -301,8 +270,6 @@ fn extract_with_selector_scopes_correctly() {
         assert!(count >= 4, "Scoped extract should find 4 products, got {count}");
     }
 }
-
-// ─── Extract with --limit ───
 
 #[test]
 fn extract_limit_caps_results() {
@@ -322,7 +289,6 @@ fn extract_limit_caps_results() {
     }
 }
 
-// ─── Link-heavy nav: should prefer job listings over nav links ───
 // MDR heuristic: text-to-link ratio filters navigation regions
 
 #[test]
@@ -349,8 +315,6 @@ fn extract_link_heavy_nav_prefers_content() {
     assert!(items.iter().any(|item| item.get("date").is_some()), "Job listings should have dates");
 }
 
-// ─── FAQ definition list ───
-
 #[test]
 fn extract_faq_items() {
     if !common::browser_ready() {
@@ -372,8 +336,6 @@ fn extract_faq_items() {
         assert!(title.len() > 5, "FAQ item {i} should have question, got: '{title}'");
     }
 }
-
-// ─── Semantic classes: classes matching /card|item|repo/ boost detection ───
 
 #[test]
 fn extract_semantic_classes_boost() {
@@ -399,8 +361,6 @@ fn extract_semantic_classes_boost() {
 
     assert!(items.iter().any(|item| item.get("date").is_some()), "Should have dates");
 }
-
-// ─── Ads interleaved: should extract articles, not ads ───
 
 #[test]
 fn extract_ads_interleaved_finds_articles() {
@@ -431,8 +391,6 @@ fn extract_ads_interleaved_finds_articles() {
 
     assert!(items.iter().any(|item| item.get("date").is_some()), "Should have dates");
 }
-
-// ─── Flat table (leaderboard) ───
 
 #[test]
 fn extract_flat_table_rows() {

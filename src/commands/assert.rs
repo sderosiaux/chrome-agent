@@ -1,29 +1,12 @@
 //! `assert` — check a claim about the page and answer with an exit code.
 //!
-//! The exit code is the whole point. A caller (a CI job, a recipe runner) needs to tell
-//! three answers apart, and the binary could previously only say two: `0` and `1`.
+//! `0` the claim held, `2` it did not (a fact about the page), `1` it could not be answered.
+//! `2` is carried by [`NotHeld`], which `main` recognises before its generic handler. A
+//! selector matching nothing is `1`, not `2`; only under `assert exists` is a count of zero
+//! a `2`.
 //!
-//! | code | meaning | who is at fault |
-//! |------|---------|-----------------|
-//! | 0 | the claim held when we looked | nobody |
-//! | 2 | the claim did not hold | the page |
-//! | 1 | the claim could not be answered | the tool, the browser, or the caller's arguments |
-//!
-//! Collapsing 2 into 1 makes "the form kept a different value" look like "Chrome never
-//! started", and the recovery for those is not the same: the first is a fact about the page
-//! to report or repair, the second is a retry. `2` is carried by [`NotHeld`], an error type
-//! `main` recognises before its generic handler runs.
-//!
-//! A selector that matches nothing is a `1`, not a `2`: "the field holds X" is unanswerable
-//! when there is no field, and answering `false` would let a typo in a selector read as a
-//! statement about the page. `assert exists` is the command that turns presence itself into
-//! a claim, and there a count of zero is a `2`.
-//!
-//! The state readers are deliberately not this module's own: `--checked` reads through
-//! `element_controls::CHECKABLE_PROBE`, the same classification `check`/`uncheck` apply
-//! before clicking, and `--selected` through `element_controls::SELECT_READ`, the same
-//! reading `select` uses for its read-back. An assertion that disagreed with the action
-//! about what "checked" means would be worse than no assertion at all.
+//! State readers are the actions' own — `element_controls::CHECKABLE_PROBE` and
+//! `SELECT_READ` — so an assertion cannot disagree with the action about "checked".
 
 use std::collections::HashMap;
 
@@ -32,29 +15,23 @@ use serde_json::{json, Value};
 use crate::cdp::client::CdpClient;
 use crate::element_ref::ElementRef;
 
-// Split out for the 1000-line file cap; callers keep using `commands::assert::*`.
 pub use super::assert_args::{from_cli, from_json};
 
 /// Exit code for an assertion that ran and did not hold.
 pub const EXIT_NOT_HELD: i32 = 2;
 
-/// How much of a text read travels in the report. A whole-page `innerText` is thousands of
-/// characters and the agent has `text` for reading it; what the report owes the caller is
-/// enough of the page to recognise which page it was looking at.
+/// How much of a text read travels in the report — enough to recognise the page, not to
+/// replace `text`.
 const ACTUAL_TEXT_BUDGET: usize = 400;
 
-// ---------------------------------------------------------------------------
 // Comparators — pure, no Chrome
-// ---------------------------------------------------------------------------
 
 /// How an observed string is compared with the expected one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Comparator {
     Equals(String),
     Contains(String),
-    /// A Rust regex (the `regex-lite` engine): `\d`, `\w` and `\s` are ASCII-only and
-    /// there is no `\p{…}`. Documented in `llm-guide.txt` because the difference from a
-    /// JS `RegExp` is invisible until an accented character fails to match `\w`.
+    /// A Rust regex (`regex-lite`): `\d`, `\w`, `\s` are ASCII-only and there is no `\p{…}`.
     Matches(String),
 }
 
@@ -73,10 +50,8 @@ impl Comparator {
         }
     }
 
-    /// Whether `actual` satisfies this comparator.
-    ///
-    /// A malformed pattern is an operational error, not a failed assertion: nothing was
-    /// compared, so there is nothing to report about the page.
+    /// Whether `actual` satisfies this comparator. A malformed pattern is an operational
+    /// error, not a failed assertion — nothing was compared.
     pub fn holds(&self, actual: &str) -> Result<bool, crate::BoxError> {
         match self {
             Self::Equals(expected) => Ok(actual == expected),
@@ -91,10 +66,8 @@ impl Comparator {
     }
 }
 
-/// Whether a found count satisfies the requested cardinality.
-///
-/// No `--count` and no `--min` means "at least one": `assert exists --selector x` reads as
-/// a presence check, and the count is there for the callers who care how many.
+/// Whether a found count satisfies the requested cardinality. Neither `--count` nor `--min`
+/// means "at least one".
 #[must_use]
 pub const fn count_holds(found: usize, count: Option<usize>, min: Option<usize>) -> bool {
     match (count, min) {
@@ -109,8 +82,8 @@ pub const fn count_holds(found: usize, count: Option<usize>, min: Option<usize>)
 pub enum Want {
     Checked,
     Unchecked,
-    /// The `<select>`'s current option, matched by `option.value` or by its trimmed text —
-    /// the same two spellings `select` accepts when picking one.
+    /// The `<select>`'s current option, matched by `option.value` or trimmed text — the two
+    /// spellings `select` accepts.
     Selected(String),
     Enabled,
     Disabled,
@@ -137,12 +110,8 @@ impl Want {
     }
 }
 
-/// Whether a checkable's read state (`true` / `false` / `mixed`, straight out of the
-/// shared probe) satisfies the wanted state.
-///
-/// `mixed` (an `indeterminate` checkbox, or `aria-checked="mixed"`) satisfies neither: it is
-/// a third state, and calling it unchecked is how a form gets submitted with a box the user
-/// never resolved.
+/// Whether a checkable's read state (`true`/`false`/`mixed` from the shared probe) satisfies
+/// the wanted state. `mixed` (`indeterminate`, or `aria-checked="mixed"`) satisfies neither.
 #[must_use]
 pub fn checked_holds(state: &str, want: &Want) -> bool {
     match want {
@@ -152,18 +121,14 @@ pub fn checked_holds(state: &str, want: &Want) -> bool {
     }
 }
 
-/// Whether the option the page currently holds is the one asserted.
-///
-/// Value first, then trimmed text — `select`'s own precedence. For a single option the two
-/// orderings cannot disagree, which is why this reads as one predicate rather than two.
+/// Whether the option the page currently holds is the one asserted. Value first, then trimmed
+/// text — `select`'s own precedence.
 #[must_use]
 pub fn selected_holds(value: Option<&str>, text: Option<&str>, expected: &str) -> bool {
     value == Some(expected) || text.map(str::trim) == Some(expected)
 }
 
-// ---------------------------------------------------------------------------
 // The assertion
-// ---------------------------------------------------------------------------
 
 /// What is being claimed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -212,9 +177,7 @@ impl Assertion {
     }
 }
 
-// ---------------------------------------------------------------------------
 // The outcome
-// ---------------------------------------------------------------------------
 
 /// What the page answered, and whether that satisfies the claim.
 #[derive(Debug, Clone)]
@@ -224,11 +187,10 @@ pub struct Outcome {
     pub expected: Value,
     pub actual: Value,
     pub held: bool,
-    /// The element the read was taken from, named the way every action names its target:
-    /// `uid` whenever it could be resolved, plus the selector the caller typed.
+    /// The element the read was taken from: `uid` when it resolved, plus the typed selector.
     pub target: Option<Value>,
-    /// Extra fields the specific check owes the caller (a truncation flag, which flavour of
-    /// hidden, how the value was redacted).
+    /// Extra fields the specific check owes the caller (truncation flag, flavour of hidden,
+    /// redaction).
     pub details: Option<Value>,
 }
 
@@ -247,7 +209,7 @@ impl Outcome {
         self
     }
 
-    /// The `assertion` object every mode returns, in all three modes and both outcomes.
+    /// The `assertion` object, identical in all three modes and both outcomes.
     #[must_use]
     pub fn assertion_json(&self) -> Value {
         let mut obj = json!({
@@ -267,8 +229,8 @@ impl Outcome {
         obj
     }
 
-    /// The full response: `ok` mirrors `held`, so a batch's `all_ok` and `stop_on_error`
-    /// treat a failed assertion as the failure it is without a second convention.
+    /// The full response. `ok` mirrors `held`, so batch `all_ok`/`stop_on_error` need no
+    /// second convention.
     #[must_use]
     pub fn to_json(&self) -> Value {
         let mut obj = json!({"ok": self.held, "assertion": self.assertion_json()});
@@ -301,8 +263,7 @@ impl Outcome {
         )
     }
 
-    /// What to do next when the claim did not hold. Every error in this tool carries one;
-    /// a failed assertion is the answer an agent is most likely to act on.
+    /// What to do next when the claim did not hold.
     fn hint(&self) -> &'static str {
         match self.kind {
             "value" => "The page holds something else. Re-read it (`eval --selector \"…\" \"el.value\"`), or `wait` and assert again — a controlled component can rewrite a value after the write returns.",
@@ -316,9 +277,9 @@ impl Outcome {
 
 /// An assertion that ran and did not hold — the carrier for exit code 2.
 ///
-/// It travels the error channel so no caller has to thread a second return type through
-/// `run`, but it is not an error: nothing failed, the page is simply not in the asserted
-/// state. `main` recognises it before its generic handler and exits [`EXIT_NOT_HELD`].
+/// It travels the error channel so no caller threads a second return type through `run`, but
+/// it is not an error. `main` recognises it before its generic handler and exits
+/// [`EXIT_NOT_HELD`].
 #[derive(Debug)]
 pub struct NotHeld {
     outcome: Outcome,
@@ -326,11 +287,8 @@ pub struct NotHeld {
 }
 
 impl NotHeld {
-    /// Print the outcome on the stream the caller reads, and answer with the exit code.
-    ///
-    /// `--json` puts it on stdout, where the agent parses errors already; text mode puts it
-    /// on stderr like every other refusal this binary prints, so a shell pipeline reading
-    /// stdout sees nothing and the exit code is the whole answer.
+    /// Print the outcome and answer with the exit code. `--json` writes stdout; text mode
+    /// writes stderr, leaving stdout empty so a shell pipeline can use the exit code alone.
     pub fn report(&self) -> i32 {
         if self.json_mode {
             crate::run_helpers::json_output(&self.outcome.to_json());
@@ -350,30 +308,19 @@ impl std::fmt::Display for NotHeld {
 
 impl std::error::Error for NotHeld {}
 
-/// Render a JSON scalar for a human-readable line.
-///
-/// Capped well below the JSON's own budget: a whole-page text read is 400 characters in the
-/// response, and 400 characters of page text on one terminal line is not a line anybody
-/// reads. The full excerpt is still in `--json`. Shared with `render`, which generalises this
-/// command's output shape to every action — two budgets would make the same value print two
-/// lengths depending on which command reported it.
+/// Render a JSON scalar for a human-readable line. Capped below the JSON budget; shared with
+/// `render` so one value does not print at two lengths depending on the command.
 use crate::render::compact;
 
-// ---------------------------------------------------------------------------
 // Reading the page
-// ---------------------------------------------------------------------------
 
-/// Read a form control's value, and whether it is a secret.
-///
-/// The sensitivity test is the one `fill` applies (`element.rs`) — an assertion that printed
-/// a password an action refuses to print would be a way around the redaction, and this
-/// response reaches stdout, the agent transcript and any `--record` file just the same.
+/// Read a form control's value, and whether it is a secret. The sensitivity test is `fill`'s
+/// own (`element::SECRET_FIELD`): this response reaches stdout, the transcript and `--record`.
 fn value_probe() -> String {
     VALUE_PROBE_TEMPLATE.replace("SECRET_EXPR", crate::element::SECRET_FIELD)
 }
 
-/// Template for `value_probe`: the shared secret predicate is substituted in, so the
-/// assertion and the fill that made the value cannot disagree about what must stay hidden.
+/// Template for `value_probe`; `SECRET_EXPR` is substituted with the shared predicate.
 const VALUE_PROBE_TEMPLATE: &str = r"function (el) {
   const holder = ['INPUT', 'TEXTAREA', 'SELECT', 'PROGRESS', 'METER', 'OUTPUT'].indexOf(el.tagName) >= 0;
   if (!holder) {
@@ -388,15 +335,11 @@ const VALUE_PROBE_TEMPLATE: &str = r"function (el) {
 
 /// Read whether an element is disabled, and whether it is rendered.
 ///
-/// `:disabled` rather than `el.disabled`: it is what `fill` refuses on, and it catches an
-/// ancestor `<fieldset disabled>` that the property misses. `aria-disabled` is read too and
-/// reported separately — a `<div role="button" aria-disabled="true">` is disabled to
-/// everything that reads the page, and answering "enabled" there is the same class of lie
-/// as reading `.checked` off a div.
+/// `:disabled` rather than `el.disabled`, so an ancestor `<fieldset disabled>` counts;
+/// `aria-disabled` is read and reported separately.
 ///
-/// `visible` means "rendered, not transparent, not `visibility:hidden`". It does NOT mean in
-/// the viewport, and it does NOT mean nothing is stacked on top — that question needs a hit
-/// test, which this command does not do.
+/// `visible` means rendered, opaque and not `visibility:hidden`. NOT "in the viewport" and
+/// NOT "nothing stacked on top" — that needs a hit test this command does not do.
 const RENDER_PROBE: &str = r"function (el) {
   const cs = getComputedStyle(el);
   let visibility = 'visible';
@@ -409,10 +352,8 @@ const RENDER_PROBE: &str = r"function (el) {
   return { enabled: enabled, visibility: visibility };
 }";
 
-/// Call a probe on the asserted element, whichever way it was named.
-///
-/// The selector path resolves in the page and throws when nothing matches — that is an
-/// operational failure (exit 1), not a claim about the page.
+/// Call a probe on the asserted element, whichever way it was named. A selector matching
+/// nothing throws: an operational failure (exit 1), not a claim about the page.
 async fn probe(
     client: &CdpClient,
     uid_map: &HashMap<String, ElementRef>,
@@ -456,8 +397,7 @@ async fn evaluate(client: &CdpClient, expression: &str) -> Result<Value, crate::
     Ok(result.get("result").and_then(|r| r.get("value")).cloned().unwrap_or_default())
 }
 
-/// Run the assertion: read the page, compare, and report — without deciding anything about
-/// exit codes. Both front ends call this, so both get the same answer for the same claim.
+/// Read the page, compare, report. Decides nothing about exit codes; both front ends call it.
 pub async fn run(
     client: &CdpClient,
     uid_map: &HashMap<String, ElementRef>,
@@ -517,9 +457,8 @@ async fn assert_value(
     let actual = read.get("value").and_then(Value::as_str);
     let held = cmp.holds(actual.unwrap_or_default())?;
 
-    // A secret is compared but never echoed. Both lengths still travel: they are what
-    // distinguishes "the mask reformatted it" from "the field is empty", which is the whole
-    // reason the value report exists.
+    // A secret is compared but never echoed. Both lengths travel, since they separate "the
+    // mask reformatted it" from "the field is empty".
     if read.get("sensitive").and_then(Value::as_bool).unwrap_or(false) {
         return Ok(Outcome::new("value", cmp.name(), json!("redacted"), json!("redacted"), held)
             .with_target(target)
@@ -592,8 +531,7 @@ async fn assert_state(
         Want::Enabled | Want::Disabled => {
             let read = probe(client, uid_map, assertion, RENDER_PROBE).await?;
             let state = read.get("enabled").and_then(Value::as_str).unwrap_or("enabled");
-            // `aria-disabled` counts as disabled and never as enabled: the page is telling
-            // every reader the control is inert, and only the CSS pseudo-class disagrees.
+            // `aria-disabled` counts as disabled and never as enabled.
             let held = match want {
                 Want::Enabled => state == "enabled",
                 _ => state != "enabled",
@@ -613,10 +551,7 @@ async fn assert_state(
 }
 
 /// Name the node the read came from: the uid whenever it resolves, plus the selector typed.
-///
-/// Same reason an action names its target — without it a report about `.total` and a delta
-/// about `n42` cannot be tied together, and a selector matching several nodes gives no clue
-/// which one answered.
+/// Without the uid, a selector matching several nodes gives no clue which one answered.
 async fn target_fields(client: &CdpClient, assertion: &Assertion) -> Option<Value> {
     let mut fields = crate::run_helpers::target_details(
         client,
@@ -632,15 +567,10 @@ async fn target_fields(client: &CdpClient, assertion: &Assertion) -> Option<Valu
     if empty { None } else { Some(fields) }
 }
 
-// ---------------------------------------------------------------------------
 // CLI entry point
-// ---------------------------------------------------------------------------
 
-/// Run the assertion for the CLI, print it, and hand `main` the exit code to use.
-///
-/// A held assertion prints on stdout and returns `Ok`. One that did not hold returns
-/// [`NotHeld`], which `main` turns into exit 2 — deliberately not an `Err` string, because
-/// the generic error path would print it as a tool failure and exit 1.
+/// Run the assertion for the CLI and print it. A claim that did not hold returns [`NotHeld`]
+/// (exit 2), never an `Err` string — the generic error path would print it as exit 1.
 pub async fn run_cli(
     client: &CdpClient,
     uid_map: &HashMap<String, ElementRef>,
@@ -660,9 +590,7 @@ pub async fn run_cli(
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
 // Tests — the comparators are pure, so none of this needs Chrome
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -674,7 +602,7 @@ mod tests {
         assert!(cmp.holds("hello@example.com").unwrap());
         assert!(!cmp.holds("hello@example.com ").unwrap());
         assert!(!cmp.holds("Hello@example.com").unwrap());
-        // The failing case the E2E test pins: the page kept nothing.
+        // The page kept nothing.
         assert!(!cmp.holds("").unwrap());
     }
 
@@ -691,27 +619,25 @@ mod tests {
         let cmp = Comparator::Matches(r"^\d{3}-\d{4}$".into());
         assert!(cmp.holds("555-1234").unwrap());
         assert!(!cmp.holds("x555-1234").unwrap());
-        // Unanchored by default, like every regex engine.
+        // Unanchored by default.
         assert!(Comparator::Matches("total".into()).holds("Subtotal: 12").unwrap());
-        // Case-insensitive flag is supported inline.
+        // `(?i)` works.
         assert!(Comparator::Matches("(?i)total".into()).holds("TOTAL").unwrap());
     }
 
     #[test]
     fn a_malformed_pattern_is_an_error_not_a_failed_assertion() {
-        // Nothing was compared, so there is nothing to say about the page: this must reach
-        // the caller as exit 1, not as held:false.
+        // Nothing was compared, so this must reach the caller as exit 1, not held:false.
         let err = Comparator::Matches("(unclosed".into()).holds("anything").unwrap_err().to_string();
         assert!(err.contains("invalid regular expression"), "{err}");
     }
 
     #[test]
     fn regex_lite_classes_are_ascii_only() {
-        // Pinning the documented limitation rather than discovering it in a user's page:
         // `\w` does not cover accented letters in this engine.
         assert!(Comparator::Matches(r"^\w+$".into()).holds("Jean").unwrap());
         assert!(!Comparator::Matches(r"^\w+$".into()).holds("Jean-Sébastien").unwrap());
-        // A literal accented character matches fine, which is the common case.
+        // A literal accented character still matches.
         assert!(Comparator::Matches("Sébastien".into()).holds("Jean-Sébastien").unwrap());
     }
 
@@ -725,7 +651,7 @@ mod tests {
         assert!(count_holds(3, Some(3), None));
         assert!(!count_holds(4, Some(3), None));
         assert!(!count_holds(2, Some(3), None));
-        // `--count 0` is a legitimate absence claim, and must not be read as "unset".
+        // `--count 0` is an absence claim, not "unset".
         assert!(count_holds(0, Some(0), None));
         assert!(!count_holds(1, Some(0), None));
         // Minimum.
@@ -742,16 +668,14 @@ mod tests {
         assert!(!checked_holds("false", &Want::Checked));
         assert!(checked_holds("false", &Want::Unchecked));
         assert!(!checked_holds("true", &Want::Unchecked));
-        // An indeterminate checkbox is a third state. Calling it unchecked is how a form is
-        // submitted with a box nobody resolved.
+        // An indeterminate checkbox is a third state, satisfying neither.
         assert!(!checked_holds("mixed", &Want::Checked));
         assert!(!checked_holds("mixed", &Want::Unchecked));
     }
 
     #[test]
     fn selected_matches_value_or_visible_text() {
-        // select picks by value first, then by trimmed text; for the one option a page
-        // holds, the two orderings cannot disagree.
+        // Value first, then trimmed text.
         assert!(selected_holds(Some("CA"), Some("California"), "CA"));
         assert!(selected_holds(Some("CA"), Some("California"), "California"));
         assert!(selected_holds(Some("CA"), Some("  California  "), "California"), "text is trimmed");

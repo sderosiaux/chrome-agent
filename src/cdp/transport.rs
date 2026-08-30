@@ -18,10 +18,7 @@ pub struct CdpReceiver {
     _shutdown: ShutdownHandle,
 }
 
-/// Holds the sender half of the outbound channel plus the join handle.
-/// When this struct is dropped the outbound channel closes, which signals
-/// the background writer loop to terminate. The reader loop terminates
-/// when the WebSocket itself closes or errors.
+/// Aborts the background I/O task on drop.
 #[derive(Debug)]
 struct ShutdownHandle {
     task: tokio::task::JoinHandle<()>,
@@ -35,12 +32,8 @@ impl Drop for ShutdownHandle {
 
 /// Connect to a Chrome `DevTools` Protocol WebSocket endpoint.
 ///
-/// Returns a split `(CdpSender, CdpReceiver)` pair. The sender is clone-safe
-/// and can be shared across tasks. The receiver is owned by a single consumer
-/// (typically the dispatcher loop in `CdpClient`).
-///
-/// Spawns a background tokio task that bridges the WebSocket to mpsc channels.
-/// The task exits when either side is dropped or the WebSocket closes.
+/// Spawns a background task bridging the WebSocket to mpsc channels; it exits when either
+/// side is dropped or the WebSocket closes.
 pub async fn connect(url: &str) -> Result<(CdpSender, CdpReceiver), CdpTransportError> {
     let (ws_stream, _response) = tokio_tungstenite::connect_async(url)
         .await
@@ -73,25 +66,16 @@ impl CdpSender {
 }
 
 impl CdpReceiver {
-    /// Receive the next JSON text message from Chrome.
-    ///
-    /// Returns `Ok(None)` when the WebSocket has closed cleanly.
+    /// Receive the next JSON text message from Chrome. `Ok(None)` once the WebSocket closed.
     pub async fn recv(&mut self) -> Result<Option<String>, CdpTransportError> {
         Ok(self.inbound_rx.recv().await)
     }
 }
 
-/// Background I/O loop that bridges the WebSocket to mpsc channels.
+/// Background I/O loop bridging the WebSocket to mpsc channels: writer pulls from
+/// `outbound_rx`, reader pushes WS text frames into `inbound_tx`.
 ///
-/// Runs two concurrent paths via `tokio::select!`:
-/// - **Writer**: pulls from `outbound_rx`, serialises to WS text frames.
-/// - **Reader**: pulls from the WS stream, deserialises text frames into
-///   `inbound_tx`.
-///
-/// Terminates when:
-/// - The outbound channel is closed (caller dropped or called `close`).
-/// - The WebSocket stream ends or errors.
-/// - The inbound channel is closed (caller dropped `inbound_rx`).
+/// Terminates when either channel closes or the WebSocket ends or errors.
 async fn io_loop<S, R>(
     mut ws_write: S,
     mut ws_read: R,
@@ -103,36 +87,33 @@ async fn io_loop<S, R>(
 {
     loop {
         tokio::select! {
-            // --- Writer path: caller → WebSocket ---
+            // Writer: caller → WebSocket.
             msg = outbound_rx.recv() => {
                 if let Some(text) = msg {
                     if ws_write.send(Message::Text(text.into())).await.is_err() {
-                        // WebSocket write failed — connection dead.
                         break;
                     }
                 } else {
-                    // Outbound channel closed — caller is done sending.
-                    // Send a clean WebSocket close frame.
+                    // Caller is done sending: close cleanly.
                     let _ = ws_write.send(Message::Close(None)).await;
                     break;
                 }
             }
 
-            // --- Reader path: WebSocket → caller ---
+            // Reader: WebSocket → caller.
             frame = ws_read.next() => {
                 match frame {
                     Some(Ok(Message::Text(text))) => {
                         if inbound_tx.send(text.to_string()).await.is_err() {
-                            // Receiver dropped — nobody is reading.
                             break;
                         }
                     }
-                    Some(Ok(Message::Close(_))) | None => {
-                        // WebSocket closed by remote or stream exhausted.
+                    // Clean close, stream end and transport error all end the loop.
+                    Some(Ok(Message::Close(_)) | Err(_)) | None => {
                         break;
                     }
                     Some(Ok(Message::Ping(data))) => {
-                        // Respond to pings to keep the connection alive.
+                        // Pong back to keep the connection alive.
                         if ws_write.send(Message::Pong(data)).await.is_err() {
                             break;
                         }
@@ -140,16 +121,12 @@ async fn io_loop<S, R>(
                     Some(Ok(_)) => {
                         // Binary, Pong, Frame — ignore.
                     }
-                    Some(Err(_)) => {
-                        // WebSocket read error — connection dead.
-                        break;
-                    }
                 }
             }
         }
     }
 
-    // Best-effort close — ignore errors since we're shutting down anyway.
+    // Best effort: we are shutting down either way.
     let _ = ws_write.close().await;
 }
 

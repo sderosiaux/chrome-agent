@@ -1,19 +1,11 @@
-//! Validation for `--chrome-arg`, the escape hatch that passes extra flags straight to the
-//! Chrome chrome-agent launches (e.g. `--enable-features=WebMCP,WebMCPTesting` — the flag
-//! this exists for, since there was previously no way to reach an experimental CDP/feature
-//! flag without giving up session, profile and lifecycle management via `--connect`).
-//!
-//! Split out of `browser.rs` for the repo's 1000-line file cap and re-exported from it, so
-//! `run.rs`/`pipe.rs` keep calling `browser::normalized_chrome_args_option`.
+//! Validation for `--chrome-arg`, which passes extra flags to the Chrome chrome-agent launches
+//! (e.g. `--enable-features=WebMCP,WebMCPTesting`). Re-exported from `browser.rs`.
 
 use crate::browser::BrowserError;
 use crate::session::{BrowserSession, SessionError, SessionStore};
 
-/// Chrome flags this tool refuses to accept via `--chrome-arg`, and why each one is refused
-/// rather than merely warned about — the project's stated preference for an explicit failure
-/// over a surprising one. Each reason names the fact chrome-agent depends on, in the words a
-/// caller can act on; there is no safe rewrite to suggest, only "drop it", so unlike an
-/// action-recovery hint there is no invocation to hand back.
+/// Chrome flags refused via `--chrome-arg`, each paired with the chrome-agent assumption it
+/// would break. There is no safe rewrite to suggest, so the reason is the whole message.
 pub const FORBIDDEN_CHROME_ARGS: &[(&str, &str)] = &[
     (
         "user-data-dir",
@@ -53,16 +45,14 @@ pub const FORBIDDEN_CHROME_ARGS: &[(&str, &str)] = &[
 ];
 
 /// The flag name a `--chrome-arg` value sets, e.g. `--user-data-dir=/tmp/x` → `user-data-dir`.
-/// `None` for a value with no `--` prefix — not a switch this tool recognises the shape of,
-/// so it is left to Chrome to accept or reject.
+/// `None` without a `--` prefix: not a switch shape this tool judges, so Chrome decides.
 fn chrome_arg_flag_name(arg: &str) -> Option<&str> {
     let stripped = arg.strip_prefix("--")?;
     Some(stripped.split('=').next().unwrap_or(stripped))
 }
 
-/// Refuse a `--chrome-arg` that would override a flag chrome-agent depends on for launch or
-/// reconnection. Named and explained per flag rather than as one generic refusal — "invalid
-/// chrome-arg" leaves the reader to guess which of the tool's own assumptions they broke.
+/// Refuse a `--chrome-arg` overriding a flag chrome-agent depends on for launch or
+/// reconnection. Explained per flag, not as one generic refusal.
 fn validate_chrome_args(args: &[String]) -> Result<(), BrowserError> {
     for arg in args {
         let Some(name) = chrome_arg_flag_name(arg) else {
@@ -77,12 +67,8 @@ fn validate_chrome_args(args: &[String]) -> Result<(), BrowserError> {
     Ok(())
 }
 
-/// Resolve the launch-only `--chrome-arg` contract shared by CLI, pipe, and replay modes.
-///
-/// Mirrors `normalized_proxy_option`: a launch-only setting has no effect on an attached
-/// browser, and saying so once here — rather than leaving `--connect --chrome-arg …` to be
-/// silently ignored — is what "the project prefers explicit failure to surprising behaviour"
-/// means for this flag.
+/// Resolve the launch-only `--chrome-arg` contract shared by CLI, pipe and replay. Mirrors
+/// `normalized_proxy_option`: with `--connect` it is refused, not silently ignored.
 pub fn normalized_chrome_args_option(
     connect: Option<&str>,
     chrome_args: &[String],
@@ -100,10 +86,8 @@ pub fn normalized_chrome_args_option(
     Ok(chrome_args.to_vec())
 }
 
-/// Merge a requested `--chrome-arg` list with the named browser's stored one — the same
-/// inherit-when-omitted rule `run.rs`/`pipe.rs` apply to `proxy_server` via `Option::or`,
-/// spelled out here because `Vec` has no `Option::or` to reach for. Shared by CLI, pipe and
-/// replay so the three do not each re-derive it slightly differently.
+/// Merge a requested `--chrome-arg` list with the named browser's stored one: an omitted list
+/// inherits, the same rule `proxy_server` gets from `Option::or`.
 pub fn effective_chrome_args(store: &SessionStore, name: &str, requested: &[String]) -> Vec<String> {
     if !requested.is_empty() {
         return requested.to_vec();
@@ -111,14 +95,10 @@ pub fn effective_chrome_args(store: &SessionStore, name: &str, requested: &[Stri
     store.browsers.get(name).map(|b| b.chrome_args.clone()).unwrap_or_default()
 }
 
-/// Guard `--chrome-arg` compatibility when reconnecting to a live named browser.
-///
-/// Chrome flags are read once at process start, so a running browser cannot pick up a
-/// new one — the same fixed-at-launch constraint `proxy_server` has (`session::
-/// ensure_proxy_compatible`), and the same rule applies: an omitted `--chrome-arg` inherits
-/// whatever the browser is already running with (the common case for a follow-up command),
-/// and only an explicit, *different* request is refused, because applying it would require
-/// killing a browser the caller never asked to close.
+/// Guard `--chrome-arg` compatibility when reconnecting to a live named browser. Chrome reads
+/// its command line once, so an omitted list inherits and only an explicit, different one is
+/// refused rather than killing a browser the caller never asked to close. Same rule as
+/// `session::ensure_proxy_compatible`.
 pub fn ensure_chrome_args_compatible(
     browser: &BrowserSession,
     effective: &[String],
@@ -151,9 +131,8 @@ mod tests {
     #[test]
     fn named_browser_chrome_args_must_match_before_reuse() {
         let existing = a_browser();
-        // No --chrome-arg requested: nothing to check, even against a browser with none.
         assert!(ensure_chrome_args_compatible(&existing, &[]).is_ok());
-        // A --chrome-arg requested against a browser launched with none is refused.
+        // Requested against a browser launched with none: refused.
         let requested = vec!["--enable-features=WebMCP,WebMCPTesting".to_string()];
         let err = ensure_chrome_args_compatible(&existing, &requested).unwrap_err().to_string();
         assert!(err.contains("different --chrome-arg flags"), "{err}");
@@ -163,12 +142,10 @@ mod tests {
     fn chrome_arg_browser_inherits_flags_when_omitted() {
         let mut existing = a_browser();
         existing.chrome_args = vec!["--enable-features=WebMCP,WebMCPTesting".to_string()];
-        // Follow-up command without --chrome-arg inherits the running flags.
+        // Omitted inherits; the same flags re-requested are fine.
         assert!(ensure_chrome_args_compatible(&existing, &[]).is_ok());
-        // The same flags, re-requested, are fine.
         assert!(ensure_chrome_args_compatible(&existing, &existing.chrome_args.clone()).is_ok());
-        // Different flags are refused rather than silently reapplied — Chrome only reads
-        // its command line once, at process start.
+        // Different flags are refused: Chrome reads its command line only at process start.
         let different = vec!["--enable-features=Other".to_string()];
         assert!(ensure_chrome_args_compatible(&existing, &different).is_err());
     }
@@ -182,8 +159,7 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(error.contains("applies only when chrome-agent launches Chrome"));
-        // Omitting --chrome-arg under --connect is not an error: there is nothing to apply
-        // and nothing to conflict with.
+        // Omitting it under --connect is not an error: there is nothing to apply.
         assert!(normalized_chrome_args_option(Some("http://127.0.0.1:9222"), &[]).is_ok());
     }
 
@@ -214,10 +190,8 @@ mod tests {
         );
     }
 
-    /// The refusal for a forbidden `--chrome-arg` follows the same contract `hints.rs` holds
-    /// every action-recovery hint to: one fact, no unresolved placeholder, and — since this
-    /// error means "don't send this at all" rather than "retry after doing X" — no wording
-    /// that invites running the command again unchanged.
+    /// Same contract as `hints.rs`: one fact, no unresolved placeholder, and no wording that
+    /// invites a blind retry (this error means "don't send this at all").
     #[test]
     fn forbidden_chrome_arg_errors_follow_the_hints_contract() {
         for (flag, why) in FORBIDDEN_CHROME_ARGS {
@@ -227,8 +201,7 @@ mod tests {
                 .to_string();
             // Rule 1: states a fact chrome-agent depends on.
             assert!(error.contains(why), "{flag}: reason missing: {error}");
-            // Rule 2, the part that applies here: the real value the caller passed is quoted
-            // back, never a placeholder like <value>.
+            // Rule 2: the real value is quoted back, never a placeholder like <value>.
             assert!(error.contains(&value), "{flag}: real value not echoed: {error}");
             for placeholder in ["<value>", "<name>", "<uid>", "<n>"] {
                 assert!(!error.contains(placeholder), "{flag}: {error}");

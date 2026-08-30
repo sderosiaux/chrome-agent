@@ -1,10 +1,5 @@
-//! A macro is a path that worked once, and a guard is what makes replaying it worth anything.
-//!
-//! The two halves are tested apart on purpose. Distillation is pure and lives in unit tests
-//! (`src/macros_record.rs`) where a frozen response proves what the whitelist keeps; here is
-//! what only a browser can answer: that the file records a real session, that running it holds
-//! its guards on the same page, and — the one that matters — that a guard which cannot hold
-//! stops the run instead of letting it finish.
+//! Recording a macro from a real session, replaying it, and stopping on a guard that fails.
+//! Distillation itself is pure and unit-tested in `src/macros_record.rs`.
 
 use std::process::{Command, Stdio};
 
@@ -60,8 +55,7 @@ impl TestMacro {
         let home = std::env::var_os("HOME").map(std::path::PathBuf::from).expect("HOME");
         home.join(".chrome-agent").join("macros").join(format!("{}.json", self.0))
     }
-    /// Write one by hand. The format is the product; a test that could not write one would be
-    /// testing the recorder only.
+    /// Write one by hand, so a test can exercise `macro run` without the recorder.
     fn write(&self, body: Value) {
         let path = self.path();
         std::fs::create_dir_all(path.parent().expect("parent")).expect("macro dir");
@@ -77,8 +71,7 @@ impl Drop for TestMacro {
     }
 }
 
-/// Drive the fixture the way an agent would the first time: navigate, look, get one thing
-/// wrong, then do the three things that work. Returns the recording path.
+/// Navigate, inspect, one failing click, then three that work. Returns the recording path.
 fn record_a_session(browser: &str, fixture: &str) -> std::path::PathBuf {
     let record = common::temp_path("macro-session", "jsonl");
     let url = common::fixture_url(fixture);
@@ -103,8 +96,7 @@ fn record_a_session(browser: &str, fixture: &str) -> std::path::PathBuf {
     record
 }
 
-/// The whitelist, on a real session rather than a frozen response: what the file keeps, and —
-/// louder — what it refuses to keep.
+/// The whitelist on a real session: what the file keeps and what it refuses to keep.
 #[test]
 fn a_recorded_macro_keeps_the_path_and_none_of_the_numbers() {
     let browser = TestBrowser::new("macro-record");
@@ -122,7 +114,7 @@ fn a_recorded_macro_keeps_the_path_and_none_of_the_numbers() {
     let report: Value = serde_json::from_str(&stdout).expect("JSON report");
     assert_eq!(report["steps"], 4, "goto, click, fill, click: {report}");
     assert!(report["refused"].as_array().unwrap().is_empty(), "{report}");
-    // The exploration and the dead end are gone, and each says why.
+    // The exploration and the dead end are dropped, each with a reason.
     let dropped = report["dropped"].as_array().expect("dropped");
     assert_eq!(dropped.len(), 2, "{report}");
     assert!(dropped.iter().any(|d| d["reason"].as_str().unwrap().contains("reads the page")));
@@ -135,14 +127,12 @@ fn a_recorded_macro_keeps_the_path_and_none_of_the_numbers() {
     assert_eq!(parsed["steps"][1]["expect"]["verdict"], "changed");
     assert_eq!(parsed["steps"][2]["expect"]["verbatim"], true);
 
-    // The blacklist. These are the fields a response carries in quantity, and every one of them
-    // would make the macro break on a page that still works.
+    // The blacklist: each of these would break the macro on a page that still works.
     for forbidden in ["verdict_reason", "\"added\"", "\"removed\"", "observed_after_ms", "delta", "uid"] {
         assert!(!text.contains(forbidden), "{forbidden} reached the file:\n{text}");
     }
 }
 
-/// The same session, run again from the file: every guard holds on the page it was recorded on.
 #[test]
 fn a_recorded_macro_runs_again_and_its_guards_hold() {
     let browser = TestBrowser::new("macro-replay");
@@ -167,7 +157,6 @@ fn a_recorded_macro_runs_again_and_its_guards_hold() {
     assert_eq!(report["steps_run"], 4, "{report}");
     assert_eq!(report["unguarded_steps"], 0, "every step promised something: {report}");
 
-    // The page really is at the end of the task, not merely at the end of the file.
     let (state, _, _) = run_cli(&[
         "--browser", runner.name(), "--json", "eval",
         "document.getElementById('result').className",
@@ -176,8 +165,6 @@ fn a_recorded_macro_runs_again_and_its_guards_hold() {
     assert_eq!(state["result"], "on", "the confirmation section is showing: {state}");
 }
 
-/// The one that decides whether any of this is worth having: a guard that cannot hold stops
-/// the run, and the steps after it do not happen.
 #[test]
 fn a_guard_that_does_not_hold_stops_the_run_where_it_failed() {
     let browser = TestBrowser::new("macro-stop");
@@ -186,8 +173,7 @@ fn a_guard_that_does_not_hold_stops_the_run_where_it_failed() {
     }
     let macro_file = TestMacro::new("macro-stop");
     let url = common::fixture_url("macro_cancel_flow.html");
-    // Step 1 clicks a heading, which changes nothing: `verdict: changed` cannot hold. Step 2
-    // would fill the email field, and must never run.
+    // Step 1 clicks a heading, so `verdict: changed` cannot hold; the fill must not run.
     macro_file.write(json!({
         "name": "placeholder",
         "steps": [
@@ -214,7 +200,6 @@ fn a_guard_that_does_not_hold_stops_the_run_where_it_failed() {
         "the report says the rest did not run: {report}"
     );
 
-    // And it really did not run: the field the third step would have filled is untouched.
     let (state, _, _) = run_cli(&[
         "--browser", browser.name(), "--json", "eval",
         "document.getElementById('email').value",
@@ -223,7 +208,7 @@ fn a_guard_that_does_not_hold_stops_the_run_where_it_failed() {
     assert_eq!(state["result"], "", "the step after the failure was not run: {state}");
 }
 
-/// A secret is declared and never stored, so a run without it stops before touching the page.
+/// A secret is never stored, so a run without it stops before touching the page.
 #[test]
 fn a_missing_secret_refuses_before_the_browser_is_touched() {
     let browser = TestBrowser::new("macro-secret");
@@ -251,7 +236,6 @@ fn a_missing_secret_refuses_before_the_browser_is_touched() {
     assert!(said.contains("never stored"), "and why it cannot be defaulted: {said}");
     assert!(said.contains("--var card="), "with the command that fixes it: {said}");
 
-    // Nothing ran: the first step would have navigated, and the browser has no page from it.
     let (state, _, _) = run_cli(&["--browser", browser.name(), "--json", "eval", "location.href"]);
     let state: Value = serde_json::from_str(&state).unwrap_or_else(|_| json!({}));
     assert!(
@@ -260,8 +244,7 @@ fn a_missing_secret_refuses_before_the_browser_is_touched() {
     );
 }
 
-/// A card number is a secret by `element::SECRET_FIELD`, so recording a session that filled one
-/// declares a parameter and writes no value.
+/// A card number is a secret by `element::SECRET_FIELD`.
 #[test]
 fn a_recorded_secret_becomes_a_parameter_and_never_a_value() {
     let browser = TestBrowser::new("macro-secret-record");
@@ -296,13 +279,11 @@ fn a_recorded_secret_becomes_a_parameter_and_never_a_value() {
     assert!(text.contains("{{card}}"), "the value became a parameter:\n{text}");
     let parsed: Value = serde_json::from_str(&text).unwrap();
     assert_eq!(parsed["params"]["card"]["secret"], true, "{text}");
-    // And the guard is still the read-back: a secret is verified, never printed.
+    // The guard is the read-back: a secret is verified, never printed.
     assert_eq!(parsed["steps"][2]["expect"]["verbatim"], true, "{text}");
 }
 
-/// The design's second preference, which only exists because the first end-to-end recording
-/// showed it never firing: a step aimed by uid reports no role and no name, so without the
-/// snapshot it was refused and only selector-aimed steps were recordable.
+/// A step aimed by uid reports no role and no name, so its locator comes from the snapshot.
 #[test]
 fn a_step_aimed_by_uid_is_recorded_by_role_and_name_and_runs_again() {
     let browser = TestBrowser::new("macro-uid");
@@ -317,7 +298,7 @@ fn a_step_aimed_by_uid_is_recorded_by_role_and_name_and_runs_again() {
         cmd
     };
 
-    // Navigate and look, exactly as an agent does before it can name a uid at all.
+    // Navigate and inspect: a uid only exists after a snapshot.
     let first = run_pipe(
         browser.name(),
         &[with_record(json!({"cmd": "goto", "url": url})), with_record(json!({"cmd": "inspect"}))],
@@ -353,7 +334,6 @@ fn a_step_aimed_by_uid_is_recorded_by_role_and_name_and_runs_again() {
     assert_eq!(last["do"]["role"], "button", "{text}");
     assert_eq!(last["do"]["name"], "Manage billing", "{text}");
 
-    // And it resolves again on a fresh page, which is the half a locator is for.
     let runner = TestBrowser::new("macro-uid-run");
     let (stdout, stderr, code) =
         run_cli(&["--browser", runner.name(), "--json", "macro", "run", macro_file.name()]);

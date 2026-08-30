@@ -2,13 +2,9 @@ use std::io::Write;
 
 use serde_json::Value;
 
-/// Narrow a recording to its owner.
-///
-/// It holds every command and every response of the session, which includes the values a
-/// fill put into the page — among them the ones redacted on stdout precisely because they
-/// are secrets. It was created with whatever the umask allowed, typically 0644, while
-/// screenshot, pdf, download and the session store all chmod 0600. Applied on every write
-/// rather than at creation: the file may already exist, wider, from an earlier run.
+/// chmod 0600: a recording holds every command and response, including values redacted on
+/// stdout because they are secrets. Applied on every write, since the file may already exist
+/// with wider permissions from an earlier run.
 fn restrict(path: &str) {
     #[cfg(unix)]
     {
@@ -19,8 +15,8 @@ fn restrict(path: &str) {
     let _ = path;
 }
 
-/// Open (or create) a recording file for append and write nothing yet.
-/// Returns an error if the file cannot be opened.
+/// Open or create the recording file for append, writing nothing. Errors when it cannot be
+/// opened, which refuses the command rather than running it unrecorded.
 pub fn start_recording(path: &str) -> Result<(), crate::BoxError> {
     let _ = std::fs::OpenOptions::new()
         .create(true)

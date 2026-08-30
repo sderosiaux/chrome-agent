@@ -1,12 +1,5 @@
-//! The vendored extraction engine's own test suite is part of the gate.
-//!
-//! `vendor/extract.js` carries 120+ jsdom unit tests under `tests/js/`, and nothing ran
-//! them: not `cargo test`, not CI. They were a suite you had to remember to invoke by
-//! hand, which is the same as a suite that cannot fail — a regression in the extraction
-//! heuristics shipped green. This runs them as part of the Rust gate.
-//!
-//! Skips when node or the jsdom install is missing, and, like every other skip here, that
-//! skip is fatal under `CHROME_AGENT_REQUIRE_CHROME`.
+//! Runs `vendor/extract.js`'s jsdom unit suite (`tests/js/`) inside `cargo test`. Skips when
+//! node or the jsdom install is missing; that skip is fatal under `CHROME_AGENT_REQUIRE_CHROME`.
 
 use std::path::PathBuf;
 use std::process::Command;

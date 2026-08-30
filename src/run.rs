@@ -2,18 +2,15 @@ use serde_json::json;
 
 use crate::BoxError;
 use crate::cli::{Cli, Command, DaemonAction, EmulateAction, WebmcpAction};
-use crate::run_helpers::{ReportPolicy, check_report, cmd_close, cmd_purge_orphans, cmd_status, cmd_stop, get_uid_map, json_output, output_action, output_action_with, output_goto};
+use crate::run_helpers::{ReportPolicy, check_report, cmd_close, cmd_purge_orphans, cmd_status, cmd_stop, get_uid_map, json_output, output_action, output_action_with, output_goto, print_batch_text};
 use crate::{commands, pipe, session};
 
-/// The biggest awaited futures in this function are `Box::pin`ned before being awaited.
+/// CLI command dispatch.
 ///
-/// Not style: `clippy::large_stack_frames` (nursery, denied in CI) sums the sizes of every MIR
-/// local in a body, and each `.await` here contributes its callee's whole future as a separate
-/// local. One `match cli.command` with ~40 arms therefore adds up to a number no single frame
-/// ever holds — measured at 527,450 bytes against a 512,000 limit, while the real state machine
-/// for this function is 8,608 bytes (`-Zprint-type-sizes`). Boxing turns the largest of those
-/// locals into an 8-byte pointer for the cost of one allocation per process run, on paths that
-/// are about to do network I/O anyway. Un-boxing any of them re-trips the lint.
+/// The biggest awaited futures here are `Box::pin`ned. Required, not style:
+/// `clippy::large_stack_frames` (denied in CI) sums every MIR local, and one `.await` per
+/// match arm summed to 527,450 bytes against a 512,000 limit even though the real state
+/// machine is 8,608. Un-boxing any of them re-trips the lint.
 pub async fn run(cli: Cli) -> Result<(), BoxError> {
     match cli.command {
         Command::Daemon { action } => {
@@ -42,9 +39,9 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
         }
 
         Command::Close { purge, purge_orphans, orphans } => {
-            // Processes before profiles: a profile whose browser is still running is not
-            // removable, so sweeping the disk first would skip exactly the directories
-            // this pair is meant to reclaim.
+            // Processes before profiles: a profile whose browser still runs is not
+            // removable, so sweeping the disk first would skip the directories this pair
+            // exists to reclaim.
             if orphans {
                 crate::orphans::cmd_close_orphans(cli.json)?;
             }
@@ -61,9 +58,8 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
             return Box::pin(pipe::run_pipe(&cli)).await;
         }
 
-        // Before the browser is opened: `list` and `show` read files, and `record` distils a
-        // recording — none of the three needs a page, and opening one to answer "what macros
-        // exist" would launch a Chrome to read a directory.
+        // Handled before a browser is opened: list/show/record only touch files, and
+        // launching a Chrome to read a directory would be absurd.
         Command::Macro { ref action } => {
             return Box::pin(crate::macros_cmd::run_cli(&cli, action)).await;
         }
@@ -94,19 +90,16 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
         _ => {}
     }
 
-    // All other commands need a browser connection + CDP client. Loading the store,
-    // connecting to (or launching) the named browser, and resolving its page live in
-    // `connect_cli::resolve_cli_connection` — split out for the repo's 1000-line file cap.
+    // Every other command needs a browser and a CDP client.
     let (mut store, browser_client, client, target_id) =
         Box::pin(crate::connect_cli::resolve_cli_connection(&cli)).await?;
-    // The caller's own answer to "how long am I willing to wait" also bounds every CDP
-    // response, so a page promise that never settles fails instead of hanging forever.
+    // --timeout also bounds every CDP call, so a page promise that never settles fails
+    // instead of hanging forever.
     client.set_call_timeout(std::time::Duration::from_secs(cli.timeout));
     let dialog_policy = crate::setup::DialogPolicy::parse(&cli.dialog)?;
     client.spawn_dialog_handler(dialog_policy, cli.dialog_text.clone());
-    // Reapplying before `device` or `reset` would let an invalid stored configuration prevent the
-    // command that repairs it. Batch defers the same decision to `run_batch`, where command order
-    // determines which entries remain blocked and when recovery takes effect.
+    // Reapplying before `device` or `reset` would let an invalid stored configuration block
+    // the command that repairs it. Batch defers the same decision to `run_batch`.
     let defers_emulation_reapply = matches!(
         &cli.command,
         Command::Emulate {
@@ -117,10 +110,9 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
         && let Err(error) =
             crate::emulation::reapply(&client, &store, &cli.browser, &cli.page).await
     {
-        // Same contract as the pipe's EmulationRecovery: the failure names the one command
-        // that repairs it, with the real values filled in, and the command was NOT run —
-        // acting on a page whose stored metrics silently failed to apply would report
-        // results measured under the wrong viewport.
+        // Same contract as the pipe's EmulationRecovery: name the repairing command with
+        // real values, and do NOT run this one — its results would be measured under the
+        // wrong viewport.
         return Err(format!(
             "Could not reapply this page's stored device configuration: {error}. \
              Clear it: chrome-agent --browser {} --page {} emulate reset",
@@ -160,8 +152,8 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
                 return Err("Only one of uid, --selector, or --xy can be provided.".into());
             }
 
-            // The selector path resolves and reports its own node, from the same handle it
-            // probes and clicks; only --xy has no element to name.
+            // The selector path names its own node, from the handle it probes and clicks;
+            // only --xy has no element to name.
             let (msg, details) = if let Some(ref sel) = selector {
                 let outcome = crate::element::click_selector(&client, sel, policy.on_intercept).await?;
                 let target = format!("selector '{sel}'");
@@ -282,9 +274,8 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
                 .call("Runtime.evaluate", json!({"expression": "document.title", "returnByValue": true}))
                 .await?;
             let title_str = title.result.value.as_ref().and_then(|v| v.as_str()).unwrap_or("");
-            // Same as goto: the old document is gone, so every stored uid now points at a
-            // node that no longer exists, and backendNodeId counters overlap between
-            // documents so a stale one can silently resolve to an unrelated element.
+            // Same as goto: the old document is gone, and backendNodeId counters overlap
+            // between documents, so a stale uid can resolve to an unrelated element.
             if let Some(browser_s) = store.browsers.get_mut(&cli.browser) {
                 session::ensure_page(browser_s, &cli.page, &target_id).uid_map.clear();
             }
@@ -323,12 +314,9 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
                     .await?;
                 let title_str = dest.result.value.as_ref().and_then(|v| v.get("title")).and_then(|v| v.as_str()).unwrap_or("");
                 let url_str = dest.result.value.as_ref().and_then(|v| v.get("url")).and_then(|v| v.as_str()).unwrap_or("");
-                // A navigation, so it answers like `goto`: no change report (the caller
-                // navigated on purpose, and pipe/batch never attach one), stale uids
-                // dropped, `--inspect` refills them from the destination.
-                //
-                // No `landed`: the caller asked for the next history entry, not for a URL,
-                // so there is no requested URL to have been redirected away from.
+                // Answers like `goto`: no change report, stale uids dropped, `--inspect`
+                // refills from the destination. No `landed` either — the caller asked for a
+                // history entry, not a URL, so nothing could have redirected away from it.
                 output_goto(&client, &mut store, &cli.browser, &cli.page, &target_id, url_str, title_str, None, inspect, depth, json_mode).await?;
             }
         }
@@ -395,8 +383,12 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
 
         Command::Check { uid, selector, inspect, max_depth } => {
             let depth = max_depth.or(cli.max_depth);
-            if uid.is_none() && selector.is_none() {
+            let provided = u8::from(uid.is_some()) + u8::from(selector.is_some());
+            if provided == 0 {
                 return Err("Provide a uid or --selector.".into());
+            }
+            if provided > 1 {
+                return Err("Only one of uid or --selector can be provided.".into());
             }
             let target = crate::run_helpers::target_details(&client, selector.as_deref(), uid.as_deref()).await;
             let outcome = if let Some(ref sel) = selector {
@@ -412,8 +404,12 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
 
         Command::Uncheck { uid, selector, inspect, max_depth } => {
             let depth = max_depth.or(cli.max_depth);
-            if uid.is_none() && selector.is_none() {
+            let provided = u8::from(uid.is_some()) + u8::from(selector.is_some());
+            if provided == 0 {
                 return Err("Provide a uid or --selector.".into());
+            }
+            if provided > 1 {
+                return Err("Only one of uid or --selector can be provided.".into());
             }
             let target = crate::run_helpers::target_details(&client, selector.as_deref(), uid.as_deref()).await;
             let outcome = if let Some(ref sel) = selector {
@@ -429,8 +425,12 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
 
         Command::Upload { files, uid, selector, inspect, max_depth } => {
             let depth = max_depth.or(cli.max_depth);
-            if uid.is_none() && selector.is_none() {
+            let provided = u8::from(uid.is_some()) + u8::from(selector.is_some());
+            if provided == 0 {
                 return Err("Provide --uid or --selector to identify the file input.".into());
+            }
+            if provided > 1 {
+                return Err("Only one of --uid or --selector can be provided.".into());
             }
             let target = crate::run_helpers::target_details(&client, selector.as_deref(), uid.as_deref()).await;
             let msg = if let Some(ref sel) = selector {
@@ -468,8 +468,8 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
             } else {
                 views.shown().to_string()
             };
-            // Persist the FULL snapshot so diff and uid lookups stay complete;
-            // --filter/--max-depth/--uid/--urls and paging only affect what we print.
+            // Persist the FULL snapshot so diff and uid lookups stay complete: display
+            // flags and paging affect only what is printed.
             if let Some(browser_s) = store.browsers.get_mut(&cli.browser) {
                 let page = session::ensure_page(browser_s, &cli.page, &target_id);
                 let full = views.full;
@@ -637,9 +637,8 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
         }
 
         Command::Assert { ref what } => {
-            // A read, so no change report and no verdict: nothing moved. `run_cli` returns
-            // `commands::assert::NotHeld` when the claim did not hold, which `main` turns
-            // into exit 2 before its generic error path (which would say 1).
+            // A read: no change report, no verdict. `run_cli` returns `assert::NotHeld` when
+            // the claim did not hold, which `main` turns into exit 2.
             let uid_map = get_uid_map(&store, &cli.browser, &cli.page);
             Box::pin(commands::assert::run_cli(&client, &uid_map, what, json_mode)).await?;
         }
@@ -898,21 +897,35 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
             };
             let cmds = commands::batch::parse_commands(&input)?;
             // The same loop pipe mode's `{"cmd":"batch"}` runs, so `--stop-on-error` and
-            // `"stop_on_error"` cannot drift apart. One recovery state is shared by every entry;
-            // a reset can repair later commands without reapplying before each one.
+            // `"stop_on_error"` cannot drift. One recovery state shared by every entry: a
+            // reset repairs later commands without reapplying before each one.
             let mut emulation_recovery = crate::pipe_dispatch::EmulationRecovery::new(
                 &client, &store, &cli.browser, &cli.page,
             ).await;
-            // Boxed like `pipe::run_pipe` above and the four arms marked the same way: `run`
-            // holds every arm's locals in ONE stack frame, and the biggest futures are the ones
-            // that carry another dispatcher whole. Nothing else about these calls changed.
+            // Boxed for the same stack-frame reason as the other arms (see `run`'s doc).
             let out = Box::pin(crate::pipe_dispatch::run_batch(
                 &client, &browser_client, &mut store,
                 &cli.browser, &cli.page, &target_id,
                 cli.timeout, cli.max_depth, policy, &cmds, stop_on_error,
                 &mut emulation_recovery,
             )).await;
-            json_output(&out);
+            // `stopped_at` is set by `run_batch` only when `stop_on_error` cut the run short,
+            // so its presence IS "an entry failed and the rest never ran".
+            let stopped_at = out.get("stopped_at").and_then(serde_json::Value::as_u64);
+            if json_mode {
+                json_output(&out);
+            } else {
+                print_batch_text(&out, stopped_at);
+            }
+            // Saved here rather than at the end of `run`: the arm returns through the error
+            // channel when it stopped, and a batch that ran commands owes the store its
+            // uid_map and snapshot either way. `save_session` also disarms the reaper, so the
+            // error path in `main` cannot mistake this browser for a leaked one.
+            session::save_session(&mut store)?;
+            if stopped_at.is_some() {
+                return Err(Box::new(crate::run_helpers::BatchStopped));
+            }
+            return Ok(());
         }
 
         // Already handled above

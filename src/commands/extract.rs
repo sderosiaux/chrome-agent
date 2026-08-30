@@ -3,25 +3,20 @@ use serde_json::{json, Value};
 
 use crate::cdp::client::CdpClient;
 
-/// The shipped repeating-record extraction algorithm (MDR/DEPTA-inspired).
-/// Single source of truth: the same file the jsdom test-suite exercises
-/// (`tests/js/*.test.js`). Exposes `extract(scope, limit)` returning a JSON
-/// string. Embedding it here (instead of an inline `format!` duplicate) means
-/// the 100+ jsdom tests actually cover the code that ships in the binary.
+/// The shipped repeating-record extraction algorithm (MDR/DEPTA-inspired), exposing
+/// `extract(scope, limit)`. Embedded rather than duplicated inline, so the jsdom suite in
+/// `tests/js/*.test.js` covers the code that actually ships.
 const EXTRACT_JS: &str = include_str!("../../vendor/extract.js");
 
-/// In-page routine for `extract --scroll`. Scrolls to the bottom repeatedly,
-/// using a `MutationObserver` debounce to detect settling, bounded by
-/// `MAX_SCROLLS`. The whole loop is raced against a hard `DEADLINE_MS`
-/// (`Promise.race`) so a continuously-mutating page (feeds, ad rotators,
-/// clocks) can never leave the `MutationObserver` debounce permanently
-/// re-armed — the awaited promise always resolves (with partial results)
-/// within the deadline, so `CdpClient::call` (which has no timeout) can't hang.
+/// In-page routine for `extract --scroll`: scroll to the bottom up to `MAX_SCROLLS` times,
+/// with a `MutationObserver` debounce to detect settling. The loop is raced against a hard
+/// 8s deadline, because a continuously-mutating page keeps the debounce re-armed forever and
+/// `CdpClient::call` has no timeout of its own.
 const SCROLL_JS: &str = r"(async () => {
         const MAX_SCROLLS = 10;
         const SETTLE_MS = 1000;
         const DEADLINE_MS = 8000;
-        // Some sites (YouTube) scroll on documentElement, not body
+        // Some sites (YouTube) scroll on documentElement, not body.
         const getHeight = () => Math.max(document.body.scrollHeight, document.documentElement.scrollHeight);
         const root = document.body.scrollHeight > 0 ? document.body : document.documentElement;
         const scrollLoop = (async () => {
@@ -31,7 +26,7 @@ const SCROLL_JS: &str = r"(async () => {
                 if (height === prevHeight && i > 0) break;
                 prevHeight = height;
                 window.scrollTo(0, height);
-                // Wait for DOM to settle using MutationObserver
+                // Wait for the DOM to settle.
                 await new Promise(resolve => {
                     let timer = setTimeout(resolve, SETTLE_MS);
                     const observer = new MutationObserver(() => {
@@ -45,8 +40,7 @@ const SCROLL_JS: &str = r"(async () => {
                 });
             }
         })();
-        // Hard deadline: even if the page never stops mutating, resolve with
-        // whatever loaded so far rather than hanging the CDP call forever.
+        // Hard deadline: resolve with partial results rather than hanging the CDP call.
         const deadline = new Promise(resolve => setTimeout(resolve, DEADLINE_MS));
         await Promise.race([scrollLoop, deadline]);
         window.scrollTo(0, 0);
@@ -60,10 +54,8 @@ pub struct ExtractResult {
     pub pattern: String,
 }
 
-/// Scroll to bottom repeatedly until no new content loads.
-/// Uses `MutationObserver` to detect DOM changes instead of blind sleep.
-/// Max 10 scroll iterations to avoid infinite scroll traps, bounded overall by
-/// an in-page `Promise.race` deadline (see [`SCROLL_JS`]).
+/// Scroll to the bottom until no new content loads: max 10 iterations, bounded overall by
+/// the in-page deadline in [`SCROLL_JS`].
 pub async fn scroll_to_load(client: &CdpClient) -> Result<(), crate::BoxError> {
     let _: Value = client
         .call(
@@ -80,9 +72,8 @@ pub async fn scroll_to_load(client: &CdpClient) -> Result<(), crate::BoxError> {
 }
 
 
-/// Extract structured data using the accessibility tree instead of DOM.
-/// Delegates to inspect with a role filter. Works on React SPAs (X.com)
-/// where DOM structure is opaque but a11y roles are clean.
+/// Extract records from the accessibility tree instead of the DOM, by delegating to `inspect`
+/// with a role filter. Works on SPAs whose DOM structure is opaque but whose roles are clean.
 pub async fn run_a11y(
     client: &CdpClient,
     limit: usize,
@@ -92,8 +83,7 @@ pub async fn run_a11y(
 
     for role in &roles {
         let filter = vec![*role];
-        // The filtered rendering is all this wants — it stores no baseline, so there is
-        // nothing here for a reduced snapshot to poison.
+        // Read-only: no baseline is stored, so the filtered rendering is enough.
         let text = if scroll {
             super::inspect::scroll_collect(client, false, None, Some(&filter), limit).await?.shown().to_string()
         } else {
@@ -110,11 +100,9 @@ pub async fn run_a11y(
         let items: Vec<Value> = lines.iter()
             .take(limit)
             .map(|line| {
-                // Strip "uid=nXXX role " prefix to get the content text
+                // `uid=n123 article "the text"` → the text.
                 let text = line.trim();
                 let text = if let Some(rest) = text.strip_prefix("uid=") {
-                    // Format: "uid=n123 article \"actual text here\""
-                    // Skip the "nXXX role " part
                     if let Some((_uid_role, content)) = rest.split_once('"') {
                         content.trim_end_matches('"')
                     } else {
@@ -138,12 +126,8 @@ pub async fn run_a11y(
     Err("No repeating a11y pattern found. Try: extract (DOM mode) or inspect --filter \"article\"".into())
 }
 
-/// Build the in-page extraction expression: bind `_scope`/`_limit`, embed the
-/// vendored [`EXTRACT_JS`] algorithm, then invoke its `extract(_scope, _limit)`
-/// entrypoint. Wrapped in an arrow IIFE so the selector-not-found `return`
-/// short-circuits cleanly. The vendored source's trailing
-/// `if (typeof module !== 'undefined') module.exports = extract;` is a no-op in
-/// the browser (`module` is undefined there).
+/// Bind `_scope`/`_limit`, embed [`EXTRACT_JS`], and call `extract(_scope, _limit)`. Wrapped
+/// in an arrow IIFE so the selector-not-found `return` short-circuits cleanly.
 fn build_extract_js(selector: Option<&str>, limit: usize) -> String {
     let scope_js = if let Some(sel) = selector {
         let escaped = serde_json::to_string(sel).unwrap_or_default();
@@ -189,7 +173,7 @@ pub async fn run(
         .unwrap_or("")
         .to_string();
 
-    // If there's a hint (no pattern found), propagate as error.
+    // A hint with no items means no pattern was found; propagate it as an error.
     if let Some(hint) = parsed.get("hint").and_then(Value::as_str)
         && items.is_empty() {
             return Err(hint.into());
@@ -202,7 +186,6 @@ pub async fn run(
     })
 }
 
-/// Format the extract result as human-readable text.
 pub fn format_text(result: &ExtractResult) -> String {
     let mut out = if result.count > result.items.len() {
         format!(
@@ -248,11 +231,8 @@ pub fn format_text(result: &ExtractResult) -> String {
     out
 }
 
-/// Build the JSON output for the extract command.
-///
-/// `count` is what the page matched, `returned` is what `--limit` let through. They used
-/// to be one number: an agent reading `count` as the page's inventory while holding a
-/// tenth of it under-processed the page with nothing saying so.
+/// JSON output. `count` is what the page matched, `returned` what `--limit` let through;
+/// when they differ, `truncated` and a hint say so.
 pub fn to_json(result: &ExtractResult) -> Value {
     let returned = result.items.len();
     let truncated = result.count > returned;
@@ -277,9 +257,7 @@ pub fn to_json(result: &ExtractResult) -> Value {
 mod tests {
     use super::*;
 
-    /// `count` is the number of records the page matched, `items` is what `--limit` let
-    /// through. When they differ the response must say so: an agent reading `count` as
-    /// "this page lists 30 products" while holding 10 under-processes the page silently.
+    /// When `count` and `items` differ, both outputs must say so.
     #[test]
     fn a_truncated_extract_says_how_many_it_is_holding_back() {
         let result = ExtractResult {
@@ -307,7 +285,7 @@ mod tests {
             "the hint names the flag to raise: {v}"
         );
 
-        // An untruncated result must not sprout a warning it does not deserve.
+        // An untruncated result carries no warning.
         let whole = ExtractResult {
             items: vec![json!({"title": "only one"})],
             count: 1,
@@ -318,15 +296,10 @@ mod tests {
         assert!(v["hint"].is_null(), "{v}");
     }
 
-    // --- FIX A9: --scroll must not hang on continuously-mutating pages ---
-
     #[test]
     fn scroll_js_has_hard_deadline_race() {
-        // Before the fix the awaited promise was resolved only by the 300ms
-        // MutationObserver debounce; a page that never stops mutating kept the
-        // debounce re-armed forever and `CdpClient::call` (no timeout) hung.
-        // The routine must now race the scroll loop against a fixed deadline so
-        // it always resolves with partial results.
+        // Without the race, a page that never stops mutating keeps the debounce re-armed
+        // and hangs the timeout-less `CdpClient::call`.
         assert!(
             SCROLL_JS.contains("Promise.race"),
             "scroll routine must bound itself with Promise.race"
@@ -335,24 +308,17 @@ mod tests {
             SCROLL_JS.contains("DEADLINE_MS"),
             "scroll routine must define a hard deadline"
         );
-        // The deadline promise must actually resolve (setTimeout(resolve, ...)),
-        // otherwise racing it would be pointless.
+        // The deadline promise must actually resolve, or racing it is pointless.
         assert!(
             SCROLL_JS.contains("const deadline = new Promise(resolve => setTimeout(resolve, DEADLINE_MS))"),
             "deadline must be a self-resolving timeout"
         );
-        // MAX_SCROLLS must be preserved per the fix requirements.
         assert!(SCROLL_JS.contains("MAX_SCROLLS = 10"));
     }
 
-    // --- dedup fix: shipped algorithm must be the vendored, jsdom-tested one ---
-
     #[test]
     fn extract_js_is_the_vendored_source() {
-        // Guard against the inline `format!` duplicate creeping back in: the
-        // embedded algorithm must be the exact file the jsdom suite exercises,
-        // and it must expose the `extract(scope, limit)` entrypoint the Rust
-        // side calls.
+        // The embedded algorithm must be the exact file the jsdom suite exercises.
         assert_eq!(EXTRACT_JS, include_str!("../../vendor/extract.js"));
         assert!(
             EXTRACT_JS.contains("function extract(_scope, _limit)"),
@@ -363,13 +329,11 @@ mod tests {
     #[test]
     fn build_extract_js_embeds_vendor_and_calls_entrypoint() {
         let js = build_extract_js(None, 20);
-        // Whole-document scope, limit injected, vendored algorithm embedded,
-        // and the entrypoint invoked with the bound args.
         assert!(js.contains("const _scope = document;"));
         assert!(js.contains("const _limit = 20;"));
         assert!(js.contains("function extract(_scope, _limit)"));
         assert!(js.contains("return extract(_scope, _limit);"));
-        // Wrapped in an arrow IIFE so the selector short-circuit `return` is legal.
+        // Arrow IIFE, so the selector short-circuit `return` is legal.
         assert!(js.trim_start().starts_with("(() => {"));
         assert!(js.trim_end().ends_with("})()"));
     }
@@ -384,11 +348,10 @@ mod tests {
 
     #[test]
     fn build_extract_js_selector_escaping_is_injection_safe() {
-        // A selector containing quotes/backslashes must be JSON-escaped, not
-        // concatenated raw, so it can't break out of the string literal.
+        // Quotes and backslashes are JSON-escaped, so a selector cannot break out of the
+        // string literal.
         let js = build_extract_js(Some("a[href=\"x\"]"), 1);
         assert!(js.contains(r#"document.querySelector("a[href=\"x\"]")"#));
-        // No unescaped raw selector delimiter leaked verbatim.
         assert!(!js.contains("querySelector(a[href=\"x\"])"));
     }
 }

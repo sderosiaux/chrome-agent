@@ -1,31 +1,13 @@
 //! `WebMCP` tool discovery and invocation — `document.modelContext.getTools()` and
-//! `.executeTool()` (W3C WICG `WebMCP`; `navigator.modelContext` is deprecated since Chrome 150).
+//! `.executeTool()` (W3C WICG; `navigator.modelContext` is deprecated since Chrome 150).
 //!
-//! This module only talks to the page. Whether a call actually moved anything is a *separate*
-//! question, answered by the same accessibility-tree diff every other mutating command gets
-//! (`webmcp_call` is in `pipe_report::mutates_page`) — this module never judges that itself.
+//! This module only talks to the page; whether a call moved anything is the shared
+//! accessibility-tree diff's answer. The protocol defines no `outputSchema`, so a declared
+//! result has no contract to check it against and `list_tools` reports `output_schema: null`.
 //!
-//! **What the protocol does not give an agent**, measured against 17 real tools across 6 sites
-//! while this module was built: there is no `outputSchema`. A tool's declared return is a
-//! freeform string with no contract to check it against — `{"success":true}` and nothing having
-//! moved is not a protocol violation, it is a tool no more suspicious-looking than a correct one.
-//! `list_tools` reports `output_schema: null` on every entry for exactly this reason: it is
-//! information a caller needs before it trusts a declared result, not a gap to paper over.
-//!
-//! **Under a `frame` binding**, `eval` already runs in that frame's isolated world (`frame`'s own
-//! doc comment), which shares the frame's DOM but not plain JS properties a MAIN-world script
-//! assigned to it. Measured against `webmcp_iframe_host.html` (top page with no tools, iframe
-//! whose own main-world script installs the fixture's polyfill on ITS `document.modelContext`):
-//! bound into that iframe with `frame`, `typeof document.modelContext` is `"undefined"` — the
-//! same blindness `eval` already has for main-world variables, just hitting a property instead
-//! of a variable. A NATIVE, platform-implemented `document.modelContext` (the real Chrome flag,
-//! not a polyfill) is a `WebIDL` attribute rather than a page-assigned property and may or may not
-//! share that visibility — Blink's isolated worlds share the underlying DOM objects, so a native
-//! IDL attribute is the more likely case to be visible, but this was NOT verified: it needs a
-//! Chrome build new enough to carry the flag AND an iframe registering tools natively, and is
-//! left for whoever needs the native path next. What IS verified either way: `list_tools` and
-//! `call_tool` report `frame_scoped: true` whenever a frame is bound, so an empty tool list next
-//! to that flag reads as "unproven", never as "this page has none".
+//! Under a `frame` binding the isolated world sees the frame's DOM but not a
+//! `document.modelContext` a main-world script assigned (measured; a NATIVE one is untested),
+//! so both calls report `frame_scoped: true` and an empty list there means unproven.
 
 use serde_json::{Value, json};
 
@@ -33,21 +15,18 @@ use crate::cdp::client::CdpClient;
 use crate::commands::eval;
 
 /// Thrown when `document.modelContext` is absent and no `frame` is bound. The literal text is
-/// unique to this module, which is what lets `hints.rs` recognise it without matching some
-/// unrelated page error.
+/// what `hints.rs` matches on.
 pub const NO_MODEL_CONTEXT_MARKER: &str =
     "chrome-agent: document.modelContext is undefined on this page.";
 
-/// Thrown instead of [`NO_MODEL_CONTEXT_MARKER`] when a `frame` is bound: the absence is real
-/// evidence for the top document, but not for a frame whose own main-world script may have
-/// installed a polyfill this isolated-world check cannot see (module doc).
+/// Thrown instead of [`NO_MODEL_CONTEXT_MARKER`] when a `frame` is bound, where absence is not
+/// evidence: a polyfill installed by the frame's main-world script is invisible here.
 pub const NO_MODEL_CONTEXT_FRAME_MARKER: &str = "chrome-agent: document.modelContext is undefined \
      in the bound frame's isolated world — this does not prove the frame has no tools, since a \
      polyfill the frame's own main-world script installs is invisible here.";
 
-/// Thrown when `--name`/`"name"` matches no tool `getTools()` reported. Only the prefix is
-/// matched by `hints.rs` — the tool name and the list of known tools that follow are page
-/// content, and vary.
+/// Thrown when the requested name matches no tool `getTools()` reported. `hints.rs` matches
+/// only this prefix; the tool names that follow are page content.
 pub const UNKNOWN_TOOL_PREFIX: &str = "chrome-agent: no WebMCP tool named";
 
 fn guard_js(frame_scoped: bool) -> String {
@@ -60,10 +39,8 @@ fn guard_js(frame_scoped: bool) -> String {
 
 /// One tool as `getTools()` reported it, reshaped for JSON output.
 ///
-/// `inputSchema` is a JSON *string* per spec (never an object) — kept verbatim in
-/// `input_schema_raw` because that is what the tool actually declared, and additionally parsed
-/// into `input_schema` on a best-effort basis for readability. A tool whose schema does not even
-/// parse is itself something worth seeing, not a reason to hide the raw text.
+/// `inputSchema` is a JSON *string* per spec. It is kept verbatim in `input_schema_raw` and
+/// additionally parsed into `input_schema` when it parses; an unparseable one is left raw.
 fn tool_summary(t: &Value) -> Value {
     let raw_schema = t.get("inputSchema").and_then(Value::as_str);
     let mut obj = json!({
@@ -72,9 +49,8 @@ fn tool_summary(t: &Value) -> Value {
         "title": t.get("title").and_then(Value::as_str),
         "origin": t.get("origin").and_then(Value::as_str),
         "input_schema_raw": raw_schema,
-        // The spec has no counterpart to inputSchema for the return value. Reported per tool
-        // (not once for the whole list) so an agent iterating tools sees it without having to
-        // recall a note stated somewhere else.
+        // The spec has no counterpart to inputSchema for the return value. Per tool, not once
+        // per list, so an agent iterating tools sees it.
         "output_schema": Value::Null,
     });
     if let Some(raw) = raw_schema
@@ -86,8 +62,7 @@ fn tool_summary(t: &Value) -> Value {
     obj
 }
 
-/// `getTools()`, reshaped per [`tool_summary`], plus whether this call is scoped to a bound
-/// `frame` — see the module doc for what that means for visibility.
+/// `getTools()` reshaped per [`tool_summary`], plus whether a `frame` was bound.
 pub struct ToolList {
     pub tools: Vec<Value>,
     pub frame_scoped: bool,
@@ -111,27 +86,21 @@ pub async fn list_tools(client: &CdpClient) -> Result<ToolList, crate::BoxError>
     Ok(ToolList { tools, frame_scoped })
 }
 
-/// What `executeTool` itself returned — the tool's side of the story. Whether the page
-/// measurably moved is a separate question the caller answers via the shared change report.
+/// What `executeTool` returned — the tool's own claim. Whether the page moved is a separate
+/// question, answered by the shared change report.
 pub struct ToolCallOutcome {
     pub tool: String,
     pub declared_result: String,
-    /// `executeTool` is specified to always resolve to a string. `false` means this page's own
-    /// tool implementation (typically a polyfill — the spec does not constrain what one
-    /// returns) handed back something else, and chrome-agent used `JSON.stringify` so there is
-    /// still something to report instead of silently discarding it.
+    /// `executeTool` is specified to resolve to a string. `false` means the page's own
+    /// implementation returned something else, which is `JSON.stringify`d rather than dropped.
     pub declared_result_was_string: bool,
-    /// See the module doc: under a `frame` binding this call reached that frame's isolated
-    /// world, not the top document's main world.
+    /// The call reached a bound frame's isolated world, not the top document's main world.
     pub frame_scoped: bool,
 }
 
-/// Call a tool by name. Resolves the name to the `RegisteredTool` `executeTool` requires
-/// (passing a bare name is the exact mistake the spec's own error message does not explain:
-/// `TypeError: The provided value is not of type 'RegisteredTool'.`) and always hands
-/// `executeTool` a validated JSON string for its second argument (its own complaint about a
-/// non-string argument — "Failed to parse input arguments" on native Chrome — is therefore
-/// unreachable through this path; the validation below is what replaces it with a clearer one).
+/// Call a tool by name, closing two of the spec's traps: `executeTool` needs the actual
+/// `RegisteredTool` object (a bare name is `TypeError: not of type 'RegisteredTool'`) and a
+/// JSON *string* second argument, so the name is resolved and the args validated first.
 pub async fn call_tool(
     client: &CdpClient,
     name: &str,
@@ -173,8 +142,7 @@ pub async fn call_tool(
     Ok(ToolCallOutcome { tool, declared_result, declared_result_was_string, frame_scoped })
 }
 
-/// Text-mode rendering for `webmcp list` — one line per tool, the absent `outputSchema` stated
-/// once rather than repeated per line.
+/// Text-mode `webmcp list`: one line per tool, with the absent `outputSchema` stated once.
 #[must_use]
 pub fn render_list_text(tools: &[Value]) -> String {
     if tools.is_empty() {

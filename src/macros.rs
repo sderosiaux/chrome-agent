@@ -1,31 +1,11 @@
 //! A named, parameterised path that already worked once, and what it is allowed to promise.
 //!
-//! Three pieces of this tool existed and ignored each other: `batch` (a list of commands on
-//! stdin, with no name, no file and no parameter), `replay` (a file and `--vars`, but of a raw
-//! recording), and the verdict (per action, never per scenario). A macro is the three of them
-//! in one artefact: a file the agent writes after succeeding once, whose every step carries the
-//! postcondition observed on that success.
+//! Every step carries the postcondition observed on the success it was distilled from. Not a
+//! recording, which keeps dead ends; not a repair loop, since a guard that does not hold stops
+//! the run with no branch, no retry and no repair.
 //!
-//! # What it is not
-//!
-//! Not a replayed recording. A recording keeps everything, dead ends included; a macro keeps the
-//! path that arrived, with durable locators and expectations that survive tomorrow.
-//!
-//! Not a repair loop. A guard that does not hold stops the run at that step and says what was
-//! expected, what was observed and what the action's own `next` was. There is no branch, no
-//! retry, no repair — claiming otherwise would be the kind of false success this project exists
-//! to remove.
-//!
-//! # Why JSON and not the YAML of the design note
-//!
-//! The design sketches the file in YAML. YAML earns its keep when a HUMAN writes the file, and
-//! the design's own premise is that the agent writes it. Against that, YAML costs a dependency
-//! (`serde_yaml` is unmaintained; the crate graph is guarded in CI and is one pure-Rust regex
-//! away from empty), and every other artefact this tool reads or writes — pipe, batch, the
-//! session store, the recording — is JSON. So a macro is JSON, and a step's `do` is EXACTLY the
-//! command object `batch`/`pipe` already accept: `macro run` dispatches it through the same
-//! dispatcher, which is the difference between reusing the execution semantics and inventing a
-//! second set. Reported as a deviation rather than taken silently.
+//! JSON rather than YAML, which would cost an unmaintained dependency. A step's `do` is EXACTLY
+//! the command object `pipe`/`batch` take, so `macro run` reuses their dispatcher.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -39,11 +19,8 @@ use serde_json::{json, Value};
 pub struct Param {
     #[serde(default = "yes")]
     pub required: bool,
-    /// Never stored, never written to the file, and the run refuses without it.
-    ///
-    /// The predicate that decides which fields are secret is `element::SECRET_FIELD`, the one
-    /// the fill report already uses; this flag is what the recorder writes when that predicate
-    /// fired, so the two cannot disagree about what a secret is.
+    /// Never stored, never written to the file, and the run refuses without it. Written by the
+    /// recorder when `element::SECRET_FIELD` fired, so both agree on what a secret is.
     #[serde(default)]
     pub secret: bool,
 }
@@ -62,19 +39,15 @@ pub struct Step {
     /// The guards, all from the whitelist. An empty object is a step that promises nothing.
     #[serde(default)]
     pub expect: Guards,
-    /// Why this step carries no guard, when it carries none.
-    ///
-    /// The design's open question, answered in the file rather than in silence: a step whose
-    /// observation produced nothing from the whitelist is not a verified step, and a reader
-    /// that cannot tell it from a guarded one will trust it the same.
+    /// Why this step carries no guard, when it carries none. Said in the file, because a reader
+    /// who cannot tell an unguarded step from a guarded one trusts it the same.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unguarded: Option<String>,
 }
 
-/// The whitelist, and only the whitelist.
-///
-/// Every field here answers the same question: would this still be true tomorrow, on the same
-/// task, if it succeeded again? What is deliberately absent is argued in `macros_record`.
+/// The whitelist, and only the whitelist. Every field answers one question: would this still be
+/// true tomorrow, on the same task, if it succeeded again? What is absent is argued in
+/// `macros_record`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Guards {
@@ -122,10 +95,8 @@ impl Guards {
             && self.exists.is_none()
     }
 
-    /// The guards that can be settled from the response alone, in the order they are checked.
-    ///
-    /// Kept separate from the ones that need a page read: a response-only guard costs nothing,
-    /// and checking it first means a step that already failed does not pay for a `text` read.
+    /// The guards settled from the response alone, in check order. Checked before the ones that
+    /// need a page read, so a step that already failed does not pay for a `text` read.
     #[must_use]
     pub fn response_guards(&self) -> Vec<(&'static str, String)> {
         let mut out = Vec::new();
@@ -147,8 +118,8 @@ impl Guards {
 #[serde(deny_unknown_fields)]
 pub struct Macro {
     pub name: String,
-    /// Where it was recorded. Context for a reader, never a guard: a macro is not refused
-    /// because the host moved.
+    /// Where it was recorded. Context, never a guard: a macro is not refused because the host
+    /// moved.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub site: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -158,11 +129,8 @@ pub struct Macro {
     pub steps: Vec<Step>,
 }
 
-/// What a name may contain.
-///
-/// It becomes a file name under the store, so a name that walks out of the directory is
-/// refused rather than sanitised: silently renaming what the caller asked for is how a macro
-/// ends up somewhere nobody looks.
+/// What a name may contain. It becomes a file name under the store, so a name that walks out of
+/// the directory is refused rather than sanitised into somewhere nobody looks.
 pub fn check_name(name: &str) -> Result<(), String> {
     if name.is_empty() {
         return Err("A macro name cannot be empty.".into());
@@ -206,8 +174,8 @@ impl Macro {
         Self::parse(&text)
     }
 
-    /// Parse and validate. `deny_unknown_fields` is the point: a guard this build does not
-    /// know is refused loudly, never ignored — an ignored guard is a promise nobody checks.
+    /// Parse and validate. `deny_unknown_fields` is the point: a guard this build does not know
+    /// is refused loudly, since an ignored guard is a promise nobody checks.
     pub fn parse(text: &str) -> Result<Self, crate::BoxError> {
         let parsed: Self = serde_json::from_str(text)
             .map_err(|e| format!("Not a usable macro file: {e}"))?;
@@ -218,11 +186,8 @@ impl Macro {
         Ok(parsed)
     }
 
-    /// Write it under the store, 0600.
-    ///
-    /// Same permission as the recording and the session store, and for a weaker but real
-    /// reason: a macro holds no secret by construction, and it does hold the values a fill
-    /// wrote — an email address, an account number — which is not public either.
+    /// Write it under the store, 0600. A macro holds no secret by construction, but it does
+    /// hold the values a fill wrote — an email address, an account number.
     pub fn save(&self) -> Result<PathBuf, crate::BoxError> {
         check_name(&self.name)?;
         let dir = store_dir();
@@ -235,9 +200,7 @@ impl Macro {
         Ok(path)
     }
 
-    /// The parameters a run must be given, and the reason it may not be defaulted.
-    ///
-    /// A secret is declared and never stored, so a missing one is a refusal and not a blank:
+    /// The parameters a run must be given. A missing secret is a refusal, never a blank:
     /// filling a password field with an empty string is a real edit of a real page.
     pub fn bind(&self, vars: &BTreeMap<String, String>) -> Result<(), crate::BoxError> {
         let mut missing: Vec<&str> = Vec::new();
@@ -267,9 +230,7 @@ impl Macro {
                 if secret.len() == 1 { "it is" } else { "they are" }
             ));
         }
-        // The names, not a template: `hints.rs`'s rule 2 is that a caller who copies the
-        // advice runs a command, and `--var name=value` is a shape to fill in rather than a
-        // command to run.
+        // The real names, not `--var name=value`: rule 2 says a copied hint has to run.
         message.push_str(&format!(
             " Pass {}: {}.",
             if missing.len() == 1 { "it" } else { "them" },
@@ -278,16 +239,14 @@ impl Macro {
         Err(message.into())
     }
 
-    /// One step's command with `{{param}}` replaced.
-    ///
-    /// Substitution is textual and happens on the serialised command, which is what `replay`
-    /// already does — the same spelling in the same tool, rather than a second convention.
+    /// One step's command with `{{param}}` replaced. Textual, on the serialised command, the
+    /// same spelling `replay` uses.
     pub fn resolve(&self, step: &Step, vars: &BTreeMap<String, String>) -> Result<Value, crate::BoxError> {
         let mut text = serde_json::to_string(&step.action)?;
         for (key, value) in vars {
             let escaped = serde_json::to_string(value)?;
-            // The value arrives as a JSON string; splice its INSIDE, so a quote or a backslash
-            // in a password cannot end the string it is being written into.
+            // Splice the JSON string's INSIDE, so a quote or backslash in a password cannot
+            // end the string it is written into.
             let inner = escaped.trim_matches('"');
             text = text.replace(&format!("{{{{{key}}}}}"), inner);
         }
@@ -390,8 +349,7 @@ mod tests {
         assert_eq!(parsed, again);
     }
 
-    /// A guard this build does not know must be refused, not ignored: an ignored guard is a
-    /// promise on the response that nothing ever checks.
+    /// An ignored guard is a promise on the response that nothing ever checks.
     #[test]
     fn an_unknown_guard_is_refused_rather_than_dropped() {
         let text = r#"{"name":"x","steps":[{"do":{"cmd":"click"},"expect":{"added":450}}]}"#;
@@ -399,8 +357,7 @@ mod tests {
         assert!(error.contains("added"), "the refusal names the field: {error}");
     }
 
-    /// The counters are the headline case of the blacklist, and the parser is where the file
-    /// format says no.
+    /// The parser is where the file format says no.
     #[test]
     fn a_macro_with_no_steps_is_not_a_macro() {
         assert!(Macro::parse(r#"{"name":"x","steps":[]}"#).is_err());
@@ -416,8 +373,8 @@ mod tests {
         assert!(error.contains("file name"), "{error}");
     }
 
-    /// A missing secret is a refusal with its reason, because there is deliberately nothing
-    /// stored to fall back on — and an empty password typed into a real form is a real edit.
+    /// Nothing is stored to fall back on, and an empty password typed into a real form is a
+    /// real edit.
     #[test]
     fn a_missing_secret_says_why_it_cannot_be_defaulted() {
         let parsed = Macro::parse(CANCEL).unwrap();
@@ -439,15 +396,14 @@ mod tests {
             .expect("resolves");
         assert_eq!(resolved["value"], "ada@example.com");
 
-        // A password with a quote in it must not end the string it lands in.
+        // A quote or backslash must not end the string it lands in.
         let awkward = parsed
             .resolve(&parsed.steps[1], &vars(&[("email", "a\"b\\c")]))
             .expect("stays valid JSON");
         assert_eq!(awkward["value"], "a\"b\\c");
     }
 
-    /// The braces reaching the page is the failure this refuses: a form that receives
-    /// `{{email}}` accepts it, and the macro looks like it worked.
+    /// A form that receives `{{email}}` accepts it, and the macro looks like it worked.
     #[test]
     fn a_placeholder_nobody_bound_stops_the_step() {
         let parsed = Macro::parse(CANCEL).unwrap();

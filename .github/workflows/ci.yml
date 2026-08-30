@@ -7,22 +7,18 @@ on:
 
 jobs:
   check:
-    # Pinned, not `ubuntu-latest`. The suite now launches a real browser, so the image is
-    # part of the contract: `ubuntu-latest` moved from 22.04 to 24.04 under existing
-    # workflows once already, and 26.04 is in public preview. A surprise image change would
-    # arrive as a browser failure in an unrelated PR.
+    # Pinned, not `ubuntu-latest`: the suite launches a real browser, so the image is part
+    # of the contract and a silent bump would arrive as a browser failure in an unrelated PR.
     runs-on: ubuntu-24.04
-    # A wedged browser used to be able to burn the full 6h default. The CDP call deadline
-    # makes that unlikely; this makes it impossible.
+    # A wedged browser must not be able to burn the 6h default.
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@1.95.0
-      - run: cargo check
-      - run: cargo clippy -- -D warnings
-      # The browser tests skip themselves when Chrome is missing, and a skip is a pass.
-      # Assert Chrome exists here so that a runner image that drops it fails the build
-      # instead of silently turning ~57 of 68 tests into no-ops.
+      - run: cargo check --locked
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      # A browser test skips itself when Chrome is missing, and a skip is a pass. Assert
+      # Chrome exists so a runner image that drops it fails instead of no-oping the suite.
       - name: Require a real browser for the test run
         run: |
           if ! command -v google-chrome >/dev/null && ! command -v chromium >/dev/null; then
@@ -30,32 +26,24 @@ jobs:
             exit 1
           fi
           google-chrome --version || chromium --version
-          # Ubuntu 23.10+ blocks unprivileged user namespaces through AppArmor, which is
-          # what Chrome's sandbox uses. The google-chrome .deb ships a profile that grants
-          # it, so the system Chrome we launch is expected to work — this lifts the
-          # restriction anyway, because the alternative if it ever does bite is passing
-          # --no-sandbox, and weakening the sandbox for every user of the tool to keep CI
-          # green is the wrong trade. Failure to set it is not fatal.
+          # Ubuntu 23.10+ blocks unprivileged user namespaces via AppArmor, which Chrome's
+          # sandbox uses. The .deb ships a profile that grants it, so this is belt and
+          # braces — the alternative if it ever bites is --no-sandbox, which weakens the
+          # sandbox for every user of the tool to keep CI green. Not fatal if it fails.
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
-          # Prove the browser actually launches before spending the suite on finding out.
+          # Prove the browser launches before spending the suite on finding out.
           google-chrome --headless=new --disable-gpu --dump-dom about:blank >/dev/null
-      # vendor/extract.js has its own jsdom suite (120+ tests) that nothing used to run —
-      # not cargo test, not CI. tests/js_suite_tests.rs runs it now, but only if jsdom is
-      # installed; without this step it would skip, and under CHROME_AGENT_REQUIRE_CHROME
-      # that skip is fatal. Installing it here is what makes the extraction engine gated.
-      # `npm ci`, with no `|| npm install` fallback: the fallback would regenerate the
-      # lockfile on the fly and let a drifted package.json pass green, which is the
-      # failure this whole pass keeps closing elsewhere. A lockfile that no longer
-      # satisfies package.json is a commit somebody forgot to make, not a hiccup.
+      # vendor/extract.js has its own jsdom suite, run by tests/js_suite_tests.rs only if
+      # jsdom is installed. `npm ci` with no `|| npm install` fallback: the fallback would
+      # regenerate the lockfile on the fly and let a drifted package.json pass green.
       - name: Install the extraction suite's dependencies
         run: npm ci --prefix tests/js
-      - run: cargo test -- --test-threads=1
+      - run: cargo test --locked -- --test-threads=1
         env:
           # Turns every "SKIP: …" into a failure. See tests/common/mod.rs.
           CHROME_AGENT_REQUIRE_CHROME: 1
-      # Linux release binaries are fully static musl builds (issue #3). That only works
-      # while the dependency graph stays pure Rust — a C-linking crate (TLS/crypto backend)
-      # would reintroduce a glibc dependency. Fail fast if one sneaks back in.
+      # Linux releases are fully static musl builds (issue #3), which only works while the
+      # dependency graph stays pure Rust. A C-linking crate reintroduces a glibc dependency.
       - name: Guard pure-Rust dependency graph
         run: |
           for c in ring openssl-sys aws-lc-sys; do

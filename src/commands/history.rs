@@ -64,7 +64,6 @@ pub fn run(filter: Option<&str>, limit: usize) -> Result<Vec<HistoryEntry>, crat
         entries.retain(|e| e.url.to_lowercase().contains(&pattern_lower));
     }
 
-    // Return last N entries
     let start = entries.len().saturating_sub(limit);
     Ok(entries.split_off(start))
 }
@@ -84,21 +83,20 @@ pub fn format_text(entries: &[HistoryEntry]) -> String {
     out.trim_end().to_string()
 }
 
+/// Unix timestamp → `YYYY-MM-DD HH:MM`, without a date crate.
 fn format_timestamp(ts: u64) -> String {
-    // Convert unix timestamp to YYYY-MM-DD HH:MM without external crate
     let secs = ts;
     let days = secs / 86400;
     let time_of_day = secs % 86400;
     let hours = time_of_day / 3600;
     let minutes = (time_of_day % 3600) / 60;
 
-    // Calculate date from days since epoch (1970-01-01)
     let (year, month, day) = days_to_date(days);
     format!("{year:04}-{month:02}-{day:02} {hours:02}:{minutes:02}")
 }
 
+/// Days since the epoch → civil date (Howard Hinnant's algorithm).
 const fn days_to_date(days: u64) -> (u64, u64, u64) {
-    // Civil date from day count algorithm
     let z = days + 719_468;
     let era = z / 146_097;
     let doe = z - era * 146_097;

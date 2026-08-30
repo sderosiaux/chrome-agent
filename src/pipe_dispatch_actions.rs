@@ -1,6 +1,5 @@
-//! Composite and form-control dispatchers, split out of `pipe_dispatch.rs` to stay
-//! under the repo's 1000-line file cap. Re-exported from `pipe_dispatch` so callers
-//! keep using a single path.
+//! Composite and form-control dispatchers, plus `run_batch`. Re-exported from
+//! `pipe_dispatch` so callers use a single path.
 
 use serde_json::{json, Value};
 
@@ -8,11 +7,10 @@ use crate::cdp::client::CdpClient;
 use crate::commands;
 use crate::session::{self, SessionStore};
 
-use crate::pipe_dispatch::{attach_snapshot, cmd_max_depth, get_uid_map, merge_into, parse_xy};
+use crate::pipe_dispatch::{attach_snapshot, cmd_max_depth, parse_xy};
+use crate::run_helpers::{get_uid_map, merge_into};
 
-// ---------------------------------------------------------------------------
-// Composite dispatchers
-// ---------------------------------------------------------------------------
+// --- Composite dispatchers ---
 
 pub async fn dispatch_navigate_and_read(
     client: &CdpClient, _store: &mut SessionStore, browser_name: &str, page_name: &str,
@@ -25,8 +23,8 @@ pub async fn dispatch_navigate_and_read(
     let _ = commands::history::append(&goto_result.url, &goto_result.title, page_name);
     let read_result = commands::read::run(client, false, truncate).await?;
     let mut out = json!({"ok": true, "url": goto_result.url, "title": goto_result.title, "content": read_result.text_content});
-    // The bounce this reports matters more here than on a bare `goto`: without it the caller
-    // gets a login page's prose back as if it were the article they asked for.
+    // `landed` matters more here than on a bare `goto`: without it a login page's prose comes
+    // back as if it were the article that was asked for.
     goto_result.landed.attach(&mut out, browser_name);
     Ok(out)
 }
@@ -54,17 +52,15 @@ pub async fn dispatch_fill_and_submit(client: &CdpClient, timeout: u64, cmd: &Va
         let wait_type = if is_selector { "selector" } else { "text" };
         commands::wait::run(client, wait_type, pattern, timeout, 500).await?;
     }
-    // Best effort: Readability rejects plenty of legitimate pages, and the fill and the
-    // submit have already landed. Failing the whole command there tells an agent its
-    // mutation did not happen, and the natural response to that is to submit again.
+    // The read below is best effort: Readability rejects plenty of legitimate pages, and the
+    // fill and submit already landed. Failing here would invite a second submit.
     let message = format!("Filled {field_count} fields, submitted, waited for '{}'", wait_for.unwrap_or("none"));
     let mut out = json!({"ok": true, "message": message});
     // The submit's own delivery, at the top level where the verdict wiring reads it: a submit
-    // button under a consent banner is the shape this command exists for, and it used to be
-    // reported as a successful submit.
+    // button under a consent banner would otherwise report as a successful submit.
     merge_into(&mut out, Some(&submitted.report()));
-    // The only witness this command has. The change report runs after the submit, so a
-    // field the page rewrote on the way in is no longer visible anywhere by then.
+    // The only witness this command has: the change report runs after the submit, by which
+    // time a field the page rewrote on the way in is no longer visible.
     out["values"] = crate::run_helpers::bulk_fill_report("selector", &outcomes);
     match commands::read::run(client, false, None).await {
         Ok(read_result) => out["content"] = json!(read_result.text_content),
@@ -88,7 +84,7 @@ pub async fn dispatch_fill_form(
 ) -> Result<Value, crate::BoxError> {
     let pairs = cmd.get("pairs").and_then(Value::as_array)
         .ok_or("fill-form requires \"pairs\" array (e.g. [{\"uid\":\"n1\",\"value\":\"a\"}])")?;
-    let uid_map = crate::run_helpers::get_uid_map(store, browser_name, page_name);
+    let uid_map = get_uid_map(store, browser_name, page_name);
     let mut outcomes = Vec::new();
     for pair in pairs {
         let uid = pair.get("uid").and_then(Value::as_str).ok_or("Each pair needs \"uid\"")?;
@@ -115,14 +111,12 @@ pub async fn dispatch_hover(
     client: &CdpClient, store: &SessionStore, browser_name: &str, page_name: &str, cmd: &Value,
 ) -> Result<Value, crate::BoxError> {
     let uid = cmd.get("uid").and_then(Value::as_str).ok_or("hover requires \"uid\"")?;
-    let uid_map = crate::run_helpers::get_uid_map(store, browser_name, page_name);
+    let uid_map = get_uid_map(store, browser_name, page_name);
     crate::element::hover(client, &uid_map, uid).await?;
     Ok(json!({"ok": true, "message": format!("Hovered uid={uid}")}))
 }
 
-// ---------------------------------------------------------------------------
-// New command dispatchers
-// ---------------------------------------------------------------------------
+// --- New command dispatchers ---
 
 pub async fn dispatch_dblclick(
     client: &CdpClient, store: &mut SessionStore, browser_name: &str, page_name: &str,
@@ -131,12 +125,12 @@ pub async fn dispatch_dblclick(
 ) -> Result<Value, crate::BoxError> {
     let inspect = cmd.get("inspect").and_then(Value::as_bool).unwrap_or(false);
     let max_depth = cmd_max_depth(cmd).or(global_max_depth);
-    // Hoist the `?` out of the `else if let` so the non-Send ControlFlow residual
-    // isn't held across the awaits below (keeps the future Send).
+    // Hoisted out of the `else if let` below: the non-Send `?` residual must not be held
+    // across an await, or the future stops being Send.
     let xy = parse_xy(cmd)?;
     let on_intercept = crate::hit_test::OnIntercept::from_cmd(cmd, report.on_intercept);
-    // The node is resolved before the action, from the handle the probe and the dispatch use:
-    // afterwards the element may be detached and the answer would describe a different page.
+    // The node is resolved before the action: afterwards it may be detached, and the answer
+    // would describe a different page.
     let (msg, details) = if let Some(sel) = cmd.get("selector").and_then(Value::as_str) {
         let outcome = crate::element::dblclick_selector(client, sel, on_intercept).await?;
         let target = format!("selector '{sel}'");
@@ -198,11 +192,13 @@ pub async fn dispatch_select(
     Ok(obj)
 }
 
+/// `desired` comes from the caller, not from the command: the dispatcher already knows whether
+/// the verb was `check` or `uncheck`, and reading it back out of a cloned Value with the field
+/// inserted was the same decision made twice.
 pub async fn dispatch_check(
     client: &CdpClient, store: &SessionStore, browser_name: &str, page_name: &str,
-    report: crate::run_helpers::ReportPolicy, cmd: &Value,
+    report: crate::run_helpers::ReportPolicy, desired: bool, cmd: &Value,
 ) -> Result<Value, crate::BoxError> {
-    let desired = cmd.get("desired").and_then(Value::as_bool).unwrap_or(true);
     let target = crate::run_helpers::target_details(
         client,
         cmd.get("selector").and_then(Value::as_str),
@@ -224,7 +220,7 @@ pub async fn dispatch_check(
         obj["uid"] = uid.clone();
     }
     // `observed_after_ms` is absent when the element already held the state: nothing was
-    // dispatched, so there was no post-action moment to report.
+    // dispatched, so there is no post-action moment.
     merge_into(&mut obj, details.as_ref());
     Ok(obj)
 }
@@ -266,18 +262,12 @@ pub async fn dispatch_drag(
     Ok(json!({"ok": true, "message": format!("Dragged uid={from} to uid={to}")}))
 }
 
-// ---------------------------------------------------------------------------
-// Assert
-// ---------------------------------------------------------------------------
+// --- Assert ---
 
-/// `assert` for pipe and batch.
-///
-/// There is no exit code here, so `held` rides on `ok`: a claim that did not hold answers
-/// `{"ok":false,"assertion":{…},"hint":…}` and one that could not be checked answers the
-/// usual `{"ok":false,"error":…}`. The two are told apart by the presence of `assertion`,
-/// and `batch`'s `all_ok` and `stop_on_error` treat both as the failures they are without
-/// needing a second convention. `assert` is not in `mutates_page`: it is a read, so no
-/// change report and no verdict ride on the response.
+/// `assert` for pipe and batch. No exit code here, so `held` rides on `ok`: a claim that did
+/// not hold answers `{"ok":false,"assertion":{…}}`, one that could not be checked answers
+/// `{"ok":false,"error":…}`, and the presence of `assertion` tells them apart. Not in
+/// `mutates_page`: a read, so no change report and no verdict.
 pub async fn dispatch_assert(
     client: &CdpClient, store: &SessionStore, browser_name: &str, page_name: &str, cmd: &Value,
 ) -> Result<Value, crate::BoxError> {
@@ -287,9 +277,7 @@ pub async fn dispatch_assert(
     Ok(outcome.to_json())
 }
 
-// ---------------------------------------------------------------------------
-// WebMCP
-// ---------------------------------------------------------------------------
+// --- WebMCP ---
 
 /// `webmcp_list` for pipe and batch. Not in `mutates_page`: it is a read, like `assert`.
 pub async fn dispatch_webmcp_list(client: &CdpClient) -> Result<Value, crate::BoxError> {
@@ -298,9 +286,8 @@ pub async fn dispatch_webmcp_list(client: &CdpClient) -> Result<Value, crate::Bo
 }
 
 /// `webmcp_call` for pipe and batch. IS in `mutates_page`: a tool's declared result is
-/// freeform text with no schema to check it against (`commands::webmcp` module doc), so the
-/// accessibility-tree delta the shared hook attaches after this returns is the only
-/// corroboration available. `declared_result` carries the tool's own side of the story.
+/// freeform text with no schema, so the accessibility-tree delta attached after this returns
+/// is the only corroboration. `declared_result` carries the tool's own claim.
 pub async fn dispatch_webmcp_call(client: &CdpClient, cmd: &Value) -> Result<Value, crate::BoxError> {
     let name = cmd.get("name").and_then(Value::as_str).ok_or("webmcp_call: missing \"name\"")?;
     let args = cmd.get("args").cloned().unwrap_or_else(|| json!({}));
@@ -324,21 +311,13 @@ pub async fn dispatch_webmcp_call(client: &CdpClient, cmd: &Value) -> Result<Val
     Ok(out)
 }
 
-// ---------------------------------------------------------------------------
-// Batch
-// ---------------------------------------------------------------------------
+// --- Batch ---
 
-/// Run a list of commands through `dispatch_single`, optionally stopping at the first
-/// failure.
+/// Run commands through `dispatch_single`. The one loop behind both batch front ends: CLI
+/// `batch` and `{"cmd":"batch",…}` in pipe mode.
 ///
-/// The one loop behind both batch front ends (`chrome-agent batch` reading a JSON array from
-/// stdin, and `{"cmd":"batch","commands":[…]}` in pipe mode) — they used to keep a copy each,
-/// so `stop_on_error` would have had to be implemented, and kept in step, twice.
-///
-/// `stop_on_error` is opt-in and off by default: a batch is also used to collect independent
-/// observations, where one failure is not a reason to abandon the rest. When it is on, the
-/// response says where it stopped rather than leaving the caller to infer it from a short
-/// array.
+/// `stop_on_error` is off by default — a batch also collects independent observations. When
+/// on, the response carries `stopped_at` and `skipped`.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_batch(
     client: &CdpClient,
@@ -356,15 +335,14 @@ pub async fn run_batch(
 ) -> Value {
     let mut results = Vec::with_capacity(commands_list.len());
     let mut stopped_at = None;
-    // Check each entry independently: a reset can repair later entries, but it cannot make an
-    // earlier command safe retroactively.
+    // Each entry is checked independently: a reset repairs later entries, never earlier ones.
     for (index, c) in commands_list.iter().enumerate() {
         let r = if let Some(response) = emulation_recovery.refusal_for(c) {
             response
         } else {
             crate::pipe_dispatch::dispatch_single(
                 client, browser_client, store, browser_name, page_name, target_id, timeout,
-                global_max_depth, report, c,
+                global_max_depth, report, c, emulation_recovery,
             ).await
         };
         emulation_recovery.update_after(c, &r);

@@ -3,10 +3,8 @@ use serde_json::{json, Value};
 use crate::cdp::client::CdpClient;
 use crate::cdp::types::EvaluateResult;
 
-/// Wrap the expression in a block scope `{ ... }` when it contains top-level
-/// `const` or `let` declarations so that repeated `eval` calls don't fail with
-/// "Identifier already declared".  V8's completion-value semantics mean the
-/// block still returns the value of its last expression statement.
+/// Wrap top-level `const`/`let` declarations in a block, so repeated `eval` calls do not fail
+/// with "Identifier already declared". V8 completion values still return the last expression.
 fn maybe_block_scope(expression: &str) -> std::borrow::Cow<'_, str> {
     let t = expression.trim();
     let has_declaration = t.starts_with("const ")
@@ -24,9 +22,8 @@ fn maybe_block_scope(expression: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
-/// Build `Runtime.evaluate` params, scoping to the frame's isolated world
-/// when the `frame` command has bound one (issue #8). Without a binding the
-/// `contextId` is omitted and evaluation targets the top document as before.
+/// Build `Runtime.evaluate` params, scoped to a bound frame's isolated world when there is
+/// one. Without a binding the `contextId` is omitted and the top document is targeted.
 fn evaluate_params(client: &CdpClient, expression: &str) -> Value {
     let mut params = json!({
         "expression": expression,
@@ -74,7 +71,6 @@ pub async fn run(
         .call("Runtime.evaluate", evaluate_params(client, &expression))
         .await?;
 
-    // Check for exception
     if let Some(exception) = &result.exception_details {
         return Err(format!(
             "Evaluation error: {}",
@@ -87,11 +83,10 @@ pub async fn run(
         .into());
     }
 
-    // Stringify the result value
     let output = match &result.result.value {
         Some(val) => serde_json::to_string(val)?,
         None => {
-            // No value returned — use description or type
+            // No value: fall back to the description, then the type.
             result
                 .result
                 .description

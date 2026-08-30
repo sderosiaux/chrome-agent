@@ -17,11 +17,9 @@ pub async fn run(
     Ok(snapshot)
 }
 
-/// One reading of the page, rendered twice: the full baseline to persist and the reduced
-/// view the caller asked for.
-///
-/// Every caller that both *shows* a tree and *stores* one goes through here, so the rule
-/// that a display flag never reaches the baseline is stated once — see `snapshot::Views`.
+/// One reading of the page rendered twice: the full baseline to persist, and the reduced view
+/// the caller asked for. Every caller that both shows and stores a tree goes through here, so
+/// a display flag can never reach the baseline.
 pub async fn views(
     client: &CdpClient,
     verbose: bool,
@@ -32,16 +30,13 @@ pub async fn views(
     Ok(crate::snapshot::take_views(client, verbose, max_depth, focus_uid, role_filter).await?)
 }
 
-/// Scroll and collect unique filtered items from virtualized lists (X.com, etc.).
-/// Takes repeated snapshots while scrolling, deduplicates by text content,
-/// stops when `limit` unique items are collected or no new items appear.
+/// Collect unique items from a virtualized list by snapshotting while scrolling, deduplicated
+/// by text, until `limit` items or three barren rounds.
 ///
-/// The collected text is a UNION over scroll positions: it never described the page at any
-/// one moment, so it cannot be a diff baseline. `Views::full` is therefore a fresh, full
-/// reading taken once the scrolling has stopped — the page as it now stands — while the
-/// union stays what the caller is shown. Its `uid_map` keeps the union too: an item that
-/// scrolled out of a virtualized list is gone from the final tree, and dropping its uid
-/// would take away the only handle the caller was given for it.
+/// The collected text is a UNION over scroll positions and never described the page at one
+/// moment, so it cannot be a diff baseline: `Views::full` is a fresh reading taken after the
+/// scrolling stops. The `uid_map` keeps the union, since an item that scrolled out of the
+/// final tree still needs a handle.
 pub async fn scroll_collect(
     client: &CdpClient,
     verbose: bool,
@@ -54,10 +49,8 @@ pub async fn scroll_collect(
     let mut uid_map: HashMap<String, ElementRef> = HashMap::new();
     let max_scrolls = limit * 3;
     let mut stale_count = 0;
-    // `limit * 3` bounds the iterations, not the time: each one costs a settle window, so a
-    // page that keeps producing items turns `--limit 500` into 1500 rounds of up to two
-    // seconds. The caller's `--timeout` is the answer to "how long am I willing to wait",
-    // so it bounds the whole collection too.
+    // `limit * 3` bounds iterations, not time: each costs a settle window of up to 2s. The
+    // caller's `--timeout` bounds the whole collection.
     let deadline = std::time::Instant::now() + client.call_timeout();
     let mut ran_out_of_time = false;
 
@@ -78,7 +71,7 @@ pub async fn scroll_collect(
 
         if collected.len() >= limit { break; }
 
-        // If no new items found after scroll, stop (end of list)
+        // Three scrolls with no new item means the end of the list.
         if collected.len() == prev_len {
             stale_count += 1;
             if stale_count >= 3 { break; }
@@ -86,13 +79,8 @@ pub async fn scroll_collect(
             stale_count = 0;
         }
 
-        // Scroll down one viewport, then wait for DOM mutations to settle.
-        //
-        // The wait used to be an inline promise whose 400ms debounce re-armed on every
-        // mutation with no ceiling: on a page that mutates forever — a ticker, a live feed,
-        // a rotating ad slot — it never resolved, and `awaitPromise` then held the whole
-        // command open. `snapshot::settle` is the same debounce with a hard timer that
-        // nothing clears, so a live page costs the ceiling instead of the session.
+        // Scroll one viewport, then settle: a 400 ms debounce under a 2000 ms ceiling that no
+        // mutation clears, so a continuously-mutating page costs the ceiling, not the session.
         let _ = client
             .call::<_, serde_json::Value>(
                 "Runtime.evaluate",
@@ -106,8 +94,8 @@ pub async fn scroll_collect(
     }
 
     collected.truncate(limit);
-    // Say when the list is short because time ran out rather than because the page ended:
-    // the two look identical in the output otherwise.
+    // A list cut short by the timeout and one cut short by the page ending look identical
+    // otherwise.
     let note = if ran_out_of_time {
         format!(
             "\n({} items collected; stopped at the {}s --timeout while the page was still producing items)",
@@ -119,9 +107,7 @@ pub async fn scroll_collect(
     };
     let text = format!("{}{note}", collected.join("\n"));
 
-    // One more full reading, after the scrolling: the baseline has to be a page state, and
-    // the union above is not one. Costs a single `getFullAXTree` on a path that already
-    // spent up to `limit * 3` of them.
+    // One more full reading: the baseline has to be a page state, and the union is not one.
     let mut full = crate::snapshot::take_snapshot(client, verbose, None, None, None).await?;
     // The final tree wins on any uid it also holds; the union keeps the ones it alone saw.
     for (uid, element) in full.uid_map {
@@ -131,7 +117,7 @@ pub async fn scroll_collect(
     Ok(Views::from_parts(full, Some(text)))
 }
 
-/// Post-process snapshot text to resolve and append href URLs on link nodes.
+/// Append resolved `href` URLs to the link nodes of a rendered snapshot.
 pub async fn resolve_urls(
     client: &CdpClient,
     text: &str,
@@ -140,7 +126,7 @@ pub async fn resolve_urls(
     let mut result = String::with_capacity(text.len());
     for line in text.lines() {
         result.push_str(line);
-        // Match lines like "uid=n42 link "Some text""
+        // Matches `uid=n42 link "Some text"`.
         let trimmed = line.trim();
         if let Some(rest) = trimmed.strip_prefix("uid=")
             && let Some((uid, after_uid)) = rest.split_once(' ') {
@@ -158,27 +144,20 @@ pub async fn resolve_urls(
     result
 }
 
-/// Result of paging/capping a rendered snapshot for display.
+/// A windowed snapshot rendering.
 pub struct Paged {
-    /// The (possibly windowed) text, with a truncation note appended when truncated.
+    /// The window, with a truncation note appended when there is one.
     pub text: String,
-    /// Total number of characters in the full snapshot.
+    /// Characters in the FULL snapshot, not in the window.
     pub total_chars: usize,
-    /// Whether characters were dropped after the returned window.
     pub truncated: bool,
-    /// Offset to pass on the next call to continue paging (only when truncated).
+    /// Where to resume paging; `None` unless truncated.
     pub next_offset: Option<usize>,
 }
 
-/// Apply char-based paging to a rendered snapshot.
-///
-/// `offset` skips the first N characters (stable because uids are stable across
-/// inspects); `max_chars` caps the returned window. UTF-8 safe — never slices a
-/// multi-byte char. When the window is capped short of the end, a machine-readable
-/// tail is appended so an agent knows how to continue or narrow.
-///
-/// When `offset == 0` and `max_chars` is `None`, the text is returned unchanged
-/// (matches the no-cap default of `text`/`read`).
+/// Char-based paging over a rendered snapshot: `offset` skips N characters, `max_chars` caps
+/// the window, and a truncated window gains a tail naming the next `--offset`. UTF-8 safe.
+/// `offset == 0` with no `max_chars` returns the text unchanged.
 #[must_use]
 pub fn paginate(text: &str, offset: usize, max_chars: Option<usize>) -> Paged {
     let total_chars = text.chars().count();
@@ -187,7 +166,7 @@ pub fn paginate(text: &str, offset: usize, max_chars: Option<usize>) -> Paged {
         return Paged { text: text.to_string(), total_chars, truncated: false, next_offset: None };
     }
 
-    // Byte index of the offset-th char (clamped to end).
+    // Byte index of the offset-th char, clamped to the end.
     let start_byte = text.char_indices().nth(offset).map_or(text.len(), |(i, _)| i);
     let window = &text[start_byte..];
     let window_chars = total_chars.saturating_sub(offset);
@@ -297,7 +276,7 @@ mod tests {
 
     #[test]
     fn paginate_utf8_safe_no_panic() {
-        // 3-byte chars: naive byte slicing would panic mid-char.
+        // Naive byte slicing would panic mid-char.
         let text = "日本語テストデータ"; // 9 chars
         let p = paginate(text, 2, Some(3)); // chars 2..5 = "語テス"
         assert_eq!(p.text.chars().take(3).collect::<String>(), "語テス");
@@ -307,15 +286,14 @@ mod tests {
 
     #[test]
     fn paginate_exact_fit_not_truncated() {
-        // Guards the `window_chars > max` comparison against an off-by-one (> vs >=):
-        // when the window exactly fills the cap, nothing is dropped and no tail is added.
+        // Guards `window_chars > max` against an off-by-one.
         let text = "abcdefghij"; // 10 chars
         let p = paginate(text, 0, Some(10));
         assert_eq!(p.text, text);
         assert!(!p.truncated);
         assert_eq!(p.next_offset, None);
 
-        // Same, offset into the middle: chars 4..10 = "efghij", cap == remaining.
+        // Offset into the middle, cap == remaining.
         let p2 = paginate(text, 4, Some(6));
         assert_eq!(p2.text, "efghij");
         assert!(!p2.truncated);
@@ -333,7 +311,7 @@ mod tests {
     #[test]
     fn url_append_only_on_links() {
         let text = "uid=n1 heading \"Title\"\nuid=n2 link \"Click me\"\nuid=n3 button \"OK\"\n";
-        // Without CDP, we just verify the parsing logic identifies link lines
+        // No CDP here: only the line-parsing that picks out link rows.
         for line in text.lines() {
             let trimmed = line.trim();
             if let Some(rest) = trimmed.strip_prefix("uid=")

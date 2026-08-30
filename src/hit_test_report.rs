@@ -1,50 +1,25 @@
-//! What a pointer-targeted action says about itself, and what it says when it dispatched
-//! nothing.
+//! What a pointer-targeted action claims about itself, including when it dispatched nothing.
+//! `hit_test` measures; this is the claim, re-exported from there so call sites stay
+//! `crate::hit_test::Dispatched`.
 //!
-//! Split out of `hit_test.rs` for the repo's 1000-line file cap and re-exported from it, so
-//! every call site stays `crate::hit_test::Dispatched`. The seam is deliberate rather than
-//! arithmetic: next door is the measurement (a probe, a settle loop, a classifier), and here is
-//! the claim the response makes about it.
-//!
-//! # Why a refusal is a value and not a sentence
-//!
-//! `--on-intercept refuse` used to answer, in full:
-//!
-//! ```json
-//! {"error":"Did not click uid=n208: div.gdpr-lmd-standard.gdpr-lmd-wall occupies the point it
-//!  would have been aimed at, and --on-intercept refuse was set.","ok":false}
-//! ```
-//!
-//! No `hint` — which `hints.rs` promises every error carries — no `intercepted_by`, no `next`.
-//! The receiver had been measured, named and then flattened into prose, so an agent had to
-//! parse an English sentence to learn which element to close. And it was the SAFE mode that
-//! helped least: `dispatch` returns the whole structured payload, while the mode a caller picks
-//! precisely because it would rather re-plan than act returned the least to re-plan with.
-//!
-//! [`Refused`] carries the measurement through the error channel — the same route
-//! `commands::assert::NotHeld` takes for exit 2 — and each of the three modes turns it into the
-//! same object. `ok` stays `false` and the CLI still exits 1: nothing was dispatched, so the
-//! command did not do what it was asked to.
+//! A refusal is a value, not a sentence: [`Refused`] carries the whole measurement through the
+//! error channel, so an agent never parses English to learn which element to close. `ok` stays
+//! `false` and the CLI exits 1 — nothing was dispatched.
 
 use serde_json::{json, Value};
 
 use crate::hit_test::{Hit, SETTLE_ATTEMPTS, SETTLE_GAP_MS};
 use crate::verdict::{Assessment, Delivered, Delivery, Observation, Postcondition};
 
-/// Why no point on the element could be aimed at.
-///
-/// `off_target` is one token over two shapes, on purpose — both mean "nothing was dispatched
-/// and a repeat measures the same thing", which is the whole content of the verdict. They
-/// differ only in the recovery, so the difference is carried here, where the message and the
-/// hint are written, rather than in the vocabulary an agent branches on.
+/// Why no point on the element could be aimed at. One `off_target` token covers both shapes:
+/// same verdict, different recovery, so the difference lives here and not in the vocabulary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Unaimable {
-    /// The aim point is on screen and outside every one of the element's own boxes: an inline
-    /// link laid out across a gap, a container clipped to nothing.
+    /// On screen and outside every one of the element's own boxes: an inline link across a gap,
+    /// a container clipped to nothing.
     NoBoxToAimAt,
-    /// The aim point stopped moving and stayed outside the viewport. What a `position: fixed`
-    /// wall pinned past an edge looks like when the document's own scroll is locked, so no
-    /// scroll this tool can perform will bring it back.
+    /// Stopped moving and stayed outside the viewport: a `position: fixed` wall pinned past an
+    /// edge with the document's scroll locked. No scroll will bring it back.
     StableOffViewport,
 }
 
@@ -56,21 +31,15 @@ pub struct Dispatched {
     pub sent: bool,
     pub aim: Option<(f64, f64)>,
     pub receiver: Option<Hit>,
-    /// The node that was acted on, resolved before the action from the same handle that was
-    /// probed and clicked — so the uid in the response and the uid in the delta are the same
-    /// node by construction, whichever way the caller aimed.
+    /// The node acted on, resolved before the action from the handle that was probed and
+    /// clicked, so this uid and the delta's are the same node by construction.
     pub uid: Option<String>,
     pub role: Option<String>,
     pub name: Option<String>,
     /// Which shape of `off_target` this was, when it was one.
     pub unaimable: Option<Unaimable>,
-    /// Which `--on-intercept` policy produced this refusal, when one did. Read only by the
-    /// generic `Intercepted` branch of [`Dispatched::refusal_message`] and by
-    /// [`crate::hints::intercepted_refusal_hint`], so the words describe the actual mode instead
-    /// of a hardcoded "refuse" — `Guard` refuses for a different, measured reason (the receiver
-    /// looked like a control) than `Refuse` does (the caller asked for every interception to
-    /// stop). `None` reads as `Refuse`'s wording: every existing caller of `skipped` that never
-    /// calls [`Dispatched::under`] keeps the words it already had.
+    /// Which `--on-intercept` policy produced this refusal, so the wording names the real mode.
+    /// `None` reads as `Refuse`'s wording.
     pub on_intercept: Option<crate::hit_test::OnIntercept>,
 }
 
@@ -145,21 +114,14 @@ impl Dispatched {
         if let Some((x, y)) = self.aim {
             out["aim"] = json!([x, y]);
         }
-        // Only when it is false. A response that says `dispatched: true` on every successful
-        // action teaches the reader to skip the field, and this one has to be read.
+        // Only when false: a field present on every response is a field readers learn to skip.
         if !self.sent {
             out["dispatched"] = json!(false);
         }
         if let Some(receiver) = &self.receiver {
             out["intercepted_by"] = receiver.report();
-            // Written here rather than left to the verdict's generic hint: this one can name
-            // the element, and an agent that has to guess which overlay to deal with is back
-            // to spending a turn finding out.
-            //
-            // Two wordings, because "it received the event instead" is false in the refusing
-            // mode — the scrim received nothing either. The paragraph that names the receiver
-            // is the same; what changes is what happened to the event and whether the repeat
-            // is a second real action.
+            // Specific rather than the verdict's generic hint, because this one names the
+            // element. Two wordings: nothing received an event that was never dispatched.
             out["verdict_hint"] = json!(if self.sent {
                 format!(
                     "The event was aimed at the target's centre and {} occupies that point, so \
@@ -186,9 +148,8 @@ impl Dispatched {
                 )
             });
         } else if self.unaimable == Some(Unaimable::StableOffViewport) {
-            // The generic `aim_point_off_target` hint has to cover both shapes; this one knows
-            // which shape it is and where the point ended up, and a coordinate off screen is
-            // the fact that stops an agent scrolling at it forever.
+            // The coordinate is what stops an agent scrolling at it forever; the generic
+            // `aim_point_off_target` hint cannot name it.
             out["verdict_hint"] = json!(format!(
                 "The aim point{} stopped moving and is outside the viewport, so nothing was \
                  dispatched. The probe already scrolled the element into view before measuring, \
@@ -204,9 +165,6 @@ impl Dispatched {
     }
 
     /// The message for an action that never dispatched, or `None` when it did.
-    ///
-    /// "Clicked" would be false for all three refusals, and a false message is what the change
-    /// report cannot undo.
     #[must_use]
     pub fn refusal_message(&self, verb: &str, target: &str) -> Option<String> {
         if self.sent {
@@ -214,8 +172,7 @@ impl Dispatched {
         }
         let budget = u64::from(SETTLE_ATTEMPTS) * SETTLE_GAP_MS;
         Some(match (self.delivery, self.unaimable) {
-            // No longer "still moving, or outside the viewport": that OR is exactly what made a
-            // permanent miss read as a temporary one. This branch is now only the first half.
+            // Still moving only — a point that settled off screen is the branch below.
             (Delivery::NotSettled, _) => format!(
                 "Did not {verb} {target}: the aim point was still moving after {budget}ms of \
                  settling, so nothing was dispatched."
@@ -250,12 +207,9 @@ impl Dispatched {
     }
 }
 
-/// An action `--on-intercept refuse` stopped before it dispatched, with everything it measured.
-///
-/// Travels through the error channel as `element::ElementError::Refused`, so no caller has to
-/// thread a second return type through three dispatchers; each mode's error boundary asks
-/// [`crate::hit_test::refusal_in`] whether the error it is holding is one of these, and prints
-/// [`Refused::to_json`] instead of `{"ok":false,"error":…}`.
+/// An action stopped before it dispatched, with everything it measured. Travels through the
+/// error channel as `element::ElementError::Refused`, so no caller threads a second return type
+/// through three dispatchers; each boundary asks [`crate::hit_test::refusal_in`] first.
 #[derive(Debug)]
 pub struct Refused {
     message: String,
@@ -268,12 +222,7 @@ impl Refused {
         Self { message, dispatched }
     }
 
-    /// Carry over the identity of the node the action resolved for itself.
-    ///
-    /// The same fields a successful outcome gets from `Dispatched::named`, applied to the
-    /// error: "a targeted action names the node it hit" held on every path except the one
-    /// where the caller has the most re-planning to do, because the naming happened after the
-    /// `?` that never returned.
+    /// The same fields `Dispatched::named` puts on a success, applied to the error.
     #[must_use]
     pub fn naming(
         mut self,
@@ -285,12 +234,9 @@ impl Refused {
         self
     }
 
-    /// The verdict this refusal carries, from the same classifier every other response uses.
-    ///
-    /// `ReportingDisabled` is the honest observation: the page was never re-read, because
-    /// nothing was done to it. It reaches no rung — an interception is Group A, measured on
-    /// this action's own target, so it settles the verdict whatever the observation says — and
-    /// it is what leaves `PageSight::Readable`, which is also true: nothing was hidden from us.
+    /// The verdict this refusal carries, from the classifier every response uses.
+    /// `ReportingDisabled` because the page was never re-read; it reaches no rung, an
+    /// interception being Group A and settling the verdict whatever the observation says.
     #[must_use]
     pub fn assessment(&self) -> Assessment {
         crate::verdict::classify(
@@ -304,11 +250,9 @@ impl Refused {
         )
     }
 
-    /// The whole response, in the shape the dispatching mode returns minus what only a page
-    /// read could fill in.
-    ///
-    /// `browser` is here for rule 2 of `hints.rs`: the command in the hint has to reach the
-    /// browser THIS invocation is driving, and only the error boundaries know its name.
+    /// The whole response, in the shape a dispatch returns minus what only a page read fills in.
+    /// `browser` is rule 2 of `hints.rs`: the command in the hint must reach the browser THIS
+    /// invocation drives, and only the error boundaries know its name.
     #[must_use]
     pub fn to_json(&self, browser: &str) -> Value {
         let mut obj = json!({"ok": false, "error": self.message});
@@ -319,9 +263,7 @@ impl Refused {
                 map.insert(key.clone(), value.clone());
             }
         }
-        // The same three fields every action writes, from the same table, so the words on a
-        // refusal cannot drift from the words on a dispatch. `verdict_hint` is already on the
-        // response — `attach_verdict` never overwrites the specific one with the generic one.
+        // `attach_verdict` never overwrites the specific `verdict_hint` with the generic one.
         crate::run_helpers::attach_verdict(&mut obj, self.assessment());
         obj["hint"] = json!(crate::hints::intercepted_refusal_hint(
             browser,
@@ -331,11 +273,7 @@ impl Refused {
         obj
     }
 
-    /// The same response for a terminal, after the `error:` line `main` prints.
-    ///
-    /// Mirrors the fields `render::action_lines` prints for a dispatch — who got in the way,
-    /// what to do next, and the advice — because a person reading a refusal needs the same
-    /// three things as an agent parsing one.
+    /// The same response for a terminal, mirroring `render::action_lines`.
     #[must_use]
     pub fn text_lines(&self, browser: &str) -> Vec<String> {
         let mut lines = Vec::new();
@@ -395,8 +333,7 @@ mod tests {
         Refused::new(message, dispatched)
     }
 
-    /// The response is what the classifier reads back, so the delivery token and the receiver
-    /// must both survive the trip.
+    /// The classifier reads the response back: delivery token and receiver must survive it.
     #[test]
     fn the_report_carries_the_receiver_and_a_hint_that_names_it() {
         let report =
@@ -412,8 +349,7 @@ mod tests {
         );
     }
 
-    /// An action that did not dispatch must not answer "Clicked" — and must not describe the
-    /// element it refused to click as having received anything.
+    /// No "Clicked", and no element described as having received anything.
     #[test]
     fn a_refusal_says_what_it_did_not_do() {
         let not_settled = Dispatched::skipped(Delivery::NotSettled, (10.0, 20.0), None);
@@ -436,8 +372,7 @@ mod tests {
         assert!(hint.contains("nothing was dispatched"), "{hint}");
     }
 
-    /// The two shapes of `off_target` produce two messages: one says the element has no box a
-    /// pointer can reach, the other says where its box actually is.
+    /// Two shapes, two messages: no reachable box, versus where the box actually is.
     #[test]
     fn the_two_shapes_of_off_target_do_not_share_a_message() {
         let no_box = Dispatched::skipped(Delivery::OffTarget, (300.0, 90.0), None)
@@ -451,15 +386,13 @@ mod tests {
         assert!(second.contains("outside the viewport"), "{second}");
         assert!(second.contains("(378, -14)"), "the coordinate is the evidence: {second}");
 
-        // And the off-screen one carries its own hint, because the generic one advises aiming
-        // at a child — which is the recovery for the other shape.
+        // The off-screen shape needs its own hint; the generic one advises aiming at a child.
         let hint = off_screen.report()["verdict_hint"].as_str().unwrap_or_default().to_string();
         assert!(hint.contains("Repeating this action"), "{hint}");
         assert!(hint.contains("scroll` will not move it"), "{hint}");
         assert!(no_box.report()["verdict_hint"].is_null(), "the generic table covers that one");
     }
 
-    /// Every field a caller has to branch on, on the response that dispatched nothing.
     #[test]
     fn a_refusal_answers_with_the_payload_a_dispatch_would_have() {
         let response = refusal(false).to_json("agent-7");
@@ -477,8 +410,7 @@ mod tests {
         assert!(hint.contains("chrome-agent --browser agent-7"), "{hint}");
     }
 
-    /// A modal receiver gets its own reason and its own advice, in the refusing mode too: the
-    /// recovery is to close the dialog, not to look for a scrim's dismiss control.
+    /// A modal receiver keeps its own reason even when nothing was dispatched.
     #[test]
     fn a_modal_receiver_keeps_its_own_reason_when_nothing_was_dispatched() {
         let response = refusal(true).to_json("default");
@@ -490,7 +422,7 @@ mod tests {
         );
     }
 
-    /// Text mode gets the same three facts as JSON: who is in the way, the branch, the advice.
+    /// Text mode carries the same three facts as JSON.
     #[test]
     fn the_terminal_form_names_the_receiver_and_the_branch() {
         let lines = refusal(false).text_lines("default");

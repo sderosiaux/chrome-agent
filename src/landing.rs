@@ -1,16 +1,7 @@
 //! Where a navigation actually ended up, as opposed to where it was aimed.
 //!
-//! `goto` used to answer `{url, title}`, which is the destination and nothing about the
-//! journey: an expired session redirecting to a login wall reads exactly like a successful
-//! load, and every step after it runs against the wrong page. `Landing` is the witness —
-//! what was asked for, what answered, whether those differ, and the HTTP status when the
-//! page is willing to say.
-//!
-//! *Where* it landed is settled here. *What* was there is settled in `serving.rs`, whose one
-//! token rides on the same object: a refusal notice and a challenge widget are both places a
-//! navigation can end up without having been redirected anywhere.
-//!
-//! Pure: no CDP, no I/O. `commands::goto` fills it in from one in-page read.
+//! `Landing` reports what was asked for, what answered, whether those differ, and the HTTP
+//! status when the page gives one. *What* was there is settled in `serving.rs`. Pure.
 
 use serde::Serialize;
 
@@ -19,34 +10,26 @@ use crate::serving::Assessment;
 /// What a navigation reports about itself.
 #[derive(Debug, Clone, Serialize)]
 pub struct Landing {
-    /// The URL as the tool sent it, after the `https://` prefixing `goto` applies. Not the
-    /// caller's raw argument: comparing `example.com` against `https://example.com/` would
-    /// call every navigation a redirect.
+    /// The URL as the tool sent it, after `goto`'s `https://` prefixing — not the caller's raw
+    /// argument, which would make every `goto example.com` a redirect.
     pub requested: String,
     /// `location.href` once the page settled.
     #[serde(rename = "final")]
     pub final_url: String,
     pub redirected: bool,
-    /// Status of the response that produced the final document, from the Navigation Timing
-    /// entry. Absent — never zero, never guessed — when the page exposes none: an older
-    /// Chrome, a document with no navigation entry, or a `responseStatus` of 0.
-    ///
-    /// This is what the browser answered, not proof that an HTTP response happened: measured
-    /// on Chrome 151, a `file://` document reports 200. A redirect chain reports its last
-    /// hop, so a followed `302` reads as 200.
+    /// Status of the final document, from Navigation Timing. Absent — never zero, never guessed
+    /// — when the page exposes none. What the browser answered, not proof of an HTTP response (a
+    /// `file://` document reports 200), and the last hop only, so a followed `302` reads as 200.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub http_status: Option<u16>,
     /// What answered: `serving`, and `challenge_from` when a vendor's frame was found.
-    /// Flattened so the caller reads one object, not two — the questions "where did I end up"
-    /// and "what is there" are answered by the same `goto`.
+    /// Flattened so one `goto` answers both questions in one object.
     #[serde(flatten)]
     pub served: Assessment,
 }
 
-/// Path segments that suggest an authentication wall.
-///
-/// A guess about a URL, not a reading of the page. Kept small on purpose: every entry here
-/// is a word that only appears in a path when the site is asking who you are.
+/// Path segments that suggest an authentication wall. A guess about a URL, not a reading of the
+/// page; kept small, so every entry is a word that only appears when a site asks who you are.
 const AUTH_WALL_SEGMENTS: &[&str] =
     &["login", "log-in", "signin", "sign-in", "sign_in", "auth", "sso"];
 
@@ -68,16 +51,9 @@ impl Landing {
         }
     }
 
-    /// What to do about this landing, or nothing when there is nothing to say.
-    ///
-    /// Two judgements can fire and only one hint field exists. What was *served* comes first:
-    /// it is decided from a status the server sent and a document that was measured, while the
-    /// auth-wall guess is a reading of a string in a URL. On a `/login` bounce that also
-    /// answered 403, the 403 is the thing the caller can act on.
-    ///
-    /// The auth-wall half only ever fires on a redirect: a caller who typed `/login`
-    /// themselves knows where they are, and telling them would be noise on every deliberate
-    /// visit to a login page.
+    /// What to do about this landing, or nothing when there is nothing to say. Two judgements,
+    /// one field: what was *served* wins, being measured rather than a guess about a URL, and
+    /// the auth-wall half fires only on a redirect.
     pub fn hint(&self, browser: &str) -> Option<String> {
         if let Some(hint) = self.served.hint(self.http_status, &self.final_url, browser) {
             return Some(hint);
@@ -98,9 +74,8 @@ impl Landing {
         ))
     }
 
-    /// Attach `landed` (and its hint) to a response object.
-    ///
-    /// Lives here rather than in the three call sites so CLI, pipe and batch cannot drift.
+    /// Attach `landed` (and its hint) to a response object. Lives here, not in the three call
+    /// sites, so CLI, pipe and batch cannot drift.
     pub fn attach(&self, out: &mut serde_json::Value, browser: &str) {
         if let Some(map) = out.as_object_mut() {
             map.insert(
@@ -113,14 +88,8 @@ impl Landing {
         }
     }
 
-    /// What a person reads in text mode, or nothing when the navigation went where it was
-    /// told and the page that answered is the page.
-    ///
-    /// A caller who typed the URL does not need it read back, and a tool that narrates its
-    /// successes teaches the reader to skip its output.
-    ///
-    /// Takes the browser name because any command inside the hint it appends has to reach the
-    /// session that produced the landing, not the default one.
+    /// What a person reads in text mode, or nothing when the navigation went where it was told
+    /// and the page that answered is the page.
     pub fn text_line(&self, browser: &str) -> Option<String> {
         let mut lines: Vec<String> = Vec::new();
         if self.redirected {
@@ -143,42 +112,25 @@ impl Landing {
 
 }
 
-/// A status only counts when it could have come off the wire.
-///
-/// The Navigation Timing entry reports `0` for a document that had no HTTP response and for
-/// a cross-origin one it will not describe. `0` is not a status, and reporting it as one
-/// invents an answer where the page declined to give one.
+/// A status only counts when it could have come off the wire. Navigation Timing reports `0` for
+/// a document with no HTTP response; reporting that as a status invents an answer.
 fn status_or_none(raw: Option<u16>) -> Option<u16> {
     raw.filter(|code| (100..=599).contains(code))
 }
 
 /// Whether the page ended up somewhere other than where it was sent.
 ///
-/// The rule, and what it deliberately ignores:
-/// - **Fragment**: dropped entirely. `#section` is resolved by the browser, never sent, and
-///   a page that jumps to an anchor did not redirect anywhere.
-/// - **Trailing slash**: one is stripped from the path. `/orders` and `/orders/` are the
-///   same resource to every server that normalises between them, and calling that a
-///   redirect would fire on most well-configured sites.
-/// - **Default port**: `:80` on http and `:443` on https are elided; the host is lowercased
-///   (case-insensitive by RFC 3986) while the path is not (it is case-sensitive on most
-///   servers).
-/// - **Empty query**: `?` with nothing after it equals no query.
-///
-/// What counts as a redirect, on purpose: any change of scheme (an `http` → `https` upgrade
-/// is the server overriding the caller, and it changes which cookies travel), of host, of
-/// path beyond that one slash, and any change of query — including a gained `?next=…`,
-/// which is the usual shape of the login bounce this field exists to expose. Query
-/// parameters are compared in the order they appear: reordering them would be a claim about
-/// the server's semantics that this code is in no position to make.
+/// Ignored: the fragment (never sent), one trailing slash on the path, the default port, host
+/// case (the path stays case-sensitive), an empty query. Reported: any change of scheme (an
+/// `http`→`https` upgrade changes which cookies travel), of host, of path beyond that slash, and
+/// any query change — a gained `?next=…` is the login bounce this exists to expose. Query
+/// parameters are compared in order; reordering is a claim about server semantics.
 pub fn is_redirect(requested: &str, final_url: &str) -> bool {
     comparison_key(requested) != comparison_key(final_url)
 }
 
-/// The part of a URL that has to change for a navigation to have been redirected.
-///
-/// Hand-rolled rather than a URL crate: the Linux release targets musl with a pure-Rust
-/// dependency graph, and this needs to split a string, not to validate one.
+/// The part of a URL that has to change for a navigation to have been redirected. Hand-rolled
+/// rather than a URL crate: the musl release keeps a pure-Rust dependency graph.
 fn comparison_key(url: &str) -> String {
     let without_fragment = url.split_once('#').map_or(url, |(head, _)| head);
     let (scheme, rest) = without_fragment
@@ -212,13 +164,8 @@ fn comparison_key(url: &str) -> String {
     format!("{scheme}://{authority}{path}{query}")
 }
 
-/// The host and path of a URL, path defaulting to `/`.
-///
-/// Hand-rolled for the same reason `comparison_key` is: the musl release keeps a pure-Rust
-/// dependency graph, and this splits a string rather than validating one. Lives here rather
-/// than in the two modules that read it (`serving`, for a challenge frame's origin; `hints`,
-/// for the host a navigation could not reach) because a second copy of this is a second set
-/// of edge cases — credentials, a port, a query with a slash in it.
+/// The host and path of a URL, path defaulting to `/`. Shared by `serving` and `hints`, since a
+/// second copy is a second set of edge cases (credentials, port, slash in query).
 #[must_use]
 pub fn host_and_path(url: &str) -> Option<(&str, &str)> {
     let (_, rest) = url.split_once("://")?;
@@ -231,10 +178,8 @@ pub fn host_and_path(url: &str) -> Option<(&str, &str)> {
     (!host.is_empty()).then_some((host, path))
 }
 
-/// `scheme://authority/` of a URL, for a hint that sends the caller to the site root.
-///
-/// The port is kept: `http://localhost:3000/` is a different server from `http://localhost/`,
-/// and a hint that quietly drops it names one the caller never asked about.
+/// `scheme://authority/` of a URL, for a hint that sends the caller to the site root. The port
+/// is kept: `http://localhost:3000/` is a different server from `http://localhost/`.
 #[must_use]
 pub fn origin_of(url: &str) -> Option<String> {
     let (scheme, rest) = url.split_once("://")?;
@@ -242,11 +187,8 @@ pub fn origin_of(url: &str) -> Option<String> {
     (!authority.is_empty()).then(|| format!("{scheme}://{authority}/"))
 }
 
-/// The path segment that made the URL look like an auth wall, if any.
-///
-/// Segment-level, and on the stem before the first `.`, so `/login`, `/login.php` and
-/// `/users/sign_in` match while `/authors/tolkien` and `/ssology` do not. Matching a bare
-/// substring made `/authors` a login page.
+/// The path segment that made the URL look like an auth wall, if any. Matched per segment on the
+/// stem before the first `.`, so `/login.php` hits and `/authors/tolkien` does not.
 pub fn auth_wall_segment(url: &str) -> Option<&'static str> {
     let without_fragment = url.split_once('#').map_or(url, |(head, _)| head);
     let without_query = without_fragment
@@ -298,7 +240,7 @@ mod tests {
 
     #[test]
     fn fragment_only_change_is_not_a_redirect() {
-        // The fragment never leaves the browser, so nothing redirected anything.
+        // The fragment never leaves the browser.
         assert!(!is_redirect(
             "https://example.com/docs",
             "https://example.com/docs#install"
@@ -329,13 +271,13 @@ mod tests {
 
     #[test]
     fn path_case_is_a_redirect() {
-        // Paths are case-sensitive on most servers, so this is a different resource.
+        // Paths are case-sensitive on most servers: a different resource.
         assert!(is_redirect("https://example.com/A", "https://example.com/a"));
     }
 
     #[test]
     fn gained_query_is_a_redirect() {
-        // The shape of the login bounce this field exists to expose.
+        // The login bounce this field exists to expose.
         assert!(is_redirect(
             "https://app.example.com/orders",
             "https://app.example.com/login?next=/orders"
@@ -370,7 +312,7 @@ mod tests {
 
     #[test]
     fn auth_wall_does_not_fire_on_a_longer_word() {
-        // Substring matching turned every author page into a login wall.
+        // Substring matching would make every author page a login wall.
         assert_eq!(auth_wall_segment("https://x.com/authors/tolkien"), None);
         assert_eq!(auth_wall_segment("https://x.com/ssology"), None);
         assert_eq!(auth_wall_segment("https://x.com/loginformation"), None);
@@ -384,9 +326,8 @@ mod tests {
         assert_eq!(auth_wall_segment("https://x.com/orders#login"), None);
     }
 
-    /// A document that answered normally: enough to act on, enough text, no error status.
-    /// Every test below that is about the *redirect* half needs one, or the `serving` half
-    /// would speak instead and the assertion would be about the wrong judgement.
+    /// A document that answered normally. Tests about the *redirect* half need one, or the
+    /// `serving` half speaks instead and the assertion judges the wrong thing.
     fn served() -> crate::serving::PageShape {
         crate::serving::PageShape {
             resource_urls: Vec::new(),
@@ -425,9 +366,8 @@ mod tests {
         assert!(deliberate.hint("default").is_none());
     }
 
-    /// Rule 2 of the `hints.rs` contract reaches this module too: the auth-wall hint used to
-    /// say "run `inspect`", which is not a command, and under `--browser` it would have been
-    /// a command aimed at another agent's session.
+    /// Rule 2 of the hint contract reaches this module: under `--browser`, a bare `inspect`
+    /// would aim at another agent's session.
     #[test]
     fn the_auth_wall_hint_names_this_invocation_s_browser() {
         let bounced = Landing::new(
@@ -457,8 +397,7 @@ mod tests {
 
     #[test]
     fn status_zero_is_absent_rather_than_reported() {
-        // A document with no HTTP response of its own reports 0. That is "I don't know", and
-        // serialising it as a status invents an answer.
+        // A document with no HTTP response reports 0, which means "I don't know".
         let landing =
             Landing::new("file:///tmp/a.html", "file:///tmp/a.html", Some(0), Some(&served()));
         assert!(landing.http_status.is_none());
@@ -469,8 +408,8 @@ mod tests {
         assert!(unavailable.http_status.is_none());
     }
 
-    /// A status outside 100..=599 is dropped before `serving` ever sees it, so a `file://`
-    /// document reporting 0 cannot come back as `error`.
+    /// A status outside 100..=599 is dropped before `serving` sees it, so a `file://` document
+    /// reporting 0 cannot come back as `error`.
     #[test]
     fn an_implausible_status_cannot_produce_an_error_verdict() {
         let landing = Landing::new("file:///tmp/a.html", "file:///tmp/a.html", Some(0), Some(&served()));
@@ -511,8 +450,8 @@ mod tests {
         assert!(line.contains("HTTP 301"), "got {line:?}");
     }
 
-    /// A page that answered on the URL asked for and served a refusal has nothing to say
-    /// about redirects and everything to say about what is there.
+    /// A refusal served on the URL asked for has nothing to say about redirects and everything
+    /// to say about what is there.
     #[test]
     fn text_line_speaks_up_when_only_what_was_served_moved() {
         let refused = Landing::new(

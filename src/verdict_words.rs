@@ -1,38 +1,24 @@
-//! What a verdict hands on: the sentence a person reads, the token an agent branches on, and
-//! the advice each rung owes its caller in both lengths.
+//! What a verdict hands on: the sentence a person reads, the token an agent branches on, and the
+//! advice each rung owes its caller in both lengths. Four tables, all keyed on the reason.
 //!
-//! Split out of `verdict.rs` for the repo's 1000-line file cap and re-exported from it, so
-//! every call site stays `crate::verdict::gloss` / `crate::verdict::next_for` /
-//! `crate::verdict::hint_for` and the tables still sit one `pub use` away from the ladder they
-//! describe. `hint_for` moved here when the ladder grew its `value_kept` rung: it is one table
-//! per reason like the other three, and it belongs beside the short form it is cut down to.
+//! Re-exported from `verdict.rs`, so call sites write `crate::verdict::gloss` and friends.
 
 use std::fmt;
 
 use crate::verdict::{Assessment, PageSight, Verdict};
 
-/// One sentence naming what the verdict word means, for a reader who has never seen the
-/// taxonomy.
+/// One sentence naming what the verdict word means, for a reader who has never seen the taxonomy.
 ///
-/// `verdict: unchanged (identical_tree)` reads as "nothing happened", which is the one
-/// conclusion this whole module exists to forbid, and `unknown` reads as a broken tool rather
-/// than as an unverified action. Both are jargon at the point where a person judges the output.
-///
-/// One table, here, next to `hint_for`: the text renderer reads it rather than writing prose of
-/// its own, so the wording cannot drift away from the classifier that produced the token. Keyed
-/// on the reason, because the reason is what the sentence is about; the per-verdict arm at the
-/// bottom is the floor for a token this table has not been taught yet.
+/// The text renderer reads this table rather than writing prose of its own, so the wording cannot
+/// drift from the classifier. The per-verdict arm at the bottom is the floor for an untaught token.
 #[must_use]
 pub fn gloss(assessment: Assessment) -> &'static str {
     match assessment.reason {
         "tree_delta" => "the page moved in a way that can be pointed at",
         "nodes_moved" => "the same nodes, in a different order",
         "focus_only" => "nothing moved but focus, which is the only sign the action arrived",
-        // Names its evidence, because it is the one `changed` with no delta to point at: the
-        // tree could not show this write (a secret field renders as a fixed marker, and a first
-        // action has no tree to compare), so the read-back on the element itself is what the
-        // claim rests on. "the element", not "the field": a select and a check reach this rung
-        // through the same measurement, and a checkbox is neither a field nor written to.
+        // Names its evidence: the one `changed` with no delta to point at, so the claim rests on
+        // the read-back. "the element", not "the field" — select and check reach this rung too.
         "value_kept" => "the element held what was asked of it when it was read back, and the \
                          tree could not show it",
         "values_lost" => "the page moved, and a field that held a value now holds none",
@@ -44,8 +30,7 @@ pub fn gloss(assessment: Assessment) -> &'static str {
         "delivered_no_change" => {
             "the event reached the target and the tree stayed still while it was watched"
         }
-        // "unchanged" is the word an agent most easily over-reads; the gloss carries the
-        // limit that the word cannot.
+        // The word an agent most easily over-reads; the gloss carries the limit it cannot.
         "identical_tree" => "the tree was identical while the tool watched — which is not the \
                              same as the action having no effect",
         "no_baseline" => "unverified — there was no earlier snapshot to compare against",
@@ -72,11 +57,8 @@ pub fn gloss(assessment: Assessment) -> &'static str {
     }
 }
 
-/// What the caller should do next, in one token from a closed vocabulary.
-///
-/// The verdict says what happened; this says what to do about it. Six tokens, and the closed
-/// set is the point: an agent can branch on it without parsing prose, and a new rung on the
-/// ladder cannot introduce a seventh behaviour by accident.
+/// What the caller should do next, in one token from a closed set of six. The verdict says what
+/// happened; this says what to do about it, without an agent parsing prose.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Next {
     /// The action did what it was for. Carry on.
@@ -113,46 +95,19 @@ impl fmt::Display for Next {
     }
 }
 
-/// Map a verdict onto the one thing to do about it. Pure, total, and the only place the
-/// mapping exists.
+/// Map a verdict onto the one thing to do about it. Pure, total, the only place the mapping exists.
 ///
-/// # Why `unknown` never yields `retry`
+/// Two rules the arms do not show on their own:
 ///
-/// This is the rule the field exists to make structural. An `unknown` verdict means the tool
-/// could not observe what the action did — NOT that the action did not happen. A blind repeat
-/// there is a second real click, a second real fill, a second order, and the page has no way to
-/// tell it from a deliberate one. So every "I don't know" answers `inspect`: read the state the
-/// action was supposed to produce, then decide. The rule used to live only as a sentence in
-/// `hints.rs`'s contract, where nothing could check it.
-///
-/// `scroll_not_settled` is the single exception, and it is one because it is not an admission of
-/// ignorance about a dispatch — it is the statement that NOTHING WAS DISPATCHED. There is no
-/// first action for the retry to duplicate.
-///
-/// # Why `proceed` is withdrawn when the page could not be read
-///
-/// This is the ONE place `next` deliberately answers something other than what the verdict alone
-/// implies, and it is the verdict/next split doing its job: the verdict describes an observation,
-/// `next` prescribes an action, and the two do not always have the same subject.
-///
-/// A Group A rung is measured on the handle this action touched, so it stays true when the
-/// post-action page read fails — `value_kept` says the field holds what was written, and it does.
-/// But `proceed` means "carry on", and carrying on happens against the whole page, which in that
-/// case was never seen. Two things are true at once: the field took the write, and everything
-/// else that may have moved is unobserved. The verdict owns the first, `next` owns the second.
-///
-/// So a `proceed` becomes `inspect` whenever the page is `Unreadable`. Written as a rule over the
-/// token rather than as an arm for `value_kept`, because the dangerous default is the other way
-/// round: a rung added later that answers `proceed` would otherwise inherit "carry on while
-/// blind" silently, and this way it cannot. `retry` is untouched — it is only ever reached from a
-/// rung that proves nothing was dispatched, where there is nothing to be blind about — and
-/// `--verdict off` is untouched too, because a caller who declined the read owns that silence
-/// (`PageSight::Readable` covers the declined case for exactly that reason).
+/// - `unknown` never yields `retry`: it means the action was not OBSERVED, not that it did not
+///   happen, and a blind repeat is a second real click. `scroll_not_settled` is the one exception,
+///   because nothing was dispatched.
+/// - `proceed` becomes `inspect` whenever the page is `Unreadable`. Written over the token rather
+///   than as an arm for `value_kept`, so a later rung cannot inherit "carry on while blind".
+///   `--verdict off` is `Readable`, because the caller owns that silence.
 #[must_use]
 pub fn next_for(assessment: Assessment) -> Next {
     let next = next_when_the_page_was_read(assessment);
-    // The one divergence, argued above: "carry on" is about the whole page, and this response
-    // saw none of it.
     if next == Next::Proceed && assessment.page == PageSight::Unreadable {
         return Next::Inspect;
     }
@@ -160,26 +115,21 @@ pub fn next_for(assessment: Assessment) -> Next {
 }
 
 /// The mapping itself, for a response that got to see the page.
-// Two pairs of arms below share a token and not a reason (`navigated`/`unknown` → inspect,
-// `changed`/`not_checked` → proceed). Merging them would delete the rationale each carries,
-// and the two halves of each pair move independently: `not_checked` becomes `proceed` only
-// because the caller chose the silence.
+// Two pairs of arms share a token and not a reason (`navigated`/`unknown` → inspect,
+// `changed`/`not_checked` → proceed). They move independently, so they stay separate.
 #[allow(clippy::match_same_arms)]
 fn next_when_the_page_was_read(assessment: Assessment) -> Next {
     match assessment.reason {
         "scroll_not_settled" => Next::Retry,
-        // A `changed` whose hint forbids treating the submit as done cannot answer `proceed`:
-        // a form that cleared itself on a successful submit and one that threw the input away
-        // look identical here, and only the caller can tell them apart.
+        // A form that cleared itself on a successful submit and one that threw the input away
+        // look identical here, so `proceed` would be a false success.
         "values_lost" => Next::Confirm,
         _ => match assessment.verdict {
             Verdict::Changed => Next::Proceed,
-            // The uids are dead and the page is a different one. Nothing is wrong; nothing
-            // stored is usable either.
+            // Nothing is wrong; nothing stored is usable either.
             Verdict::Navigated => Next::Inspect,
-            // Neither is a failure and neither is proof of success: the tool watched and saw
-            // nothing, and everything it cannot see (canvas, CSS, a late handler) looks like
-            // this. Confirm elsewhere rather than repeat.
+            // Neither a failure nor proof of success: everything the tool cannot see (canvas,
+            // CSS, a late handler) looks like this. Confirm elsewhere rather than repeat.
             Verdict::Unchanged | Verdict::NoEffect => Next::Confirm,
             Verdict::Intercepted => Next::Dismiss,
             // The same write produces the same answer, so a repeat only edits the page again.
@@ -197,9 +147,8 @@ mod tests {
     use super::*;
     use crate::verdict::{Delivered, Delivery, Observation, Postcondition, classify};
 
-    /// Every reason the ladder can actually produce, derived by running it rather than by
-    /// keeping a list beside it. A new rung appears here for free, and the assertion below
-    /// makes it appear as a failing test until it has a gloss and a next step.
+    /// Every reason the ladder can produce, derived by running it. A new rung appears here for
+    /// free and fails the assertions until it has a gloss and a next step.
     pub(super) fn every_assessment() -> Vec<Assessment> {
         let mut out = Vec::new();
         let observations = [
@@ -268,8 +217,7 @@ mod tests {
         every_assessment().into_iter().map(|a| a.reason).collect()
     }
 
-    /// The ladder as it stands. Pinned so a rung added without a gloss fails here, and so the
-    /// coverage assertions below are checking a list somebody has actually looked at.
+    /// The ladder as it stands, pinned so the coverage assertions below check a reviewed list.
     #[test]
     fn the_ladder_produces_exactly_these_reasons() {
         let expected: std::collections::BTreeSet<&str> = [
@@ -297,8 +245,7 @@ mod tests {
         assert_eq!(reasons(), expected);
     }
 
-    /// A gloss per reason, and none of them the per-verdict floor: the floor is for a token
-    /// this table has not been taught, and every reason the ladder emits is one it has.
+    /// A gloss per reason, none of them the per-verdict floor.
     #[test]
     fn every_reason_has_its_own_gloss() {
         let mut seen = std::collections::HashSet::new();
@@ -316,8 +263,7 @@ mod tests {
         assert_eq!(seen.len(), reasons().len());
     }
 
-    /// Two reasons that shared a sentence would be two rungs the reader cannot tell apart —
-    /// which is the whole failure the reason token exists to fix, one level up.
+    /// Two reasons sharing a sentence would be two rungs the reader cannot tell apart.
     #[test]
     fn no_two_reasons_share_a_gloss() {
         let mut by_gloss: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
@@ -332,8 +278,8 @@ mod tests {
         }
     }
 
-    /// The gloss for `unchanged` must not read as "nothing happened" — the one conclusion the
-    /// taxonomy forbids, and the reason this table exists at all.
+    /// The `unchanged` gloss must not read as "nothing happened", the conclusion the taxonomy
+    /// forbids.
     #[test]
     fn the_unchanged_gloss_refuses_to_conclude_no_effect() {
         let text = gloss(Assessment { verdict: Verdict::Unchanged, reason: "identical_tree", page: PageSight::Readable });
@@ -341,8 +287,7 @@ mod tests {
         assert!(!text.contains("no effect having"), "{text}");
     }
 
-    /// The two jargon words get their human equivalent, since the token itself misleads:
-    /// `unknown` reads as a broken tool, `not_checked` as a missing feature.
+    /// The tokens mislead: `unknown` reads as a broken tool, `not_checked` as a missing feature.
     #[test]
     fn the_uncertain_verdicts_are_glossed_in_plain_words() {
         for (reason, word) in
@@ -381,9 +326,7 @@ mod tests {
         }
     }
 
-    /// The rule the field was added to make structural: an unobserved action must never be
-    /// repeated blind, because the repeat is a second real click. The one exception is the rung
-    /// that says nothing was dispatched, where there is no first action to duplicate.
+    /// An unobserved action is never repeated blind; the repeat would be a second real click.
     #[test]
     fn an_unobserved_action_is_never_answered_with_a_retry() {
         for assessment in every_assessment() {
@@ -431,12 +374,9 @@ mod tests {
     }
 }
 
-/// The guide's own table, checked against the code that produces it.
-///
-/// `llm-guide.txt` is compiled into `--help` and is what an agent copies its expectations from,
-/// and `next` is the field it is told to branch on. A table that drifts from `next_for` would
-/// send every reader of the guide down the branch the tool does not take — including the one
-/// branch that must never be taken, `retry` on an action that may have landed.
+/// The printed tables, checked against the code that produces them. `llm-guide.txt` is compiled
+/// into `--help`, so a table that drifts from `next_for` is a second implementation of it, free to
+/// promise a branch the tool does not take — including `retry` on an action that may have landed.
 #[cfg(test)]
 mod guide {
     use super::*;
@@ -446,12 +386,6 @@ mod guide {
     const GUIDE: &str = include_str!("../llm-guide.txt");
 
     /// The two documents that reprint this module's tables in markdown.
-    ///
-    /// There were five copies of the verdict/reason/next mapping in print and exactly one of
-    /// them — the guide's — was confronted with `next_for`. A table an agent copies its
-    /// branching from is not documentation, it is a second implementation, and the four
-    /// unchecked ones were free to promise a `next` this module does not return. The `delivery`
-    /// table had two copies and neither was checked.
     const SKILL: &str = include_str!("../skills/chrome-agent/SKILL.md");
     const README: &str = include_str!("../README.md");
 
@@ -477,8 +411,8 @@ mod guide {
                     return None;
                 }
                 let (reason, next) = (cols.next()?, cols.next()?);
-                // The `delivery` table below shares the word "intercepted" in its first
-                // column. A row of this table always names a token of the vocabulary third.
+                // The `delivery` table shares the word "intercepted" in its first column. A row
+                // of this table always names a vocabulary token third.
                 let vocabulary =
                     [Next::Proceed, Next::Inspect, Next::Retry, Next::Confirm, Next::Dismiss, Next::Stop];
                 vocabulary.iter().any(|n| n.as_str() == next).then_some((verdict, reason, next))
@@ -500,10 +434,8 @@ mod guide {
         }
     }
 
-    /// The table maps one reason to one `next`, and there is exactly one pair where that shape
-    /// is not enough — a confirmed write on a page that could not be read. The row states the
-    /// readable case, so the exception has to be written under it in words, or an agent copying
-    /// the table would believe `value_kept` always means "carry on".
+    /// One reason maps to one `next` everywhere but a confirmed write on an unreadable page; the
+    /// row states the readable case, so the exception must be written under it in words.
     #[test]
     fn the_guide_states_the_one_next_that_depends_on_more_than_the_reason() {
         let blind = Assessment {
@@ -522,8 +454,7 @@ mod guide {
         );
     }
 
-    /// Every reason the ladder emits appears in the guide. A rung an agent is never told about
-    /// is a branch it cannot take.
+    /// A rung an agent is never told about is a branch it cannot take.
     #[test]
     fn the_guide_documents_every_reason_the_ladder_can_produce() {
         let documented: std::collections::BTreeSet<&str> =
@@ -540,9 +471,7 @@ mod guide {
     /// A markdown copy of the table, as `(verdict, reasons, nexts)`.
     ///
     /// One reader for two shapes: `SKILL.md` gives each reason its own row, `README.md` merges
-    /// several into one (`` `tree_delta`, `nodes_moved`, `focus_only` ``). Neither can use the
-    /// guide's fixed-column reader, and giving each its own would be a third parser to keep in
-    /// step — so a cell is read as a LIST, which the one-reason case is a case of.
+    /// several into one. So a cell is read as a LIST, of which the one-reason case is an instance.
     fn markdown_rows(doc: &str) -> Vec<(String, Vec<String>, Vec<String>)> {
         const HEADER: &str = "| `verdict` | `verdict_reason` | `next` |";
         let table = doc.split_once(HEADER).expect("the verdict table's header row").1;
@@ -569,20 +498,15 @@ mod guide {
         cell.split(separator).map(bare).filter(|token| !token.is_empty()).collect()
     }
 
-    /// The same re-borrow `leak` does, from a markdown document: the token sits inside
-    /// backticks there, so whitespace is not what separates it.
+    /// The same re-borrow `leak` does, from markdown, where backticks separate the token.
     fn leak_from(doc: &'static str, reason: &str) -> &'static str {
         doc.split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
             .find(|word| *word == reason)
             .expect("the reason came from this document")
     }
 
-    /// The two markdown reprints of the ladder promise the same `next` this module returns.
-    ///
-    /// Five copies of this mapping were in print and one — the guide's — was confronted with
-    /// `next_for`. A table an agent branches on is a second implementation of `next_for`, and
-    /// an unchecked one is free to drift: `proceed` and `confirm` are opposite branches of the
-    /// closed set of six, so a single wrong cell makes an agent do a different thing.
+    /// The two markdown reprints promise the same `next` this module returns. `proceed` and
+    /// `confirm` are opposite branches, so a single wrong cell makes an agent do another thing.
     #[test]
     fn every_markdown_copy_of_the_table_is_the_mapping_this_module_implements() {
         for (name, doc, expected) in
@@ -604,9 +528,8 @@ mod guide {
                         "{name} promises {} for {verdict}/{reason}",
                         nexts[0]
                     );
-                    // A cell naming two tokens is the documented exception, and it is exactly
-                    // one row. Asserting WHICH row is the point: without it, any row could grow
-                    // a second answer and this test would check it against the blind page.
+                    // A cell naming two tokens is the documented exception, and exactly one row.
+                    // Asserting WHICH row stops any other row growing a second answer.
                     match nexts.len() {
                         1 => {}
                         2 => {
@@ -630,12 +553,9 @@ mod guide {
         }
     }
 
-    /// The `delivery` readings the guide's fixed-column block lists.
-    ///
-    /// Scoped to the section rather than matched by shape: `intercepted` is a word of the
-    /// verdict table above too, and a reader that took every line starting with it would mix
-    /// the two blocks. A row sits at the block's own indent; the wrapped continuations that
-    /// follow one sit deeper, and the `#` notes below the block end it.
+    /// The `delivery` readings the guide's fixed-column block lists. Scoped to the section rather
+    /// than matched by shape, since `intercepted` is also a word of the verdict table. A row sits
+    /// at the block's own indent; wrapped continuations sit deeper, and `#` notes end the block.
     fn delivery_rows_in_the_guide() -> Vec<&'static str> {
         let section = GUIDE
             .split_once("\"delivery\" on a pointer-targeted action")
@@ -679,15 +599,11 @@ mod guide {
             .collect()
     }
 
-    /// Both copies of the `delivery` table name the six readings the code can produce, in order.
+    /// Both copies of the `delivery` table name the six readings the code produces, in order.
     ///
-    /// `Delivery::parse` answers `not_probed` for anything it does not recognise, and that is
-    /// the right answer where it is used — a response written by an older binary carries a
-    /// token this one has not been taught, and "no evidence" is what that means. It is the
-    /// wrong answer for a documentation table: a reading invented or misspelled here would
-    /// collapse onto the floor and read as verified. So a row must ROUND-TRIP, not merely
-    /// parse, and the count is asserted as well — a row this reader skips would otherwise
-    /// leave the remaining five agreeing with themselves.
+    /// `Delivery::parse` answers `not_probed` for anything unrecognised, so a misspelled reading
+    /// would collapse onto the floor and read as verified. A row must ROUND-TRIP, not merely
+    /// parse, and the count is asserted too, or a skipped row leaves the rest self-consistent.
     #[test]
     fn both_copies_of_the_delivery_table_name_the_readings_the_code_produces() {
         let expected = [
@@ -740,8 +656,7 @@ mod guide {
         }
     }
 
-    /// `Assessment.reason` is `&'static str`, and the guide is a `&'static str` too — this only
-    /// re-borrows a slice of it.
+    /// `Assessment.reason` is `&'static str` and so is the guide: this re-borrows a slice of it.
     fn leak(reason: &str) -> &'static str {
         GUIDE
             .split_whitespace()
@@ -752,11 +667,8 @@ mod guide {
 
 /// What the agent should do next, when the verdict alone does not say.
 ///
-/// Keyed on the reason, except for the one pair where the reason is not the whole story: a
-/// confirmed write whose page could not be read. `read_failed` used to hold that slot and carry
-/// the blindness in words; now that the Group A rung outranks it, this is where the blindness is
-/// said — otherwise the only trace of it on the response would be the ABSENCE of `changed`, which
-/// is the ambiguity the whole module exists to remove.
+/// Keyed on the reason, except for a confirmed write whose page could not be read: the Group A
+/// rung outranks `read_failed`, so this is the only place that blindness gets said.
 #[must_use]
 pub fn hint_for(assessment: Assessment) -> Option<&'static str> {
     if assessment.reason == "value_kept" {
@@ -779,8 +691,7 @@ pub fn hint_for(assessment: Assessment) -> Option<&'static str> {
         "identical_tree" => Some(
             "Nothing in the accessibility tree changed while this was watched. That is not the same as the action having no effect: a click absorbed by an overlay, an effect the tree cannot see (canvas, styling), and a handler that runs after the window all look like this. Confirm with `inspect` or `eval` before repeating the action — a repeat is a second real action.",
         ),
-        // The action itself writes a more specific hint naming the receiver; this is the
-        // fallback for a response that lost it.
+        // The action writes a more specific hint naming the receiver; this is the fallback.
         "hit_test_receiver" => Some(
             "The point this was aimed at belongs to another element, which received the event instead — `intercepted_by` names it. Deal with that element first (a banner or scrim usually has to be dismissed), or aim somewhere the target is actually exposed. Nothing is known about what the target would have done.",
         ),
@@ -793,13 +704,12 @@ pub fn hint_for(assessment: Assessment) -> Option<&'static str> {
         "aim_point_off_target" => Some(
             "No point on the element could be aimed at and the reading was stable — two probes 30ms apart agreed — so nothing was dispatched and a repeat measures the same coordinate. Two shapes reach here, and `aim` tells them apart: a coordinate on screen means the element has no box a pointer can reach (an inline link laid out across a gap, a container clipped to nothing), and a coordinate outside the viewport means the page is holding it there, which the probe's own scroll already failed to change. Run `inspect` to see where the element sits: for the first, aim at a child that has a box of its own; for the second, change the page's state — dismiss the layer pinning it — because no scroll will move it.",
         ),
-        // `changed` alone would read as plain success, and this is the shape where that costs
-        // most: a form that "submits" and quietly discards what was typed into it.
+        // `changed` alone would read as success on a form that quietly discards its input.
         "values_lost" => Some(
             "The page moved, and a field that held a value before this action holds none after it — `values_lost` names each one and what it held. Two things look identical here: a form that submitted successfully and cleared itself, and a form that threw the input away without sending it. Confirm which before treating the submit as done: check for the page's own confirmation (`assert text --contains`), or the request itself with `network`. Re-filling and re-submitting risks a second submission of work that already went through.",
         ),
-        // Both name the field to read and forbid the retry: re-filling is the reflex here,
-        // and it is a second real edit that produces the same answer.
+        // Both name the field to read and forbid the retry: re-filling is the reflex, and it is
+        // a second real edit that produces the same answer.
         "value_reverted" => Some(
             "The element held nothing when it was read back: `value.actual` is empty and `value.requested` is what was asked for. Do not fill it again — the same write already produced this, and a repeat is a second real edit against a field that discarded the first. A field that empties itself is a controlled component writing its own state over ours, or an input rejecting what it cannot parse (a number input given letters). Read `value.actual` to confirm, then either send a value of the type the field accepts, or drive the page's own control instead of the field. If the emptying may be a validator that runs later than the window in `observed_after_ms`, `wait` then `assert value` is what measures that.",
         ),
@@ -814,21 +724,11 @@ pub fn hint_for(assessment: Assessment) -> Option<&'static str> {
     }
 }
 
-/// The same advice as `hint_for`, cut to what fits on a terminal line or two.
+/// The same advice as `hint_for`, cut to a terminal line or two. `None` wherever `hint_for` is.
 ///
-/// The full hints are written for an agent reading JSON, where length is cheap and a paragraph
-/// naming every failure mode is worth having. In text mode the `not_kept` one rendered as seven
-/// wrapped lines of about ninety words, which buried the three lines above it that carry the
-/// news — `value: NOT KEPT …`, the verdict and the gloss.
-///
-/// A second curated table rather than a truncation of the first: cutting at a character count
-/// ends mid-sentence, and cutting at the first sentence loses the imperative in most of these —
-/// the prohibition in `value_reverted` is in the SECOND sentence, and it is the one line that
-/// stops an agent from editing the page again. So each entry states the fact and the next
-/// command, and where the full hint forbids a repeat, the short one forbids it too. The tests
-/// below check that mechanically rather than trusting the wording.
-///
-/// `None` where `hint_for` is `None`: a verdict that needs no advice gets no line.
+/// A second curated table, not a truncation: cutting at a character count ends mid-sentence, and
+/// cutting at the first sentence loses the imperative — `value_reverted`'s prohibition is in the
+/// SECOND one. Where the full hint forbids a repeat, the short one must too (tested below).
 #[must_use]
 pub fn short_hint(assessment: Assessment) -> Option<&'static str> {
     if assessment.reason == "value_kept" {
@@ -840,8 +740,7 @@ pub fn short_hint(assessment: Assessment) -> Option<&'static str> {
         };
     }
     match assessment.reason {
-        // The prohibition comes first in both: re-filling is the reflex, and it is a second
-        // real edit against a field that already refused the first one.
+        // The prohibition comes first in both.
         "value_reverted" => Some(
             "Do not fill it again — the field discarded the first write. Read `value.actual`, then send a value the field accepts.",
         ),
@@ -886,8 +785,7 @@ mod short {
     /// Roughly two lines on a normal terminal. The full text stays in `verdict_hint`.
     const LINE_PAIR: usize = 200;
 
-    /// Advice a person needs and advice an agent needs are the same advice; only the budget
-    /// differs. A reason with a full hint and no short one prints nothing in text mode.
+    /// A reason with a full hint and no short one prints nothing in text mode.
     #[test]
     fn every_full_hint_has_a_short_form() {
         for assessment in super::tests::every_assessment() {
@@ -901,8 +799,7 @@ mod short {
         }
     }
 
-    /// The whole point of the second table: it has to be short, and it has to be whole
-    /// sentences. A character-count truncation of the full hint would fail the second half.
+    /// Short AND whole sentences. A character-count truncation would fail the second half.
     #[test]
     fn a_short_hint_is_short_and_ends_where_a_sentence_ends() {
         for assessment in super::tests::every_assessment() {
@@ -918,9 +815,7 @@ mod short {
         }
     }
 
-    /// The rule that survives the cut. Where the full hint forbids a repeat in words, the short
-    /// one must too: shortening the advice must not shorten away the one line that stops an
-    /// agent from clicking, filling or submitting a second time.
+    /// Shortening must not drop the line that stops an agent acting a second time.
     #[test]
     fn shortening_never_drops_a_prohibition() {
         for assessment in super::tests::every_assessment() {
@@ -934,8 +829,7 @@ mod short {
                     assessment.reason
                 );
             }
-            // The softer half of the same rule: a full hint that warns about doing the action
-            // twice must leave the short form warning about it too, in whatever wording.
+            // Softer half: a full hint warning about a duplicate leaves the short one warning too.
             let warns = |text: &str| {
                 ["repeat", "again", "twice", "second"].iter().any(|w| text.contains(w))
             };
@@ -949,8 +843,7 @@ mod short {
         }
     }
 
-    /// `scroll_not_settled` is the one rung where the repeat IS the advice, so its short form
-    /// must not read like the prohibitions above it.
+    /// `scroll_not_settled` is the one rung where the repeat IS the advice.
     #[test]
     fn the_safe_retry_still_says_to_retry() {
         let assessment = Assessment { verdict: Verdict::Unknown, reason: "scroll_not_settled", page: PageSight::Readable };

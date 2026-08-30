@@ -1,10 +1,6 @@
-//! `select` reads the selection back through the same observation window as fill/check.
-//!
-//! It used to set `selectedIndex`, dispatch `change`, and return the option text from the
-//! same synchronous script — before a controlled component (React/MUI validation) had any
-//! chance to revert it. "Selected \"Beta\"" on a select the page had already snapped back
-//! to Alpha is a silent wrong answer: the agent submits the form believing a different
-//! option is chosen than what the page holds.
+//! `select` reads the selection back through the same 60 ms observation window as fill/check.
+//! A selection a controlled component reverts inside that window must be refused, not reported
+//! as made.
 
 use std::process::Command;
 
@@ -13,14 +9,8 @@ use serde_json::Value;
 mod common;
 use common::TestBrowser;
 
-fn binary() -> String {
-    let mut path = std::env::current_exe().unwrap().parent().unwrap().parent().unwrap().to_path_buf();
-    path.push("chrome-agent");
-    path.to_string_lossy().into_owned()
-}
-
 fn run_cli(args: &[&str]) -> (String, i32) {
-    let output = Command::new(binary()).args(args).output().expect("Failed to run chrome-agent");
+    let output = Command::new(common::binary()).args(args).output().expect("Failed to run chrome-agent");
     (
         String::from_utf8_lossy(&output.stdout).to_string(),
         output.status.code().unwrap_or(-1),
@@ -39,8 +29,7 @@ fn open(browser: &str) -> bool {
     true
 }
 
-/// The page snaps the selection back on the task queue. Claiming "Selected" there is
-/// the wrong answer; the command must refuse, like check does when a click is rejected.
+/// The fixture snaps the selection back on the task queue.
 #[test]
 fn a_reverted_selection_is_not_reported_as_selected() {
     let b = TestBrowser::new("select-revert");
@@ -60,7 +49,6 @@ fn a_reverted_selection_is_not_reported_as_selected() {
     );
 }
 
-/// A selection that sticks reports the window it was observed through, like fill/check.
 #[test]
 fn a_kept_selection_reports_its_observation_window() {
     let b = TestBrowser::new("select-kept");
@@ -82,7 +70,6 @@ fn a_kept_selection_reports_its_observation_window() {
     );
 }
 
-/// The uid path makes the same promise as the selector path.
 #[test]
 fn the_uid_path_reads_back_too() {
     let b = TestBrowser::new("select-uid-revert");

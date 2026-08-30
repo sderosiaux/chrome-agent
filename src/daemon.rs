@@ -12,7 +12,6 @@ const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(2);
 
 /// Run the micro-daemon. Blocks until idle timeout or explicit stop.
 pub async fn run_daemon(socket_path: &Path) -> Result<(), DaemonError> {
-    // Clean up stale socket
     if socket_path.exists() {
         let _ = std::fs::remove_file(socket_path);
     }
@@ -22,7 +21,6 @@ pub async fn run_daemon(socket_path: &Path) -> Result<(), DaemonError> {
             .map_err(|e| DaemonError(format!("Failed to create socket dir: {e}")))?;
     }
 
-    // Write PID file
     if let Ok(pid_path) = session::daemon_pid_path() {
         let _ = std::fs::write(&pid_path, format!("{}\n", std::process::id()));
     }
@@ -36,20 +34,16 @@ pub async fn run_daemon(socket_path: &Path) -> Result<(), DaemonError> {
     let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
     let mut last_activity = Instant::now();
 
-    // Heartbeat task: check Chrome health periodically. It deliberately does NOT
-    // touch `activity_tx` — only real client traffic must reset the idle timer,
-    // otherwise the 2s heartbeat would keep the daemon alive forever and the
-    // IDLE_TIMEOUT would never be reached.
+    // Heartbeat task: check Chrome health periodically. It must NOT touch `activity_tx` —
+    // only client traffic resets the idle timer, or the 2s beat keeps the daemon alive
+    // forever and IDLE_TIMEOUT is never reached.
     let _heartbeat = tokio::spawn(async move {
         let mut interval = tokio::time::interval(HEARTBEAT_INTERVAL);
         loop {
             interval.tick().await;
-            // Heartbeat logic: try to load session and verify browser PIDs.
-            // A store that will not load is reported, not swallowed: this loop's whole job
-            // is to keep the registry honest, and a silent `continue` every two seconds is
-            // a daemon that looks healthy while doing nothing. `eprintln!` is the whole
-            // remedy available — a heartbeat has no client to answer and launches no
-            // browser, so there is nothing to refuse.
+            // Load the session and verify browser pids. A store that will not load is
+            // reported on stderr rather than skipped silently: the beat has no client to
+            // answer, so saying so is the only remedy available.
             let mut store = match session::load_session() {
                 Ok(store) => store,
                 Err(e) => {
@@ -99,7 +93,6 @@ pub async fn run_daemon(socket_path: &Path) -> Result<(), DaemonError> {
         }
     }
 
-    // Cleanup
     let _ = std::fs::remove_file(socket_path);
     if let Ok(pid_path) = session::daemon_pid_path() {
         let _ = std::fs::remove_file(&pid_path);
@@ -120,7 +113,7 @@ async fn handle_client(
     let mut lines = BufReader::new(reader).lines();
 
     while let Ok(Some(line)) = lines.next_line().await {
-        // Real client traffic resets the daemon's idle timer.
+        // Client traffic, and only client traffic, resets the idle timer.
         let _ = activity.send(()).await;
 
         let (response, should_shutdown) = process_command(&line);
@@ -132,18 +125,16 @@ async fn handle_client(
             break;
         }
         if should_shutdown {
-            // Signal the main loop to break so its cleanup (socket + PID removal)
-            // runs. Do NOT std::process::exit here — that leaks the socket file.
+            // Break the main loop so its cleanup (socket + pid removal) runs. Never
+            // std::process::exit here: that leaks the socket file.
             let _ = shutdown.send(()).await;
             break;
         }
     }
 }
 
-/// Process a daemon command. Thin dispatch layer.
-///
-/// Returns the JSON response plus a flag indicating whether the daemon should
-/// shut down after replying (only set by the `stop` command).
+/// Process a daemon command: the JSON response, plus whether the daemon should shut down
+/// after replying (only `stop` sets it).
 fn process_command(line: &str) -> (serde_json::Value, bool) {
     let request: serde_json::Value = match serde_json::from_str(line) {
         Ok(v) => v,
@@ -164,10 +155,8 @@ fn process_command(line: &str) -> (serde_json::Value, bool) {
         "ping" => (serde_json::json!({"ok": true, "data": "pong"}), false),
 
         "status" => {
-            // A store that would not load answers an empty browser list, which reads as
-            // "this daemon knows of no browser" — a statement about the machine made by a
-            // read that failed. The list stays empty (there is nothing truthful to put in
-            // it) and the reason goes to stderr, where the daemon's other diagnostics go.
+            // A store that will not load answers an empty browser list — there is nothing
+            // truthful to put in it — and the reason goes to stderr.
             let store = session::load_session().unwrap_or_else(|e| {
                 eprintln!("daemon status: could not read the session store: {e}");
                 session::SessionStore::default()
@@ -213,8 +202,8 @@ mod tests {
 
     #[test]
     fn stop_requests_graceful_shutdown() {
-        // Regression for A3b: `stop` must trigger the main-loop break (so socket +
-        // PID cleanup runs), signalled by the shutdown flag — not std::process::exit.
+        // `stop` must set the shutdown flag so the main loop breaks and cleans up,
+        // rather than calling std::process::exit.
         let (resp, shutdown) = process_command(r#"{"command":"stop"}"#);
         assert!(shutdown, "stop must request shutdown");
         assert_eq!(resp["ok"], true);
@@ -239,9 +228,8 @@ mod tests {
 
     #[test]
     fn heartbeat_cannot_reset_idle_timer() {
-        // Regression for A3a: the heartbeat fires far more often than the daemon
-        // idles, so if it ever fed the activity channel the daemon would live
-        // forever. Guard the invariant that keeps the fix meaningful.
+        // The heartbeat fires far more often than the daemon idles, so feeding the
+        // activity channel from it would keep the daemon alive forever.
         assert!(
             HEARTBEAT_INTERVAL < IDLE_TIMEOUT,
             "heartbeat must be shorter than the idle timeout — otherwise resetting \

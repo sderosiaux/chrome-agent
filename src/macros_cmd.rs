@@ -1,8 +1,5 @@
-//! The `macro` surface: what an agent types, and what it reads back.
-//!
-//! Four verbs, and the split between them is where the browser is: `list`, `show` and `record`
-//! touch files only, so they never open a page — a Chrome launched to answer "what macros exist"
-//! would be the kind of cost nobody sees until the bill. Only `run` needs a browser.
+//! The `macro` surface: what an agent types, and what it reads back. `list`, `show` and `record`
+//! touch files only and never open a page; only `run` needs a browser.
 
 use std::collections::BTreeMap;
 
@@ -65,9 +62,8 @@ pub async fn run_cli(cli: &Cli, action: &MacroAction) -> Result<(), crate::BoxEr
                     print!("{}", crate::macros_run::render_run(&report));
                 }
             } else {
-                // A macro whose guard did not hold is a failure of the run, and a shell that
-                // chains on it has to see that. It carries its own report and prints it once —
-                // `1`, not `2`: `2` means an assertion did not hold and belongs to `assert`.
+                // A guard that did not hold fails the run, so a chaining shell sees it. Exit
+                // `1`, not `2`: `2` belongs to `assert`.
                 return Err(Box::new(crate::macros_run::Stopped::new(report, json_mode)));
             }
         }
@@ -98,8 +94,8 @@ pub fn record_from_recording(
 ) -> Result<Value, crate::BoxError> {
     let text = std::fs::read_to_string(path)
         .map_err(|e| format!("Cannot read the recording '{path}': {e}"))?;
-    // The snapshot a step's uid has to be read against is the last one the session took, and a
-    // recording holds those too: the `inspect` responses it kept while the agent explored.
+    // A step's uid resolves against the last snapshot the session took, which the recording
+    // kept with its `inspect` responses.
     let mut snapshot: Option<String> = None;
     let mut history: Vec<Observed> = Vec::new();
     for line in text.lines().filter(|line| !line.trim().is_empty()) {
@@ -136,26 +132,21 @@ pub fn save_distilled(
         "ok": true,
         "macro": distilled.macro_file.name,
         "path": path.display().to_string(),
-        // Which entry the task was taken to start at, and whether that was the caller's choice.
-        // The design suspected a marker; this is the same information, chosen with hindsight,
-        // and it is printed rather than assumed — `--from` overrides it.
+        // Which entry the task was taken to start at, and whether the caller chose it.
         "started_at": start,
         "started_by": if from.is_some() { "you" } else { "the last navigation" },
         "steps": distilled.macro_file.steps.len(),
         "unguarded_steps": unguarded,
         "params": distilled.macro_file.params.keys().collect::<Vec<_>>(),
         "dropped": distilled.dropped.iter().map(|r| json!({"index": r.index, "reason": r.reason})).collect::<Vec<_>>(),
-        // Not the same thing as dropped, and the difference is the whole point: these acted on
-        // the page and could not be written down, so the macro is SHORTER than the task.
+        // Not dropped: these acted on the page and could not be written down, so the macro is
+        // SHORTER than the task.
         "refused": distilled.refused.iter().map(|r| json!({"index": r.index, "reason": r.reason})).collect::<Vec<_>>(),
     }))
 }
 
-/// `{"cmd":"macro", …}` inside a pipe session.
-///
-/// The session's own history is the source here, which is what makes recording possible without
-/// planning for it: the agent finds out that the task worked, and only then asks for it to be
-/// kept.
+/// `{"cmd":"macro", …}` inside a pipe session, distilling the session's own history — which is
+/// what lets an agent ask for a task to be kept only after finding out that it worked.
 pub fn dispatch_pipe(cmd: &Value, history: &[Observed]) -> Result<Value, crate::BoxError> {
     let action = cmd.get("action").and_then(Value::as_str).unwrap_or("record");
     match action {

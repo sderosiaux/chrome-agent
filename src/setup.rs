@@ -1,6 +1,4 @@
 //! Page-level setup: console interceptor injection and stealth patches.
-//!
-//! Extracted from main.rs to keep it under the line limit.
 
 use serde_json::json;
 
@@ -8,9 +6,8 @@ use crate::cdp::client::CdpClient;
 
 /// How to answer JavaScript dialogs (`alert`/`confirm`/`prompt`/`beforeunload`).
 ///
-/// A native dialog blocks the page with no DOM signal, so without this the
-/// agent's next command silently hangs. `Accept`/`Dismiss` auto-answer; `Manual`
-/// leaves dialogs alone (legacy behaviour).
+/// A native dialog blocks the page with no DOM signal, so an unanswered one hangs the next
+/// command. `Accept`/`Dismiss` auto-answer; `Manual` leaves dialogs alone.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DialogPolicy {
     Accept,
@@ -48,9 +45,8 @@ pub struct DialogResponse {
 
 /// Decide how to answer a dialog of `dialog_type` under `policy`.
 ///
-/// `Accept` confirms every dialog (for `beforeunload` this means "proceed" — the
-/// agent asked to navigate/close); `prompt` gets the supplied `--dialog-text`
-/// (empty string if none). `Dismiss` (and `Manual`, defensively) cancels.
+/// `Accept` confirms every dialog (for `beforeunload`, "proceed") and supplies
+/// `--dialog-text` to a `prompt`, empty if none. `Dismiss` and `Manual` cancel.
 #[must_use]
 pub fn dialog_decision(policy: DialogPolicy, dialog_type: &str, text: Option<&str>) -> DialogResponse {
     match policy {
@@ -66,35 +62,12 @@ pub fn dialog_decision(policy: DialogPolicy, dialog_type: &str, text: Option<&st
 
 /// Apply stealth anti-detection patches. Must be called after `Page.enable`.
 ///
-/// Every one of the four calls discarded its result, so a patch that did not land
-/// was invisible — and the non-stealth path is the proof that silence was not the
-/// policy: the callers do `client.enable("Runtime").await?`, so a session REFUSES
-/// to start when `Runtime.enable` fails and starts normally when all four stealth
-/// patches failed. A patch that does not land produces precisely the error the
-/// flag exists to prevent, and produces it in the worst possible form: the page
-/// answers with an interstitial, `landed.serving` reads `challenge`, and the hint
-/// says to use `--connect` — attributing to the site a cause that is ours.
-///
-/// So each failure is named on stderr — never stdout, so `--json` stays clean,
-/// the same channel the JS dialog handler uses for a fact no response has a field
-/// for. Deliberately NOT an error and deliberately NOT a refusal to connect: that
-/// would be a hardening, and a browser missing one patch is still a working
-/// browser. The signature stays `-> ()` for the same reason: no call site changes.
-///
-/// The four are attempted unconditionally and reported independently. Nothing
-/// here claims that one failing causes another to fail — `Network.enable` and
-/// `Network.setUserAgentOverride` look related and that dependency has not been
-/// measured, so skipping the second on the first's failure would be a guess that
-/// hides a fact.
-///
-/// What this still cannot see, stated rather than papered over:
-/// `Page.addScriptToEvaluateOnNewDocument` reports whether Chrome ACCEPTED the
-/// script, not whether it ran without throwing on the next document — that
-/// happens later, in a context nothing here is watching.
+/// All four are attempted unconditionally and reported independently; a failure is named on
+/// stderr (never stdout, so `--json` stays clean) and is not an error, since a browser
+/// missing one patch still works. `Page.addScriptToEvaluateOnNewDocument` reports only that
+/// Chrome accepted the script, not that it ran without throwing on the next document.
 pub async fn apply_stealth(client: &CdpClient) {
-    // Reported by name because they are independently invisible: which one failed
-    // decides which fingerprint is still exposed, and they are four different
-    // fingerprints.
+    // Named per patch: which one failed decides which fingerprint is still exposed.
     if let Err(e) = client.enable("Network").await {
         warn_patch("Network.enable (required by the user-agent override)", &e.to_string());
     }
@@ -114,26 +87,14 @@ pub async fn apply_stealth(client: &CdpClient) {
         );
     }
 
-    // 2. Patch the current page immediately (in case we connected mid-session)
+    // 2. Patch the current page immediately (in case we connected mid-session).
     //
-    // The guard is a deliberate BEHAVIOUR CHANGE, not a tidy-up, and it was found
-    // by the control test — the one that asserts an ordinary page produces no
-    // warning — failing. `Object.defineProperty` creates an own property that is
-    // non-configurable by default, so on any page the script in step 1 has already
-    // patched, this line THROWS: "TypeError: Cannot redefine property: webdriver".
-    // That is the normal case for every `--stealth` command after the first, and
-    // it has always been so; discarding the result is what hid it. Naming the
-    // failure without also fixing it would print a warning on almost every
-    // invocation, and a warning that fires when nothing is wrong stops being read
-    // — which would have made this whole change counter-productive.
-    //
-    // Reading the property first skips exactly the case where the patch is already
-    // in place and skips nothing else: a page that froze `navigator.webdriver`
-    // itself still reports, which is the case this step exists for
-    // (`tests/fixtures/webdriver_locked.html`). Measured on two successive
-    // `--stealth` invocations against one browser: `typeof navigator.webdriver`
-    // reads `"undefined"` on both, so the fingerprint the patch exists to hide is
-    // still hidden — the guard removes a throw, not a patch.
+    // Guarded on reading the property first: `Object.defineProperty` makes a
+    // non-configurable own property, so on a page step 1 already patched this throws
+    // "TypeError: Cannot redefine property: webdriver" — the normal case for every
+    // `--stealth` command after the first, which would warn on nearly every invocation.
+    // A page that froze `navigator.webdriver` itself still reports
+    // (`tests/fixtures/webdriver_locked.html`). The guard removes a throw, not a patch.
     let webdriver_now: Result<crate::cdp::types::EvaluateResult, _> = client
         .call(
             "Runtime.evaluate",
@@ -143,17 +104,13 @@ pub async fn apply_stealth(client: &CdpClient) {
         )
         .await;
     match webdriver_now {
-        // Read rather than discarded: an evaluation that throws answers `Ok` and
-        // reports it in `exceptionDetails`, which is how this patch fails most
-        // quietly — `navigator.webdriver` is already non-configurable on a page
-        // the script above has patched, and redefining it then throws.
+        // An evaluation that throws answers `Ok` and reports it in `exceptionDetails`,
+        // so the result is read rather than discarded.
         Ok(r) => {
             if let Some(exception) = &r.exception_details {
-                // `text` alone is the word "Uncaught"; the description carries the
-                // reason, which is the whole point of naming the failure. Its
-                // first line only — the rest is a stack trace inside a one-line
-                // expression this file wrote, which names nothing the reader
-                // does not already have.
+                // `text` alone is just "Uncaught"; the description carries the reason.
+                // First line only — the rest is a stack trace inside a one-line
+                // expression this file wrote.
                 let reason = exception
                     .exception
                     .as_ref()
@@ -190,17 +147,12 @@ pub async fn apply_stealth(client: &CdpClient) {
     }
 }
 
-/// One stealth patch that did not land, on stderr.
-///
-/// States what is missing and nothing more: which detection this exposes the
-/// session to is a question about the site, not about this failure.
+/// Report one stealth patch that did not land, on stderr.
 fn warn_patch(patch: &str, reason: &str) {
     eprintln!("warning: stealth patch not applied — {patch}: {reason}");
 }
 
-// ---------------------------------------------------------------------------
-// JS source constants
-// ---------------------------------------------------------------------------
+// --- JS source constants ---
 
 const STEALTH_PATCHES_JS: &str = r#"
     Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
@@ -318,10 +270,8 @@ mod tests {
 
     #[test]
     fn permissions_patch_calls_query_on_the_instance_not_the_prototype() {
-        // A1 regression: `origQuery.call(Permissions.prototype, ...)` throws
-        // "Illegal invocation" because query must run against a real
-        // navigator.permissions instance, not the prototype. The patch must
-        // capture the instance and delegate to it.
+        // `origQuery.call(Permissions.prototype, ...)` throws "Illegal invocation":
+        // query must run against a real navigator.permissions instance.
         assert!(
             STEALTH_PATCHES_JS.contains("const perms = navigator.permissions;"),
             "permissions instance must be captured"
@@ -338,9 +288,8 @@ mod tests {
 
     #[test]
     fn webgl2_get_parameter_is_patched() {
-        // A6 regression: WebGL2RenderingContext does not inherit from
-        // WebGLRenderingContext, so its getParameter must be overridden
-        // separately or webgl2 contexts leak headless vendor/renderer.
+        // WebGL2RenderingContext does not inherit from WebGLRenderingContext, so its
+        // getParameter needs its own override or webgl2 leaks the headless vendor.
         assert!(
             STEALTH_PATCHES_JS.contains("WebGL2RenderingContext.prototype.getParameter"),
             "WebGL2 getParameter must be overridden"
