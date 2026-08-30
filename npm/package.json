@@ -1,7 +1,7 @@
 {
   "name": "chrome-agent",
   "version": "0.15.0",
-  "description": "Browser automation for AI agents. Single binary, zero dependencies, CDP direct.",
+  "description": "Web tasks that compile. Browser automation that reads the page back after every action and reports what actually happened, in JSON. Single binary, CDP direct.",
   "type": "module",
   "bin": {
     "chrome-agent": "./bin/chrome-agent.js"
