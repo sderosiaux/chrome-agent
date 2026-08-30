@@ -618,6 +618,16 @@ pub enum Command {
         action: EmulateAction,
     },
 
+    /// Discover and call tools a page registers on `document.modelContext` (`WebMCP`)
+    ///
+    /// `list` never mutates the page; `call` does, and is reported like every other action
+    /// command — verdict, delta, `next` — because the protocol gives no other way to check
+    /// what a tool declares against what actually happened. There is no `outputSchema`.
+    Webmcp {
+        #[command(subcommand)]
+        action: WebmcpAction,
+    },
+
     /// Execute multiple commands from a JSON array on stdin
     Batch {
         /// Stop at the first command that fails (default: run every command)
@@ -689,6 +699,29 @@ pub enum EmulateAction {
     Status,
     /// Clear target overrides and the persisted metrics for this named page
     Reset,
+}
+
+#[derive(Subcommand)]
+pub enum WebmcpAction {
+    /// List tools this page has registered — name, description, inputSchema. No outputSchema:
+    /// the protocol defines none.
+    List,
+    /// Call a tool by name (resolved to the `RegisteredTool` the page's own `getTools()` reported —
+    /// executeTool refuses a bare name). Reports what the tool declared AND what the page's
+    /// accessibility tree measurably did, side by side.
+    Call {
+        /// Tool name, exactly as `webmcp list` reported it
+        name: String,
+        /// JSON object of arguments (default: "{}")
+        #[arg(long, default_value = "{}")]
+        args: String,
+        /// Inspect page after calling
+        #[arg(long)]
+        inspect: bool,
+        /// Max depth for inspect output (also accepted as global flag)
+        #[arg(long)]
+        max_depth: Option<usize>,
+    },
 }
 
 #[derive(Subcommand)]

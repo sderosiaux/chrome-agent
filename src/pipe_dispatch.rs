@@ -13,7 +13,7 @@ pub use crate::pipe_report::{attach_change_report, mutates_page};
 pub use crate::pipe_dispatch_actions::{
     dispatch_assert, dispatch_check, dispatch_dblclick, dispatch_drag, dispatch_fill_and_submit,
     dispatch_fill_form, dispatch_history, dispatch_hover, dispatch_navigate_and_read,
-    dispatch_select, dispatch_upload, run_batch,
+    dispatch_select, dispatch_upload, dispatch_webmcp_call, dispatch_webmcp_list, run_batch,
 };
 
 // ---------------------------------------------------------------------------
@@ -812,6 +812,8 @@ pub async fn dispatch_single(
         "frame" => dispatch_frame(client, cmd).await,
         "emulate" => dispatch_emulate(client, store, browser_name, page_name, cmd).await,
         "assert" => dispatch_assert(client, store, browser_name, page_name, cmd).await,
+        "webmcp_list" | "webmcp-list" => dispatch_webmcp_list(client).await,
+        "webmcp_call" | "webmcp-call" => dispatch_webmcp_call(client, cmd).await,
         other => Err(unknown_cmd_error(other)),
     };
     // `result` must not outlive this block: BoxError is not Send, and an await with it

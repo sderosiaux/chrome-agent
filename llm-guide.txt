@@ -100,6 +100,23 @@ LLM USAGE GUIDE:
     # --proxy-server (use --proxy-server instead), --headless (use --headed instead) — chrome-agent
     # depends on its own values for these to find and reconnect to the browser it launched.
 
+  WebMCP tools (document.modelContext.getTools()/.executeTool()):
+    chrome-agent webmcp list
+    chrome-agent inspect                                       # baseline first, like any action
+    chrome-agent webmcp call add_to_cart --args '{"item":"X"}'
+    # The protocol defines no outputSchema: a tool's declared return is a freeform string with
+    # nothing to check it against. `webmcp call` reports the tool's own declared_result next to
+    # verdict/delta/next from the SAME machinery every other action gets. A tool that declares
+    # success and moves nothing reads verdict=unchanged/identical_tree, never a stronger claim —
+    # canvas repaints, CSS-only changes, and late handlers all look the same to this measurement.
+    # `webmcp call` resolves the RegisteredTool object and validates --args as JSON itself, so
+    # the spec's own TypeError ("not of type 'RegisteredTool'") and SyntaxError ("Failed to
+    # parse input arguments") are not reachable through it.
+    # Under `frame`, webmcp hits the same isolated-world blindness eval already has: a tool the
+    # frame's own main-world script registered can be invisible. Response carries
+    # frame_scoped:true when this applies — an empty list there is unproven, not "none".
+    # Most installed Chrome has no native WebMCP: use --chrome-arg above, or a page's polyfill.
+
   Targeting elements (3 modes):
     chrome-agent click n40                              # by uid from inspect
     chrome-agent click --selector "button.submit"      # by CSS selector

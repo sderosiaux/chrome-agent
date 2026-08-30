@@ -26,3 +26,4 @@ pub mod tabs;
 pub mod text;
 pub mod upload;
 pub mod wait;
+pub mod webmcp;

@@ -1,7 +1,7 @@
 use serde_json::json;
 
 use crate::BoxError;
-use crate::cli::{Cli, Command, DaemonAction, EmulateAction};
+use crate::cli::{Cli, Command, DaemonAction, EmulateAction, WebmcpAction};
 use crate::run_helpers::{ReportPolicy, check_report, cmd_close, cmd_purge_orphans, cmd_status, cmd_stop, get_uid_map, json_output, output_action, output_action_with, output_goto};
 use crate::{commands, pipe, session};
 
@@ -830,6 +830,54 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
                     } else {
                         println!("Cleared device emulation from page={:?}.", cli.page);
                     }
+                }
+            }
+        }
+
+        Command::Webmcp { action } => {
+            match action {
+                WebmcpAction::List => {
+                    let tools = commands::webmcp::list_tools(&client).await?;
+                    if json_mode {
+                        json_output(&json!({
+                            "ok": true,
+                            "tools": tools.tools,
+                            "frame_scoped": tools.frame_scoped,
+                        }));
+                    } else {
+                        print!("{}", commands::webmcp::render_list_text(&tools.tools));
+                        if tools.frame_scoped {
+                            println!(
+                                "note: scoped to the bound frame's isolated world — a tool the \
+                                 frame registered from its own main-world script is invisible \
+                                 here; an empty list is not proof this frame has none."
+                            );
+                        }
+                    }
+                }
+                WebmcpAction::Call { name, args, inspect, max_depth } => {
+                    let depth = max_depth.or(cli.max_depth);
+                    let outcome = commands::webmcp::call_tool(&client, &name, &args).await?;
+                    let msg = format!("Called WebMCP tool '{}'", outcome.tool);
+                    let mut details = json!({
+                        "tool": outcome.tool,
+                        "declared_result": outcome.declared_result,
+                    });
+                    if let Ok(parsed) =
+                        serde_json::from_str::<serde_json::Value>(&outcome.declared_result)
+                    {
+                        details["declared_result_parsed"] = parsed;
+                    }
+                    if !outcome.declared_result_was_string {
+                        details["declared_result_was_string"] = json!(false);
+                    }
+                    if outcome.frame_scoped {
+                        details["frame_scoped"] = json!(true);
+                    }
+                    output_action_with(
+                        &client, &mut store, &cli.browser, &cli.page, &target_id, msg,
+                        &policy.for_action(inspect, depth), json_mode, Some(details),
+                    ).await?;
                 }
             }
         }

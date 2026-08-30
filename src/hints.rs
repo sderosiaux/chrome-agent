@@ -309,6 +309,52 @@ pub fn error_hint(msg: &str, browser: &str) -> Option<String> {
         ))
     } else if msg.contains("Provide a uid") || msg.contains("Provide --uid") {
         Some("Specify what to target: uid (e.g. n47), --selector \"css\", or --xy x,y".to_string())
+    } else if msg.contains("bound frame's isolated world") {
+        // Matched before the plain "document.modelContext is undefined" branch below (that
+        // text is also a substring of this one): a frame binding changes what the absence
+        // proves, from "this page has no WebMCP" to "not visible from here".
+        Some(format!(
+            "This checked the bound frame's isolated world, where document.modelContext came \
+             back undefined — the same blindness `eval` already has for a frame's main-world \
+             variables, just hitting a property instead. That is NOT proof this frame has no \
+             tools: a polyfill the frame's own script installed on its main-world document is \
+             invisible here. Run `{run} frame main` to check the top document instead, or accept \
+             that a frame's own WebMCP tools cannot currently be confirmed absent from outside it."
+        ))
+    } else if msg.contains("document.modelContext is undefined") {
+        // Matched before the generic JS-error branch: this is a specific, known cause
+        // (`webmcp list`/`webmcp call`'s own guard), not a page bug to debug.
+        Some(format!(
+            "This page's document.modelContext is undefined, so no WebMCP tool can be listed \
+             or called here. Either this browser was not launched with --chrome-arg \
+             --enable-features=WebMCP,WebMCPTesting, or the page registers no polyfill for it. \
+             --chrome-arg is fixed for the life of a named browser: run `{run} close --purge` \
+             and relaunch with the flag, or check the page's own script for a document.modelContext \
+             polyfill."
+        ))
+    } else if msg.contains("no WebMCP tool named") {
+        Some(format!(
+            "That name matched none of this page's registered tools when getTools() was last \
+             checked. Run `{run} webmcp list` to see the names actually registered — a tool can \
+             also disappear if the page unregistered it since the last list."
+        ))
+    } else if msg.contains("not of type 'RegisteredTool'") {
+        // Native executeTool()'s own error, reachable only through raw `eval` — `webmcp call`
+        // resolves the tool object itself and cannot produce this.
+        Some(format!(
+            "WebMCP's executeTool() requires the actual tool object getTools() returned, not a \
+             bare name — this TypeError is what results from passing one directly. Run \
+             `{run} webmcp list` to see the registered tools, then `{run} webmcp call` with the \
+             name from that list; it resolves the tool object for you before calling executeTool()."
+        ))
+    } else if msg.contains("executeTool") && (msg.contains("is not valid JSON") || msg.contains("Failed to parse input arguments")) {
+        // Also native executeTool()'s own error, also unreachable through `webmcp call`: it
+        // always hands executeTool a validated JSON string.
+        Some(format!(
+            "executeTool()'s second argument must be a JSON string, not an object — this is what \
+             results from passing one directly. Run `{run} webmcp call` instead and give --args \
+             a JSON object or string; chrome-agent serializes it before it ever reaches executeTool()."
+        ))
     } else if msg.contains("Evaluation error") || msg.contains("TypeError") || msg.contains("ReferenceError") || msg.contains("SyntaxError") {
         Some("JS error in page context. Check expression syntax. Use --selector to scope to an element.".to_string())
     } else if msg.contains("dispatcher task exited") || msg.contains("transport closed") {
@@ -377,6 +423,11 @@ mod tests {
         "File not found: /tmp/nope",
         "assert: invalid regular expression",
         "batch: expected a JSON array",
+        "Evaluation error: Error: chrome-agent: document.modelContext is undefined on this page.",
+        "Evaluation error: Error: chrome-agent: document.modelContext is undefined in the bound frame's isolated world — this does not prove the frame has no tools, since a polyfill the frame's own main-world script installs is invisible here.",
+        "Evaluation error: Error: chrome-agent: no WebMCP tool named \"foo\". Known tools: bar, baz.",
+        "Evaluation error: TypeError: The provided value is not of type 'RegisteredTool'.",
+        "Evaluation error: SyntaxError: \"[object Object]\" is not valid JSON\n    at JSON.parse (<anonymous>)\n    at Object.executeTool (file:///x.html:1:1)",
     ];
 
     #[test]
@@ -513,6 +564,71 @@ mod tests {
         for hint in [&node, &parse] {
             assert!(!hint.contains("Page structure issue"), "{hint}");
         }
+    }
+
+    /// The four `WebMCP` branches all name their specific cause, and none of them falls through
+    /// to the generic "JS error in page context" catch-all that would otherwise claim them —
+    /// every `WebMCP` error is also an `Evaluation error`/`TypeError`/`SyntaxError`.
+    #[test]
+    fn webmcp_errors_do_not_fall_through_to_the_generic_js_error_hint() {
+        let generic = "JS error in page context. Check expression syntax. Use --selector to scope to an element.";
+
+        let no_context = error_hint(
+            "Evaluation error: Error: chrome-agent: document.modelContext is undefined on this page.",
+            "default",
+        )
+        .unwrap();
+        assert_ne!(no_context, generic);
+        assert!(no_context.contains("--chrome-arg"), "{no_context}");
+        assert!(no_context.contains("--enable-features=WebMCP"), "{no_context}");
+
+        let unknown_tool = error_hint(
+            "Evaluation error: Error: chrome-agent: no WebMCP tool named \"foo\". Known tools: bar.",
+            "default",
+        )
+        .unwrap();
+        assert_ne!(unknown_tool, generic);
+        assert!(unknown_tool.contains("chrome-agent webmcp list"), "{unknown_tool}");
+
+        let bare_name = error_hint(
+            "Evaluation error: TypeError: The provided value is not of type 'RegisteredTool'.",
+            "default",
+        )
+        .unwrap();
+        assert_ne!(bare_name, generic);
+        assert!(bare_name.contains("chrome-agent webmcp call"), "{bare_name}");
+
+        let object_args = error_hint(
+            "Evaluation error: SyntaxError: \"[object Object]\" is not valid JSON\n    at executeTool (x)",
+            "default",
+        )
+        .unwrap();
+        assert_ne!(object_args, generic);
+        assert!(object_args.contains("--args"), "{object_args}");
+    }
+
+    /// The frame-scoped absence and the plain absence share the substring "document.modelContext
+    /// is undefined", so the more specific one has to be checked first or it is unreachable.
+    #[test]
+    fn a_frame_scoped_absence_is_not_read_as_a_plain_absence() {
+        let plain = error_hint(
+            "Evaluation error: Error: chrome-agent: document.modelContext is undefined on this page.",
+            "default",
+        )
+        .unwrap();
+        assert!(plain.contains("--chrome-arg"), "{plain}");
+        assert!(!plain.contains("bound frame"), "{plain}");
+
+        let frame = error_hint(
+            "Evaluation error: Error: chrome-agent: document.modelContext is undefined in the \
+             bound frame's isolated world — this does not prove the frame has no tools, since a \
+             polyfill the frame's own main-world script installs is invisible here.",
+            "default",
+        )
+        .unwrap();
+        assert_ne!(plain, frame);
+        assert!(frame.contains("frame main"), "{frame}");
+        assert!(!frame.contains("--chrome-arg"), "a frame binding is not a launch-flag problem: {frame}");
     }
 
     /// Clap's rendering of `chrome-agent click n1 --timeout 5`, verbatim.

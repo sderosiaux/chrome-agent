@@ -288,6 +288,43 @@ pub async fn dispatch_assert(
 }
 
 // ---------------------------------------------------------------------------
+// WebMCP
+// ---------------------------------------------------------------------------
+
+/// `webmcp_list` for pipe and batch. Not in `mutates_page`: it is a read, like `assert`.
+pub async fn dispatch_webmcp_list(client: &CdpClient) -> Result<Value, crate::BoxError> {
+    let tools = commands::webmcp::list_tools(client).await?;
+    Ok(json!({"ok": true, "tools": tools.tools, "frame_scoped": tools.frame_scoped}))
+}
+
+/// `webmcp_call` for pipe and batch. IS in `mutates_page`: a tool's declared result is
+/// freeform text with no schema to check it against (`commands::webmcp` module doc), so the
+/// accessibility-tree delta the shared hook attaches after this returns is the only
+/// corroboration available. `declared_result` carries the tool's own side of the story.
+pub async fn dispatch_webmcp_call(client: &CdpClient, cmd: &Value) -> Result<Value, crate::BoxError> {
+    let name = cmd.get("name").and_then(Value::as_str).ok_or("webmcp_call: missing \"name\"")?;
+    let args = cmd.get("args").cloned().unwrap_or_else(|| json!({}));
+    let args_text = serde_json::to_string(&args)?;
+    let outcome = commands::webmcp::call_tool(client, name, &args_text).await?;
+    let mut out = json!({
+        "ok": true,
+        "message": format!("Called WebMCP tool '{}'", outcome.tool),
+        "tool": outcome.tool,
+        "declared_result": outcome.declared_result,
+    });
+    if let Ok(parsed) = serde_json::from_str::<Value>(&outcome.declared_result) {
+        out["declared_result_parsed"] = parsed;
+    }
+    if !outcome.declared_result_was_string {
+        out["declared_result_was_string"] = json!(false);
+    }
+    if outcome.frame_scoped {
+        out["frame_scoped"] = json!(true);
+    }
+    Ok(out)
+}
+
+// ---------------------------------------------------------------------------
 // Batch
 // ---------------------------------------------------------------------------
 
