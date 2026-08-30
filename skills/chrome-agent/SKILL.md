@@ -253,8 +253,24 @@ declared is an exit-1 usage error that names the invocation which works.
 --connect URL      # attach to a real Chrome (DataDome/Kasada)
 --proxy-server URL # http(s)/socks4/5://host:port; launch-only
 --copy-cookies     # use cookies from your real Chrome profile
+--chrome-arg FLAG  # extra flag for the launched Chrome (repeatable); launch-only, see below
 --dialog MODE      # accept (default) | dismiss | manual · --dialog-text for prompt()
 ```
+
+`--chrome-arg` passes an extra flag straight to the Chrome chrome-agent launches, e.g. the flag
+that unlocks an experimental feature:
+
+```bash
+chrome-agent --chrome-arg --enable-features=WebMCP,WebMCPTesting goto https://example.com
+```
+
+Like `--proxy-server`, it applies only when chrome-agent launches Chrome (no effect, and refused
+rather than silently ignored, under `--connect`), and is fixed for the life of a named browser: a
+follow-up command that omits it inherits whatever the browser already runs with, and one naming
+different flags is refused — close or purge the browser to change them. Refused outright:
+`--user-data-dir`, `--remote-debugging-port`, `--remote-debugging-pipe`, `--proxy-server` (use
+`--proxy-server` above instead), `--headless` (use `--headed` instead) — chrome-agent depends on
+its own values for these to find and reconnect to the browser it launched.
 
 Exit codes: **0** success · **1** error (including a bad flag) · **2** an assertion did not hold ·
 **130** Ctrl+C. JS dialogs auto-accept so the page never hangs.

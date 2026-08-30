@@ -855,8 +855,8 @@ mod tests {
     #[test]
     fn an_interrupt_only_targets_this_invocation_s_browser() {
         let mut store = SessionStore::default();
-        session::ensure_browser(&mut store, "agent-1", "ws://a", Some(111), true, None);
-        session::ensure_browser(&mut store, "agent-2", "ws://b", Some(222), true, None);
+        session::ensure_browser(&mut store, "agent-1", "ws://a", Some(111), true, None, Vec::new());
+        session::ensure_browser(&mut store, "agent-2", "ws://b", Some(222), true, None, Vec::new());
 
         assert_eq!(interrupt_kill_target(&store, "agent-1"), Some(111));
         assert_eq!(
