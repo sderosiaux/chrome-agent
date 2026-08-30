@@ -9,6 +9,27 @@ identity, which is everything currently measured. `unchanged` is the placeholder
 `no_effect` / `intercepted` split below: promoting it needs proof of delivery, which needs
 the hit test in slice 5.
 
+> **AMENDED IN IMPLEMENTATION** — the two paragraphs around this one are the inventory this
+> document held of its own present, and that present has moved; the paragraphs stay because the
+> reasoning in them is what the code was built against, and `284984f` defends the "placeholder"
+> argument explicitly. Read them in the past tense.
+>
+> `src/verdict.rs:126-147` now carries **eight** variants, not five: `Changed`, `Navigated`,
+> `Intercepted`, `NotKept`, `NoEffect`, `Unchanged`, `Unknown`, `NotChecked`. So `unchanged` is no
+> longer the placeholder for the `no_effect` / `intercepted` split — that split shipped, and
+> `unchanged` became what it is described as being everywhere else: the honest floor for a path
+> with no proof of delivery. The condition the paragraph names was met rather than dropped:
+> promoting it did need proof of delivery, and the hit test is what supplied it.
+>
+> Two of the four items under **What is not** have also shipped, and naming them as gaps now
+> misdescribes the code: the one-shot probe bound to the target's `objectId` is
+> `hit_test::probe_once` (`src/hit_test.rs:423`), and the hit test it feeds is
+> `src/hit_test.rs` entire. The other two — the attributed baseline, and the scroll and keyboard
+> rungs — are still not built, and the sentence remains true of them.
+>
+> Rung (a) below carries its own `AMENDED IN IMPLEMENTATION` note, for a different reason: there
+> the design was wrong, here it was merely overtaken.
+
 **What is not**: the one-shot probe bound to the target's objectId, the hit test, the
 attributed baseline, and the scroll/keyboard rungs. Do not redesign what follows — it was
 derived from 113 fixtures and 107 cases where a plausible signal reports a confident wrong

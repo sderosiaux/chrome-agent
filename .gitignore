@@ -12,3 +12,6 @@ bench/stagehand/pnpm-lock.yaml
 
 # Bench runs are reproducible, not archived
 bench/results/
+
+# proof instrumentation for the path-scoped rules, not part of the project
+.claude/settings.local.json

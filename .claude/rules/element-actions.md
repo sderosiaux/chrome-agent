@@ -1,0 +1,40 @@
+---
+paths:
+  - "src/element.rs"
+  - "src/element_controls.rs"
+  - "src/read_back.rs"
+  - "src/commands/click.rs"
+  - "src/commands/dblclick.rs"
+  - "src/commands/select.rs"
+  - "src/commands/check.rs"
+  - "src/commands/upload.rs"
+  - "src/commands/drag.rs"
+  - "tests/observation_window_tests.rs"
+  - "tests/selector_uid_tests.rs"
+  - "tests/bulk_fill_tests.rs"
+  - "tests/checkable_tests.rs"
+  - "tests/select_readback_tests.rs"
+  - "tests/press_key_tests.rs"
+---
+
+# Acting on an element, and reading back what the page kept
+
+Moved out of `CLAUDE.md`'s **Key Design Decisions** — not rewritten and not summarised. The
+words are the ones that were there, minus the factual corrections made in the same change (a
+path that had stopped resolving, a count that had gone stale). What changed is *when* they
+load: this file is pulled in when you read a file its `paths:` block names, and costs nothing
+in a session that touches none of them.
+
+- **JS click fallback** — when a11y reports "disabled" but DOM isn't, click falls back to `.click()`
+- **One observation window, stated** (`element::READ_BACK_MS`, 60 ms) — every read-back waits the same window and reports `observed_after_ms` beside the value. The four paths used to disagree: `fill` read synchronously (0 ms), so a value reverted one microtask later was reported as kept — `verbatim:true` on a field the page had already emptied (`tests/fixtures/form_value_microtask_revert.html`); `check --selector` waited 60 ms; `check <uid>` waited however long a CDP round trip happened to cost. 60 ms catches a revert on the microtask queue, in `setTimeout(0)` or in an animation frame, and does NOT catch a validator firing at 400 ms (`form_value_late_revert.html`) — no fixed window could, which is why the window is reported rather than persistence asserted. `check`'s `observed_after_ms` is absent when the element already held the state: nothing was dispatched, so there was no post-action moment (`CheckOutcome`). `select` was the fourth path and the last to join: it returned the option text from the same synchronous script that set `selectedIndex`, so a controlled component that snapped the selection back was still reported as selected. All four now also report WHAT they read, not just when: `value:{requested,actual,verbatim}` on the response, which is what carries the reading to the classifier (rung 11 above).
+- **`fill` reports what the page kept** — `value: {requested, actual, verbatim, observed_after_ms, caveat?}`. Secret fields (`type=password`, or `autocomplete` naming a password/card/CVC/one-time code) report `{redacted:true, requested_length, actual_length, verbatim}` instead: the response reaches stdout, the agent transcript and any `_record` file. Masks reformat, controlled components rewrite, number inputs discard. Both strings are returned rather than reduced to one word: a currency mask turns `1000` into `10.00` while a digits-only comparison insists the content was preserved. Refuses on `:disabled` (catches an ancestor `<fieldset disabled>`, which `el.disabled` does not) and `readOnly`. Caveat when the write exceeded `maxlength` — that constrains the editing pipeline, not the value setter, so the field now holds something the form will reject.
+- **A bulk fill reports each field** (`run_helpers::bulk_fill_report`) — `fill-form` and `fill_and_submit` filled through the same code as `fill` and dropped every `FillOutcome`, answering "Filled 3 fields": right about the count, silent about the mask that reformatted one of them. Both now return `values: [{uid|selector, value:{...}}]`, redacted the same way a single fill is. For `fill_and_submit` this is the *only* witness: the change report runs after the submit, by which time the form has moved on.
+- **`check`/`uncheck` classify before acting** — native `<input type=checkbox|radio>` read through `.checked` (`indeterminate` as mixed), an element with `aria-checked` or a checkable role through that attribute, anything else refused. `!!el.checked` was wrong in both directions: absent on a `<div role=checkbox>` (so a checked box was clicked OFF while reporting success) and present-but-meaningless on any other input. Unchecking a radio is refused. The state is read back after the click.
+- **`press`** — a single printable character is sent with `text` so it actually types; unmapped names are refused rather than dispatched with virtual key code 0.
+- **A targeted action names the node it hit** (`run_helpers::target_details`, src/run_helpers.rs:115 → `hit_test::resolve_selector`, src/hit_test.rs:563, for fill/select/check/uncheck/upload; `hit_test::resolve_selector` directly for click/dblclick, which read the uid off the single handle the probe already resolved — see the entry above) — every click/dblclick/fill/select/check/uncheck/upload response carries `uid`, whether the caller aimed by selector or by uid. `--selector` resolves in the page, the message quoted the selector back and the change report named uids, with nothing tying the two together: an agent could not check that the node the delta describes is the node it aimed at, and a selector matching several elements gave no clue which one was used. Resolved BEFORE the action (`Runtime.evaluate` → `DOM.describeNode` → `n{backendNodeId}`) — afterwards the element may be detached and the answer would describe a different page. Costs one CDP round trip on the selector path.
+- **`dblclick`** — 4 mouse events (pressed/released x2 with click_count 1 then 2), JS fallback via `dblclick` MouseEvent. `--selector` resolves the element's viewport-center coords then runs the native CDP double-click (`dblclick_selector`); it is a real double-click, not a single `click_selector`.
+- **`select`** — matches by `option.value` first, then by `option.text.trim()`. Dispatches `change`, then reads the selection back through `READ_BACK_MS` and reports `observed_after_ms` like `fill` and `check`. A selection the page reverted inside the window is refused (exit 1, naming the option actually held) rather than reported as made: an agent that submits a form believing a different option is chosen cannot recover from that answer. Both the uid and the selector path run one in-page script that sets, dispatches, waits and re-reads, bound to the same node throughout.
+- **`check`/`uncheck`** — idempotent: queries `this.checked` via callFunctionOn, clicks only if state differs
+- **`upload`** — validates file paths exist before CDP call. Uses `DOM.setFileInputFiles` with backendNodeId (uid) or nodeId (selector)
+- **`drag`** — 5-step linear interpolation between source/destination centers, 16ms between moves for realism
+- **A click waited ten seconds for an event that could not arrive** (`element::wait_for_stabilization`, `element::main_frame_navigated`) — measured on shop.app and reproducible: `click --xy` took 10 051 ms while `inspect` on the same page took 51 ms, `press Escape` 113 ms, and a click at an inert coordinate on the SAME page in the same session took 140 ms. `--timeout` never fires, because 10 s is under the 30 s default; the caller waits with no field, no message and no reason. The wait was ours. `wait_for_stabilization` probed 50 ms for `Page.frameNavigated` and, on seeing one, waited up to 10 s for `Page.loadEventFired` — but `frameNavigated` fires for EVERY frame and `loadEventFired` only for the top one, so a subframe navigating armed a wait for an event that cannot come, and it ran to the ceiling every time. Captured live at the moment of the click: two `frameNavigated` for a SUBFRAME 4 ms apart (`about:blank`, then `chrome-error://chromewebdata/`) — the tracking iframe a product tile appends — and no load event in the 12 s that followed. The predicate is now the top frame (`frame.parentId` absent), and the 50 ms probe reads its whole window instead of returning on the first event, so a click that spawns a tracker AND navigates still waits for the navigation. Measured after: 10.12 s → 0.15 s on shop.app, same page, same coordinate. `tests/fixtures/click_spawns_subframe.html` is the shape offline, `click_navigates_away.html` the control that must still wait.
