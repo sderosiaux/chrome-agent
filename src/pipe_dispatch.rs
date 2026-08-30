@@ -549,7 +549,7 @@ pub async fn dispatch_console(client: &CdpClient, cmd: &Value) -> Result<Value, 
     let entries = commands::console::run(client, level, clear, limit).await?;
     let messages: Vec<Value> = entries.iter()
         .map(|e| json!({"level": e.level, "message": e.message, "timestamp": e.timestamp})).collect();
-    Ok(json!({"ok": true, "messages": messages}))
+    Ok(json!({"ok": true, "installed": entries.installed, "messages": messages}))
 }
 
 pub async fn dispatch_extract(client: &CdpClient, cmd: &Value) -> Result<Value, crate::BoxError> {

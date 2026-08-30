@@ -764,7 +764,7 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
                     .iter()
                     .map(|e| json!({"level": e.level, "message": e.message, "timestamp": e.timestamp}))
                     .collect();
-                json_output(&json!({"ok": true, "messages": messages}));
+                json_output(&json!({"ok": true, "installed": entries.installed, "messages": messages}));
             } else {
                 println!("{}", commands::console::format_text(&entries));
             }

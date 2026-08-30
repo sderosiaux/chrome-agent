@@ -1,0 +1,17 @@
+<!DOCTYPE html>
+<html>
+<head><title>webdriver locked</title></head>
+<body>
+<p id="p">This page freezes navigator.webdriver before anything else can patch it.</p>
+<script>
+  // A page that fingerprints by locking the property the stealth patch redefines.
+  // `configurable: false` makes the redefinition throw, so `--stealth`'s
+  // "patch the already-loaded page" step fails on a page like this one — and
+  // used to fail invisibly, because its result was discarded.
+  Object.defineProperty(navigator, 'webdriver', {
+    get: () => true,
+    configurable: false,
+  });
+</script>
+</body>
+</html>
