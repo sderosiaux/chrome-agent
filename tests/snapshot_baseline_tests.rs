@@ -36,6 +36,7 @@
 use std::process::Command;
 
 mod common;
+use common::TestBrowser;
 
 /// The page holds thirteen accessibility nodes and an empty `#slot` to inject into.
 const FIXTURE: &str = "snapshot_filter_baseline.html";
@@ -82,23 +83,6 @@ fn run_pipe(args: &[&str], commands: &[String]) -> Vec<serde_json::Value> {
         .lines()
         .filter_map(|l| serde_json::from_str(l).ok())
         .collect()
-}
-
-struct TestBrowser(String);
-impl TestBrowser {
-    /// Unique per process and per case: two browsers sharing a name drive the same Chrome,
-    /// and this suite navigates and diffs on every one of them.
-    fn new(label: &str) -> Self {
-        Self(format!("{label}-{}", std::process::id()))
-    }
-    fn name(&self) -> &str {
-        &self.0
-    }
-}
-impl Drop for TestBrowser {
-    fn drop(&mut self) {
-        let _ = run_cli(&["--browser", &self.0, "close", "--purge"]);
-    }
 }
 
 fn goto(browser: &str) -> bool {

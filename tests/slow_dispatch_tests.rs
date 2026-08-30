@@ -25,6 +25,7 @@ use std::time::Instant;
 use serde_json::Value;
 
 mod common;
+use common::TestBrowser;
 
 /// Wide enough that only the bug can trip it: the two failures are 10.1 s and 5.1 s, and a
 /// healthy local click measures 0.15 s.
@@ -51,21 +52,6 @@ fn timed(args: &[&str]) -> (Value, f64) {
     let secs = started.elapsed().as_secs_f64();
     assert_eq!(code, 0, "{args:?} failed: {stdout}");
     (serde_json::from_str(&stdout).expect("JSON response"), secs)
-}
-
-struct TestBrowser(String);
-impl TestBrowser {
-    fn new(label: &str) -> Self {
-        Self(format!("{label}-{}", std::process::id()))
-    }
-    fn name(&self) -> &str {
-        &self.0
-    }
-}
-impl Drop for TestBrowser {
-    fn drop(&mut self) {
-        let _ = run_cli(&["--browser", &self.0, "close", "--purge"]);
-    }
 }
 
 /// The uid the current snapshot gives the node whose line contains every needle.

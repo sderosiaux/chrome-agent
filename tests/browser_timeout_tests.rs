@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
 mod common;
+use common::TestBrowser;
 
 fn binary() -> String {
     let mut path = std::env::current_exe()
@@ -26,16 +27,6 @@ fn binary() -> String {
         .to_path_buf();
     path.push("chrome-agent");
     path.to_string_lossy().into_owned()
-}
-
-struct BrowserGuard(&'static str);
-
-impl Drop for BrowserGuard {
-    fn drop(&mut self) {
-        let _ = Command::new(binary())
-            .args(["--browser", self.0, "close", "--purge"])
-            .output();
-    }
 }
 
 /// Serve one port: plain HTTP GETs receive a /json/version answer pointing back at
@@ -95,8 +86,8 @@ fn spawn_starving_browser() -> std::net::SocketAddr {
 #[test]
 fn browser_level_calls_honor_the_timeout_flag() {
     let addr = spawn_starving_browser();
-    let browser = "test-browser-timeout";
-    let _guard = BrowserGuard(browser);
+    let guard = TestBrowser::new("test-browser-timeout");
+    let browser = guard.name();
 
     // Target resolution (Target.getTargets on the browser client) is the first CDP
     // call of the run and the fake never answers it. With --timeout 2 the command

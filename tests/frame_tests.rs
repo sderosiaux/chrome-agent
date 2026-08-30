@@ -11,6 +11,7 @@ use std::process::{Command, Stdio};
 use serde_json::Value;
 
 mod common;
+use common::TestBrowser;
 
 /// Path to the built binary (sibling of the test binary).
 fn binary() -> String {
@@ -53,21 +54,6 @@ fn run_pipe(browser: &str, commands: &[Value]) -> Vec<Value> {
         .collect()
 }
 
-/// Close the browser session (best-effort cleanup).
-fn close(browser: &str) {
-    let _ = Command::new(binary())
-        .args(["--browser", browser, "close", "--purge"])
-        .output();
-}
-
-/// RAII guard: closes the browser on drop, incl. on panic/unwind, so a panic
-/// inside `run_pipe` can't leak the pipe process and its Chrome.
-struct BrowserGuard<'a>(&'a str);
-impl Drop for BrowserGuard<'_> {
-    fn drop(&mut self) {
-        close(self.0);
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Positive: frame switch binds subsequent commands to the iframe
@@ -78,8 +64,8 @@ fn frame_switch_scopes_eval_location_to_iframe() {
     if !common::browser_ready() {
         return;
     }
-    let browser = "test-frame-eval-loc";
-    let _guard = BrowserGuard(browser);
+    let guard = TestBrowser::new("test-frame-eval-loc");
+    let browser = guard.name();
     let responses = run_pipe(
         browser,
         &[
@@ -88,7 +74,6 @@ fn frame_switch_scopes_eval_location_to_iframe() {
             serde_json::json!({"cmd": "eval", "expression": "location.href"}),
         ],
     );
-    close(browser);
 
     assert_eq!(responses.len(), 3, "expected 3 responses: {responses:?}");
     assert_eq!(responses[1]["ok"], Value::Bool(true), "frame switch: {:?}", responses[1]);
@@ -109,8 +94,8 @@ fn frame_switch_scopes_eval_dom_to_iframe() {
     if !common::browser_ready() {
         return;
     }
-    let browser = "test-frame-eval-dom";
-    let _guard = BrowserGuard(browser);
+    let guard = TestBrowser::new("test-frame-eval-dom");
+    let browser = guard.name();
     let responses = run_pipe(
         browser,
         &[
@@ -119,7 +104,6 @@ fn frame_switch_scopes_eval_dom_to_iframe() {
             serde_json::json!({"cmd": "eval", "expression": "document.querySelector('#child-marker').textContent"}),
         ],
     );
-    close(browser);
 
     assert_eq!(responses.len(), 3, "responses: {responses:?}");
     let text = responses[2]["result"].as_str().unwrap_or_default();
@@ -135,8 +119,8 @@ fn frame_switch_scopes_inspect_to_iframe() {
     if !common::browser_ready() {
         return;
     }
-    let browser = "test-frame-inspect";
-    let _guard = BrowserGuard(browser);
+    let guard = TestBrowser::new("test-frame-inspect");
+    let browser = guard.name();
     let responses = run_pipe(
         browser,
         &[
@@ -145,7 +129,6 @@ fn frame_switch_scopes_inspect_to_iframe() {
             serde_json::json!({"cmd": "inspect"}),
         ],
     );
-    close(browser);
 
     assert_eq!(responses.len(), 3, "responses: {responses:?}");
     let snap = responses[2]["snapshot"].as_str().unwrap_or_default();
@@ -168,8 +151,8 @@ fn frame_main_switches_back_to_top_document() {
     if !common::browser_ready() {
         return;
     }
-    let browser = "test-frame-main-back";
-    let _guard = BrowserGuard(browser);
+    let guard = TestBrowser::new("test-frame-main-back");
+    let browser = guard.name();
     let responses = run_pipe(
         browser,
         &[
@@ -179,7 +162,6 @@ fn frame_main_switches_back_to_top_document() {
             serde_json::json!({"cmd": "eval", "expression": "location.href"}),
         ],
     );
-    close(browser);
 
     assert_eq!(responses.len(), 4, "responses: {responses:?}");
     let href = responses[3]["result"].as_str().unwrap_or_default();
@@ -198,8 +180,8 @@ fn navigation_resets_frame_binding() {
     if !common::browser_ready() {
         return;
     }
-    let browser = "test-frame-nav-reset";
-    let _guard = BrowserGuard(browser);
+    let guard = TestBrowser::new("test-frame-nav-reset");
+    let browser = guard.name();
     let responses = run_pipe(
         browser,
         &[
@@ -209,7 +191,6 @@ fn navigation_resets_frame_binding() {
             serde_json::json!({"cmd": "eval", "expression": "location.href"}),
         ],
     );
-    close(browser);
 
     assert_eq!(responses.len(), 4, "responses: {responses:?}");
     // After re-navigating the top page, eval must run against the top document
@@ -236,8 +217,8 @@ fn frame_on_non_iframe_element_errors() {
     if !common::browser_ready() {
         return;
     }
-    let browser = "test-frame-non-iframe";
-    let _guard = BrowserGuard(browser);
+    let guard = TestBrowser::new("test-frame-non-iframe");
+    let browser = guard.name();
     let responses = run_pipe(
         browser,
         &[
@@ -245,7 +226,6 @@ fn frame_on_non_iframe_element_errors() {
             serde_json::json!({"cmd": "frame", "target": "h1"}),
         ],
     );
-    close(browser);
 
     assert_eq!(responses.len(), 2, "responses: {responses:?}");
     assert_eq!(responses[1]["ok"], Value::Bool(false), "{:?}", responses[1]);
@@ -261,8 +241,8 @@ fn frame_on_missing_selector_errors() {
     if !common::browser_ready() {
         return;
     }
-    let browser = "test-frame-missing";
-    let _guard = BrowserGuard(browser);
+    let guard = TestBrowser::new("test-frame-missing");
+    let browser = guard.name();
     let responses = run_pipe(
         browser,
         &[
@@ -270,7 +250,6 @@ fn frame_on_missing_selector_errors() {
             serde_json::json!({"cmd": "frame", "target": ".does-not-exist"}),
         ],
     );
-    close(browser);
 
     assert_eq!(responses.len(), 2, "responses: {responses:?}");
     assert_eq!(responses[1]["ok"], Value::Bool(false), "{:?}", responses[1]);
@@ -286,8 +265,8 @@ fn frame_missing_target_field_errors() {
     if !common::browser_ready() {
         return;
     }
-    let browser = "test-frame-no-target";
-    let _guard = BrowserGuard(browser);
+    let guard = TestBrowser::new("test-frame-no-target");
+    let browser = guard.name();
     let responses = run_pipe(
         browser,
         &[
@@ -295,7 +274,6 @@ fn frame_missing_target_field_errors() {
             serde_json::json!({"cmd": "frame"}),
         ],
     );
-    close(browser);
 
     assert_eq!(responses.len(), 2, "responses: {responses:?}");
     assert_eq!(responses[1]["ok"], Value::Bool(false), "{:?}", responses[1]);
@@ -312,8 +290,8 @@ fn without_frame_switch_eval_targets_top_document() {
     if !common::browser_ready() {
         return;
     }
-    let browser = "test-frame-control-eval";
-    let _guard = BrowserGuard(browser);
+    let guard = TestBrowser::new("test-frame-control-eval");
+    let browser = guard.name();
     let responses = run_pipe(
         browser,
         &[
@@ -321,7 +299,6 @@ fn without_frame_switch_eval_targets_top_document() {
             serde_json::json!({"cmd": "eval", "expression": "location.href"}),
         ],
     );
-    close(browser);
 
     assert_eq!(responses.len(), 2, "responses: {responses:?}");
     let href = responses[1]["result"].as_str().unwrap_or_default();
@@ -336,8 +313,8 @@ fn without_frame_switch_inspect_shows_parent() {
     if !common::browser_ready() {
         return;
     }
-    let browser = "test-frame-control-inspect";
-    let _guard = BrowserGuard(browser);
+    let guard = TestBrowser::new("test-frame-control-inspect");
+    let browser = guard.name();
     let responses = run_pipe(
         browser,
         &[
@@ -345,7 +322,6 @@ fn without_frame_switch_inspect_shows_parent() {
             serde_json::json!({"cmd": "inspect"}),
         ],
     );
-    close(browser);
 
     assert_eq!(responses.len(), 2, "responses: {responses:?}");
     let snap = responses[1]["snapshot"].as_str().unwrap_or_default();

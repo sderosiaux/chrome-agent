@@ -16,6 +16,7 @@ use std::process::{Command, Stdio};
 use serde_json::Value;
 
 mod common;
+use common::TestBrowser;
 
 fn binary() -> String {
     let mut path = std::env::current_exe().unwrap().parent().unwrap().parent().unwrap().to_path_buf();
@@ -29,25 +30,6 @@ fn run_cli(args: &[&str]) -> (String, i32) {
         String::from_utf8_lossy(&output.stdout).to_string(),
         output.status.code().unwrap_or(-1),
     )
-}
-
-struct TestBrowser(String);
-impl TestBrowser {
-    /// Unique per process. A fixed name means two concurrent runs of this suite drive the same
-    /// browser: one navigates while the other clicks a uid from its own snapshot, and both fail
-    /// with "Node with given id does not belong to the document". CLAUDE.md documents the
-    /// hazard — `--browser <unique>` per agent — and the suites have to obey it too.
-    fn new(label: &str) -> Self {
-        Self(format!("{label}-{}", std::process::id()))
-    }
-    fn name(&self) -> &str {
-        &self.0
-    }
-}
-impl Drop for TestBrowser {
-    fn drop(&mut self) {
-        let _ = run_cli(&["--browser", &self.0, "close", "--purge"]);
-    }
 }
 
 fn open_busy_page(browser: &str) -> bool {
@@ -144,7 +126,8 @@ fn pipe_and_cli_agree_when_the_read_fails() {
     );
     // Unique per process: a fixed name lets a second concurrent run of this suite drive the
     // same browser and clobber this one's page.
-    let browser = format!("read-failure-pipe-{}", std::process::id());
+    let guard = TestBrowser::new("read-failure-pipe");
+    let browser = guard.name().to_string();
     let mut child = Command::new(binary())
         .args(["--browser", &browser, "--timeout", "2", "pipe"])
         .stdin(Stdio::piped())
@@ -167,7 +150,6 @@ fn pipe_and_cli_agree_when_the_read_fails() {
     assert_eq!(last["verdict_reason"], "read_failed", "{last}");
 
     std::thread::sleep(std::time::Duration::from_secs(7));
-    let _ = run_cli(&["--browser", &browser, "close", "--purge"]);
 }
 
 /// A failure in the action itself is still a failure — the policy is about the read only.

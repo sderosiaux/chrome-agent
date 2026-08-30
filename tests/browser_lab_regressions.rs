@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 
 mod common;
+use common::TestBrowser;
 
 fn binary() -> PathBuf {
     let mut path = std::env::current_exe()
@@ -34,19 +35,6 @@ fn run(browser: &str, args: &[&str]) -> Output {
         .expect("run chrome-agent")
 }
 
-struct BrowserGuard(String);
-
-impl BrowserGuard {
-    fn new(browser: &str) -> Self {
-        Self(browser.to_string())
-    }
-}
-
-impl Drop for BrowserGuard {
-    fn drop(&mut self) {
-        let _ = run(&self.0, &["close", "--purge"]);
-    }
-}
 
 fn run_pipe(browser: &str, commands: &[Value], timeout: Duration) -> Vec<Value> {
     let mut child = Command::new(binary())
@@ -190,8 +178,8 @@ fn goto_reports_the_settled_redirect_url() {
         return;
     }
     let server = RedirectServer::start();
-    let browser = format!("test-settled-url-{}", std::process::id());
-    let _guard = BrowserGuard::new(&browser);
+    let guard = TestBrowser::new("test-settled-url");
+    let browser = guard.name().to_string();
     let start_url = server.url("/start");
     let output = run(&browser, &["--json", "goto", &start_url]);
     assert!(
@@ -267,8 +255,8 @@ fn frame_can_switch_from_an_iframe_into_a_nested_iframe() {
     if !common::browser_ready() {
         return;
     }
-    let browser = format!("test-nested-frame-{}", std::process::id());
-    let _guard = BrowserGuard::new(&browser);
+    let guard = TestBrowser::new("test-nested-frame");
+    let browser = guard.name().to_string();
     let responses = run_pipe(
         &browser,
         &[
@@ -289,8 +277,8 @@ fn selector_click_auto_accepts_native_alert_without_hanging_pipe() {
     if !common::browser_ready() {
         return;
     }
-    let browser = format!("test-dialog-click-{}", std::process::id());
-    let _guard = BrowserGuard::new(&browser);
+    let guard = TestBrowser::new("test-dialog-click");
+    let browser = guard.name().to_string();
     let responses = run_pipe(
         &browser,
         &[

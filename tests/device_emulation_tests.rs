@@ -1,10 +1,10 @@
 use std::io::{BufRead, BufReader, Read as _, Write as _};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use serde_json::Value;
 
 mod common;
+use common::TestBrowser;
 
 fn binary() -> String {
     let mut path = std::env::current_exe()
@@ -62,35 +62,13 @@ fn run_json(args: &[&str]) -> Value {
         .unwrap_or_else(|error| panic!("invalid JSON for {args:?}: {error}\nstdout: {stdout}"))
 }
 
-struct TestBrowser(String);
-
-static NEXT_BROWSER: AtomicUsize = AtomicUsize::new(1);
-
-impl TestBrowser {
-    fn new() -> Self {
-        Self(format!(
-            "device-emulation-{}-{}",
-            std::process::id(),
-            NEXT_BROWSER.fetch_add(1, Ordering::Relaxed),
-        ))
-    }
-
-    fn name(&self) -> &str {
-        &self.0
-    }
-}
-
-impl Drop for TestBrowser {
-    fn drop(&mut self) {
-        let _ = run(&["--browser", &self.0, "close", "--purge"]);
-    }
-}
-
 struct TempRecording(std::path::PathBuf);
 
 impl TempRecording {
     fn new(name: &str, contents: &str) -> Self {
-        let path = std::env::temp_dir().join(format!("chrome-agent-{name}.jsonl"));
+        // Unique: two concurrent runs writing one path is the same collision as two runs
+        // sharing one browser, and this file is read back after it is written.
+        let path = common::temp_path(name, "jsonl");
         std::fs::write(&path, contents).unwrap();
         Self(path)
     }
@@ -124,7 +102,7 @@ fn emulation_stays_on_its_page_reapplies_and_cleans_up() {
     if !common::browser_ready() {
         return;
     }
-    let browser = TestBrowser::new();
+    let browser = TestBrowser::new("device-emulation");
     let probe = common::fixture_url("emulation_probe.html");
     let other = common::fixture_url("extract_cards.html");
 
@@ -356,7 +334,7 @@ fn pipe_and_batch_share_the_same_page_scoped_state() {
     if !common::browser_ready() {
         return;
     }
-    let browser = TestBrowser::new();
+    let browser = TestBrowser::new("device-emulation");
     let probe = common::fixture_url("emulation_probe.html");
     assert_eq!(
         run_json(&[
@@ -429,7 +407,7 @@ fn status_stays_page_scoped_while_pipe_eval_stays_in_its_frame() {
     if !common::browser_ready() {
         return;
     }
-    let browser = TestBrowser::new();
+    let browser = TestBrowser::new("device-emulation");
     let parent = common::fixture_url("frame_parent.html");
     assert_eq!(
         run_json(&[
@@ -475,7 +453,7 @@ fn an_open_pipe_publishes_emulation_changes_immediately() {
     if !common::browser_ready() {
         return;
     }
-    let browser = TestBrowser::new();
+    let browser = TestBrowser::new("device-emulation");
     let probe = common::fixture_url("emulation_probe.html");
     assert_eq!(
         run_json(&[
@@ -569,7 +547,7 @@ fn replay_applies_reports_and_resets_page_emulation() {
     if !common::browser_ready() {
         return;
     }
-    let browser = TestBrowser::new();
+    let browser = TestBrowser::new("device-emulation");
     let probe = common::fixture_url("emulation_probe.html");
     assert_eq!(
         run_json(&[
@@ -629,7 +607,7 @@ fn browser_restart_discards_page_emulation() {
     if !common::browser_ready() {
         return;
     }
-    let browser = TestBrowser::new();
+    let browser = TestBrowser::new("device-emulation");
     let probe = common::fixture_url("emulation_probe.html");
 
     assert_eq!(

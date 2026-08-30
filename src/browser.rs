@@ -778,7 +778,7 @@ mod tests {
 
     #[test]
     fn read_devtools_active_port_parses_correctly() {
-        let dir = std::env::temp_dir().join("chrome-agent_test_devtools");
+        let dir = std::env::temp_dir().join(format!("chrome-agent_test_devtools-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("DevToolsActivePort");
         std::fs::write(&path, "9222\n/devtools/browser/abc-123\n").unwrap();
@@ -792,7 +792,7 @@ mod tests {
 
     #[test]
     fn read_devtools_active_port_rejects_invalid() {
-        let dir = std::env::temp_dir().join("chrome-agent_test_devtools_bad");
+        let dir = std::env::temp_dir().join(format!("chrome-agent_test_devtools_bad-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("DevToolsActivePort");
         std::fs::write(&path, "not_a_number\n").unwrap();
@@ -893,7 +893,7 @@ mod tests {
 
     #[tokio::test]
     async fn try_reconnect_existing_none_when_absent() {
-        let dir = std::env::temp_dir().join("chrome-agent_test_reconnect_absent");
+        let dir = std::env::temp_dir().join(format!("chrome-agent_test_reconnect_absent-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("DevToolsActivePort");
         std::fs::remove_file(&path).ok();
@@ -903,7 +903,7 @@ mod tests {
 
     #[tokio::test]
     async fn try_reconnect_existing_removes_stale_file() {
-        let dir = std::env::temp_dir().join("chrome-agent_test_reconnect_stale");
+        let dir = std::env::temp_dir().join(format!("chrome-agent_test_reconnect_stale-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("DevToolsActivePort");
         // Valid format, but the port has no listening server → stale.

@@ -18,6 +18,7 @@ use std::process::{Command, Stdio};
 use serde_json::{json, Value};
 
 mod common;
+use common::TestBrowser;
 
 fn binary() -> String {
     let mut path = std::env::current_exe().unwrap().parent().unwrap().parent().unwrap().to_path_buf();
@@ -49,23 +50,6 @@ fn run_batch(browser: &str, commands: &Value) -> Value {
         .expect("write batch input");
     let output = child.wait_with_output().expect("batch output");
     serde_json::from_slice(&output.stdout).expect("batch JSON")
-}
-
-struct TestBrowser(String);
-impl TestBrowser {
-    /// Unique per process: two concurrent runs sharing a browser click uids from each other's
-    /// snapshots, which CLAUDE.md documents as the parallel-agent hazard.
-    fn new(label: &str) -> Self {
-        Self(format!("{label}-{}", std::process::id()))
-    }
-    fn name(&self) -> &str {
-        &self.0
-    }
-}
-impl Drop for TestBrowser {
-    fn drop(&mut self) {
-        let _ = run_cli(&["--browser", &self.0, "close", "--purge"]);
-    }
 }
 
 fn open(browser: &str, fixture: &str) -> bool {
