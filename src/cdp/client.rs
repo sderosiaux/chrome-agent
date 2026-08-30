@@ -10,7 +10,20 @@ use tokio::sync::{broadcast, oneshot, Mutex};
 use super::transport::{self, CdpSender, CdpTransportError};
 use super::types::{CdpEvent, CdpMessage, CdpRequest, CdpResponse};
 
-type PendingMap = Arc<Mutex<HashMap<u64, oneshot::Sender<CdpResponse>>>>;
+type PendingMap = Arc<Mutex<HashMap<u64, oneshot::Sender<PendingReply>>>>;
+
+/// What the dispatcher hands back to the call waiting on an `id`.
+///
+/// It used to hand back a `CdpResponse` and nothing else, which left the dispatcher with exactly
+/// one way to report a message it could not read: say nothing, and let the caller's deadline
+/// expire. Two outcomes, so two variants.
+enum PendingReply {
+    /// Chrome answered and the answer parsed.
+    Read(CdpResponse),
+    /// A message carrying this `id` arrived and could not be read. Carries serde's own
+    /// complaint — the type mismatch and its position — plus the message's key names.
+    Unreadable(String),
+}
 
 /// Deadline applied to a CDP response when the caller sets none. Matches the CLI's
 /// `--timeout` default, which is the number a caller reaches for when asked how long they
@@ -53,6 +66,42 @@ fn timeout_message(method: &str, deadline: std::time::Duration) -> String {
             "{method} did not answer within {}s. An in-page promise that never settles \
              (awaitPromise) is the usual cause; raise --timeout if the page is merely slow.",
             deadline.as_secs()
+        )
+    }
+}
+
+/// What a call says when Chrome answered and chrome-agent could not read the answer.
+///
+/// This is the sentence that used to be [`timeout_message`]'s. A message that failed to
+/// deserialize was dropped by the dispatcher, the caller's oneshot was never resolved, and
+/// thirty seconds later the command reported "did not answer within 30s … raise --timeout if
+/// the page is merely slow" — about a reply that had arrived immediately. Two wrong claims in
+/// one line: that nothing answered, and that the page is the thing to be patient with. On the
+/// binary whose `hints.rs` and [`INPUT_ACK_DEADLINE`] exist so that a slow-page diagnosis can be
+/// trusted, that is the failure those two were built to prevent, arriving by a route neither
+/// could see.
+///
+/// The prefix `response parse` is load-bearing exactly as the `dispatched` wording is above:
+/// `hints::error_hint` keys its recovery off it, and the recovery is the right one here — a
+/// Chrome much newer or older than the bundled Chromium is what a shape this tool cannot read
+/// looks like.
+///
+/// Split on `Input.` for the same reason [`timeout_message`] is, and it is not symmetry for its
+/// own sake: an input event whose acknowledgement could not be READ was still dispatched and
+/// still acknowledged, so the page may have acted on it, and the sentence must not invite a
+/// second click. Every other method produced no result this tool could use, so the caller can
+/// safely act as if the command had not run.
+fn unreadable_message(method: &str, detail: &str) -> String {
+    if method.starts_with("Input.") {
+        format!(
+            "response parse: {method} was dispatched and Chrome answered, but chrome-agent \
+             could not read the answer ({detail}), so what the page did with it is unknown. \
+             The event may already have reached the page."
+        )
+    } else {
+        format!(
+            "response parse: {method} was answered and chrome-agent could not read the answer \
+             ({detail}), so the command produced nothing. Chrome replied; the page is not slow."
         )
     }
 }
@@ -132,6 +181,16 @@ pub enum CdpClientError {
     Protocol { code: i64, message: String },
     #[error("response parse: {0}")]
     ResponseParse(serde_json::Error),
+    /// A message carrying this call's `id` arrived and did not fit `CdpMessage`.
+    ///
+    /// Distinct from [`Self::ResponseParse`], which is the `result` field not fitting the `R` a
+    /// call site asked for — a mismatch between this tool and one command. This one is the
+    /// ENVELOPE not fitting, which is a mismatch between this tool and the protocol, and the two
+    /// have different fixes. They share a `response parse` prefix so `hints::error_hint` gives
+    /// them the same recovery, which is genuinely the same: find out what Chrome this is.
+    /// Built by [`unreadable_message`], never formatted at a call site.
+    #[error("{0}")]
+    Unreadable(String),
     #[error("timeout: {0}")]
     Timeout(String),
     #[error("dispatcher task exited")]
@@ -317,7 +376,16 @@ impl CdpClient {
         }
 
         let response = match tokio::time::timeout(deadline, rx).await {
-            Ok(received) => received.map_err(|_| CdpClientError::DispatcherGone)?,
+            Ok(received) => match received.map_err(|_| CdpClientError::DispatcherGone)? {
+                PendingReply::Read(response) => response,
+                // The whole point of the second variant: this arrives as fast as the message
+                // did, instead of as a deadline nobody set.
+                PendingReply::Unreadable(detail) => {
+                    return Err(CdpClientError::Unreadable(unreadable_message(
+                        method, &detail,
+                    )))
+                }
+            },
             Err(_) => {
                 // Drop the slot: leaving it behind leaks one entry per timed-out call, and
                 // a late answer would then be delivered to a receiver nobody awaits.
@@ -523,26 +591,125 @@ async fn dispatch_loop(
         let Ok(Some(message)) = receiver.recv().await else {
             break;
         };
-
-        let parsed: CdpMessage = match serde_json::from_str(&message) {
-            Ok(m) => m,
-            Err(_) => continue,
-        };
-
-        match parsed {
-            CdpMessage::Response(response) => {
-                if let Some(tx) = pending.lock().await.remove(&response.id) {
-                    let _ = tx.send(response);
-                }
-            }
-            CdpMessage::Event(event) => {
-                let _ = events_tx.send(event);
-            }
-        }
+        route_message(&message, &pending, &events_tx).await;
     }
 
     // Transport closed — clear pending so callers get RecvError.
     pending.lock().await.clear();
+}
+
+/// Route one raw message from Chrome: to the call waiting on its `id`, to the event
+/// subscribers, or — when it fits neither shape — to [`resolve_unreadable`].
+///
+/// Split out of [`dispatch_loop`] so the routing decision can be exercised without a WebSocket:
+/// `CdpReceiver`'s fields are private to `transport`, so the loop itself cannot be fed a
+/// message, and the third branch is precisely the one that had never been tested.
+async fn route_message(
+    message: &str,
+    pending: &PendingMap,
+    events_tx: &broadcast::Sender<CdpEvent>,
+) {
+    let parsed: CdpMessage = match serde_json::from_str(message) {
+        Ok(m) => m,
+        // Was `Err(_) => continue`, with no comment where the two branches around it had one.
+        // A dropped message is not a message that never came: if it carried an `id`, a call is
+        // waiting on it and will now wait out its whole deadline for an answer that already
+        // arrived.
+        Err(_) => return resolve_unreadable(message, pending).await,
+    };
+
+    match parsed {
+        CdpMessage::Response(response) => {
+            if let Some(tx) = pending.lock().await.remove(&response.id) {
+                let _ = tx.send(PendingReply::Read(response));
+            }
+        }
+        CdpMessage::Event(event) => {
+            let _ = events_tx.send(event);
+        }
+    }
+}
+
+/// Fail the call waiting on an unreadable message's `id`, rather than let it time out.
+///
+/// `CdpResponse` requires `id` and `CdpEvent` requires `method`, and every other field of both
+/// is `#[serde(default)]`, so a message that fits neither is not a message missing a field — it
+/// is one whose optional field arrived with a JSON type the struct did not declare. Reading the
+/// `id` out of a plain `Value` needs none of those declarations, so the answer reaches its caller
+/// even when the shape around it did not.
+///
+/// **Status, honestly: this has not been observed in the field.** The trigger was never measured
+/// — it is reasoned from the struct definitions — and with `CdpError::data` now typed `Value`,
+/// every remaining narrowly-typed field of the envelope (`id`, `code`, `message`, `method`,
+/// `sessionId`) is one CDP does pin, so there is no shape today's Chrome is expected to send that
+/// would reach this function at all. What is fixed is the CONSEQUENCE: whatever produces an unreadable message next —
+/// a protocol change, a Chrome much newer than the bundled Chromium, a field we type too
+/// narrowly — costs one error naming the cause instead of thirty seconds and a sentence blaming
+/// the page. The `eprintln!` below is what would confirm the residual half on a real machine.
+async fn resolve_unreadable(message: &str, pending: &PendingMap) {
+    if let Some((id, detail)) = unreadable_reply(message) {
+        // Bound so the guard is released before the `eprintln!` below, which is I/O.
+        let waiting = pending.lock().await.remove(&id);
+        if let Some(tx) = waiting {
+            let _ = tx.send(PendingReply::Unreadable(detail));
+            return;
+        }
+    }
+    // Residual path: no `id` to route by, or no call waiting on it — an event we could not read,
+    // or a late answer to a call that already gave up. Nobody is owed an error, so this is the
+    // one place the message really is dropped, and it says so on stderr (never stdout, so --json
+    // stays clean) instead of vanishing.
+    //
+    // Its KEYS and not its content, for the reason `snapshot_secret` exists: a CDP message is
+    // routinely a page value, and the one thing that must never be traded for a diagnostic is
+    // the card number a `fill` just wrote. Key names are protocol identifiers and belong to
+    // Chrome, not to the page.
+    eprintln!(
+        "cdp: dropped a message chrome-agent could not read and no call was waiting for (keys: {})",
+        top_level_keys(message).unwrap_or_else(|| "not an object".to_string())
+    );
+}
+
+/// The `id` an unreadable message carries, and what can honestly be said about the shape.
+///
+/// Two parses on a path that only runs when one has already failed. The first reads the `id` out
+/// of a `Value`, which no field declaration can block. The second exists because `untagged`
+/// answers `data did not match any variant of untagged enum CdpMessage` — true, and naming
+/// nothing at all; retrying the response shape ALONE produces serde's real complaint, which is
+/// the whole diagnostic value of this fix and worth a second parse on a path taken approximately
+/// never.
+///
+/// What that complaint gives, precisely, is the type mismatch and a byte offset — `invalid type:
+/// integer 42, expected a string at line 1 column 22` — and NOT the field's name, which serde
+/// does not carry without a dependency this crate will not take (the musl graph is guarded, and
+/// a field name is not worth a crate). The key list is added beside it because it closes most of
+/// the gap for free: the mismatch says what was wrong and the keys say where to look for it,
+/// and both are Chrome's vocabulary rather than the page's — see `resolve_unreadable` on why
+/// the message body itself is never quoted.
+fn unreadable_reply(message: &str) -> Option<(u64, String)> {
+    let id = serde_json::from_str::<Value>(message)
+        .ok()?
+        .get("id")?
+        .as_u64()?;
+    // Deliberately `from_str` and not `from_value`: only the string parse keeps the position,
+    // and the position is the half of the diagnostic serde does give us.
+    let detail = match serde_json::from_str::<CdpResponse>(message) {
+        Err(e) => e.to_string(),
+        // Reachable only if the two parses disagree, which they should not. Saying so beats
+        // asserting a reason we do not have.
+        Ok(_) => "the message fitted neither CdpMessage variant".to_string(),
+    };
+    let keys = top_level_keys(message).unwrap_or_else(|| "unknown".to_string());
+    Some((id, format!("{detail}; message keys: {keys}")))
+}
+
+/// The top-level key names of a JSON object, or `None` when it is not one.
+///
+/// Names only. See `resolve_unreadable` for why no value ever appears in a diagnostic here.
+fn top_level_keys(message: &str) -> Option<String> {
+    let value: Value = serde_json::from_str(message).ok()?;
+    let keys: Vec<&str> = value.as_object()?.keys().map(String::as_str).collect();
+    Some(keys.join(", "))
 }
 
 #[cfg(test)]
@@ -571,6 +738,185 @@ mod tests {
     fn the_input_deadline_clears_the_background_tab_stall_and_undercuts_the_default() {
         assert!(INPUT_ACK_DEADLINE > Duration::from_secs(5), "the measured stall is 5.00 s");
         assert!(INPUT_ACK_DEADLINE < DEFAULT_CALL_TIMEOUT);
+    }
+
+    /// The fix, end to end on the routing decision: a message carrying a known `id` and an
+    /// optional field of an unexpected type resolves the pending call at once, with an error
+    /// naming what could not be read — where it used to resolve nothing at all and leave the
+    /// caller to its deadline.
+    ///
+    /// `sessionId` is the vector because it is now the only optional field on an incoming
+    /// message that is not a `Value` (`CdpError::data` was the other, and typing it `Value` is
+    /// half of this fix). Today's Chrome cannot send this: the test is of the CLASS, which is
+    /// any field we type more narrowly than the protocol guarantees, and the class is the part
+    /// that survives a protocol change.
+    #[tokio::test]
+    async fn an_unreadable_answer_fails_its_call_instead_of_timing_out() {
+        let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
+        let (tx, rx) = oneshot::channel();
+        pending.lock().await.insert(7, tx);
+        let (events_tx, _events_rx) = broadcast::channel::<CdpEvent>(16);
+
+        route_message(r#"{"id":7,"sessionId":42}"#, &pending, &events_tx).await;
+
+        // Under a second, and by a wide margin: the point is that nothing waits on a deadline.
+        let reply = tokio::time::timeout(Duration::from_secs(1), rx)
+            .await
+            .expect("the pending call must be resolved, not left to expire")
+            .expect("the dispatcher must answer rather than drop the sender");
+        let PendingReply::Unreadable(detail) = reply else {
+            panic!("a message that fits neither variant is not a readable response");
+        };
+        assert!(
+            detail.contains("invalid type: integer `42`, expected a string"),
+            "the error must say what could not be read: {detail}"
+        );
+        assert!(
+            detail.contains("message keys: id, sessionId"),
+            "and where to look for it, since serde does not name the field: {detail}"
+        );
+        assert!(
+            pending.lock().await.is_empty(),
+            "the slot must be dropped, or a late answer is delivered to nobody"
+        );
+
+        // And the sentence the caller sees says Chrome answered — not that the page was slow.
+        let message = unreadable_message("Target.getTargets", &detail);
+        assert!(message.contains("Target.getTargets"), "{message}");
+        assert!(message.contains("Chrome replied; the page is not slow"), "{message}");
+        assert!(
+            !message.contains("timeout") && !message.contains("--timeout"),
+            "the old failure blamed the caller's patience: {message}"
+        );
+        assert!(
+            message.starts_with("response parse"),
+            "hints::error_hint keys the recovery off this prefix: {message}"
+        );
+    }
+
+    /// An unreadable ACKNOWLEDGEMENT of an input event is not an input event that did not
+    /// happen: it was dispatched and Chrome answered, so the sentence must not read as "nothing
+    /// occurred" and must not invite a second click. Same split as `timeout_message`'s, for the
+    /// same reason.
+    #[test]
+    fn an_unreadable_input_ack_never_reads_as_an_event_that_did_not_land() {
+        let input = unreadable_message("Input.dispatchMouseEvent", "invalid type: map");
+        assert!(input.contains("was dispatched"), "{input}");
+        assert!(input.contains("may already have reached the page"), "{input}");
+        assert!(!input.contains("produced nothing"), "{input}");
+
+        let other = unreadable_message("Runtime.evaluate", "invalid type: map");
+        assert!(other.contains("produced nothing"), "{other}");
+        assert!(!other.contains("was dispatched"), "{other}");
+    }
+
+    /// The `response parse` prefix is a claim about `hints::error_hint`'s branch order, so it is
+    /// checked rather than asserted in prose. What must NOT happen is the generic timeout branch
+    /// ("Use --timeout N for slow pages"), which is the advice this whole fix exists to stop
+    /// giving about a reply that arrived at once.
+    ///
+    /// The positive marker is a FRAGMENT of another module's prose, which is the drift this repo
+    /// spent a whole pass removing elsewhere — so it is deliberately the shortest phrase that
+    /// identifies the branch and nothing about its advice. It moved once already: the branch used
+    /// to say "could not parse" and to claim the command never ran, which is false for an
+    /// `Input.*` whose ack was unreadable — the event was dispatched and Chrome answered, and only
+    /// our reading of the receipt failed. That is now fixed in `hints`, and this marker follows it.
+    #[test]
+    fn an_unreadable_answer_gets_the_parse_hint_and_never_the_slow_page_one() {
+        for method in ["Runtime.evaluate", "Input.dispatchMouseEvent"] {
+            let message = unreadable_message(method, "invalid type: map, expected a string");
+            let hint = crate::hints::error_hint(&message, "b1")
+                .unwrap_or_else(|| panic!("every error carries a hint: {message}"));
+            assert!(
+                hint.contains("could not read the answer"),
+                "{method} must reach the parse branch, got: {hint}"
+            );
+            assert!(
+                !hint.contains("Use --timeout N"),
+                "{method} must never be reported as a slow page: {hint}"
+            );
+        }
+    }
+
+    /// The diagnostic quotes Chrome's vocabulary and never the page's. A CDP message routinely
+    /// carries a value a `fill` just wrote, and this project redacts those from stdout, the
+    /// transcript and any `--record` file; an error path is not an exemption.
+    #[test]
+    fn the_diagnostic_carries_key_names_and_no_value() {
+        let raw = r#"{"id":9,"sessionId":42,"result":{"value":"4111111111111111"}}"#;
+        let (id, detail) = unreadable_reply(raw).expect("an id is there to route by");
+        assert_eq!(id, 9);
+        assert!(
+            !detail.contains("4111111111111111"),
+            "a page value must not reach a diagnostic: {detail}"
+        );
+        // Sorted, not in wire order: serde_json's map is a BTreeMap here, which makes the list
+        // the same for the same shape however Chrome laid it out.
+        assert_eq!(top_level_keys(raw).unwrap(), "id, result, sessionId");
+        assert_eq!(top_level_keys("[1,2]"), None);
+    }
+
+    /// A message with no `id` has no call waiting on it, so there is nothing to fail — and the
+    /// routing must not invent one, nor panic on a message that is not JSON at all.
+    #[tokio::test]
+    async fn an_unreadable_message_with_no_id_fails_nothing() {
+        assert_eq!(unreadable_reply(r#"{"method":"Page.loadEventFired"}"#), None);
+        assert_eq!(unreadable_reply("not json at all"), None);
+
+        let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
+        let (tx, rx) = oneshot::channel();
+        pending.lock().await.insert(7, tx);
+        let (events_tx, _events_rx) = broadcast::channel::<CdpEvent>(16);
+
+        route_message("not json at all", &pending, &events_tx).await;
+
+        assert_eq!(pending.lock().await.len(), 1, "an unrelated call must be untouched");
+        drop(rx);
+    }
+
+    /// A readable response still reaches its caller, and a readable event still reaches the
+    /// subscribers — the two branches the third one sits beside.
+    #[tokio::test]
+    async fn a_readable_message_still_routes_where_it_did() {
+        let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
+        let (tx, rx) = oneshot::channel();
+        pending.lock().await.insert(7, tx);
+        let (events_tx, mut events_rx) = broadcast::channel::<CdpEvent>(16);
+
+        route_message(r#"{"id":7,"result":{"ok":true}}"#, &pending, &events_tx).await;
+        let PendingReply::Read(response) = rx.await.expect("the response must be delivered") else {
+            panic!("a well-formed response is readable");
+        };
+        assert_eq!(response.id, 7);
+
+        route_message(r#"{"method":"Page.loadEventFired","params":{}}"#, &pending, &events_tx)
+            .await;
+        assert_eq!(events_rx.recv().await.unwrap().method, "Page.loadEventFired");
+    }
+
+    /// `CdpError::data` is the instance that motivated the class. A response whose `data` is an
+    /// object used to take the whole message out of both variants; it is now an ordinary
+    /// protocol error, delivered as one.
+    #[tokio::test]
+    async fn a_structured_error_detail_is_a_protocol_error_and_not_a_lost_message() {
+        let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
+        let (tx, rx) = oneshot::channel();
+        pending.lock().await.insert(3, tx);
+        let (events_tx, _events_rx) = broadcast::channel::<CdpEvent>(16);
+
+        route_message(
+            r#"{"id":3,"error":{"code":-32000,"message":"Cannot find context","data":{"context":9}}}"#,
+            &pending,
+            &events_tx,
+        )
+        .await;
+
+        let PendingReply::Read(response) = rx.await.expect("delivered") else {
+            panic!("a structured `data` must not take the message out of CdpResponse");
+        };
+        let error = response.error.expect("the error is still there");
+        assert_eq!(error.code, -32000);
+        assert_eq!(error.message, "Cannot find context");
     }
 
     fn event(method: &str) -> CdpEvent {
