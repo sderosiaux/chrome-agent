@@ -65,28 +65,114 @@ pub fn dialog_decision(policy: DialogPolicy, dialog_type: &str, text: Option<&st
 }
 
 /// Apply stealth anti-detection patches. Must be called after `Page.enable`.
+///
+/// Every one of the four calls discarded its result, so a patch that did not land
+/// was invisible — and the non-stealth path is the proof that silence was not the
+/// policy: the callers do `client.enable("Runtime").await?`, so a session REFUSES
+/// to start when `Runtime.enable` fails and starts normally when all four stealth
+/// patches failed. A patch that does not land produces precisely the error the
+/// flag exists to prevent, and produces it in the worst possible form: the page
+/// answers with an interstitial, `landed.serving` reads `challenge`, and the hint
+/// says to use `--connect` — attributing to the site a cause that is ours.
+///
+/// So each failure is named on stderr — never stdout, so `--json` stays clean,
+/// the same channel the JS dialog handler uses for a fact no response has a field
+/// for. Deliberately NOT an error and deliberately NOT a refusal to connect: that
+/// would be a hardening, and a browser missing one patch is still a working
+/// browser. The signature stays `-> ()` for the same reason: no call site changes.
+///
+/// The four are attempted unconditionally and reported independently. Nothing
+/// here claims that one failing causes another to fail — `Network.enable` and
+/// `Network.setUserAgentOverride` look related and that dependency has not been
+/// measured, so skipping the second on the first's failure would be a guess that
+/// hides a fact.
+///
+/// What this still cannot see, stated rather than papered over:
+/// `Page.addScriptToEvaluateOnNewDocument` reports whether Chrome ACCEPTED the
+/// script, not whether it ran without throwing on the next document — that
+/// happens later, in a context nothing here is watching.
 pub async fn apply_stealth(client: &CdpClient) {
-    let _ = client.enable("Network").await;
+    // Reported by name because they are independently invisible: which one failed
+    // decides which fingerprint is still exposed, and they are four different
+    // fingerprints.
+    if let Err(e) = client.enable("Network").await {
+        warn_patch("Network.enable (required by the user-agent override)", &e.to_string());
+    }
 
-    // 1. navigator.webdriver = undefined + other fingerprint patches
-    // Injected before ANY page JS runs, survives navigations
-    let _ = client
+    // 1. navigator.webdriver + chrome.runtime, Permissions, WebGL/WebGL2 and the
+    //    screenX/pageX input leak — injected before ANY page JS runs.
+    if let Err(e) = client
         .send(
             "Page.addScriptToEvaluateOnNewDocument",
             json!({ "source": STEALTH_PATCHES_JS }),
         )
-        .await;
+        .await
+    {
+        warn_patch(
+            "Page.addScriptToEvaluateOnNewDocument (all 7 fingerprint patches, every future document)",
+            &e.to_string(),
+        );
+    }
 
     // 2. Patch the current page immediately (in case we connected mid-session)
-    let _ = client
-        .send(
+    //
+    // The guard is a deliberate BEHAVIOUR CHANGE, not a tidy-up, and it was found
+    // by the control test — the one that asserts an ordinary page produces no
+    // warning — failing. `Object.defineProperty` creates an own property that is
+    // non-configurable by default, so on any page the script in step 1 has already
+    // patched, this line THROWS: "TypeError: Cannot redefine property: webdriver".
+    // That is the normal case for every `--stealth` command after the first, and
+    // it has always been so; discarding the result is what hid it. Naming the
+    // failure without also fixing it would print a warning on almost every
+    // invocation, and a warning that fires when nothing is wrong stops being read
+    // — which would have made this whole change counter-productive.
+    //
+    // Reading the property first skips exactly the case where the patch is already
+    // in place and skips nothing else: a page that froze `navigator.webdriver`
+    // itself still reports, which is the case this step exists for
+    // (`tests/fixtures/webdriver_locked.html`). Measured on two successive
+    // `--stealth` invocations against one browser: `typeof navigator.webdriver`
+    // reads `"undefined"` on both, so the fingerprint the patch exists to hide is
+    // still hidden — the guard removes a throw, not a patch.
+    let webdriver_now: Result<crate::cdp::types::EvaluateResult, _> = client
+        .call(
             "Runtime.evaluate",
-            json!({"expression": "Object.defineProperty(navigator, 'webdriver', { get: () => undefined });"}),
+            json!({"expression": "if (navigator.webdriver !== undefined) { \
+                Object.defineProperty(navigator, 'webdriver', { get: () => undefined }); \
+            }"}),
         )
         .await;
+    match webdriver_now {
+        // Read rather than discarded: an evaluation that throws answers `Ok` and
+        // reports it in `exceptionDetails`, which is how this patch fails most
+        // quietly — `navigator.webdriver` is already non-configurable on a page
+        // the script above has patched, and redefining it then throws.
+        Ok(r) => {
+            if let Some(exception) = &r.exception_details {
+                // `text` alone is the word "Uncaught"; the description carries the
+                // reason, which is the whole point of naming the failure. Its
+                // first line only — the rest is a stack trace inside a one-line
+                // expression this file wrote, which names nothing the reader
+                // does not already have.
+                let reason = exception
+                    .exception
+                    .as_ref()
+                    .and_then(|e| e.description.as_deref())
+                    .unwrap_or(&exception.text);
+                warn_patch(
+                    "Runtime.evaluate navigator.webdriver (the already-loaded page)",
+                    reason.lines().next().unwrap_or(reason),
+                );
+            }
+        }
+        Err(e) => warn_patch(
+            "Runtime.evaluate navigator.webdriver (the already-loaded page)",
+            &e.to_string(),
+        ),
+    }
 
     // 3. Override user-agent to remove "HeadlessChrome"
-    let _ = client
+    if let Err(e) = client
         .send(
             "Network.setUserAgentOverride",
             json!({
@@ -95,7 +181,21 @@ pub async fn apply_stealth(client: &CdpClient) {
                 "platform": "MacIntel"
             }),
         )
-        .await;
+        .await
+    {
+        warn_patch(
+            "Network.setUserAgentOverride (the UA still says HeadlessChrome)",
+            &e.to_string(),
+        );
+    }
+}
+
+/// One stealth patch that did not land, on stderr.
+///
+/// States what is missing and nothing more: which detection this exposes the
+/// session to is a question about the site, not about this failure.
+fn warn_patch(patch: &str, reason: &str) {
+    eprintln!("warning: stealth patch not applied — {patch}: {reason}");
 }
 
 // ---------------------------------------------------------------------------

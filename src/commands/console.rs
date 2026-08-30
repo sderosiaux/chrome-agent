@@ -10,6 +10,48 @@ pub struct ConsoleEntry {
     pub timestamp: u64,
 }
 
+/// What a `console` read found, and whether anything was listening when it ran.
+///
+/// The buffer used to be read as `window.__chrome_agent_console || []`, so a page
+/// where the interceptor had never been installed answered with the same empty
+/// list as a page that simply had not logged. "No console messages captured" is a
+/// statement about the page, and an agent uses it to conclude the page is healthy;
+/// on a page with no interceptor it is a statement about nothing. The asymmetry
+/// showed it was not a choice — the same read already checked `exceptionDetails`
+/// for its OWN evaluation and checked nothing for the injection.
+///
+/// **The scope of `installed: false` is exactly one thing: the bootstrap did not
+/// take on this page.** It is the same gesture as `verdict: unknown / read_failed`
+/// — a report that the measurement did not happen, not a claim about what would
+/// have been measured. In particular it does NOT cover the other half of the
+/// silence: anything the page logged BEFORE a chrome-agent connection existed is
+/// gone whatever this field says, because the interceptor captures forward only.
+/// `installed: true` therefore means "something was listening from the moment it
+/// was installed", never "nothing was missed".
+///
+/// Derefs to the entries so a caller that only wants the list is unaffected.
+#[derive(Debug)]
+pub struct ConsoleReading {
+    /// Whether `window.__chrome_agent_console` existed in the page at read time.
+    pub installed: bool,
+    pub entries: Vec<ConsoleEntry>,
+}
+
+impl std::ops::Deref for ConsoleReading {
+    type Target = [ConsoleEntry];
+
+    fn deref(&self) -> &Self::Target {
+        &self.entries
+    }
+}
+
+/// The shape the read script returns: the probe and the buffer in one round trip.
+#[derive(Debug, Deserialize)]
+struct RawReading {
+    installed: bool,
+    entries: Vec<ConsoleEntry>,
+}
+
 /// JS snippet that monkey-patches console.log/warn/error/info and captures
 /// unhandled errors + promise rejections into `window.__chrome_agent_console`.
 const INTERCEPTOR_JS: &str = r"
@@ -56,6 +98,14 @@ const INTERCEPTOR_JS: &str = r"
 /// 2. `Runtime.evaluate` with a guard — bootstraps on the current page immediately.
 ///
 /// Does NOT require `Runtime.enable`, so it is stealth-safe.
+///
+/// Both errors stay discarded here, and the check lives in [`run`] instead. That
+/// is deliberate, not an omission: propagating them would catch the two ways CDP
+/// can refuse the call and miss the way the bootstrap actually fails most quietly
+/// — a JS exception raised while the snippet runs, which `send` never sees
+/// because `Runtime.evaluate` answers `Ok` and reports it in `exceptionDetails`.
+/// A probe at read time catches all three at once, and catches the fourth thing
+/// no injection-time check can: a page that dropped the buffer afterwards.
 pub async fn inject(client: &CdpClient) {
     // Runs on every future navigation automatically
     let _ = client
@@ -79,17 +129,26 @@ pub async fn inject(client: &CdpClient) {
 
 /// Read captured console messages from the injected interceptor.
 /// Optionally filter by level and clear after reading.
+///
+/// The probe rides on the expression that already reads the buffer — same call,
+/// same round trip, no added cost — and its answer is reported beside the list
+/// rather than raised: this is a read command, and a missing interceptor does not
+/// stop it reading. See [`ConsoleReading`] for what `installed: false` does and
+/// does not claim.
 pub async fn run(
     client: &CdpClient,
     level_filter: Option<&str>,
     clear: bool,
     limit: usize,
-) -> Result<Vec<ConsoleEntry>, crate::BoxError> {
+) -> Result<ConsoleReading, crate::BoxError> {
     let result: crate::cdp::types::EvaluateResult = client
         .call(
             "Runtime.evaluate",
             json!({
-                "expression": "JSON.stringify(window.__chrome_agent_console || [])",
+                "expression": "JSON.stringify({ \
+                    installed: typeof window.__chrome_agent_console !== 'undefined', \
+                    entries: window.__chrome_agent_console || [] \
+                })",
                 "returnByValue": true,
             }),
         )
@@ -112,10 +171,20 @@ pub async fn run(
         .value
         .as_ref()
         .and_then(|v| v.as_str())
-        .unwrap_or("[]");
+        .ok_or("Failed to read console buffer: the page returned no value")?;
 
-    let entries: Vec<ConsoleEntry> = serde_json::from_str(raw)
+    let RawReading { installed, entries } = serde_json::from_str(raw)
         .map_err(|e| format!("Failed to parse console buffer: {e}"))?;
+
+    if !installed {
+        // stderr, never stdout, so --json stays clean — the channel the dialog
+        // handler already uses for a fact the response has no field for.
+        eprintln!(
+            "warning: console interceptor not installed on this page \
+             (window.__chrome_agent_console is undefined), so nothing was capturing \
+             console output. An empty result here is a missing listener, not a quiet page."
+        );
+    }
 
     let filtered: Vec<ConsoleEntry> = if let Some(level) = level_filter {
         entries.into_iter().filter(|e| e.level == level).collect()
@@ -124,20 +193,57 @@ pub async fn run(
     };
 
     let limited = keep_recent(filtered, limit);
-
     if clear {
-        let _ = client
-            .send(
-                "Runtime.evaluate",
-                json!({
-                    "expression": "window.__chrome_agent_console = []",
-                    "returnByValue": true,
-                }),
-            )
-            .await;
+        clear_buffer(client, installed).await;
     }
 
-    Ok(limited)
+    Ok(ConsoleReading { installed, entries: limited })
+}
+
+/// Empty the page's buffer, and say on stderr when that did not happen.
+///
+/// The result used to be discarded, which made every read that asked for a clear
+/// report the entries as consumed: on a failure they are still in the page and
+/// the next read returns them again, which reads as the page having logged them
+/// twice. Three things can go wrong and all three are answered here — the call
+/// can fail, the expression can throw, and the buffer can be absent.
+///
+/// The guard is load-bearing, not defensive: the old expression ASSIGNED an empty
+/// array, so clearing a page with no interceptor CREATED the buffer and the next
+/// read would have probed `installed: true` on a page where nothing is listening.
+/// Emptying in place also holds for any reference the interceptor captured.
+async fn clear_buffer(client: &CdpClient, installed: bool) {
+    if !installed {
+        eprintln!(
+            "warning: console --clear had nothing to clear; no interceptor buffer exists \
+             on this page."
+        );
+        return;
+    }
+    let result: Result<crate::cdp::types::EvaluateResult, _> = client
+        .call(
+            "Runtime.evaluate",
+            json!({
+                "expression": "!!window.__chrome_agent_console && \
+                    (window.__chrome_agent_console.length = 0, true)",
+                "returnByValue": true,
+            }),
+        )
+        .await;
+
+    let emptied = match result {
+        Ok(r) if r.exception_details.is_none() => {
+            r.result.value.as_ref().and_then(serde_json::Value::as_bool).unwrap_or(false)
+        }
+        _ => false,
+    };
+
+    if !emptied {
+        eprintln!(
+            "warning: console --clear did not empty the page's buffer; the messages just \
+             reported are still there and the next read will return them again."
+        );
+    }
 }
 
 /// Keep the most-recent `limit` entries of a chronological (oldest→newest)
@@ -157,12 +263,24 @@ fn format_time(ts: u64) -> String {
     format!("{h:02}:{m:02}:{s:02}")
 }
 
-/// Format entries for text output.
-pub fn format_text(entries: &[ConsoleEntry]) -> String {
-    if entries.is_empty() {
+/// Format a reading for text output.
+///
+/// The two silences are told apart here, because they are two different facts and
+/// only one of them is about the page. Takes the whole reading rather than the
+/// slice for exactly that reason.
+#[must_use]
+pub fn format_text(reading: &ConsoleReading) -> String {
+    if !reading.installed {
+        return "Console interceptor not installed on this page \
+                (window.__chrome_agent_console is undefined) — nothing was capturing console \
+                output, so this is not a report that the page logged nothing."
+            .to_string();
+    }
+    if reading.entries.is_empty() {
         return "No console messages captured.".to_string();
     }
-    entries
+    reading
+        .entries
         .iter()
         .map(|e| {
             format!(
@@ -206,5 +324,44 @@ mod tests {
         let limited = keep_recent(entries, 10);
         let msgs: Vec<&str> = limited.iter().map(|e| e.message.as_str()).collect();
         assert_eq!(msgs, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn text_output_tells_the_two_silences_apart() {
+        let quiet = ConsoleReading { installed: true, entries: vec![] };
+        let blind = ConsoleReading { installed: false, entries: vec![] };
+
+        assert_eq!(format_text(&quiet), "No console messages captured.");
+        assert_ne!(
+            format_text(&blind),
+            format_text(&quiet),
+            "an empty page and an absent listener are two different facts"
+        );
+        assert!(
+            format_text(&blind).contains("not installed"),
+            "{}",
+            format_text(&blind)
+        );
+    }
+
+    #[test]
+    fn the_blind_report_claims_nothing_about_what_the_page_logged() {
+        // The measurement is "nothing was listening". "The page logged things you missed" is
+        // a different claim, and this tool has no way to make it.
+        let text = format_text(&ConsoleReading { installed: false, entries: vec![] }).to_lowercase();
+        for forbidden in ["missed", "lost", "were logged"] {
+            assert!(!text.contains(forbidden), "over-claims: {text}");
+        }
+    }
+
+    #[test]
+    fn an_installed_interceptor_reports_its_entries_unchanged() {
+        let reading = ConsoleReading {
+            installed: true,
+            entries: vec![entry("boom", 0)],
+        };
+        assert!(format_text(&reading).contains("LOG: boom"), "{}", format_text(&reading));
+        // And the reading is still usable as the slice every caller wants.
+        assert_eq!(reading.len(), 1);
     }
 }
