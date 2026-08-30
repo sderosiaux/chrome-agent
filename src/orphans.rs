@@ -115,16 +115,22 @@ pub fn cmd_close_orphans(json_mode: bool) -> Result<(), crate::BoxError> {
         return Err("Could not read the process table, so no orphan could be identified.".into());
     };
 
-    let (closed, skipped): (Vec<&Orphan>, Vec<&Orphan>) = orphans
-        .iter()
-        .partition(|o| crate::run_helpers::kill_pid(o.pid) == crate::run_helpers::KillOutcome::Signalled);
+    // The outcome is kept, not reduced to a boolean, because the three ways of not
+    // signalling are three different facts and the line printed below used to assert one of
+    // them for all of them ("stopped being a browser"). `kill_pid` measures which; saying
+    // it is free once it has been carried this far.
+    use crate::run_helpers::KillOutcome;
+    let attempted: Vec<(&Orphan, KillOutcome)> =
+        orphans.iter().map(|o| (o, crate::run_helpers::kill_pid(o.pid))).collect();
+    let (closed, skipped): (Vec<_>, Vec<_>) =
+        attempted.iter().partition(|(_, outcome)| *outcome == KillOutcome::Signalled);
 
     let message = format!("Closed {} orphaned browser(s)", closed.len());
     if json_mode {
-        let listed = |group: &[&Orphan]| {
+        let listed = |group: &[&(&Orphan, KillOutcome)]| {
             group
                 .iter()
-                .map(|o| serde_json::json!({"name": o.name, "pid": o.pid}))
+                .map(|(o, _)| serde_json::json!({"name": o.name, "pid": o.pid}))
                 .collect::<Vec<_>>()
         };
         crate::run_helpers::json_output(&serde_json::json!({
@@ -134,12 +140,20 @@ pub fn cmd_close_orphans(json_mode: bool) -> Result<(), crate::BoxError> {
             "skipped": listed(&skipped),
         }));
     } else {
-        for orphan in &closed {
+        for (orphan, _) in &closed {
             println!("Closed orphan={}  pid={}", orphan.name, orphan.pid);
         }
-        for orphan in &skipped {
+        for (orphan, outcome) in &skipped {
+            let reason = match outcome {
+                KillOutcome::Gone => "it had already exited",
+                KillOutcome::NotABrowser => "its pid now belongs to another process",
+                KillOutcome::Unverified => "its pid could not be checked against the process table",
+                // Unreachable by construction (this half is everything that is not
+                // `Signalled`), and worded as a reading rather than a cause anyway.
+                KillOutcome::Signalled => "it was signalled",
+            };
             eprintln!(
-                "warning: orphan={} pid={} stopped being a browser before it could be signalled",
+                "warning: orphan={} pid={} was not signalled: {reason}",
                 orphan.name, orphan.pid
             );
         }
