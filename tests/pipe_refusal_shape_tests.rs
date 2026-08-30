@@ -138,32 +138,42 @@ fn network_idle_is_the_one_wait_that_needs_no_pattern() {
         return;
     }
     let browser = TestBrowser::new("pipe-wait-pattern");
+    let page = fixture_url("assert_page.html");
+    let goto = format!(r#"{{"cmd":"goto","url":"{page}"}}"#);
     let responses = run_pipe(
         browser.name(),
         &[
+            &goto,
             "{\"cmd\":\"wait\",\"what\":\"network-idle\"}",
             "{\"cmd\":\"wait\",\"what\":\"selector\"}",
         ],
     );
-    assert_eq!(responses.len(), 2);
+    assert_eq!(responses.len(), 3);
     assert_eq!(
         responses[0]["ok"],
         serde_json::json!(true),
         "{}",
         responses[0]
     );
+    assert_eq!(responses[0]["url"], serde_json::json!(page));
     assert_eq!(
         responses[1]["ok"],
-        serde_json::json!(false),
+        serde_json::json!(true),
         "{}",
         responses[1]
     );
+    assert_eq!(
+        responses[2]["ok"],
+        serde_json::json!(false),
+        "{}",
+        responses[2]
+    );
     assert!(
-        responses[1]["error"]
+        responses[2]["error"]
             .as_str()
             .unwrap_or_default()
             .contains("missing \"pattern\""),
         "{}",
-        responses[1]
+        responses[2]
     );
 }
