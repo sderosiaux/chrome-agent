@@ -29,7 +29,7 @@
 //! `downloadWillBegin` — and with it the server's suggested filename, which is the one piece of
 //! the report that exists nowhere else.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
 use serde_json::{json, Value};
@@ -37,6 +37,7 @@ use tokio::sync::broadcast;
 
 use crate::cdp::client::CdpClient;
 use crate::cdp::types::CdpEvent;
+use crate::session::{liveness, Liveness};
 
 /// What Chrome said about the download this action armed for.
 pub enum Transfer {
@@ -82,9 +83,24 @@ pub struct Armed {
 /// How hard the sweep tries before giving the directory up, and how long it waits between tries.
 ///
 /// 5 × 30 ms, and only paid when Chrome is still writing: the first attempt succeeds on every
-/// download that completed.
+/// download that completed. It is the fast path, not the guarantee — see [`collect_abandoned`].
 const SWEEP_ATTEMPTS: u32 = 5;
 const SWEEP_GAP_MS: u64 = 30;
+
+/// What names a transfer directory, and the reason the filter on it is load-bearing rather than
+/// decorative: `~/.chrome-agent/tmp` is also where `screenshot`, `pdf` and `download <url>` put a
+/// file the caller did not name, and none of those are ours to remove.
+const INCOMING_PREFIX: &str = ".incoming-";
+
+/// How many transfer directories one arming looks at.
+///
+/// Far looser than `profiles.rs`'s 32, and deliberately so: examining one profile there is a
+/// recursive scan for holder artefacts and a modification time, while examining one of these is a
+/// string split and a `kill(pid, 0)`. What the cap actually bounds is the readdir of a directory
+/// somebody let grow. Removal is uncapped for the same asymmetry read the other way — a transfer
+/// directory holds one file, so unlinking it is a handful of syscalls whatever that file weighs,
+/// where removing one 14 MB profile is thousands of them.
+const COLLECT_CAP: usize = 64;
 
 /// Point Chrome's downloads at a directory this invocation owns, and start listening.
 ///
@@ -93,7 +109,12 @@ const SWEEP_GAP_MS: u64 = 30;
 /// refusing — the caller would have to click a second time to get the file, and the page cannot
 /// tell that from a second deliberate action.
 pub async fn arm(client: &CdpClient) -> Result<Armed, crate::BoxError> {
-    let dir = incoming_dir()?;
+    let tmp = tmp_root()?;
+    // Before this invocation's own directory exists, so the collector never has to reason about a
+    // half-created one. Ours would survive it either way — our pid is alive, and that is the whole
+    // predicate — but a sweep that cannot see its own caller is one fewer thing to argue about.
+    let _ = collect_abandoned(&tmp, COLLECT_CAP);
+    let dir = incoming_dir(&tmp);
     std::fs::create_dir_all(&dir)?;
     #[cfg(unix)]
     {
@@ -270,10 +291,16 @@ pub fn place(
 /// Separate from `place` so every outcome pays it, including the ones that wrote nothing. The
 /// retry is not decoration: measured on the `--max-bytes` path, Chrome answers `canceled`, we
 /// return, and it then finalises — recreating the directory and a zero-byte stub AFTER the
-/// removal, so every cancelled download left one `.incoming-<pid>-<nanos>/` behind for good. It
-/// is the same lesson `close --purge` learnt about a Chrome that has been told to stop and has
-/// not finished stopping: a removal that reports success on its first `Ok` is claiming a
-/// convergence that has not happened.
+/// removal. It is the same lesson `close --purge` learnt about a Chrome that has been told to
+/// stop and has not finished stopping: a removal that reports success on its first `Ok` is
+/// claiming a convergence that has not happened.
+///
+/// What it is NOT is the guarantee. This runs before the process ends, and on the paths where
+/// Chrome is not finished with the directory it is racing something no budget can bound — see
+/// [`collect_abandoned`] for the measurement and for what actually converges. Keeping it is still
+/// worth it, and that is the whole of its case: a download that completed clears on the first
+/// attempt and never reaches the collector, so nothing routinely accumulates for a later
+/// invocation to find.
 pub async fn clean_up(armed: &Armed) {
     for attempt in 0..SWEEP_ATTEMPTS {
         let _ = std::fs::remove_dir_all(&armed.dir);
@@ -286,18 +313,111 @@ pub async fn clean_up(armed: &Armed) {
     }
 }
 
+/// Remove the transfer directories of processes that are provably gone. Returns their names.
+///
+/// # What no sweep budget can cover
+///
+/// [`clean_up`] runs before this process ends, and on the paths where Chrome is not finished with
+/// the directory it is chasing something it cannot bound. Measured here with the shipped 5 × 30 ms
+/// budget, over eight downloads whose transfer was still running when `--timeout` expired: three
+/// directories were back on disk the moment the last invocation returned, and **all eight** were
+/// there fifteen seconds later, each holding the zero-byte stub `allowAndName` names after the
+/// guid. The transfer does not stop when chrome-agent does — Chrome keeps the download it was
+/// handed — so the only window wide enough is the length of the download, which is exactly the
+/// bound `--timeout` already declined to be. Widening it would move the failure onto a slower
+/// runner, which is where it was found in the first place.
+///
+/// # Why the pid is the whole predicate
+///
+/// The name is `.incoming-<pid>-<nanos>` and the pid is the process that armed it. Only Chrome,
+/// acting on that invocation's `setDownloadBehavior`, ever writes there, and the override dies
+/// with the CDP session (module docs); so once the OS no longer knows that pid, the directory
+/// cannot gain another byte from anyone and any later invocation may take it. That is
+/// `profiles.rs`'s shape — a removal predicated on "no live holder" rather than on a delay — and
+/// it converges without inventing a number.
+///
+/// This is also why a concurrent agent is safe rather than merely unlikely to be hit: its
+/// directory carries ITS pid, [`liveness`] answers `Alive`, and it is kept. A recycled pid answers
+/// `Alive` too, which keeps a directory that could have gone — the harmless direction.
+///
+/// # Why arming, and what it costs there
+///
+/// It is the only moment anyone has a reason to care about this directory, and it is already a
+/// filesystem operation on a command that is about to spend a CDP round trip, a click and up to
+/// `--timeout` seconds waiting. Measured: 227 µs with nothing to collect, which is the shape of
+/// every invocation after the first; 241 µs with 500 unrelated files beside it, since the prefix
+/// filter answers before any pid is probed; 6.1 ms to examine and remove a full window of 64,
+/// which is a backlog being drained rather than a recurring cost. The session store's save path —
+/// where `profiles.rs` sweeps — was the alternative and was rejected: it runs on every command
+/// including read-only ones, and this directory is created by exactly one verb.
+///
+/// The price of that choice, stated: a caller who abandons a download and never runs another
+/// leaves the crumbs there. `close --purge-orphans` does not cover them either. What bounds the
+/// damage is that a transfer directory holds one partial file, and the next `download` takes 64.
+///
+/// Every case that does not resolve keeps the directory: [`Liveness::Unknown`] (a pid under
+/// another uid, and every non-Unix platform, where no probe is wired and this is therefore a
+/// no-op), a name whose pid does not parse, and anything here that is not a transfer directory at
+/// all.
+///
+/// The known gap, stated rather than guarded: a `HOME` shared between machines or containers puts
+/// two pid namespaces over one directory, and a pid dead here may be alive there. `profiles.rs`
+/// guards that case with the hostname in Chrome's `SingletonLock`; this does not, because what is
+/// at risk is a partial download of the current second rather than a profile something is logged
+/// into, and the session store beside it already assumes one machine.
+pub fn collect_abandoned(tmp: &Path, cap: usize) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(tmp) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = entries
+        .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+        .filter(|name| name.starts_with(INCOMING_PREFIX))
+        .collect();
+    // Sorted only so the window is the same set on two successive invocations rather than whatever
+    // order the filesystem answered in — a backlog behind the cap drains deterministically instead
+    // of depending on readdir. It is lexicographic over the whole name, so it is not any
+    // meaningful age order, and nothing here needs one: the predicate is about the owner, not the
+    // clock, which is the difference from `profiles.rs` and the reason no rotation is needed.
+    names.sort_unstable();
+    names.truncate(cap);
+
+    let mut removed = Vec::new();
+    for name in names {
+        if !is_abandoned(&name) {
+            continue;
+        }
+        if std::fs::remove_dir_all(tmp.join(&name)).is_ok() {
+            removed.push(name);
+        }
+    }
+    removed
+}
+
+/// `.incoming-<pid>-<nanos>` → whether the process named in it is provably gone.
+fn is_abandoned(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix(INCOMING_PREFIX) else {
+        return false;
+    };
+    let Some((pid, _nanos)) = rest.split_once('-') else {
+        return false;
+    };
+    pid.parse::<u32>().is_ok_and(|pid| liveness(pid) == Liveness::Dead)
+}
+
+/// Where every file this tool writes without being told a path goes.
+fn tmp_root() -> Result<PathBuf, crate::BoxError> {
+    let home = dirs::home_dir().ok_or("Could not determine home directory")?;
+    Ok(home.join(".chrome-agent").join("tmp"))
+}
+
 /// A directory only this invocation writes to, so `allowAndName`'s guid-named files cannot
 /// collide with a concurrent agent's and the sweep cannot delete one.
-fn incoming_dir() -> Result<PathBuf, crate::BoxError> {
+fn incoming_dir(tmp: &Path) -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or_default();
-    let home = dirs::home_dir().ok_or("Could not determine home directory")?;
-    Ok(home
-        .join(".chrome-agent")
-        .join("tmp")
-        .join(format!(".incoming-{}-{nanos}", std::process::id())))
+    tmp.join(format!("{INCOMING_PREFIX}{}-{nanos}", std::process::id()))
 }
 
 fn string_field(params: &Value, key: &str) -> String {
@@ -344,10 +464,116 @@ mod tests {
     /// sweep at the end of one would take the other's file with it.
     #[test]
     fn each_invocation_gets_its_own_incoming_directory() {
-        let first = incoming_dir().unwrap();
+        let tmp = scratch("incoming-names");
+        let first = incoming_dir(&tmp);
         std::thread::sleep(Duration::from_millis(2));
-        let second = incoming_dir().unwrap();
+        let second = incoming_dir(&tmp);
         assert_ne!(first, second);
-        assert!(first.to_string_lossy().contains(".incoming-"));
+        assert!(first.to_string_lossy().contains(INCOMING_PREFIX));
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// A scratch directory no second process can guess, since these run on parallel threads and
+    /// alongside other `cargo test` processes.
+    fn scratch(tag: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default();
+        let dir = std::env::temp_dir()
+            .join(format!("chrome-agent-{tag}-{}-{nanos}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn transfer_dir(tmp: &Path, name: &str) -> PathBuf {
+        let dir = tmp.join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        // `allowAndName` leaves a guid-named file; an empty directory is not the shape found on
+        // disk and would let a `remove_dir` that cannot handle contents pass by accident.
+        std::fs::write(dir.join("6f1c1f0e-guid"), b"partial").unwrap();
+        dir
+    }
+
+    /// A pid nothing holds any more: spawned, waited on, and therefore reaped.
+    #[cfg(unix)]
+    fn a_reaped_pid() -> u32 {
+        let mut child =
+            std::process::Command::new("/bin/sh").args(["-c", "exit 0"]).spawn().expect("spawn");
+        let pid = child.id();
+        child.wait().expect("wait");
+        pid
+    }
+
+    /// The defect, without waiting for a real race: a directory whose owner has exited is
+    /// collected by the next arming, and one whose owner is alive is not.
+    ///
+    /// Before the collector existed, `clean_up`'s 5 × 30 ms was the only thing that ever removed
+    /// one of these, so the abandoned directory here survived for good — measured on the path
+    /// where the transfer is still running at eight invocations out of eight.
+    #[cfg(unix)]
+    #[test]
+    fn a_transfer_directory_is_collected_once_its_process_is_gone() {
+        let tmp = scratch("collect-abandoned");
+        let dead = a_reaped_pid();
+        assert_eq!(
+            liveness(dead),
+            Liveness::Dead,
+            "the pid was recycled between the wait and the probe, so this proves nothing"
+        );
+
+        let abandoned = transfer_dir(&tmp, &format!("{INCOMING_PREFIX}{dead}-1788086042802162000"));
+        let live = transfer_dir(
+            &tmp,
+            &format!("{INCOMING_PREFIX}{}-1788086042802162001", std::process::id()),
+        );
+
+        let removed = collect_abandoned(&tmp, COLLECT_CAP);
+
+        assert!(!abandoned.exists(), "a directory nothing can write to any more was kept");
+        assert_eq!(removed.len(), 1, "{removed:?}");
+        assert!(
+            live.exists(),
+            "a running process's transfer directory was taken, which on a concurrent agent is \
+             its download"
+        );
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// Everything the predicate cannot resolve keeps the directory, and everything else in
+    /// `~/.chrome-agent/tmp` is not the predicate's business at all.
+    #[test]
+    fn an_unreadable_owner_or_another_command_s_file_is_left_alone() {
+        let tmp = scratch("collect-keeps");
+        let unparseable = transfer_dir(&tmp, &format!("{INCOMING_PREFIX}not-a-pid"));
+        let no_separator = transfer_dir(&tmp, INCOMING_PREFIX.trim_end_matches('-'));
+        // A `screenshot`/`pdf`/`download <url>` output sitting in the same directory.
+        let neighbour = tmp.join("shot-1788086042.png");
+        std::fs::write(&neighbour, b"png").unwrap();
+
+        assert!(collect_abandoned(&tmp, COLLECT_CAP).is_empty());
+        assert!(unparseable.exists());
+        assert!(no_separator.exists());
+        assert!(neighbour.exists());
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// The cap bounds the readdir of a directory somebody let grow, and the rest is drained by
+    /// the invocations that follow rather than dropped.
+    #[cfg(unix)]
+    #[test]
+    fn the_cap_bounds_one_arming_and_the_backlog_still_converges() {
+        let tmp = scratch("collect-cap");
+        let dead = a_reaped_pid();
+        assert_eq!(liveness(dead), Liveness::Dead, "the pid was recycled");
+        for n in 0..5 {
+            transfer_dir(&tmp, &format!("{INCOMING_PREFIX}{dead}-178808604280216200{n}"));
+        }
+
+        assert_eq!(collect_abandoned(&tmp, 2).len(), 2, "the cap is not applied");
+        assert_eq!(collect_abandoned(&tmp, 2).len(), 2);
+        assert_eq!(collect_abandoned(&tmp, 2).len(), 1);
+        assert!(collect_abandoned(&tmp, 2).is_empty(), "the backlog did not drain");
+        std::fs::remove_dir_all(&tmp).ok();
     }
 }
