@@ -72,6 +72,19 @@ proposal remains deferred.
 
 ## What exists
 
+The next workflow experiment is implemented in
+[`examples/report_export`](../../examples/report_export/README.md): a Python program using `pipe`
+against a local reference application. Account and period are inputs. The task checks page
+context, waits for the scoped report, downloads once, validates the CSV's scope, row count and
+total, then publishes the file. Tests compare actual invoice IDs and export counts with an
+independent server oracle. Wrong files remain unpublished; response loss produces uncertainty
+without another export.
+
+This workflow required no new browser primitive or task format. Input validation, data
+dependencies and result assembly fit in the caller's language. The main reusable caller code is
+JSONL transport handling, including terminal failures and deadlines. Cross-site adaptation and
+discovery-cost comparisons remain unmeasured.
+
 The action layer reports delivery, retained values, navigation, uncertainty and next actions.
 The pipe protocol has typed command objects and cross-field validation. Assertions can check
 values, text, URLs and state. These are useful building blocks for a task runner.

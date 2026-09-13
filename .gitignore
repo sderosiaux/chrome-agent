@@ -1,5 +1,6 @@
 target/
 node_modules/
+__pycache__/
 
 # bench working files: inputs to a replay and un-archived outputs, not evidence.
 # Archived runs live under bench/results/<date>/ and are committed.

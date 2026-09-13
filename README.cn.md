@@ -395,7 +395,7 @@ API 测试，或者对一个自带 polyfill 的页面测试。在 `frame` 绑定
 | PDF 导出 | `pdf` | 无 | 无 |
 | MCP server | 无 | 有 | 有 |
 | 云服务商、iOS/Safari | 无（可 `--connect` 到任何东西） | 有 | 无 |
-| 代码量 | ~28.2K 行 Rust 代码（src/ 下，不含空行与纯注释行；有测试重新测量） | ~40K 行（他们的数字，此处未核实） | Playwright |
+| 代码量 | ~29.7K 行 Rust 代码（src/ 下，不含空行与纯注释行；有测试重新测量） | ~40K 行（他们的数字，此处未核实） | Playwright |
 
 `extract` 用 MDR/DEPTA 风格的启发式（兄弟节点相似度、内容异质性、文本/链接比）在结构上找出重复记录，而不是
 让模型去读 DOM。在 Hacker News 首页，它用 1,571 tokens 交出 30 条记录，无障碍树要 5,652，原始 HTML 要
@@ -417,7 +417,7 @@ API 测试，或者对一个自带 polyfill 的页面测试。在 `frame` 绑定
 `{"permissions": {"allow": ["Bash(chrome-agent *)"]}}`。
 
 ```
-chrome-agent（3 MB Rust 二进制，~28.2K 行 Rust 代码（src/ 下））
+chrome-agent（3 MB Rust 二进制，~29.7K 行 Rust 代码（src/ 下））
     | CDP over WebSocket
     v
 Chrome（默认无头，无 Node.js，无运行时）

@@ -360,6 +360,11 @@ page could not be read, the macro file is missing — exits `1`, with `stopped_b
 
 ### Files on disk
 
+For a complete workflow, see the [checked report export example](examples/report_export/README.md).
+An ordinary Python program drives `pipe`, checks account and period, validates the downloaded CSV,
+and returns a verified file or a failure with evidence. It includes a local demo app and Chrome
+tests for wrong data, delayed downloads and responses lost after export.
+
 Screenshots, PDFs and downloads land under `~/.chrome-agent/tmp` (or your `--out` path) with `0600`
 permissions, and the path is printed on stdout. Binary bytes never reach stdout.
 
@@ -435,7 +440,7 @@ main-world script is invisible from the isolated world.
 | PDF export | `pdf` | none | none |
 | MCP server | none | yes | yes |
 | Cloud providers, iOS/Safari | none (`--connect` to anything) | yes | none |
-| Codebase | ~28.2K lines of Rust in `src/` (blank and comment-only lines excluded; a test re-measures it) | ~40K lines (their figure, unverified here) | Playwright |
+| Codebase | ~29.7K lines of Rust in `src/` (blank and comment-only lines excluded; a test re-measures it) | ~40K lines (their figure, unverified here) | Playwright |
 
 `extract` finds repeating records structurally with MDR/DEPTA-style heuristics (sibling similarity,
 content heterogeneity, text-to-link ratio) instead of asking a model to read the DOM. On the Hacker
@@ -458,7 +463,7 @@ embeds a full LLM usage guide, and every error carries a `hint` naming the next 
 permissions: `{"permissions": {"allow": ["Bash(chrome-agent *)"]}}`.
 
 ```
-chrome-agent (3 MB Rust binary, ~28.2K lines of Rust in src/)
+chrome-agent (3 MB Rust binary, ~29.7K lines of Rust in src/)
     | CDP over WebSocket
     v
 Chrome (headless by default, no Node.js, no runtime)

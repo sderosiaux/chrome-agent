@@ -11,7 +11,7 @@ something else took the click, or nothing could be observed. One word, in JSON, 
 
 One 3 MB Rust binary over CDP. No Node runtime, no Playwright, no daemon.
 
-chrome-agent v0.16.0 (~28.2K lines of Rust in `src/`, blank and comment-only lines excluded; 3 MB binary)
+chrome-agent v0.16.0 (~29.7K lines of Rust in `src/`, blank and comment-only lines excluded; 3 MB binary)
 
 Full documentation: [github.com/sderosiaux/chrome-agent](https://github.com/sderosiaux/chrome-agent).
 
@@ -179,7 +179,7 @@ chrome-agent --stealth --copy-cookies goto x.com/home --inspect
 | Reader mode | `read` (Readability.js) | none | none |
 | Record extraction | `extract`, structural, no LLM call | none | none |
 | MCP server | none | yes | yes |
-| Code | ~28.2K lines of Rust in `src/` (blank and comment-only lines excluded; a test re-measures it) | ~40K lines (their figure, unverified here) | Playwright |
+| Code | ~29.7K lines of Rust in `src/` (blank and comment-only lines excluded; a test re-measures it) | ~40K lines (their figure, unverified here) | Playwright |
 
 ## Using it from an agent
 
