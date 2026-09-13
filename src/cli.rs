@@ -551,9 +551,12 @@ pub enum Command {
     /// Prove a claim about the page — exit 0 held (the only quotable evidence), 2 did not hold, 1 not checked
     ///
     /// The exit code is the answer: 0 the claim held, 2 it did not (the page is not in the
-    /// asserted state), 1 it could not be checked at all — no browser, a selector matching
-    /// nothing, an invalid regex, a CDP timeout. 2 is a fact to report, 1 is a retry.
+    /// asserted state), 1 the check could not finish — no browser, a selector matching
+    /// nothing, an invalid regex, a CDP timeout. With --within, only reads are repeated.
     Assert {
+        /// Wait up to this many whole seconds for the claim to hold (default: check once)
+        #[arg(long, global = true, value_parser = crate::commands::assert_wait::parse_seconds)]
+        within: Option<u64>,
         #[command(subcommand)]
         what: AssertWhat,
     },

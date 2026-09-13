@@ -241,12 +241,24 @@ chrome-agent fill --selector "#coupon" "SAVE10"
 chrome-agent assert value --selector "#coupon" --equals "SAVE10"
 chrome-agent assert state --selector "#terms" --checked
 chrome-agent assert exists --selector ".result" --min 1
+chrome-agent assert value --selector "#quantity" --equals "1" --within 5
 ```
 
 `assert` is a read: no change report, no verdict, and it never clicks. `--matches` is a Rust regex
 (`\d`/`\w`/`\s` are ASCII-only, no `\p{...}`; `(?i)` works). Inside `batch` and `pipe` an assertion
 has no exit code of its own — it is `ok:false` with an `assertion` object, and a `batch` that
 stopped on it exits 1, not 2.
+
+`--within N` observes the same condition until it holds or N seconds elapse. N must be a positive
+whole number; without it, assertions check once. The wait repeats reads only. It stops at the
+first matching observation and does not establish that the state will remain unchanged.
+JSON adds `assertion.wait` with `within_ms`, `elapsed_ms`, `observations` and `timed_out`.
+An expired condition returns exit 2 with the last expected/actual comparison. An unreadable
+element, lost connection or blocked read returns exit 1; its `error` response carries `wait` and,
+when available, `last_observation`. Missing elements remain errors for value/text/state checks;
+use `assert exists --within N` to wait for presence first. In pipe and macro commands, use
+`"within":5`. The observation window also bounds pending reads; the global `--timeout` still
+limits each CDP call separately.
 
 ### Pipe and batch mode
 

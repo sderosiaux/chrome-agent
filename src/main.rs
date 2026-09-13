@@ -189,6 +189,14 @@ async fn main() {
         if let Some(not_held) = e.downcast_ref::<commands::assert::NotHeld>() {
             exit_after_stdout(not_held.report());
         }
+        if let Some(failed) = e.downcast_ref::<commands::assert_wait::ReadFailed>() {
+            if json_mode {
+                run_helpers::json_output(&failed.to_json());
+            } else {
+                failed.print_text();
+            }
+            exit_after_stdout(1);
+        }
         // A stopped macro has its own report (step, guard, observation, `next`). Printed
         // here so the handler below does not flatten it to its first sentence. A macro guard
         // is the same claim class as an assertion, so a guard that ran and did not hold exits

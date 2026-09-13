@@ -60,7 +60,7 @@ pub enum PipeCommand {
     History(HistoryArgs),
     Frame(FrameArgs),
     Emulate(EmulateArgs),
-    Assert(AssertArgs),
+    Assert(Box<AssertArgs>),
     #[serde(alias = "webmcp-list")]
     WebmcpList(NoArgs),
     #[serde(alias = "webmcp-call")]
@@ -589,6 +589,8 @@ pub struct EmulateArgs {
 #[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct AssertArgs {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub within: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub what: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -300,8 +300,13 @@ pub async fn dispatch_assert(
 ) -> Result<Value, crate::BoxError> {
     let assertion = commands::assert::from_json(&args.as_value())?;
     let uid_map = ctx.uid_map();
-    let outcome = commands::assert::run(ctx.client, &uid_map, &assertion).await?;
-    Ok(outcome.to_json())
+    match commands::assert::run(ctx.client, &uid_map, &assertion).await {
+        Ok(outcome) => Ok(outcome.to_json()),
+        Err(error) => match error.downcast_ref::<commands::assert_wait::ReadFailed>() {
+            Some(failed) => Ok(failed.to_json()),
+            None => Err(error),
+        },
+    }
 }
 
 // --- WebMCP ---

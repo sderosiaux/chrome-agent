@@ -305,6 +305,7 @@ async fn check_page_guards(
                 kind: Kind::Url(Comparator::Matches(pattern.clone())),
                 selector: None,
                 uid: None,
+                within: None,
             },
         ));
     }
@@ -315,6 +316,7 @@ async fn check_page_guards(
                 kind: Kind::Text(Comparator::Contains(text.clone())),
                 selector: Some("body".into()),
                 uid: None,
+                within: None,
             },
         ));
     }
@@ -328,6 +330,7 @@ async fn check_page_guards(
                 },
                 selector: Some(exists.selector.clone()),
                 uid: None,
+                within: None,
             },
         ));
     }

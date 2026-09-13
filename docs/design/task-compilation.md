@@ -85,6 +85,11 @@ dependencies and result assembly fit in the caller's language. The main reusable
 JSONL transport handling, including terminal failures and deadlines. Cross-site adaptation and
 discovery-cost comparisons remain unmeasured.
 
+Assertions now accept `--within N` (`"within":N` in pipe and macros) to observe a condition for
+up to N seconds. They reuse existing readers and return the first held comparison, or the last
+comparison when the window expires. Read failures retain their separate error outcome. This
+implements the bounded observation primitive in A7; it adds no task format or action retry.
+
 The action layer reports delivery, retained values, navigation, uncertainty and next actions.
 The pipe protocol has typed command objects and cross-field validation. Assertions can check
 values, text, URLs and state. These are useful building blocks for a task runner.

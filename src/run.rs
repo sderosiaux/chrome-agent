@@ -705,12 +705,12 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
             output_read(json_mode, &out, &msg);
         }
 
-        Command::Assert { ref what } => {
+        Command::Assert { ref what, within } => {
             // A read: no change report, no verdict. `run_cli` returns `assert::NotHeld` when
             // the claim did not hold, which `main` turns into exit 2.
             let uid_map = ctx.uid_map();
             Box::pin(commands::assert::run_cli(
-                &client, &uid_map, what, json_mode,
+                &client, &uid_map, what, within, json_mode,
             ))
             .await?;
         }

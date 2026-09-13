@@ -10,6 +10,9 @@ use tokio::sync::{Mutex, broadcast, oneshot};
 use super::transport::{self, CdpSender, CdpTransportError};
 use super::types::{CdpEvent, CdpMessage, CdpRequest, CdpResponse};
 
+#[path = "pending_call.rs"]
+mod pending_call;
+
 type PendingMap = Arc<Mutex<HashMap<u64, oneshot::Sender<PendingReply>>>>;
 
 /// What the dispatcher hands back to the call waiting on an `id`.
@@ -338,6 +341,7 @@ impl CdpClient {
 
         let (tx, rx) = oneshot::channel();
         self.pending.lock().await.insert(id, tx);
+        let _pending_call = pending_call::PendingCall::new(&self.pending, id);
 
         let json = serde_json::to_string(&request).map_err(CdpClientError::Serialization)?;
         if let Err(e) = self.sender.send(json).await {

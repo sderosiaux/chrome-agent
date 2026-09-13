@@ -234,7 +234,9 @@ pub fn redact_response(value: Value, macro_file: &Macro, vars: &BTreeMap<String,
                     "cmd" | "verdict" | "next" | "delivery" | "via" | "kind" | "comparator" => {
                         value
                     }
-                    "assertion" | "value" | "landed" => redact_response(value, macro_file, vars),
+                    "assertion" | "last_observation" | "wait" | "value" | "landed" => {
+                        redact_response(value, macro_file, vars)
+                    }
                     "results" => match value {
                         Value::Array(results) => Value::Array(
                             results

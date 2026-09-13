@@ -171,6 +171,7 @@ pub struct Assertion {
     pub kind: Kind,
     pub selector: Option<String>,
     pub uid: Option<String>,
+    pub within: Option<u64>,
 }
 
 impl Assertion {
@@ -207,6 +208,7 @@ pub struct Outcome {
     /// Extra fields the specific check owes the caller (truncation flag, flavour of hidden,
     /// redaction).
     pub details: Option<Value>,
+    pub wait: Option<super::assert_wait::Observation>,
 }
 
 impl Outcome {
@@ -225,6 +227,7 @@ impl Outcome {
             held,
             target: None,
             details: None,
+            wait: None,
         }
     }
 
@@ -257,6 +260,9 @@ impl Outcome {
                 }
             }
         }
+        if let Some(wait) = &self.wait {
+            obj["wait"] = json!(wait);
+        }
         obj
     }
 
@@ -285,8 +291,20 @@ impl Outcome {
                     .map(|s| format!(" on '{s}'"))
             })
             .unwrap_or_default();
+        let timing = self.wait.as_ref().map_or_else(String::new, |wait| {
+            format!(
+                " ({} ms, {} observations{})",
+                wait.elapsed_ms,
+                wait.observations,
+                if wait.timed_out {
+                    ", deadline reached"
+                } else {
+                    ""
+                }
+            )
+        });
         format!(
-            "assert {} {}{target}: {held} — expected {}, actual {}",
+            "assert {} {}{target}: {held} — expected {}, actual {}{timing}",
             self.kind,
             self.comparator,
             compact(&self.expected),
@@ -296,6 +314,9 @@ impl Outcome {
 
     /// What to do next when the claim did not hold.
     fn hint(&self) -> &'static str {
+        if self.wait.is_some() {
+            return "The condition was not observed within the requested window. Inspect the current page before deciding what to do next; this wait did not repeat the preceding action.";
+        }
         match self.kind {
             "value" => {
                 "The page holds something else. Re-read it (`eval --selector \"…\" \"el.value\"`), or `wait` and assert again — a controlled component can rewrite a value after the write returns."
@@ -454,6 +475,17 @@ async fn evaluate(client: &CdpClient, expression: &str) -> Result<Value, crate::
 
 /// Read the page, compare, report. Decides nothing about exit codes; both front ends call it.
 pub async fn run(
+    client: &CdpClient,
+    uid_map: &HashMap<String, ElementRef>,
+    assertion: &Assertion,
+) -> Result<Outcome, crate::BoxError> {
+    if let Some(seconds) = assertion.within {
+        return super::assert_wait::run(client, uid_map, assertion, seconds).await;
+    }
+    read_once(client, uid_map, assertion).await
+}
+
+pub(super) async fn read_once(
     client: &CdpClient,
     uid_map: &HashMap<String, ElementRef>,
     assertion: &Assertion,
@@ -698,9 +730,10 @@ pub async fn run_cli(
     client: &CdpClient,
     uid_map: &HashMap<String, ElementRef>,
     what: &crate::cli::AssertWhat,
+    within: Option<u64>,
     json_mode: bool,
 ) -> Result<(), crate::BoxError> {
-    let assertion = from_cli(what)?;
+    let assertion = from_cli(what, within)?;
     let outcome = run(client, uid_map, &assertion).await?;
     if !outcome.held {
         return Err(Box::new(NotHeld { outcome, json_mode }));
@@ -869,6 +902,7 @@ mod tests {
             kind: Kind::Value(Comparator::Equals("x".into())),
             selector: None,
             uid: None,
+            within: None,
         };
         let err = no_target.require_target().unwrap_err().to_string();
         assert!(
@@ -879,6 +913,7 @@ mod tests {
             kind: Kind::State(Want::Checked),
             selector: Some("#a".into()),
             uid: Some("n1".into()),
+            within: None,
         };
         assert!(both.require_target().is_err());
     }

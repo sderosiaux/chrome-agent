@@ -1,8 +1,7 @@
 ---
 paths:
-  - "src/commands/assert.rs"
-  - "src/commands/assert_args.rs"
-  - "tests/assert_tests.rs"
+  - "src/commands/assert*.rs"
+  - "tests/assert*_tests.rs"
   - "tests/text_exception_tests.rs"
 ---
 
@@ -39,6 +38,18 @@ the two are told apart. A CLI `batch --stop-on-error` that stopped on a failed a
 so a shell pipeline can use the exit code alone.
 
 ## An assertion reads through the action's own reader
+
+`--within N` (pipe/macros: `"within":N`) opts into bounded observation; the default remains one
+read. N is a positive whole number of seconds. Poll the same readers every 200 ms, stopping on
+the first held outcome. Never repeat an action, and never turn a read error into a false claim.
+The deadline also bounds an in-flight read; cancelling it removes its pending CDP request.
+
+An ordinary expiry retains the last comparison, exits 2, and adds `assertion.wait` with
+`within_ms`, `elapsed_ms`, `observations` (completed reads) and `timed_out`. A read error exits 1
+with `error`, `wait` and optional `last_observation`, never an `assertion` field: macros use that
+field to distinguish failed conditions from operational failures. Missing value/text/state
+targets remain errors; `assert exists` is the way to wait for presence. Timing measures the
+observation window after connection setup, and does not establish stability after success.
 
 Two implementations that agree today drift. An assertion that read `el.checked` on a
 `<div role=checkbox>` would report a checked box as unchecked — the exact bug `check` was fixed

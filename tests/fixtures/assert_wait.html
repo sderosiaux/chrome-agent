@@ -1,0 +1,27 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Delayed assertion results</title>
+<button id="add">Add to cart</button>
+<input id="quantity" value="0" aria-label="Quantity">
+<input id="password" type="password" value="old-secret">
+<div id="status">Pending</div>
+<button id="export" disabled>Export</button>
+<input id="checked" type="checkbox">
+<div id="rows"></div>
+<script>
+  window.writes = 0;
+  window.begin = () => {
+    window.writes++;
+    setTimeout(() => {
+      // Replace the field to exercise fresh selector resolution on each observation.
+      document.querySelector('#quantity').outerHTML = '<input id="quantity" value="1" aria-label="Quantity">';
+      document.querySelector('#password').value = 'new-secret';
+      document.querySelector('#status').innerText = 'Saved';
+      document.querySelector('#export').disabled = false;
+      document.querySelector('#checked').checked = true;
+      document.querySelector('#rows').innerHTML = '<p class="row">One</p><p class="row">Two</p>';
+      history.replaceState(null, '', '#saved');
+    }, 1200);
+  };
+  document.querySelector('#add').addEventListener('click', window.begin);
+</script>

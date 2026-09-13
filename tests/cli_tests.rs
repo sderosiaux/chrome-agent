@@ -324,6 +324,10 @@ fn an_invalid_invocation_is_refused_before_a_browser_is_resolved() {
 
     // Each pair is an invocation and a word its refusal must contain.
     for (args, names) in [
+        (
+            &["assert", "text", "--contains", "Saved", "--within", "0"][..],
+            "--within",
+        ),
         (&["download"][..], "--selector"),
         (
             &["download", "https://example.com/f.csv", "--uid", "n1"][..],

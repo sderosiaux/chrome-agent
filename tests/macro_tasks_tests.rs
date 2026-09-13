@@ -83,6 +83,7 @@ fn every_invalid_later_step_is_rejected_before_the_first_fill() {
         json!({"do":{"cmd":"fill", "selector":"#plain", "value":"{{missing}}"}}),
         json!({"do":{"cmd":"text"}, "expect":{"url_matches":"["}}),
         json!({"do":{"cmd":"assert", "what":"text", "matches":"["}}),
+        json!({"do":{"cmd":"assert", "what":"text", "contains":"Saved", "within":0}}),
         json!({"do":{"cmd":"wait", "what":"text"}}),
         json!({"do":{"cmd":"batch", "commands":[{"cmd":"typo_command"}]}}),
     ] {

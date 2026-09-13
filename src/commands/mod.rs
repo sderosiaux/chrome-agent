@@ -1,5 +1,6 @@
 pub mod assert;
 pub mod assert_args;
+pub mod assert_wait;
 pub mod batch;
 pub mod click;
 pub mod console;

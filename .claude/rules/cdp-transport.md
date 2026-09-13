@@ -123,6 +123,10 @@ pipe mode for the rest of the session, socket still open and dispatcher still ru
 The timed-out request is removed from `pending`: leaving it leaks a slot and would deliver a late
 answer to a receiver nobody awaits.
 
+`PendingCall` also removes the slot when an enclosing operation cancels a read, such as an
+assertion reaching its `--within` deadline. This cancels response tracking only; it does not
+cancel page JavaScript or undo a dispatched action.
+
 `inspect --limit` was the reachable instance twice over. Its scroll probe re-armed a 400 ms
 debounce on every mutation with no ceiling (now `snapshot::settle(400, 2000)`, whose hard timer
 nothing clears), and its `limit * 3` bound counts iterations rather than time, so `--limit 500`

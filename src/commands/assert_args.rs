@@ -9,7 +9,10 @@ use super::assert::{Assertion, Comparator, Kind, Want};
 
 /// Build the assertion from the parsed CLI subcommand. clap's arg groups already enforce
 /// "exactly one comparator" and "exactly one state"; the rest is checked here.
-pub fn from_cli(what: &crate::cli::AssertWhat) -> Result<Assertion, crate::BoxError> {
+pub fn from_cli(
+    what: &crate::cli::AssertWhat,
+    within: Option<u64>,
+) -> Result<Assertion, crate::BoxError> {
     use crate::cli::AssertWhat as W;
     let assertion = match what {
         W::Value {
@@ -27,6 +30,7 @@ pub fn from_cli(what: &crate::cli::AssertWhat) -> Result<Assertion, crate::BoxEr
             )?),
             selector: selector.clone(),
             uid: uid.clone(),
+            within,
         },
         W::Text {
             selector,
@@ -42,6 +46,7 @@ pub fn from_cli(what: &crate::cli::AssertWhat) -> Result<Assertion, crate::BoxEr
             )?),
             selector: selector.clone(),
             uid: uid.clone(),
+            within,
         },
         W::Url { equals, matches } => Assertion {
             kind: Kind::Url(comparator(
@@ -52,6 +57,7 @@ pub fn from_cli(what: &crate::cli::AssertWhat) -> Result<Assertion, crate::BoxEr
             )?),
             selector: None,
             uid: None,
+            within,
         },
         W::State {
             selector,
@@ -82,6 +88,7 @@ pub fn from_cli(what: &crate::cli::AssertWhat) -> Result<Assertion, crate::BoxEr
                 kind: Kind::State(want),
                 selector: selector.clone(),
                 uid: uid.clone(),
+                within,
             }
         }
         W::Exists {
@@ -95,6 +102,7 @@ pub fn from_cli(what: &crate::cli::AssertWhat) -> Result<Assertion, crate::BoxEr
             },
             selector: Some(selector.clone()),
             uid: None,
+            within,
         },
     };
     Ok(assertion)
@@ -188,6 +196,7 @@ pub fn from_json(cmd: &Value) -> Result<Assertion, crate::BoxError> {
         kind,
         selector: field("selector"),
         uid: field("uid"),
+        within: super::assert_wait::from_json(cmd.get("within"))?,
     };
     if assertion.selector.is_some() && assertion.uid.is_some() {
         return Err("assert: provide at most one of selector or uid".into());

@@ -111,10 +111,20 @@ chrome-agent assert state --uid n15 --selected "California"    # a dropdown's cu
 chrome-agent assert state --selector "#submit" --disabled      # :disabled OR aria-disabled
 chrome-agent assert state --selector ".modal" --visible        # rendered, opaque, not hidden
 chrome-agent assert exists --selector ".result" --count 10     # --min N, or --count 0 for absence
+chrome-agent assert value --selector "#quantity" --equals "1" --within 5
 ```
 
-- **0** it held · **2** the page is not in that state (report or repair) · **1** nothing was
-  compared: no browser, a selector matching nothing, an unparseable regex, a CDP timeout (retry).
+Use `--within N` for a delayed result (positive whole seconds); assertions otherwise check once.
+Only reads repeat, and the first matching observation succeeds. This does not prove stability.
+JSON adds `assertion.wait`: `within_ms`, `elapsed_ms`, `observations`, `timed_out`. Expiry is exit 2
+with the last comparison. Unreadable targets, blocked reads and connection loss stay exit 1,
+with `error`, `wait` and optional `last_observation`. A missing value/text/state target is still
+an error; wait for presence with `assert exists --within N` first. Pipe and macros accept
+`"within":5` on the assertion command. The window bounds the entire read; `--timeout` continues
+to cap individual CDP calls.
+
+- **0** it held · **2** the condition did not hold (report or repair) · **1** the check could not
+  finish: no browser, a selector matching nothing, an unparseable regex, a CDP timeout.
   The only other thing that exits 2 is a `macro run` guard that was checked and did not hold — the
   same kind of claim. A bad flag exits 1. Inside `pipe`/`batch` an assertion has no exit
   code of its own: it is `ok:false` with the same `assertion` object, and a `batch` that stopped

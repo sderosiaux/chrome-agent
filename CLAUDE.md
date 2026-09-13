@@ -1,7 +1,7 @@
 # chrome-agent v0.16.0
 
 Single Rust binary for browser automation via CDP, built for AI agents. 43 subcommands
-(`chrome-agent --help`), 29.7K lines of Rust in `src/` across 85 files (blank and comment-only lines excluded),
+(`chrome-agent --help`), 30.1K lines of Rust in `src/` across 87 files (blank and comment-only lines excluded),
 one regex crate (`regex-lite`, for `assert --matches`), 3 MB binary.
 
 ## Architecture
@@ -34,7 +34,7 @@ CLI (clap) → CDP Client (WebSocket) → Chrome
 | `src/emulation.rs` | page-scoped device metrics: validation, transactional CDP apply/reset, persistence, observed status |
 | `src/base64.rs`, `src/truncate.rs` | RFC 4648 decoder for screenshot/pdf/download (no `base64` crate, keeps the musl graph pure-Rust); UTF-8 safe string truncation |
 | `src/commands/` | 25 modules: goto, click, dblclick, fill, inspect, eval, text, read, extract, diff, network, console, wait, screenshot, pdf, download, download_click, tabs, frame, batch, assert, assert_args, record, history, webmcp. `select`/`check`/`upload`/`drag` had one too, each a single call into `element_controls` behind a message the dispatcher already built |
-| `src/commands/assert.rs`, `assert_args.rs` | comparators (pure), page readers, the `NotHeld` carrier for exit 2; CLI/JSON → `Assertion` and the argument combinations it refuses |
+| `src/commands/assert.rs`, `assert_args.rs`, `assert_wait.rs` | comparators, page readers, exit 2, optional bounded observation with `--within`; CLI/JSON → `Assertion` and shared argument validation |
 | `src/commands/download_fetch.rs` | the download a URL produces: the base64 fetch through `Runtime.evaluate`, `MAX_FETCH_BYTES` derived from the transport ceiling with a `const` assertion tying them, and the filename derivation both paths share. Split from download.rs for the 1000-line cap, re-exported via `pub use` |
 | `src/commands/download_click.rs` | the download a click produces: `Browser.setDownloadBehavior` arming, a subscription taken before anything can fire, bounded wait on `downloadWillBegin`/`downloadProgress`, `--max-bytes` cancel, 0600 move out of a private per-invocation directory, `collect_abandoned` deferred sweep |
 | `src/commands/webmcp.rs` | `document.modelContext.getTools()`/`.executeTool()`; owns the thrown marker strings `src/hints/` matches on |
@@ -79,7 +79,7 @@ Facts true of one subsystem live in `.claude/rules/`, loaded when you `Read` a f
 | `files-on-disk.md` | `src/commands/download*.rs`, `src/commands/screenshot.rs`, `src/commands/pdf.rs`, `src/geometry.rs`, `src/base64.rs` | the click that produces a download, the deferred sweep, `downloaded` vs `ok`, clip math, 0600 |
 | `cdp-transport.md` | `src/cdp/**`, `src/setup.rs` | every CDP call has a deadline, the input-event deadline, foreground for pointer events, `waited_ms`, dialogs, the seven stealth patches |
 | `emulation.md` | `src/emulation.rs`, `src/pipe_emulation.rs` | Chrome keeps no override, so the store is the mechanism |
-| `assert.md` | `src/commands/assert.rs`, `src/commands/assert_args.rs` | exit 0/1/2, reading through the action's own reader, `--matches` being a Rust regex |
+| `assert.md` | `src/commands/assert*.rs` | exit 0/1/2, shared readers, bounded observation, Rust regexes |
 | `content-extraction.md` | `src/commands/{read,extract,text,eval,network,console,wait}.rs`, `vendor/extract.js` | reader mode, the extraction heuristics, network and console capture, `--scroll`, `network-idle` |
 | `webmcp.md` | `src/commands/webmcp.rs` | why a tool's declared result gets no new verdict word |
 | `pipe-and-batch.md` | `src/pipe.rs`, `src/pipe_command.rs`, `src/pipe_dispatch*.rs`, `src/commands/batch.rs`, `src/commands/record.rs`, `src/macros_cmd.rs` | the typed protocol and what still takes a raw `Value`, one `history_step` behind `back`/`forward`, recordings are 0600 and refuse when unwritable, `stop_on_error`, a failed read is not a failed action |

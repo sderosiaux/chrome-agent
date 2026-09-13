@@ -182,9 +182,18 @@ LLM USAGE GUIDE:
     chrome-agent assert state --uid n15 --selected "California"
     chrome-agent assert exists --selector ".result" --count 10
     chrome-agent assert exists --selector ".error" --min 1
-    # 2 = the page is not in that state (report or repair). 1 = nothing was compared: no browser,
-    # a selector matching nothing, an unparseable regex, a CDP timeout (retry). Only assert exits
-    # 2. assert is a read: no change report, no verdict, and it never clicks. --checked reads the
+    chrome-agent assert value --selector "#quantity" --equals "1" --within 5
+    # --within N waits up to N positive whole seconds, polling reads only; no action is repeated.
+    # Default: check once. First matching observation succeeds; this does not prove stability.
+    # JSON assertion.wait: within_ms, elapsed_ms, observations, timed_out. Expiry returns exit 2
+    # with the last expected/actual comparison. Unreadable targets, lost connections and blocked
+    # reads remain exit 1: error + wait + optional last_observation, not a failed assertion.
+    # Missing value/text/state targets stay errors; use assert exists --within N for presence.
+    # Pipe/macros: {"cmd":"assert","what":"value","selector":"#quantity","equals":"1","within":5}.
+    # --within bounds the observation window, including reads; --timeout caps each CDP call.
+    # 2 = the condition did not hold (report or repair). 1 = the check could not finish: no browser,
+    # a selector matching nothing, an unparseable regex, a CDP timeout. An assert or macro guard
+    # can exit 2. assert is a read: no change report, no verdict, and it never clicks. --checked reads the
     # same classification check/uncheck apply and --selected the same reading select uses, so an
     # assertion cannot disagree with the action; --enabled/--disabled and --visible read state
     # too. Secrets are compared, never printed. --matches is
