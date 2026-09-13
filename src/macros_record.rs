@@ -1,7 +1,7 @@
 //! Turning a session that worked into a macro: what becomes a guard, and what is refused.
 //!
 //! An observation becomes an expectation only if it would still be true tomorrow, on the same
-//! task, succeeding the same way. Everything else is dropped, never kept as context.
+//! task, succeeding the same way. Reads, waits, assertions and context are part of the path.
 //!
 //! KEPT: `delivery: target_hit` and only that reading, since the others describe a step that did
 //! not do what it was asked; the verdict WORD, never the reason, which may move for the same
@@ -32,6 +32,7 @@ pub struct Observed {
     pub delivery: Option<String>,
     pub dispatched: Option<bool>,
     pub verbatim: Option<bool>,
+    pub downloaded: Option<bool>,
     pub secret_value: bool,
     pub uid: Option<String>,
     pub role: Option<String>,
@@ -53,13 +54,15 @@ impl Observed {
             verbatim: value
                 .and_then(|v| v.get("verbatim"))
                 .and_then(Value::as_bool),
+            downloaded: response.get("downloaded").and_then(Value::as_bool),
             // The fill report's own redaction flag marks the parameter, so the recorder and
             // `element::SECRET_FIELD` cannot disagree about what a secret is.
-            secret_value: value
-                .and_then(|v| v.get("redacted"))
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
-            uid: string_at(response, "uid"),
+            secret_value: cmd.get("secret").and_then(Value::as_bool) == Some(true)
+                || value
+                    .and_then(|v| v.get("redacted"))
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+            uid: string_at(response, "uid").or_else(|| string_at(cmd, "uid")),
             role: string_at(response, "role"),
             name: string_at(response, "name"),
             landed_url: response
@@ -120,21 +123,17 @@ pub struct Refusal {
 /// The result of distilling: a macro, and everything that did not make it in.
 pub struct Distilled {
     pub macro_file: Macro,
-    /// Steps dropped as exploration or as failures. Not errors: the fumbling is meant to go.
+    /// Discovery commands dropped without losing effects, conditions or outputs.
     pub dropped: Vec<Refusal>,
-    /// Steps that acted on the page and COULD NOT be recorded, so the macro is short of the task.
+    /// Required steps that cannot establish a replayable path; the whole recording is refused.
     pub refused: Vec<Refusal>,
 }
 
-/// Commands that change the page; anything else is exploration and never becomes a step. Built
-/// from `pipe_report::mutates_page` so the lists cannot drift, plus `goto`, excluded there only
-/// because it needs no change report.
-fn is_step(cmd_name: &str) -> bool {
-    cmd_name == "goto"
-        || cmd_name == "navigate"
-        || cmd_name == "open"
-        || cmd_name == "go"
-        || crate::pipe_report::mutates_page(cmd_name)
+/// Only known discovery commands are expendable. A read may be the task's actual output;
+/// an eval may act, and waits, assertions, downloads and context must survive distillation.
+fn exploration(cmd: &Value) -> bool {
+    matches!(cmd_name(cmd), "diff" | "history")
+        || (cmd_name(cmd) == "inspect" && cmd.get("scroll").and_then(Value::as_bool) != Some(true))
 }
 
 fn cmd_name(cmd: &Value) -> &str {
@@ -149,7 +148,12 @@ pub fn default_start(history: &[Observed]) -> usize {
     history
         .iter()
         .enumerate()
-        .rfind(|(_, o)| o.ok && matches!(cmd_name(&o.cmd), "goto" | "navigate" | "open" | "go"))
+        .rfind(|(_, o)| {
+            o.ok && matches!(
+                cmd_name(&o.cmd),
+                "goto" | "navigate" | "open" | "go" | "navigate_and_read" | "navigate-and-read"
+            )
+        })
         .map_or(0, |(index, _)| index)
 }
 
@@ -163,25 +167,31 @@ pub fn distil(name: &str, history: &[Observed], from: usize) -> Result<Distilled
 
     for (index, observed) in history.iter().enumerate().skip(from) {
         let verb = cmd_name(&observed.cmd);
-        if !is_step(verb) {
+        if exploration(&observed.cmd) {
             dropped.push(Refusal {
                 index,
-                reason: format!("`{verb}` reads the page; a macro keeps what changes it"),
-            });
-            continue;
-        }
-        if !observed.ok {
-            dropped.push(Refusal {
-                index,
-                reason: format!("`{verb}` failed, and a macro is the path that worked"),
+                reason: format!(
+                    "`{verb}` was discovery; replay rebuilds its own locator and verdict snapshots"
+                ),
             });
             continue;
         }
         if observed.dispatched == Some(false) {
-            dropped.push(Refusal {
+            refused.push(Refusal {
                 index,
-                reason: format!("`{verb}` dispatched nothing, so the page never saw it"),
+                reason: format!("`{verb}` dispatched nothing; the recording does not demonstrate a successful path through this step"),
             });
+            continue;
+        }
+        if !observed.ok
+            || observed.verbatim == Some(false)
+            || observed.downloaded == Some(false)
+            || matches!(
+                observed.verdict.as_deref(),
+                Some("not_kept" | "intercepted")
+            )
+        {
+            refused.push(Refusal { index, reason: format!("`{verb}` did not succeed; removing it or recording its failure as an expectation would hide an incomplete task") });
             continue;
         }
 
@@ -195,12 +205,32 @@ pub fn distil(name: &str, history: &[Observed], from: usize) -> Result<Distilled
         if site.is_none() {
             site = observed.landed_url.as_deref().and_then(host_of);
         }
-        let (action, declared) = parameterise(action, observed);
-        for (key, param) in declared {
+        let (mut action, declared) = parameterise(action, observed);
+        if let Err(error) = crate::macros_prepare::validate_action(&action) {
+            refused.push(Refusal {
+                index,
+                reason: format!("`{verb}` cannot be replayed: {error}"),
+            });
+            continue;
+        }
+        for (mut key, param) in declared {
+            if params.contains_key(&key) {
+                // Two writes to the same secret field may be different values (old/new
+                // password). Give each occurrence its own input instead of merging them.
+                let base = key.clone();
+                let mut suffix = index;
+                while params.contains_key(&key) {
+                    key = format!("{base}_{suffix}");
+                    suffix += 1;
+                }
+                let field = if verb == "type" { "text" } else { "value" };
+                action[field] = json!(format!("{{{{{key}}}}}"));
+            }
             params.insert(key, param);
         }
         let expect = guards_for(observed);
-        let unguarded = expect.is_empty().then(|| unguarded_reason(observed));
+        let unguarded = (expect.is_empty() && !matches!(verb, "assert" | "wait"))
+            .then(|| unguarded_reason(observed));
         steps.push(Step {
             action,
             expect,
@@ -208,19 +238,11 @@ pub fn distil(name: &str, history: &[Observed], from: usize) -> Result<Distilled
         });
     }
 
-    if steps.is_empty() {
+    if steps.is_empty() && refused.is_empty() {
         return Err(format!(
-            "Nothing to record from step {from} on: {} command(s) were exploration or failures{}. \
+            "Nothing to record from step {from} on: {} command(s) were discovery. \
              `macro record --from N` names the first step of the task.",
             dropped.len(),
-            if refused.is_empty() {
-                String::new()
-            } else {
-                format!(
-                    ", and {} could not be given a durable locator",
-                    refused.len()
-                )
-            }
         )
         .into());
     }
@@ -249,6 +271,30 @@ fn locate(observed: &Observed) -> Result<Value, String> {
         map.remove("inspect");
     }
     let verb = cmd_name(&action);
+    // These forms hide per-field outcomes or document-local identities. Until distillation
+    // can represent each substep faithfully, demand explicit commands instead of a partial path.
+    if matches!(
+        verb,
+        "batch"
+            | "drag"
+            | "fill_form"
+            | "fill-form"
+            | "fillform"
+            | "fill_and_submit"
+            | "fill-and-submit"
+    ) {
+        return Err(format!(
+            "`{verb}` needs explicit steps with durable locators and individual outcomes before it can be recorded"
+        ));
+    }
+    if verb == "scroll"
+        && action
+            .get("target")
+            .and_then(Value::as_str)
+            .is_some_and(|s| !matches!(s, "up" | "down"))
+    {
+        return Err("scroll by uid is document-local; record an up/down direction instead".into());
+    }
     if action.get("xy").is_some() {
         return Err(format!(
             "`{verb} --xy` names no element: a coordinate is not a locator, and the next \
@@ -284,7 +330,12 @@ fn parameterise(mut action: Value, observed: &Observed) -> (Value, Vec<(String, 
     }
     let key = secret_param_name(&action);
     if let Some(map) = action.as_object_mut() {
-        map.insert("value".into(), json!(format!("{{{{{key}}}}}")));
+        let field = if map.get("cmd").and_then(Value::as_str) == Some("type") {
+            "text"
+        } else {
+            "value"
+        };
+        map.insert(field.into(), json!(format!("{{{{{key}}}}}")));
     }
     (
         action,
@@ -332,12 +383,15 @@ fn guards_for(observed: &Observed) -> Guards {
     // `not_checked` means the caller declined to look and `unknown` that the tool could not
     // tell; promising either would demand that tomorrow's run be equally blind.
     if let Some(word) = observed.verdict.as_deref()
-        && !matches!(word, "not_checked" | "unknown")
+        && matches!(word, "changed" | "navigated")
     {
         guards.verdict = Some(word.to_string());
     }
     if observed.verbatim == Some(true) {
         guards.verbatim = Some(true);
+    }
+    if observed.downloaded == Some(true) {
+        guards.downloaded = Some(true);
     }
     if let Some(pattern) = observed.landed_url.as_deref().and_then(url_pattern) {
         guards.url_matches = Some(pattern);
@@ -608,31 +662,14 @@ mod tests {
         ];
         let distilled = distil("cancel", &history, 0).expect("a macro");
         let steps = &distilled.macro_file.steps;
-        assert_eq!(
-            steps.len(),
-            3,
-            "goto, click, fill — and nothing else: {steps:?}"
-        );
+        assert_eq!(steps.len(), 4, "reads and eval survive: {steps:?}");
         assert_eq!(steps[0].action["cmd"], "goto");
-        assert_eq!(steps[0].expect.url_matches.as_deref(), Some("/account"));
         assert_eq!(steps[1].expect.delivery.as_deref(), Some("target_hit"));
-        assert_eq!(steps[2].expect.verbatim, Some(true));
-        assert_eq!(distilled.macro_file.site.as_deref(), Some("example.com"));
-        assert_eq!(distilled.dropped.len(), 3, "{:?}", distilled.dropped);
-        assert!(distilled.refused.is_empty());
-        // Every dropped step says why: a macro shorter than the task must be visible.
-        assert!(
-            distilled
-                .dropped
-                .iter()
-                .any(|r| r.reason.contains("reads the page"))
-        );
-        assert!(
-            distilled
-                .dropped
-                .iter()
-                .any(|r| r.reason.contains("failed"))
-        );
+        assert_eq!(steps[2].action["cmd"], "eval");
+        assert_eq!(steps[3].expect.verbatim, Some(true));
+        assert_eq!(distilled.dropped.len(), 1);
+        assert_eq!(distilled.refused.len(), 1);
+        assert_eq!(distilled.refused[0].index, 2);
     }
 
     /// A step that acted and could not be written is a refusal, not a silent drop.
@@ -653,6 +690,55 @@ mod tests {
         assert_eq!(distilled.refused.len(), 1);
         assert_eq!(distilled.refused[0].index, 1);
         assert!(distilled.refused[0].reason.contains("aimed by uid"));
+    }
+
+    #[test]
+    fn secret_typing_and_repeated_secret_writes_keep_independent_inputs() {
+        let history = ["old-password", "new-password"].map(|value| {
+            observed(
+                &json!({"cmd":"type", "selector":"#password", "text":value, "secret":true}),
+                &json!({"ok":true, "value":{"verbatim":true,"redacted":true}}),
+            )
+        });
+        let distilled = distil("change-password", &history, 0).unwrap();
+        assert!(distilled.refused.is_empty());
+        assert_eq!(distilled.macro_file.params.len(), 2);
+        let actions = &distilled.macro_file.steps;
+        assert_ne!(actions[0].action["text"], actions[1].action["text"]);
+        let file = serde_json::to_string(&distilled.macro_file).unwrap();
+        assert!(!file.contains("old-password") && !file.contains("new-password"));
+        let vars = distilled
+            .macro_file
+            .params
+            .keys()
+            .map(|k| (k.clone(), "supplied".into()))
+            .collect();
+        assert!(distilled.macro_file.prepare(&vars).is_ok());
+    }
+
+    #[test]
+    fn context_and_read_commands_survive_even_without_page_mutations() {
+        let commands = [
+            json!({"cmd":"emulate", "action":"device", "width":900,"height":700}),
+            json!({"cmd":"frame", "target":"iframe.checkout"}),
+            json!({"cmd":"read"}),
+            json!({"cmd":"extract"}),
+        ];
+        let history: Vec<Observed> = commands
+            .iter()
+            .map(|cmd| observed(cmd, &json!({"ok":true})))
+            .collect();
+        let distilled = distil("read-in-context", &history, 0).unwrap();
+        assert!(distilled.refused.is_empty());
+        assert_eq!(
+            distilled
+                .macro_file
+                .steps
+                .iter()
+                .map(|s| &s.action)
+                .collect::<Vec<_>>(),
+            commands.iter().collect::<Vec<_>>()
+        );
     }
 
     /// The default start is the last navigation, announced rather than guessed in silence.

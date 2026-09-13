@@ -45,6 +45,18 @@ pub struct Step {
     pub unguarded: Option<String>,
 }
 
+impl Step {
+    /// Explicit assertions and waits already evaluate their own condition in the dispatcher.
+    #[must_use]
+    pub fn is_unguarded(&self) -> bool {
+        self.expect.is_empty()
+            && !matches!(
+                self.action.get("cmd").and_then(Value::as_str),
+                Some("assert" | "wait")
+            )
+    }
+}
+
 /// The whitelist, and only the whitelist. Every field answers one question: would this still be
 /// true tomorrow, on the same task, if it succeeded again? What is absent is argued in
 /// `macros_record`.
@@ -54,13 +66,16 @@ pub struct Guards {
     /// `target_hit`, and nothing else — the strongest guard available, and binary.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivery: Option<String>,
-    /// The verdict WORD (`changed`, `navigated`, `not_kept`…), never the reason.
+    /// The verdict word, never the reason.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verdict: Option<String>,
     /// The page kept what was written. For a secret field the guard stays `verbatim`; the
     /// value never appears.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verbatim: Option<bool>,
+    /// The download actually produced a file; `ok` alone only means the command ran.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub downloaded: Option<bool>,
     /// A pattern (`regex-lite`, like `assert --matches`), never a whole URL.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url_matches: Option<String>,
@@ -90,6 +105,7 @@ impl Guards {
         self.delivery.is_none()
             && self.verdict.is_none()
             && self.verbatim.is_none()
+            && self.downloaded.is_none()
             && self.url_matches.is_none()
             && self.text_contains.is_none()
             && self.exists.is_none()
@@ -108,6 +124,9 @@ impl Guards {
         }
         if let Some(verbatim) = self.verbatim {
             out.push(("verbatim", verbatim.to_string()));
+        }
+        if let Some(downloaded) = self.downloaded {
+            out.push(("downloaded", downloaded.to_string()));
         }
         out
     }
@@ -252,39 +271,14 @@ impl Macro {
         Err(message.into())
     }
 
-    /// One step's command with `{{param}}` replaced. Textual, on the serialised command, the
-    /// same spelling `replay` uses.
+    /// Substitute string values once, preserving JSON structure and literal parameter data.
     pub fn resolve(
         &self,
         step: &Step,
         vars: &BTreeMap<String, String>,
     ) -> Result<Value, crate::BoxError> {
-        let mut text = serde_json::to_string(&step.action)?;
-        for (key, value) in vars {
-            let escaped = serde_json::to_string(value)?;
-            // Splice the JSON string's INSIDE, so a quote or backslash in a password cannot
-            // end the string it is written into.
-            let inner = escaped.trim_matches('"');
-            text = text.replace(&format!("{{{{{key}}}}}"), inner);
-        }
-        let resolved: Value = serde_json::from_str(&text)?;
-        if let Some(left) = unresolved_placeholder(&text) {
-            return Err(format!(
-                "Step still carries {{{{{left}}}}} after substitution: pass --var {left}=… . A \
-                 macro never runs with a placeholder in it — the page would receive the braces."
-            )
-            .into());
-        }
-        Ok(resolved)
+        crate::macros_prepare::substitute(&step.action, &self.params, vars)
     }
-}
-
-/// The first `{{name}}` left in a serialised step, if any.
-fn unresolved_placeholder(text: &str) -> Option<String> {
-    let start = text.find("{{")?;
-    let rest = &text[start + 2..];
-    let end = rest.find("}}")?;
-    Some(rest[..end].to_string())
 }
 
 /// Every macro in the store, by name.
@@ -313,11 +307,7 @@ pub fn list() -> Vec<String> {
 pub fn summary(name: &str) -> Value {
     match Macro::load(name) {
         Ok(macro_file) => {
-            let unguarded = macro_file
-                .steps
-                .iter()
-                .filter(|s| s.expect.is_empty())
-                .count();
+            let unguarded = macro_file.steps.iter().filter(|s| s.is_unguarded()).count();
             json!({
                 "name": macro_file.name,
                 "site": macro_file.site,

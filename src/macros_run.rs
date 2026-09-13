@@ -116,7 +116,7 @@ pub async fn run(
     let macro_file = Macro::load(name)?;
     // Before the browser: a run that cannot finish for want of a password must not first open
     // a page and act on it.
-    macro_file.bind(vars)?;
+    let prepared = macro_file.prepare(vars)?;
 
     let mut session = crate::pipe::open_session(cli).await?;
     let mut recovery =
@@ -127,9 +127,8 @@ pub async fn run(
     // `unknown / no_baseline`. One snapshot at the start and one after each navigation.
     let mut needs_baseline = true;
     let mut steps_done = Vec::new();
-    for (index, step) in macro_file.steps.iter().enumerate() {
-        let action = macro_file.resolve(step, vars)?;
-        let action = match resolve_locator(&mut session, cli, &action, &mut recovery).await {
+    for (index, step) in prepared.iter().enumerate() {
+        let action = match resolve_locator(&mut session, cli, &step.action, &mut recovery).await {
             Ok(action) => action,
             Err(e) => {
                 let report = stopped(
@@ -141,7 +140,11 @@ pub async fn run(
                     &steps_done,
                 );
                 crate::session::save_session(&mut session.store)?;
-                return Ok(report);
+                return Ok(crate::macros_prepare::redact_stop(
+                    report,
+                    &macro_file,
+                    vars,
+                ));
             }
         };
 
@@ -177,22 +180,23 @@ pub async fn run(
                 &steps_done,
             );
             crate::session::save_session(&mut session.store)?;
-            return Ok(report);
+            return Ok(crate::macros_prepare::redact_stop(
+                report,
+                &macro_file,
+                vars,
+            ));
         }
         steps_done.push(json!({
             "step": index,
             "cmd": action.get("cmd").cloned().unwrap_or_default(),
-            "guards": guard_names(&step.expect),
+            "guards": step_guard_names(step),
             "unguarded": step.unguarded,
+            "result": crate::macros_prepare::redact_response(outcome.response, &macro_file, vars),
         }));
     }
 
     crate::session::save_session(&mut session.store)?;
-    let unguarded = macro_file
-        .steps
-        .iter()
-        .filter(|s| s.expect.is_empty())
-        .count();
+    let unguarded = macro_file.steps.iter().filter(|s| s.is_unguarded()).count();
     Ok(json!({
         "ok": true,
         "macro": macro_file.name,
@@ -214,10 +218,16 @@ async fn execute(
 ) -> StepOutcome {
     let response = crate::pipe::dispatch_on(session, cli, action, recovery).await;
     if response.get("ok").and_then(Value::as_bool) != Some(true) {
-        return StepOutcome {
-            response,
-            failure: None,
-        };
+        let failure = response
+            .get("assertion")
+            .filter(|a| a["held"] == false)
+            .map(|a| GuardFailure {
+                guard: "assertion",
+                expected: compact(a.get("expected")),
+                observed: compact(a.get("actual")),
+                kind: StopKind::GuardNotHeld,
+            });
+        return StepOutcome { response, failure };
     }
     // Response-first: these cost nothing, and a step that already failed one does not pay for
     // a page read to fail a second.
@@ -268,6 +278,10 @@ fn observed_for(guard: &str, response: &Value) -> Option<String> {
         "verbatim" => response
             .get("value")
             .and_then(|v| v.get("verbatim"))
+            .and_then(Value::as_bool)
+            .map(|b| b.to_string()),
+        "downloaded" => response
+            .get("downloaded")
             .and_then(Value::as_bool)
             .map(|b| b.to_string()),
         _ => None,
@@ -429,6 +443,7 @@ fn stopped(
         "steps_run": done.len(),
         "steps": done.to_vec(),
         "cmd": step.action.get("cmd").cloned().unwrap_or_default(),
+        "result": response,
     });
     // Written before anything else reads it: `exit_code` branches on this one token, so a
     // caller never has to infer the claim class from which keys happen to be present.
@@ -450,7 +465,7 @@ fn stopped(
         });
     } else {
         report["error"] = json!(format!(
-            "Step {index} of macro '{}' did not run: {}",
+            "Step {index} of macro '{}' failed: {}",
             macro_file.name,
             response
                 .get("error")
@@ -468,6 +483,8 @@ fn stopped(
         "hint",
         "delivery",
         "intercepted_by",
+        "dispatched",
+        "downloaded",
     ] {
         if let Some(value) = response.get(key) {
             report[key] = value.clone();
@@ -498,10 +515,34 @@ fn guard_names(guards: &Guards) -> Vec<&'static str> {
     names
 }
 
+fn step_guard_names(step: &Step) -> Vec<&'static str> {
+    let mut guards = guard_names(&step.expect);
+    match step.action.get("cmd").and_then(Value::as_str) {
+        Some("assert") => guards.push("assertion"),
+        Some("wait") => guards.push("wait"),
+        _ => {}
+    }
+    guards
+}
+
 /// One run, for a person: what ran, and where it stopped. The failing step first, then the
 /// action's own `next`, then the sentence saying the rest did not happen.
 #[must_use]
 pub fn render_run(report: &Value) -> String {
+    if report.get("refused").is_some() && report["ok"] == false {
+        let mut out = format!(
+            "{}\n",
+            report["error"].as_str().unwrap_or("Recording incomplete")
+        );
+        for entry in report["refused"].as_array().into_iter().flatten() {
+            out.push_str(&format!(
+                "entry {}: {}\n",
+                entry["index"],
+                entry["reason"].as_str().unwrap_or_default()
+            ));
+        }
+        return out;
+    }
     if report["ok"].as_bool().unwrap_or(false) {
         let mut out = format!("{} step(s) ran, every guard held\n", report["steps_run"]);
         if report["unguarded_steps"].as_u64().unwrap_or(0) > 0 {

@@ -29,8 +29,16 @@ pub enum MacroAction {
     Run {
         /// Macro name
         name: String,
-        /// Parameter values (repeatable, or comma-separated): --var email=a@b.c
-        #[arg(long, value_delimiter = ',')]
+        /// Parameter value (repeat for multiple values): --var email=a@b.c
+        #[arg(long)]
+        var: Vec<String>,
+    },
+    /// Validate all commands, parameters and guards without opening Chrome
+    Check {
+        /// Macro name
+        name: String,
+        /// Parameter value (repeat for multiple values): --var email=a@b.c
+        #[arg(long)]
         var: Vec<String>,
     },
 }

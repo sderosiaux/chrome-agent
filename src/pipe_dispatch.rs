@@ -324,7 +324,7 @@ pub async fn dispatch_download(
     Ok(outcome.to_json())
 }
 
-fn download_max_bytes(requested: Option<u64>) -> Result<usize, crate::BoxError> {
+pub fn download_max_bytes(requested: Option<u64>) -> Result<usize, crate::BoxError> {
     let value = requested.unwrap_or(commands::download::DEFAULT_MAX_BYTES as u64);
     let value =
         usize::try_from(value).map_err(|_| "download: max_bytes exceeds platform limits")?;
@@ -583,8 +583,14 @@ const WAIT_DEFAULT_TIMEOUT: u64 = 10;
 
 /// Resolve `wait`'s (what, pattern) from the several accepted shapes.
 /// `network-idle` needs no pattern; every other condition requires one.
-fn wait_condition(args: &WaitArgs) -> Result<(String, String), crate::BoxError> {
+pub fn wait_condition(args: &WaitArgs) -> Result<(String, String), crate::BoxError> {
     if let Some(what) = &args.what {
+        if !matches!(what.as_str(), "text" | "url" | "selector" | "network-idle") {
+            return Err(format!(
+                "Unknown wait type: {what}. Use text, url, selector, or network-idle."
+            )
+            .into());
+        }
         if what == "network-idle" {
             return Ok((what.clone(), String::new()));
         }
@@ -878,11 +884,11 @@ mod tests {
 
     #[test]
     fn wait_missing_pattern_and_empty_are_refused() {
-        let err = wait_condition(&wait_args(&json!({"cmd": "wait", "what": "text"})))
+        let err = parse(&json!({"cmd": "wait", "what": "text"}))
             .unwrap_err()
             .to_string();
         assert!(err.contains("missing \"pattern\""), "{err}");
-        assert!(wait_condition(&wait_args(&json!({"cmd": "wait"}))).is_err());
+        assert!(parse(&json!({"cmd": "wait"})).is_err());
     }
 
     #[test]

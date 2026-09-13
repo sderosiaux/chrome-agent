@@ -1,4 +1,4 @@
-//! The `macro` surface: what an agent types, and what it reads back. `list`, `show` and `record`
+//! The `macro` surface: what an agent types, and what it reads back. `list`, `show`, `check` and `record`
 //! touch files only and never open a page; only `run` needs a browser.
 
 use std::collections::BTreeMap;
@@ -52,10 +52,31 @@ pub async fn run_cli(cli: &Cli, action: &MacroAction) -> Result<(), crate::BoxEr
             from,
         } => {
             let report = record_from_recording(name, from_recording, *from)?;
+            if report["ok"] != true {
+                return Err(Box::new(crate::macros_run::Stopped::new(report, json_mode)));
+            }
             if json_mode {
                 out_line!("{report}");
             } else {
                 out!("{}", render_record(&report));
+            }
+        }
+        MacroAction::Check { name, var } => {
+            let macro_file = Macro::load(name)?;
+            let steps = macro_file.prepare(&parse_vars(var)?)?;
+            let unguarded = steps.iter().filter(|s| s.is_unguarded()).count();
+            if json_mode {
+                out_line!(
+                    "{}",
+                    json!({"ok":true, "macro":name, "steps":steps.len(),
+                    "unguarded_steps":unguarded, "browser_opened":false,
+                    "scope":"Commands, inputs and guards validated. Page-dependent checks run during replay."})
+                );
+            } else {
+                out_line!(
+                    "Checked '{name}': {} step(s), {unguarded} unguarded. No browser opened; page-dependent checks run during replay.",
+                    steps.len()
+                );
             }
         }
         MacroAction::Run { name, var } => {
@@ -85,11 +106,13 @@ pub fn parse_vars(pairs: &[String]) -> Result<BTreeMap<String, String>, crate::B
     for pair in pairs {
         let (key, value) = pair
             .split_once('=')
-            .ok_or_else(|| format!("--var expects name=value, got '{pair}'. Nothing was run."))?;
+            .ok_or("--var expects name=value. Nothing was run.")?;
         if key.is_empty() {
-            return Err(format!("--var '{pair}' has no name. Nothing was run.").into());
+            return Err("--var has no name. Nothing was run.".into());
         }
-        vars.insert(key.to_string(), value.to_string());
+        if vars.insert(key.to_string(), value.to_string()).is_some() {
+            return Err(format!("Duplicate --var '{key}'. Nothing was run.").into());
+        }
     }
     Ok(vars)
 }
@@ -106,12 +129,25 @@ pub fn record_from_recording(
     // kept with its `inspect` responses.
     let mut snapshot: Option<String> = None;
     let mut history: Vec<Observed> = Vec::new();
-    for line in text.lines().filter(|line| !line.trim().is_empty()) {
-        let Ok(entry) = serde_json::from_str::<Value>(line) else {
-            continue;
-        };
-        let cmd = entry.get("cmd").unwrap_or(&Value::Null);
-        let response = entry.get("response").unwrap_or(&Value::Null);
+    for (index, line) in text
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| !line.trim().is_empty())
+    {
+        let entry = serde_json::from_str::<Value>(line).map_err(|_| {
+            format!(
+                "Recording line {} is invalid JSON; no macro was saved.",
+                index + 1
+            )
+        })?;
+        let cmd = entry
+            .get("cmd")
+            .filter(|v| v.is_object())
+            .ok_or_else(|| format!("Recording line {} has no command object", index + 1))?;
+        let response = entry
+            .get("response")
+            .filter(|v| v.get("ok").is_some_and(Value::is_boolean))
+            .ok_or_else(|| format!("Recording line {} has no command outcome", index + 1))?;
         history.push(Observed::read_with_snapshot(
             cmd,
             response,
@@ -140,17 +176,31 @@ pub fn save_distilled(
     crate::macros::check_name(name)?;
     let start = from.unwrap_or_else(|| macros_record::default_start(history));
     let distilled = macros_record::distil(name, history, start)?;
-    let path = distilled.macro_file.save()?;
+    let complete = distilled.refused.is_empty();
+    let path = if complete {
+        // Recorded parameters are secret string inputs. Check the file's remaining structure
+        // with stand-ins so literal, undeclared placeholders cannot create an unusable macro.
+        let inputs = distilled
+            .macro_file
+            .params
+            .keys()
+            .map(|key| (key.clone(), "macro-record-check".into()))
+            .collect();
+        distilled.macro_file.prepare(&inputs)?;
+        Some(distilled.macro_file.save()?.display().to_string())
+    } else {
+        None
+    };
     let unguarded = distilled
         .macro_file
         .steps
         .iter()
-        .filter(|s| s.expect.is_empty())
+        .filter(|s| s.is_unguarded())
         .count();
-    Ok(json!({
-        "ok": true,
+    let mut report = json!({
+        "ok": complete,
         "macro": distilled.macro_file.name,
-        "path": path.display().to_string(),
+        "path": path,
         // Which entry the task was taken to start at, and whether the caller chose it.
         "started_at": start,
         "started_by": if from.is_some() { "you" } else { "the last navigation" },
@@ -158,10 +208,16 @@ pub fn save_distilled(
         "unguarded_steps": unguarded,
         "params": distilled.macro_file.params.keys().collect::<Vec<_>>(),
         "dropped": distilled.dropped.iter().map(|r| json!({"index": r.index, "reason": r.reason})).collect::<Vec<_>>(),
-        // Not dropped: these acted on the page and could not be written down, so the macro is
-        // SHORTER than the task.
+        // Refused entries make the whole recording incomplete; no shorter macro is saved.
         "refused": distilled.refused.iter().map(|r| json!({"index": r.index, "reason": r.reason})).collect::<Vec<_>>(),
-    }))
+    });
+    if !complete {
+        report["error"] = json!(
+            "Recording is incomplete: required steps were refused. No macro was saved; inspect refused entries and record the task again."
+        );
+        report["stopped_by"] = json!("error");
+    }
+    Ok(report)
 }
 
 /// `{"cmd":"macro", …}` inside a pipe session, distilling the session's own history — which is

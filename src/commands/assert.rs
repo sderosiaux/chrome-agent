@@ -62,13 +62,18 @@ impl Comparator {
             Self::Equals(expected) => Ok(actual == expected),
             Self::Contains(expected) => Ok(actual.contains(expected.as_str())),
             Self::Matches(pattern) => {
-                let re = regex_lite::Regex::new(pattern).map_err(|e| {
-                    format!("assert --matches: invalid regular expression /{pattern}/: {e}")
-                })?;
+                let re = compile_pattern(pattern)?;
                 Ok(re.is_match(actual))
             }
         }
     }
+}
+
+/// The same pattern validation and error wording at preparation and comparison time.
+pub fn compile_pattern(pattern: &str) -> Result<regex_lite::Regex, crate::BoxError> {
+    regex_lite::Regex::new(pattern).map_err(|e| {
+        format!("assert --matches: invalid regular expression /{pattern}/: {e}").into()
+    })
 }
 
 /// Whether a found count satisfies the requested cardinality. Neither `--count` nor `--min`

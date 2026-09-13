@@ -1,84 +1,15 @@
 //! Recording a macro from a real session, replaying it, and stopping on a guard that fails.
 //! Distillation itself is pure and unit-tested in `src/macros_record.rs`.
 
-use std::process::{Command, Stdio};
-
 use serde_json::{Value, json};
 
 mod common;
+#[path = "common/macros.rs"]
+mod macros;
 use common::TestBrowser;
+use macros::{TestMacro, run_cli, run_pipe};
 
-fn run_cli(args: &[&str]) -> (String, String, i32) {
-    let output = Command::new(common::binary())
-        .args(args)
-        .output()
-        .expect("run chrome-agent");
-    (
-        String::from_utf8_lossy(&output.stdout).to_string(),
-        String::from_utf8_lossy(&output.stderr).to_string(),
-        output.status.code().unwrap_or(-1),
-    )
-}
-
-/// Feed a pipe session and hand back one parsed response per line.
-fn run_pipe(browser: &str, commands: &[Value]) -> Vec<Value> {
-    use std::io::Write as _;
-    let mut child = Command::new(common::binary())
-        .args(["--browser", browser, "pipe"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn pipe");
-    {
-        let stdin = child.stdin.as_mut().expect("stdin");
-        for cmd in commands {
-            writeln!(stdin, "{cmd}").expect("write");
-        }
-    }
-    let output = child.wait_with_output().expect("pipe output");
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .map(|line| serde_json::from_str(line).unwrap_or_else(|e| panic!("not JSON ({e}): {line}")))
-        .collect()
-}
-
-/// A macro file this test owns, removed when it ends.
-struct TestMacro(String);
-
-impl TestMacro {
-    fn new(label: &str) -> Self {
-        Self(common::unique_name(label))
-    }
-    fn name(&self) -> &str {
-        &self.0
-    }
-    fn path(&self) -> std::path::PathBuf {
-        let home = std::env::var_os("HOME")
-            .map(std::path::PathBuf::from)
-            .expect("HOME");
-        home.join(".chrome-agent")
-            .join("macros")
-            .join(format!("{}.json", self.0))
-    }
-    /// Write one by hand, so a test can exercise `macro run` without the recorder.
-    fn write(&self, body: Value) {
-        let path = self.path();
-        std::fs::create_dir_all(path.parent().expect("parent")).expect("macro dir");
-        let mut file = body;
-        file["name"] = json!(self.0);
-        std::fs::write(&path, serde_json::to_string_pretty(&file).unwrap()).expect("write macro");
-    }
-}
-
-impl Drop for TestMacro {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(self.path());
-    }
-}
-
-/// Navigate, inspect, one failing click, then three that work. Returns the recording path.
+/// Navigate, inspect, a second discovery read, then three that work. Returns the recording path.
 fn record_a_session(browser: &str, fixture: &str) -> std::path::PathBuf {
     let record = common::temp_path("macro-session", "jsonl");
     let url = common::fixture_url(fixture);
@@ -91,7 +22,7 @@ fn record_a_session(browser: &str, fixture: &str) -> std::path::PathBuf {
         &[
             with_record(json!({"cmd": "goto", "url": url})),
             with_record(json!({"cmd": "inspect"})),
-            with_record(json!({"cmd": "click", "selector": "#not-a-thing"})),
+            with_record(json!({"cmd": "diff"})),
             with_record(json!({"cmd": "click", "selector": "[data-test=billing]"})),
             with_record(json!({"cmd": "fill", "selector": "#email", "value": "ada@example.com"})),
             with_record(json!({"cmd": "click", "selector": "#confirm"})),
@@ -103,8 +34,8 @@ fn record_a_session(browser: &str, fixture: &str) -> std::path::PathBuf {
         "one response per command: {responses:?}"
     );
     assert_eq!(
-        responses[2]["ok"], false,
-        "the dead end really failed: {}",
+        responses[2]["ok"], true,
+        "discovery succeeded: {}",
         responses[2]
     );
     assert_eq!(
@@ -137,18 +68,13 @@ fn a_recorded_macro_keeps_the_path_and_none_of_the_numbers() {
     let report: Value = serde_json::from_str(&stdout).expect("JSON report");
     assert_eq!(report["steps"], 4, "goto, click, fill, click: {report}");
     assert!(report["refused"].as_array().unwrap().is_empty(), "{report}");
-    // The exploration and the dead end are dropped, each with a reason.
+    // The two discovery commands are dropped, each with a reason.
     let dropped = report["dropped"].as_array().expect("dropped");
     assert_eq!(dropped.len(), 2, "{report}");
     assert!(
         dropped
             .iter()
-            .any(|d| d["reason"].as_str().unwrap().contains("reads the page"))
-    );
-    assert!(
-        dropped
-            .iter()
-            .any(|d| d["reason"].as_str().unwrap().contains("failed"))
+            .all(|d| d["reason"].as_str().unwrap().contains("discovery"))
     );
 
     let text = std::fs::read_to_string(macro_file.path()).expect("the macro file");
@@ -401,8 +327,8 @@ fn a_step_that_could_not_run_is_an_error_and_still_exits_one() {
         report["error"]
             .as_str()
             .unwrap_or_default()
-            .contains("did not run"),
-        "the sentence says the step never ran: {report}"
+            .contains("failed:"),
+        "the sentence reports failure without assuming that nothing was dispatched: {report}"
     );
 
     let (state, _, _) = run_cli(&[

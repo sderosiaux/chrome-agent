@@ -1,7 +1,7 @@
 ---
 paths:
   - "src/macros*.rs"
-  - "tests/macro_tests.rs"
+  - "tests/macro*_tests.rs"
 ---
 
 # Distilling a session that worked into a macro, and replaying it
@@ -28,7 +28,7 @@ browser never started": the exact conflation `EXIT_NOT_HELD` exists to remove.
 The distinction is in the data, written by `stopped()` from a `StopKind`, never inferred at the
 call site from which keys happen to be present:
 
-- `stopped_by: "guard"` → **2**. A response guard (`delivery`, `verdict`, `verbatim`) or a page guard (`url_matches`, `text_contains`, `exists`) was evaluated and did not hold. The report also carries `guard`, `expected` and `observed`.
+- `stopped_by: "guard"` → **2**. A response guard (`delivery`, `verdict`, `verbatim`, `downloaded`) or a page guard (`url_matches`, `text_contains`, `exists`) was evaluated and did not hold. The report also carries `guard`, `expected` and `observed`.
 - `stopped_by: "error"` → **1**. The step itself failed or its locator did not resolve (no `guard` key at all), or a guard could not be EVALUATED — `guard: "page"`, when the read through `assert`'s own readers threw. Nothing was compared, so it says nothing about the page; the same rule as `assert`'s selector-matches-nothing being a `1`.
 
 Operational failures before any step — an unreadable or malformed macro file, a missing required
@@ -43,7 +43,8 @@ on the same task.
 **Kept:**
 
 - `delivery: target_hit` — binary, measured before the dispatch, the strongest thing this tool knows. Only `target_hit`; the other readings describe a step that did not do what it was asked.
-- The verdict WORD, never the reason. `tree_delta` today and `value_kept` tomorrow for the same successful fill is in this repo's own history.
+- Only confirming verdict words (`changed`, `navigated`), never the reason. `tree_delta` today and `value_kept` tomorrow for the same successful fill is in this repo's own history.
+- `downloaded: true` — a delivered click alone does not establish that a file arrived.
 - `value.verbatim: true` — for a secret field this is the guard, while the value stays out of the file.
 - `url_matches`, derived from the PATH only, escaped for `regex-lite`.
 
@@ -69,8 +70,13 @@ refused. Order of preference:
 
 `--xy` is never recordable: a coordinate names no element.
 
-A refused step is reported apart from a dropped one. A dropped step was exploration; a refused
-step ACTED and could not be written down, so the macro is shorter than the task.
+A refused step is reported apart from a dropped one. Discovery-only `inspect`, `diff` and
+`history` may be dropped. Reads, waits, assertions, downloads, scrolling inspection and supported
+context commands remain. Failure, `not_kept`, failed read-back, missing downloads, undelivered
+actions or unsupported locators refuse the whole recording. Nothing is saved or overwritten.
+Composite forms, batch and drag require explicit steps before recording; scroll accepts only
+up/down. Repeated secret writes receive independent parameters. A malformed JSONL entry is an
+error, never an omitted step.
 
 At run time a role+name step resolves against a fresh snapshot: one match is the target, none is a
 page that no longer has the control, and several are an ambiguity a macro may not settle by
@@ -109,3 +115,18 @@ CI-guarded), while every other artefact this tool reads or writes is JSON.
 
 A step's `do` is EXACTLY the command object `pipe`/`batch` take, so `macro run` reuses the
 execution semantics instead of inventing a second set.
+
+## Preparation and outputs
+
+`macros_prepare.rs` prepares every step before `open_session`. `macro check` runs this same path
+without Chrome. Both use the pipe command parser and shared semantic validators; nested batches
+are checked recursively, while their execution keeps existing batch semantics. Parameters apply
+once to JSON string values in actions and guards. Unknown inputs, undeclared placeholders,
+missing used values, dynamic object keys and malformed Rust regexes are errors. Commas in `--var`
+are literal; repeat the flag for multiple values. CSS, JavaScript and live state remain runtime
+checks. Preparation is not a proof of task completion.
+
+`steps[].result` retains completed dispatcher responses; a stopped step is in `result`. The
+runner redacts declared secret inputs in both. Explicit assertion failure is exit 2, with its
+original evidence preserved. Operational failure is exit 1 and must not claim that no action was
+dispatched. Assertions and waits count as checks, even without a separate `expect` object.

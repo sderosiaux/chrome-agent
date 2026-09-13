@@ -40,6 +40,7 @@ mod kill;
 mod landing;
 mod macros;
 mod macros_cmd;
+mod macros_prepare;
 mod macros_record;
 mod macros_run;
 mod orphans;

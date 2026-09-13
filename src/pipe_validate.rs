@@ -42,21 +42,29 @@ pub fn validate(command: &PipeCommand) -> Result<(), crate::BoxError> {
             )?;
             on_intercept(args.on_intercept.as_deref())?;
         }
-        PipeCommand::Upload(args) => exactly_one(
-            command.name(),
-            &[args.uid.is_some(), args.selector.is_some()],
-            "\"uid\" or \"selector\"",
-        )?,
+        PipeCommand::Upload(args) => {
+            args.files
+                .as_ref()
+                .ok_or("upload: missing \"files\" array")?;
+            exactly_one(
+                command.name(),
+                &[args.uid.is_some(), args.selector.is_some()],
+                "\"uid\" or \"selector\"",
+            )?;
+        }
         PipeCommand::Text(args) => at_most_one(
             command.name(),
             &[args.uid.is_some(), args.selector.is_some()],
             "\"uid\" or \"selector\"",
         )?,
-        PipeCommand::Screenshot(args) => at_most_one(
-            command.name(),
-            &[args.uid.is_some(), args.selector.is_some()],
-            "\"uid\" or \"selector\"",
-        )?,
+        PipeCommand::Screenshot(args) => {
+            at_most_one(
+                command.name(),
+                &[args.uid.is_some(), args.selector.is_some()],
+                "\"uid\" or \"selector\"",
+            )?;
+            crate::commands::screenshot::ImgFormat::parse(args.format.as_deref().unwrap_or("png"))?;
+        }
         PipeCommand::Download(args) => {
             exactly_one(
                 command.name(),
@@ -68,10 +76,72 @@ pub fn validate(command: &PipeCommand) -> Result<(), crate::BoxError> {
                 "\"url\", \"uid\", or \"selector\"",
             )?;
             on_intercept(args.on_intercept.as_deref())?;
+            crate::commands::download::Target::parse(
+                args.url.as_deref(),
+                args.uid.as_deref(),
+                args.selector.as_deref(),
+            )?;
+            crate::pipe_dispatch::download_max_bytes(args.max_bytes)?;
         }
-        PipeCommand::FillAndSubmit(args) => on_intercept(args.on_intercept.as_deref())?,
-        PipeCommand::Wait(args) => wait_shape(args)?,
-        PipeCommand::Emulate(args) => emulate_shape(args)?,
+        PipeCommand::FillAndSubmit(args) => {
+            on_intercept(args.on_intercept.as_deref())?;
+            args.submit
+                .as_ref()
+                .ok_or("fill_and_submit: missing \"submit\" selector")?;
+            for field in args
+                .fields
+                .as_ref()
+                .ok_or("fill_and_submit: missing \"fields\" array")?
+            {
+                field
+                    .selector
+                    .as_ref()
+                    .ok_or("fill_and_submit: each field needs \"selector\"")?;
+                field
+                    .value
+                    .as_ref()
+                    .ok_or("fill_and_submit: each field needs \"value\"")?;
+            }
+        }
+        PipeCommand::FillForm(args) => {
+            for pair in args
+                .pairs
+                .as_ref()
+                .ok_or("fill-form requires \"pairs\" array")?
+            {
+                pair.uid.as_ref().ok_or("Each pair needs \"uid\"")?;
+                pair.value.as_ref().ok_or("Each pair needs \"value\"")?;
+            }
+        }
+        PipeCommand::Drag(args) => {
+            args.from.as_ref().ok_or("drag: missing \"from\" uid")?;
+            args.to.as_ref().ok_or("drag: missing \"to\" uid")?;
+        }
+        PipeCommand::Hover(args) => {
+            args.uid.as_ref().ok_or("hover requires \"uid\"")?;
+        }
+        PipeCommand::Goto(args) => {
+            for header in args.headers.iter().flatten() {
+                crate::commands::goto::parse_header(header)?;
+            }
+        }
+        PipeCommand::Assert(args) => {
+            crate::commands::assert::from_json(&args.as_value())?;
+        }
+        PipeCommand::Wait(args) => {
+            wait_shape(args)?;
+            crate::pipe_dispatch::wait_condition(args)?;
+        }
+        PipeCommand::Emulate(args) => {
+            emulate_shape(args)?;
+            match args.action.as_deref() {
+                Some("device") => {
+                    crate::pipe_emulation::parse_device_config(args)?;
+                }
+                Some("status" | "reset") => {}
+                _ => return Err("emulate: action must be device, status, or reset".into()),
+            }
+        }
         _ => {}
     }
     Ok(())

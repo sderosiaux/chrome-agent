@@ -133,7 +133,7 @@ Use `--browser <name>` to give each parallel agent its own Chrome and its own se
 | `frame <selector\|main>` | Bind `eval`/`inspect` to an iframe. Only within one `pipe`/`batch` process. |
 | `emulate device --width W --height H [--dpr N] [--mobile] [--touch] [--orientation portrait\|landscape] [--label name]` | Device metrics for one named page. Also `emulate status` and `emulate reset`. |
 | `webmcp list` | Tools the page registered on `document.modelContext`. Also `webmcp call <name> --args '{"k":"v"}'`. |
-| `macro record <name> --from-recording <file>` | Distil a recorded session into a guarded, parameterised path. Also `macro list`, `macro show`, `macro run`. |
+| `macro record <name> --from-recording <file>` | Distil a recorded session into a guarded, parameterised path. Also `macro list`, `macro show`, `macro check`, `macro run`. |
 | `replay <file>` | Re-run a `pipe --record` file command by command. |
 | `batch` | Run a JSON array of commands from stdin. |
 | `pipe` | Persistent JSON stdin/stdout connection. |
@@ -324,12 +324,34 @@ There is no repair and no retry.
 
 ```bash
 chrome-agent macro record cancel --from-recording session.jsonl
+chrome-agent macro check cancel --var email=ada@example.com
 chrome-agent macro run cancel --var email=ada@example.com
 ```
 
-Guards are `delivery: target_hit`, the verdict word, `value.verbatim`, and a `url_matches` built
-from the path — never the change counters, a uid, or a duration. A step aimed by uid is recorded by
-role and accessible name, or refused. Secret fields become declared parameters, never file content.
+`macro check` validates the whole path without opening Chrome. `macro run` performs the same
+preparation before any action: command shapes, parameter references, durable locator shapes and
+Rust regular expressions. CSS selectors, JavaScript and conditions on the live page are checked
+during replay. Repeat `--var` for multiple inputs; commas belong to the value. Substitution applies
+to string values in commands and guards, once, so quotes, newlines and literal braces in an input
+remain data. Object keys cannot be parameterized.
+
+Recording keeps waits, assertions, reads, downloads and supported context commands. It drops
+`inspect` discovery (except `inspect --scroll`), `diff` and `history`. A failed step, an undelivered
+action or an unsupported locator makes recording fail without saving or replacing a macro.
+Composite form operations, batches, drag and scrolling by uid require explicit recordable steps.
+Use `--from N` to select the demonstrated successful portion of a session.
+
+Derived guards are `delivery: target_hit`, `verdict: changed|navigated`, `verbatim: true`,
+`downloaded: true` and a `url_matches` built from the path. A failed read-back is never recorded as
+success. A uid target becomes role and accessible name, or is refused. Secret field values become
+required parameters; repeated secret writes receive separate parameters.
+
+With `--json`, each completed step carries its dispatcher response in `steps[].result`. A stopped
+step's response is in `result`, alongside the earlier results. This includes extracted data,
+assertion evidence and download paths. Declared secret inputs are redacted from these reports.
+Explicit assertions and waits count as checks. Other steps with no guard remain `unguarded`.
+The caller must supply checks for the requested outcome: a successful click alone cannot prove
+that the correct item and quantity reached a cart.
 
 A guard that was checked and did not hold exits **2**, the same code as a failed assertion: it is
 the same kind of claim. The report carries `stopped_by: "guard"` along with which guard, what it

@@ -124,7 +124,7 @@ pub async fn dispatch_emulate(
 /// The KEYS were already checked by `pipe_command::EmulateArgs` (`deny_unknown_fields`, so a
 /// typo is refused by name); the values stay `Value` here because these messages name the field
 /// and the type it wanted, which serde's `invalid type` does not.
-fn parse_device_config(
+pub fn parse_device_config(
     args: &crate::pipe_command::EmulateArgs,
 ) -> Result<crate::emulation::DeviceEmulation, crate::BoxError> {
     let label = optional_string(args.label.as_ref(), "label")?;

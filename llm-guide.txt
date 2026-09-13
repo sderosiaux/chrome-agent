@@ -211,14 +211,26 @@ LLM USAGE GUIDE:
   Macros (a path that already worked, kept and replayable):
     chrome-agent macro list
     chrome-agent macro record checkout --from-recording session.jsonl
+    chrome-agent macro check checkout --var email=ada@example.com
     chrome-agent macro run checkout --var email=ada@example.com
     chrome-agent replay session.jsonl
     # In pipe: {"cmd":"macro","action":"record","name":"x"} distils THIS session; "from"
     # overrides where the task starts (default: the last successful navigation).
-    # A step keeps only what survives tomorrow: delivery target_hit, the verdict WORD,
-    # value.verbatim, a url_matches built from the PATH. Never counters, uids or durations.
-    # A step aimed by uid is recorded by role+name or REFUSED; --xy is never recordable. A secret
-    # field becomes a declared parameter and is never stored: run refuses without --var.
+    # check validates the full path offline; run uses the same preparation before any action.
+    # Inputs substitute JSON string values in commands and guards, once. Repeat --var for
+    # multiple inputs; commas are literal. Object keys cannot contain placeholders.
+    # Recording keeps waits, assertions, reads, downloads and supported context. Only discovery
+    # inspect (without scroll), diff and history are dropped. Failed or undelivered steps,
+    # unsupported locators and composite form/batch/drag operations refuse the entire recording;
+    # no macro is saved or overwritten. Use --from N to select a successful path.
+    # Derived guards: delivery target_hit, verdict changed|navigated, verbatim:true,
+    # downloaded:true, url_matches from the PATH. Never counters, uids or durations.
+    # A uid becomes role+name or is refused; xy and scroll-by-uid are not recordable.
+    # Secret fields become required parameters. Repeated secret writes use separate inputs.
+    # --json retains responses in steps[].result; the stopped step is in result. Declared secret
+    # inputs are redacted. Assertions and waits count as checks; other guardless steps are unguarded.
+    # CSS, JavaScript and live-page conditions still require replay. A click does not establish
+    # task completion: include explicit assertions for identity, variant, quantity, etc.
     # A guard that does not hold STOPS the run, naming the step index, the guard, what was
     # observed and the action's own next -- nothing is repaired, retried or skipped. Steps that
     # promise nothing are marked unguarded. replay re-runs a `pipe --record` file raw: no guards,

@@ -209,6 +209,7 @@ printf '%s\n' \
 chrome-agent status                                              # browsers, pids, orphan= lines
 chrome-agent tabs
 chrome-agent macro list                                          # named paths, with their guards
+chrome-agent macro check checkout --var email=ada@example.com    # validate offline before opening Chrome
 chrome-agent macro run checkout --var email=ada@example.com      # stops at the first failed guard
 chrome-agent replay recording.jsonl                              # a pipe --record file, no guards
 chrome-agent close [--purge] [--orphans]                         # --orphans: browsers no session claims
@@ -216,16 +217,24 @@ chrome-agent close [--purge] [--orphans]                         # --orphans: br
 
 **Macros.** `macro record <name> --from-recording <file>` (or
 `{"cmd":"macro","action":"record","name":"x"}` inside the pipe session that just did it) distils
-the steps that changed the page and keeps only what survives tomorrow: `delivery: target_hit`, the
-verdict **word**, `value.verbatim`, a `url_matches` on the path — never counters, uids or
-durations. A step aimed by uid is recorded by role + accessible name, or refused. A secret field
+actions, waits, assertions, reads, downloads and supported context. Discovery snapshots, diffs
+and history are dropped. Failed or undelivered steps and unsupported locators refuse the whole
+recording without saving or replacing a macro. Derived guards are `delivery: target_hit`,
+`verdict: changed|navigated`, `verbatim: true`, `downloaded: true` and `url_matches` on the path. A step aimed by uid is recorded by role + accessible name, or refused. A secret field
 becomes a declared parameter and is never stored, so `macro run` refuses without `--var`. A guard
 that does not hold **stops** the run, naming the step index, the guard, what was observed and the
 action's own `next`, and exits **2** with `stopped_by: "guard"` — the same code as a failed
 assertion, because it is the same kind of claim. A run that stopped for any other reason (the step
 failed, the page could not be read, no such macro) exits **1** with `stopped_by: "error"`. Steps
 that could promise nothing are marked `unguarded` and counted in both reports — read that number
-before trusting a green run.
+before trusting a green run. Explicit assertions and waits count as checks.
+
+`macro check` prepares all commands, parameters and guards offline; `macro run` uses the same
+preparation before any action. Repeat `--var` for multiple inputs; commas remain part of a value.
+Substitution visits string values in commands and guards once. CSS, JavaScript and live-page
+conditions are checked during replay. Use `--json` to retrieve each completed `steps[].result` and
+the stopped step's `result`, including data, assertion evidence and download paths. Declared secret
+inputs are redacted. Task success requires explicit outcome assertions supplied by the caller.
 
 ## Global flags
 

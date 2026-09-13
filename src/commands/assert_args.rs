@@ -103,6 +103,24 @@ pub fn from_cli(what: &crate::cli::AssertWhat) -> Result<Assertion, crate::BoxEr
 /// Build the assertion from a pipe/batch command object, shaped
 /// `{"cmd":"assert","what":"value","selector":"#email","equals":"a@b.c"}`.
 pub fn from_json(cmd: &Value) -> Result<Assertion, crate::BoxError> {
+    for key in [
+        "what", "selector", "uid", "equals", "contains", "matches", "selected",
+    ] {
+        if let Some(value) = cmd.get(key)
+            && !value.is_null()
+            && !value.is_string()
+        {
+            return Err(format!("assert: \"{key}\" must be a string").into());
+        }
+    }
+    for key in ["checked", "unchecked", "enabled", "disabled", "visible"] {
+        if let Some(value) = cmd.get(key)
+            && !value.is_null()
+            && !value.is_boolean()
+        {
+            return Err(format!("assert: \"{key}\" must be a boolean").into());
+        }
+    }
     let what = cmd
         .get("what")
         .and_then(Value::as_str)
@@ -166,11 +184,31 @@ pub fn from_json(cmd: &Value) -> Result<Assertion, crate::BoxError> {
             .into());
         }
     };
-    Ok(Assertion {
+    let assertion = Assertion {
         kind,
         selector: field("selector"),
         uid: field("uid"),
-    })
+    };
+    if assertion.selector.is_some() && assertion.uid.is_some() {
+        return Err("assert: provide at most one of selector or uid".into());
+    }
+    match &assertion.kind {
+        Kind::Value(_) | Kind::State(_)
+            if assertion.selector.is_none() && assertion.uid.is_none() =>
+        {
+            return Err("assert: provide selector or uid for a value or state assertion".into());
+        }
+        Kind::Exists { count, min } => {
+            if assertion.selector.is_none() || assertion.uid.is_some() {
+                return Err("assert exists: provide selector".into());
+            }
+            if count.is_some() && min.is_some() {
+                return Err("assert exists: provide either count or min".into());
+            }
+        }
+        _ => {}
+    }
+    Ok(assertion)
 }
 
 /// Pick the one comparator given, and refuse the combinations that mean nothing.
@@ -202,7 +240,10 @@ fn comparator(
     match (equals, contains, matches) {
         (Some(s), _, _) => Ok(Comparator::Equals(s.to_string())),
         (_, Some(s), _) => Ok(Comparator::Contains(s.to_string())),
-        (_, _, Some(s)) => Ok(Comparator::Matches(s.to_string())),
+        (_, _, Some(s)) => {
+            super::assert::compile_pattern(s)?;
+            Ok(Comparator::Matches(s.to_string()))
+        }
         (None, None, None) => {
             Err(format!("assert {kind}: give one of --equals, --contains or --matches.").into())
         }

@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Macro task outcomes</title>
+<body>
+<h1>Task fixtures</h1>
+<label>Note <textarea id="note"></textarea></label>
+<label>Size <select id="size"><option>S</option><option>M</option></select></label>
+<button id="add">Add linen shirt</button>
+<p id="status">Ready</p>
+<section id="cart" aria-label="Cart"></section>
+<section id="news" aria-label="Headlines">
+  <article><a href="https://example.com/editorial">Editor's pick</a><time datetime="2026-09-10T09:00:00Z">September 10</time></article>
+  <article data-sponsored="true"><a href="https://example.com/ad">Sponsored promotion</a><time datetime="2026-09-13T12:00:00Z">September 13</time></article>
+  <article><a href="https://example.com/latest">Latest report</a><time datetime="2026-09-13T10:00:00Z">September 13</time></article>
+</section>
+<script>
+  const cart = document.querySelector('#cart');
+  function row(sku, size, quantity) {
+    cart.innerHTML = `<article data-sku="${sku}" data-size="${size}" data-quantity="${quantity}">Linen shirt, ${size}, quantity ${quantity}</article>`;
+  }
+  if (location.hash === '#existing') row('linen-shirt', 'M', 1);
+  document.querySelector('#add').addEventListener('click', () => {
+    document.querySelector('#status').textContent = 'Adding';
+    window.addCalls = (window.addCalls || 0) + 1;
+    setTimeout(() => {
+      const wrong = location.hash === '#wrong';
+      row(wrong ? 'different-shirt' : 'linen-shirt', document.querySelector('#size').value,
+          Number(cart.firstElementChild?.dataset.quantity || 0) + 1);
+      document.querySelector('#status').textContent = 'Added';
+    }, 800);
+  });
+</script>
+</body>
+</html>
