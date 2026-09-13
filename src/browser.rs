@@ -433,6 +433,7 @@ async fn http_get_json(url: &str, timeout: Duration) -> Result<serde_json::Value
 
     tokio::task::spawn_blocking(move || {
         let agent = ureq::Agent::config_builder()
+            .timeout_global(Some(timeout))
             .timeout_connect(Some(timeout))
             .timeout_recv_body(Some(timeout))
             .build()

@@ -229,3 +229,9 @@ judge.
 ## `connect_page` retry
 
 Page-level CDP connection retries, up to 8 attempts, 500 ms / 300 ms backoff between tries.
+
+HTTP discovery requests (`/json/version`, `/json/list`) have one global deadline spanning
+connection, response headers and body. Connect and body timeouts alone leave the header wait
+unbounded. The deadline lives in ureq itself: an outer async timeout would leave the blocking
+worker alive and could still prevent process shutdown. Existing discovery retries remain bounded
+per request; the deadline is not a budget for an entire CLI invocation.
