@@ -265,6 +265,34 @@ the recorded path: requiring the same low-level change verdict on both runs can 
 result. A final condition should express the requested state, with separate checks for workflows
 that specifically require a new event or record.
 
+## Deferred roadmap: a repository of tasks by site
+
+Decision, 2026-09-13: explore a catalogue of reusable tasks maintained in this repository, with
+procedures that capture the subtleties of individual sites. Implementation is deferred.
+
+An agent starts with an intent such as adding a particular variant to a cart, collecting the
+latest homepage headlines, or exporting a report. It can discover a matching task by its purpose
+and supported site, supply parameters, and receive checked outputs. The reusable procedure saves
+the agent from rediscovering the site's controls and interaction rules on every run.
+
+Each entry should carry:
+
+- The task's purpose, supported site and conditions under which it applies.
+- Inputs and outputs, including the account, item, variant or period where relevant.
+- An executable macro or ordinary script using the existing browser primitives.
+- Site-specific interaction notes, outcome assertions and known failure cases.
+- Tests, a maintainer and the last verification date, so callers can assess maintenance status.
+
+Keep procedures versioned and reviewable alongside their checks. Successful execution in a
+previous run is historical evidence; every new run must verify its current context and result.
+The catalogue is a shared collection of procedures. Credentials, browser sessions and private
+user history stay with the caller.
+
+Revisit this extension of A11 when real-site workflows show repeated discovery work worth
+maintaining as reusable tasks. Start with entries in the repository. A marketplace could later
+distribute these tasks if the catalogue proves useful and maintainable. Vendor memory adapters,
+a hosted registry and a new task language are outside this roadmap item.
+
 ## Where runtime design needs care
 
 Role/name targeting already refuses multiple matches. CSS targeting uses `querySelector`, so
