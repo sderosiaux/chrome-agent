@@ -145,7 +145,7 @@ The CLI supplies navigation, selection, assertions, bounded waits and download c
 program supplies the procedure, data dependencies, CSV checks and final result. No new task
 format or browser command was needed for this workflow.
 
-The pipe caller handles JSONL framing, timeouts, terminal failures and process cleanup. It is
-kept beside this example so another workflow can show whether that code warrants a shared
-library. This example does not measure discovery cost, model usage during discovery, or a speed
-advantage over agent-driven execution.
+The shared [pipe caller](../pipe_client.py) handles JSONL framing, timeouts, terminal failures and
+process cleanup. The [pagination and draft examples](../verified_workflows/README.md) reuse it.
+This example does not measure discovery cost, model usage during discovery, or a speed advantage
+over agent-driven execution.

@@ -15,11 +15,13 @@ import os
 from pathlib import Path
 import re
 import shutil
+import sys
 import tempfile
 import time
 from urllib.parse import urlsplit, urlunsplit
 import uuid
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from pipe_client import Pipe, PipeError
 
 

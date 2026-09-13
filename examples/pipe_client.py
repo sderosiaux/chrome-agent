@@ -1,4 +1,4 @@
-"""A small sequential JSONL caller for this example, using only Python's standard library."""
+"""Sequential JSONL transport shared by the runnable examples; standard library only."""
 
 import json
 import queue

@@ -377,6 +377,9 @@ An ordinary Python program drives `pipe`, checks account and period, validates t
 and returns a verified file or a failure with evidence. It includes a local demo app and Chrome
 tests for wrong data, delayed downloads and responses lost after export.
 
+The [pagination and draft examples](examples/verified_workflows/README.md) add complete table
+collection and recovery after an uncertain creation, using ordinary Python scripts through `pipe`.
+
 Screenshots, PDFs and downloads land under `~/.chrome-agent/tmp` (or your `--out` path) with `0600`
 permissions, and the path is printed on stdout. Binary bytes never reach stdout.
 

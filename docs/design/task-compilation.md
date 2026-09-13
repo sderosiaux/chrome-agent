@@ -90,6 +90,18 @@ up to N seconds. They reuse existing readers and return the first held compariso
 comparison when the window expires. Read failures retain their separate error outcome. This
 implements the bounded observation primitive in A7; it adds no task format or action retry.
 
+The [pagination and draft procedures](../../examples/verified_workflows/README.md) now exercise
+bounded iteration, aggregation and recovery through ordinary Python. Pagination checks dataset
+revision and total across pages, deduplicates identical overlap and labels incomplete results.
+Draft creation persists a local operation journal before submission, then searches and verifies
+the resulting record. A later run reuses the same journal to reconcile without another submit.
+Both share the existing JSONL caller with the report export example.
+
+One fixture exposed a boundary outside the caller: Chrome retried a POST after the server closed
+the connection without any response bytes. A single create command yielded multiple drafts;
+the procedure detected the ambiguity. A local journal cannot supply server-side uniqueness.
+These experiments do not yet measure discovery or maintenance costs on a real site.
+
 The action layer reports delivery, retained values, navigation, uncertainty and next actions.
 The pipe protocol has typed command objects and cross-field validation. Assertions can check
 values, text, URLs and state. These are useful building blocks for a task runner.
