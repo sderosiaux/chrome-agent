@@ -62,7 +62,14 @@ that cannot be acquired is not a reason to drop the entry.
 
 - **`screenshot`** — `--format jpeg`/`--quality`, `--max-width` (downscale via CDP `clip.scale`, no image crate), `--uid`/`--selector` clip via `DOM.getBoxModel` (`geometry::clip_for_*`). Never emits base64 on stdout.
 - **`pdf`** — `Page.printToPDF` (`transferMode: ReturnAsBase64`) → `base64::decode` → file. Mirrors screenshot.
-- **`download <url>`** — in-page `fetch(url,{credentials:'include'})` → base64 in page → `base64::decode` → file. Auth-preserving. Filename from Content-Disposition (including RFC 5987 `filename*`), then the URL.
+- **`download <url>`** — in-page `fetch(url,{credentials:'include'})` → base64 in page → `base64::decode` → file. Auth-preserving. Filename from Content-Disposition, then the URL.
+
+Content-Disposition parsing respects quoted semicolons, escaped quotes and exact parameter
+names. A valid `filename*` takes precedence over `filename`: decode its UTF-8 (or legacy
+ISO-8859-1) percent escapes, then strip directory components using both `/` and `\` on every OS.
+Malformed escapes, unsupported encodings and unusable names fall back to `filename`, then the
+URL. Ordinary `filename` values keep percent escapes literal. The encoding follows
+[RFC 8187](https://www.rfc-editor.org/rfc/rfc8187.html#section-3.2).
 
 `--max-bytes` on this path is bounded by the wire, because the file crosses CDP base64-encoded:
 `download_fetch::MAX_FETCH_BYTES` = `(cdp::transport::MAX_MESSAGE_BYTES − 64 KiB) × 3/4` = **75,448,320

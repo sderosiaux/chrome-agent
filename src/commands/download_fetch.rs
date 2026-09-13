@@ -260,48 +260,126 @@ pub fn filename_from_url(url: &str) -> String {
         .next()
         .unwrap_or("")
         .trim();
-    if last.is_empty() {
+    let cleaned = sanitize_name(last);
+    if cleaned.is_empty() {
         "download".to_string()
     } else {
-        sanitize_name(last)
+        cleaned
     }
 }
 
-/// Filename from a `Content-Disposition` value: `filename="x"`, `filename=x`, or RFC 5987
-/// `filename*=UTF-8''x`. Percent escapes are kept literal — decoding `%2f` would break the
-/// path-traversal guarantee.
+/// Filename from `Content-Disposition`, preferring a valid RFC 8187 `filename*` over
+/// `filename`. Extended values are decoded before stripping directory components;
+/// ordinary quoted/unquoted filenames keep percent escapes literal.
 #[must_use]
 pub fn filename_from_content_disposition(header: &str) -> Option<String> {
-    let lower = header.to_ascii_lowercase();
-    // Prefer the extended form when present.
-    if let Some(pos) = lower.find("filename*=") {
-        let raw = &header[pos + "filename*=".len()..];
-        let value = raw.split(';').next().unwrap_or(raw).trim();
-        // `filename*=UTF-8''name.pdf` → the part after the last "''".
-        let name = value.rsplit("''").next().unwrap_or(value).trim_matches('"');
-        let cleaned = sanitize_name(name);
-        if !cleaned.is_empty() {
+    let mut fallback = None;
+    for parameter in disposition_parameters(header) {
+        let Some((key, value)) = parameter.split_once('=') else {
+            continue;
+        };
+        let extended = key.trim().eq_ignore_ascii_case("filename*");
+        let decoded = if extended {
+            decode_extended_filename(value.trim())
+        } else if key.trim().eq_ignore_ascii_case("filename") {
+            unquote_filename(value.trim())
+        } else {
+            continue;
+        };
+        let Some(name) = decoded else {
+            continue;
+        };
+        let cleaned = sanitize_name(&name);
+        if cleaned.is_empty() {
+            continue;
+        }
+        if extended {
             return Some(cleaned);
         }
+        if fallback.is_none() {
+            fallback = Some(cleaned);
+        }
     }
-    if let Some(pos) = lower.find("filename=") {
-        let raw = &header[pos + "filename=".len()..];
-        let value = raw
-            .split(';')
-            .next()
-            .unwrap_or(raw)
-            .trim()
-            .trim_matches('"');
-        let cleaned = sanitize_name(value);
-        if !cleaned.is_empty() {
-            return Some(cleaned);
+    fallback
+}
+
+/// A semicolon separates parameters only outside quoted strings. Escaped quotes do not
+/// end a string, and a filename-looking substring inside another parameter is just text.
+fn disposition_parameters(header: &str) -> impl Iterator<Item = &str> {
+    let mut quoted = false;
+    let mut escaped = false;
+    header
+        .split(move |ch| {
+            if escaped {
+                escaped = false;
+            } else if quoted && ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                quoted = !quoted;
+            } else if ch == ';' && !quoted {
+                return true;
+            }
+            false
+        })
+        .skip(1)
+}
+
+fn unquote_filename(value: &str) -> Option<String> {
+    let Some(quoted) = value.strip_prefix('"') else {
+        return Some(value.to_string());
+    };
+    let mut chars = quoted.chars();
+    let mut name = String::new();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '"' => return chars.as_str().trim().is_empty().then_some(name),
+            '\\' => name.push(chars.next()?),
+            _ => name.push(ch),
         }
     }
     None
 }
 
-/// Strip any directory component so a server-supplied name can't traverse paths.
+/// RFC 8187: charset'language'value, with strict percent decoding. An invalid or unsupported
+/// encoding leaves the ordinary filename (or URL) available as fallback. ISO-8859-1 is kept
+/// for older RFC 5987 senders. `+` is literal here, not a form-encoded space.
+fn decode_extended_filename(value: &str) -> Option<String> {
+    let (charset, rest) = value.split_once('\'')?;
+    let (_, encoded) = rest.split_once('\'')?;
+    let mut chars = encoded.bytes();
+    let mut decoded = Vec::with_capacity(encoded.len());
+    while let Some(byte) = chars.next() {
+        if byte == b'%' {
+            let high = char::from(chars.next()?).to_digit(16)?;
+            let low = char::from(chars.next()?).to_digit(16)?;
+            decoded.push((high * 16 + low) as u8);
+        } else if byte.is_ascii_alphanumeric()
+            || matches!(
+                byte,
+                b'!' | b'#' | b'$' | b'&' | b'+' | b'-' | b'.' | b'^' | b'_' | b'`' | b'|' | b'~'
+            )
+        {
+            decoded.push(byte);
+        } else {
+            return None;
+        }
+    }
+    if charset.eq_ignore_ascii_case("UTF-8") {
+        String::from_utf8(decoded).ok()
+    } else if charset.eq_ignore_ascii_case("ISO-8859-1") {
+        Some(decoded.into_iter().map(char::from).collect())
+    } else {
+        None
+    }
+}
+
+/// Strip either kind of directory separator, regardless of the local OS. Empty names,
+/// dot components and control characters leave the caller's fallback in charge.
 fn sanitize_name(name: &str) -> String {
+    if name.chars().any(char::is_control) {
+        return String::new();
+    }
+    let name = name.rsplit(['/', '\\']).next().unwrap_or("").trim();
     Path::new(name)
         .file_name()
         .and_then(|n| n.to_str())
@@ -426,12 +504,115 @@ mod tests {
     }
 
     #[test]
-    fn cd_preserves_percent_escapes_literally() {
-        // No percent-decoding: `%2f` must not become '/'.
-        let n =
-            filename_from_content_disposition("attachment; filename*=UTF-8''a%2fb.pdf").unwrap();
-        assert_eq!(n, "a%2fb.pdf");
-        assert!(!n.contains('/'));
+    fn cd_decodes_extended_filenames() {
+        for (value, expected) in [
+            ("UTF-8''caf%C3%A9%20report.pdf", "café report.pdf"),
+            ("utf-8'fr'caf%C3%A9.pdf", "café.pdf"),
+            ("ISO-8859-1'en'%A3%20rates.csv", "£ rates.csv"),
+            ("UTF-8''a+b%2520.csv", "a+b%20.csv"),
+        ] {
+            let header = format!("attachment; filename=fallback.bin; filename*={value}");
+            assert_eq!(
+                filename_from_content_disposition(&header).as_deref(),
+                Some(expected),
+                "{header}"
+            );
+        }
+    }
+
+    #[test]
+    fn cd_parses_parameter_boundaries_and_quoted_values() {
+        for (header, expected) in [
+            (
+                r#"attachment; filename="report; final.csv""#,
+                "report; final.csv",
+            ),
+            (
+                r#"attachment; filename="report \"final\".csv""#,
+                "report \"final\".csv",
+            ),
+            ("attachment; filename = report.csv", "report.csv"),
+            (
+                "attachment; x-filename=wrong.csv; filename=right.csv",
+                "right.csv",
+            ),
+            (
+                r#"attachment; note="filename*=UTF-8''wrong.csv"; filename=right.csv"#,
+                "right.csv",
+            ),
+            (
+                r#"attachment; filename="literal%20name.csv""#,
+                "literal%20name.csv",
+            ),
+            (
+                "attachment; filename*=UTF-8''real.csv; filename=fallback.csv",
+                "real.csv",
+            ),
+        ] {
+            assert_eq!(
+                filename_from_content_disposition(header).as_deref(),
+                Some(expected),
+                "{header}"
+            );
+        }
+        assert_eq!(
+            filename_from_content_disposition("attachment; x-filename=wrong.csv"),
+            None
+        );
+        assert_eq!(
+            filename_from_content_disposition("attachment; filename=\"unterminated.csv"),
+            None
+        );
+    }
+
+    #[test]
+    fn cd_invalid_extended_filename_uses_fallback() {
+        for value in [
+            "UTF-8''bad%",
+            "UTF-8''bad%2",
+            "UTF-8''bad%GG",
+            "UTF-8''%FF.csv",
+            "UTF-16''%00x",
+            "missing-charset.csv",
+            "UTF-8''",
+            "UTF-8''%00.csv",
+            "UTF-8''%0A.csv",
+            "UTF-8''..",
+            "UTF-8''%2F",
+            "UTF-8''raw space.csv",
+        ] {
+            let header = format!("attachment; filename*={value}; filename=fallback.csv");
+            assert_eq!(
+                filename_from_content_disposition(&header).as_deref(),
+                Some("fallback.csv"),
+                "{header}"
+            );
+        }
+    }
+
+    #[test]
+    fn cd_sanitizes_after_decoding_path_separators() {
+        for value in [
+            "UTF-8''..%2F..%2Freport.csv",
+            "UTF-8''..%5C..%5Creport.csv",
+            "UTF-8''%2Ftmp%2Freport.csv",
+        ] {
+            let header = format!("attachment; filename*={value}");
+            let path = resolve_out_path(None, &header, "https://example.com/fallback").unwrap();
+            assert_eq!(path.file_name().unwrap(), "report.csv");
+            assert!(path.parent().unwrap().ends_with(".chrome-agent/tmp"));
+        }
+    }
+
+    #[test]
+    fn unusable_names_fall_back_and_windows_paths_lose_directories() {
+        for suggested in ["", ".", "..", "/", "\\", "bad\0name", "bad\nname"] {
+            let path = resolve_named_path(None, suggested).unwrap();
+            assert_eq!(path.file_name().unwrap(), "download", "{suggested:?}");
+        }
+        let path = resolve_named_path(None, r"C:\exports\report.csv").unwrap();
+        assert_eq!(path.file_name().unwrap(), "report.csv");
+        assert_eq!(filename_from_url("https://example.com/.."), "download");
     }
 
     #[test]
