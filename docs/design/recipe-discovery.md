@@ -30,7 +30,8 @@ The executor validates the proposal, records the attempt and returns actual evid
 Persist experiment identity before dispatch. A repeated request retrieves the recorded outcome
 or reports an unresolved attempt; it must not silently repeat the browser action. Refuse a
 proposal based on stale state. A replacement agent can resume using the persisted record
-without the previous conversation. This is a planned protocol contract, not a shipped API.
+without the previous conversation. The local `discover` API implements these experiment
+semantics; candidate acceptance and retrieval across discoveries remain planned.
 
 Model usage is enforced by the caller and may be reported with its provenance. Missing usage
 is unknown, not zero. chrome-agent enforces its own browser and continuation limits; it cannot

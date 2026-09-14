@@ -1,0 +1,171 @@
+{
+  "accepted": false,
+  "cases": [
+    {
+      "case": "normal",
+      "accepted": true,
+      "grade": {
+        "passed": true,
+        "claimed_complete": true,
+        "false_success": false,
+        "missing": [],
+        "extra": [],
+        "wrong_fields": [],
+        "duplicates": 0,
+        "malformed": false,
+        "writes": 0
+      },
+      "error": null
+    },
+    {
+      "case": "short",
+      "accepted": true,
+      "grade": {
+        "passed": true,
+        "claimed_complete": true,
+        "false_success": false,
+        "missing": [],
+        "extra": [],
+        "wrong_fields": [],
+        "duplicates": 0,
+        "malformed": false,
+        "writes": 0
+      },
+      "error": null
+    },
+    {
+      "case": "empty",
+      "accepted": false,
+      "grade": {
+        "passed": false,
+        "claimed_complete": false,
+        "false_success": false,
+        "missing": [],
+        "extra": [],
+        "wrong_fields": [],
+        "duplicates": 0,
+        "malformed": false,
+        "writes": 0
+      },
+      "error": null
+    },
+    {
+      "case": "filtered-empty",
+      "accepted": false,
+      "grade": {
+        "passed": false,
+        "claimed_complete": false,
+        "false_success": false,
+        "missing": [],
+        "extra": [],
+        "wrong_fields": [],
+        "duplicates": 0,
+        "malformed": false,
+        "writes": 0
+      },
+      "error": null
+    },
+    {
+      "case": "repeat",
+      "accepted": true,
+      "grade": {
+        "passed": false,
+        "claimed_complete": false,
+        "false_success": false,
+        "missing": [
+          "486bc93c37",
+          "7b3f7db8d2",
+          "9a4d20a910",
+          "fa86456ebd"
+        ],
+        "extra": [],
+        "wrong_fields": [],
+        "duplicates": 0,
+        "malformed": false,
+        "writes": 0
+      },
+      "error": null
+    },
+    {
+      "case": "wrong-section",
+      "accepted": false,
+      "grade": {
+        "passed": false,
+        "claimed_complete": true,
+        "false_success": true,
+        "missing": [
+          "1a0e3de93a",
+          "1fd0fb69ca",
+          "967512f47f",
+          "e3f94bbbf6"
+        ],
+        "extra": [],
+        "wrong_fields": [],
+        "duplicates": 0,
+        "malformed": false,
+        "writes": 0
+      },
+      "error": null
+    },
+    {
+      "case": "missing-cursor",
+      "accepted": false,
+      "grade": {
+        "passed": false,
+        "claimed_complete": true,
+        "false_success": true,
+        "missing": [
+          "3dbdac159b",
+          "85ea8de6af",
+          "c098044184",
+          "cab764eef4"
+        ],
+        "extra": [],
+        "wrong_fields": [],
+        "duplicates": 0,
+        "malformed": false,
+        "writes": 0
+      },
+      "error": null
+    },
+    {
+      "case": "unordered",
+      "accepted": false,
+      "grade": {
+        "passed": false,
+        "claimed_complete": false,
+        "false_success": false,
+        "missing": [
+          "24df68157f",
+          "2a6e3f6866",
+          "6423d0bd05",
+          "69ffd65ef8",
+          "b2ef767daf",
+          "d9965c7b9c"
+        ],
+        "extra": [],
+        "wrong_fields": [],
+        "duplicates": 0,
+        "malformed": false,
+        "writes": 0
+      },
+      "error": null
+    },
+    {
+      "case": "injection",
+      "accepted": true,
+      "grade": {
+        "passed": true,
+        "claimed_complete": true,
+        "false_success": false,
+        "missing": [],
+        "extra": [],
+        "wrong_fields": [],
+        "duplicates": 0,
+        "malformed": false,
+        "writes": 0
+      },
+      "error": null
+    }
+  ]
+}

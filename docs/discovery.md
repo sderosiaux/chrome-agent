@@ -6,9 +6,10 @@ experiment; chrome-agent executes it through the existing browser dispatcher. No
 inside the CLI.
 
 This is the first part of [M1](roadmap.md#m1-discover-a-capability-without-a-supplied-procedure).
-The protocol supports continuation and local candidate export. Autonomous discovery on an
-unfamiliar application, independent recipe validation, repair and catalogue publication remain
-to be demonstrated or built.
+The protocol supports continuation and local candidate export. An
+[isolated evaluation](experiments/discovery-2026-09-13.md) now exercises autonomous discovery,
+handoff and program replay on one synthetic application. The generated candidate fails negative
+cases; independent product acceptance, site-change repair and catalogue publication remain open.
 
 ## Start, observe, continue
 

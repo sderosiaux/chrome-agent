@@ -112,6 +112,8 @@ repair scope, and exploration and validation cost. Include failures and uncertai
 denominator. For shared recipes, also track successful use in a fresh environment, stale or
 withdrawn revisions rejected, and private data excluded from contributions.
 
-Existing tests establish behavior in their tested cases. They do not yet establish autonomous
-discovery, cross-site generalization or a trustworthy recipe catalogue. The current foundation
-and its limits are recorded in [task compilation](design/task-compilation.md).
+The first [isolated discovery experiment](experiments/discovery-2026-09-13.md) establishes
+discovery, handoff and executable reuse on one synthetic site. Its independent tests also
+reject the generated recipe for false completeness claims. Cross-site generalization and a
+trustworthy recipe catalogue remain unproven. The execution foundation and its limits are
+recorded in [task compilation](design/task-compilation.md).

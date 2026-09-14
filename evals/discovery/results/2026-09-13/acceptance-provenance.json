@@ -1,0 +1,20 @@
+{
+  "started_utc": "2026-09-14T03:10:06.331220+00:00",
+  "git_head": "d2295c8fbf4bd118f96c6436ceaaaddca7384b37",
+  "binary_sha256": "0bb519ad23646927317850445d9ce9419abe7c1660422a6550cab21084869377",
+  "python": "3.12.8 (v3.12.8:2dc476bcb91, Dec  3 2024, 14:43:19) [Clang 13.0.0 (clang-1300.0.29.30)]",
+  "versions": {
+    "claude": "2.1.257 (Claude Code)",
+    "docker": "Docker version 29.7.2, build a7dcaa6"
+  },
+  "harness_sha256": {
+    "caller.py": "7b4680f4c1cbe2bc640dba95be4cca322ccbd9bb820a594bb9cc02b100aa8d9c",
+    "run.py": "e238097e041e3c9842872df0d7330023275b2ac8ea4be4a1a26c24bfff1464b1",
+    "suite.py": "0a3adf11a762cd3d9fe142adec9848c2c6a3a9ac5d6c18ab0619fda201de9be6",
+    "bridge.py": "b2428b9f3469f644056e11340cb48c5b38297563a64909327b44b9c477b4c220",
+    "program.py": "572e0db7f4062a01020db6f4709cdb7c998eb1cbc1824a6b0057f4ce45e6ede4",
+    "process.py": "3d2a6a32233e34445be1c64687106dd9b75e9212ea502e26a1d47e639da14452",
+    "website.py": "98c3198d232f6465733d2288d356f2ff2953a2c94c56f961333ee08fda9b26c5",
+    "check_boundary.py": "4c31a89fd8fabc5b23f7bf44d3fc17cdb22dae3ccf49c0928c6df779d616e3ae"
+  }
+}

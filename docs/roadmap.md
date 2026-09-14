@@ -30,7 +30,7 @@ after the later acceptance gate below.
 | Area | Decision | Next evidence or work |
 |---|---|---|
 | Observations, assertions, result identity and uncertainty | Invest | Make these the evidence used to accept or reject discovered capabilities. Preserve operational errors separately from failed conditions. |
-| Autonomous exploration | Invest through the calling agent | Use the persistent experiment protocol to test discovery without supplied procedures, then fresh-context reuse against an independent evaluator. |
+| Autonomous exploration | Invest through the calling agent | First isolated discovery and handoff succeeded on a synthetic site. Fix the generated recipe's false successes before broadening its reach. |
 | Site knowledge and recipe memory | Extend | The local journal stores observations, parameters, checks and revisions. Add applicability checks and retrieval across discoveries based on M1/M2 evidence. |
 | Recomposition and repair | Invest | Combine known capabilities for an unseen request; rediscover changed transitions while retaining result checks and unresolved effects. |
 | Shared and private recipe sources | Add | Source-qualified identity, immutable references, deterministic resolution, private forks and explicit update policy. |
@@ -75,8 +75,32 @@ Implemented foundation: `discover start/show/step/export` persists caller propos
 observations and uncertainty, enforces revisions and experiment budgets, and exports selected
 paths as local candidate macros. Real-Chrome tests cover process loss and fresh-input reuse.
 The profile limits explicit observation commands; it is not a public recipe sandbox.
-**M1 remains open:** scripted protocol tests do not establish autonomous discovery. The next
-experiment must isolate the calling agent from the application source and independent evaluator.
+The first [isolated experiment](experiments/discovery-2026-09-13.md) now demonstrates autonomous
+discovery, replacement of the caller, agent-generated code repair and fresh execution on one
+synthetic site. Its generated recipe passes ordinary replay but falsely claims completeness
+on a wrong-section response and a missing pagination cursor. **M1 remains open.** A successful
+discovery does not establish an acceptable recipe.
+
+Do the next work in this order:
+
+1. Make completeness and applicability enforceable acceptance conditions. Use the committed
+   evaluator to reject missing termination evidence, wrong scope and unsupported ordering
+   assumptions. Valid empty results must succeed. Repairs receive execution observations, while
+   the acceptance criteria and withheld answers stay outside the calling agent's control.
+2. Demonstrate a repaired candidate passing these cases and new withheld variants with unchanged
+   result requirements. Retain its rejected predecessor and bind the evidence to the exact source
+   digest. This is still local evaluation, not catalogue eligibility.
+3. Reduce repeated discovery through an explicit executable candidate reference and its tested
+   conditions. In the paired pilot, the informed agent used the program only after exploring the
+   site again; supplying source code alone did not save work. Require correct outcomes and fewer
+   discovery calls in fresh contexts before adding retrieval infrastructure.
+4. Expand to another site family and the remaining M1 adversarial cases. The Python container
+   prototype does not confine arbitrary website effects; M3 remains a separate gate.
+
+Keep the current observation profile. The caller discovered the page's cursor feed by reading
+delivered JavaScript; this case did not require clicks or a new HTTP command. Keep fixed macros
+for their supported paths. Adaptive pagination is evaluated using ordinary Python, without
+introducing a workflow language or committing to a public recipe format.
 
 Build the smallest complete discovery loop through a continuation protocol for the calling
 agent, using the existing executor. Persist each selected experiment, its reason, before/after

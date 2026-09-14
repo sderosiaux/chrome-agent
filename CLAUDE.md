@@ -10,8 +10,9 @@ Read [the mission](docs/mission.md) and [roadmap](docs/roadmap.md) before extend
 The target is autonomous discovery of web capabilities, with verified recipes that agents can
 reuse, repair and share through a GitHub catalogue or private sources. The runtime below is
 the shipped foundation. `discover` now persists caller-driven experiments and exports local
-candidates; autonomous discovery without supplied procedures is unproven and catalogue
-acceptance remains planned. See [the implemented protocol](docs/discovery.md).
+candidates. The first [isolated discovery experiment](docs/experiments/discovery-2026-09-13.md)
+demonstrates discovery and reuse on one synthetic site, but rejects the generated recipe for
+false completeness claims. M1 and catalogue acceptance remain open. See [the implemented protocol](docs/discovery.md).
 Discovery is driven by the calling agent; no embedded model/provider layer is planned. The
 first public catalogue covers read and extraction recipes; external-write recipes come later.
 Prioritize work that enables that lifecycle. Existing macros and Python examples establish
