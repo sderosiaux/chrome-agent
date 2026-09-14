@@ -1,7 +1,7 @@
 # chrome-agent v0.16.0
 
-Single Rust binary for browser automation via CDP, built for AI agents. 43 subcommands
-(`chrome-agent --help`), 30.1K lines of Rust in `src/` across 87 files (blank and comment-only lines excluded),
+Single Rust binary for browser automation via CDP, built for AI agents. 44 subcommands
+(`chrome-agent --help`), 30.9K lines of Rust in `src/` across 91 files (blank and comment-only lines excluded),
 one regex crate (`regex-lite`, for `assert --matches`), 3 MB binary.
 
 ## Product direction
@@ -9,7 +9,9 @@ one regex crate (`regex-lite`, for `assert --matches`), 3 MB binary.
 Read [the mission](docs/mission.md) and [roadmap](docs/roadmap.md) before extending the product.
 The target is autonomous discovery of web capabilities, with verified recipes that agents can
 reuse, repair and share through a GitHub catalogue or private sources. The runtime below is
-the shipped foundation; discovery and catalogue acceptance are not implemented yet.
+the shipped foundation. `discover` now persists caller-driven experiments and exports local
+candidates; autonomous discovery without supplied procedures is unproven and catalogue
+acceptance remains planned. See [the implemented protocol](docs/discovery.md).
 Discovery is driven by the calling agent; no embedded model/provider layer is planned. The
 first public catalogue covers read and extraction recipes; external-write recipes come later.
 Prioritize work that enables that lifecycle. Existing macros and Python examples establish
@@ -24,6 +26,7 @@ CLI (clap) → CDP Client (WebSocket) → Chrome
 | Module | Role |
 |--------|------|
 | `src/cli.rs`, `src/cli_actions.rs` | clap definition (`Cli`, `Command`, one variant per verb) and the per-verb subcommand enums (`MacroAction`, `EmulateAction`, `AssertWhat`, `WebmcpAction`, `DaemonAction`) |
+| `src/discovery.rs`, `src/discovery_cmd.rs`, `src/discovery_store.rs` | Caller proposals, revision/budget/history validation, shared dispatcher execution, durable reservations, atomic private files and local candidate export. |
 | `src/main.rs`, `src/run.rs`, `src/run_helpers.rs`, `src/connect_cli.rs` | the binary entry point; CLI dispatch on `Command` — each arm builds typed args from clap, calls the SAME `pipe_dispatch::dispatch_*` pipe and batch call, and renders the answer; shared output/error handling and `connect_page` (8-attempt retry); resolving one invocation's browser + page connection |
 | `src/page_ctx.rs` | `PageCtx`: the two clients, the store, the three names that locate a page in it, and the two global flags, in one struct — so a dispatcher takes three parameters instead of eleven |
 | `src/render.rs` | text-mode renderer: the `value:` / `values lost:` / `verdict:` / `next:` lines, colour only on a tty |
@@ -91,6 +94,7 @@ Facts true of one subsystem live in `.claude/rules/`, loaded when you `Read` a f
 | `cdp-transport.md` | `src/cdp/**`, `src/setup.rs` | every CDP call has a deadline, the input-event deadline, foreground for pointer events, `waited_ms`, dialogs, the seven stealth patches |
 | `emulation.md` | `src/emulation.rs`, `src/pipe_emulation.rs` | Chrome keeps no override, so the store is the mechanism |
 | `assert.md` | `src/commands/assert*.rs` | exit 0/1/2, shared readers, bounded observation, Rust regexes |
+| `discovery.md` | `src/discovery*.rs`, `tests/discovery_tests.rs` | Durable reservations, exact proposal retries, local observation scope, candidates versus independent validation. |
 | `content-extraction.md` | `src/commands/{read,extract,text,eval,network,console,wait}.rs`, `vendor/extract.js` | reader mode, the extraction heuristics, network and console capture, `--scroll`, `network-idle` |
 | `webmcp.md` | `src/commands/webmcp.rs` | why a tool's declared result gets no new verdict word |
 | `pipe-and-batch.md` | `src/pipe.rs`, `src/pipe_command.rs`, `src/pipe_dispatch*.rs`, `src/commands/batch.rs`, `src/commands/record.rs`, `src/macros_cmd.rs` | the typed protocol and what still takes a raw `Value`, one `history_step` behind `back`/`forward`, recordings are 0600 and refuse when unwritable, `stop_on_error`, a failed read is not a failed action |
@@ -116,7 +120,7 @@ The trigger is the `Read` tool; `rg`, `sed` and `wc` through Bash do not arm a p
 ## Gotchas
 
 - `assert` needs a browser like every other command, and `assert value|state --uid` needs a uid from a *stored* snapshot: `goto` clears the map, so inspect before asserting by uid. The `uid` an action echoes back is resolved live and is not enough on its own.
-- Exit codes: `0` success, `1` error (including a bad flag — clap's usage exit moved off `2`), `2` a claim this tool made did not hold, `130` Ctrl+C. Two commands can return `2`: `assert`, and `macro run` when a guard was checked and the page disagreed (`stopped_by: "guard"`). A `macro run` that stopped for any other reason — the step never ran, a guard could not be evaluated, the macro file is unreadable — is `1` like everything else.
+- Exit codes: `0` success, `1` error (including a bad flag — clap's usage exit moved off `2`), `2` a claim this tool made did not hold, `130` Ctrl+C. `assert`, `discover step`, and `macro run` return `2` when an assertion or guard was checked and did not hold (`not_held` in discovery; `stopped_by: "guard"` in macros). A `macro run` that stopped for any other reason — the step never ran, a guard could not be evaluated, the macro file is unreadable — is `1` like everything else.
 - `landed.serving` never changes `ok` or the exit code: a 403, a WAF refusal and a captcha are facts about the page, and the navigation still happened. Branch on `serving`, not on `ok`. `serving: "page"` is the absence of contradicting evidence, not a guarantee — a paywall, a cookie wall and a soft 404 all reach it.
 - `serving` reads the document as it was when `goto`'s settle probe stopped. On a site whose first paint is empty (measured: `www.amazon.fr`, 1 run in 3) that reads `nothing_actionable`; `inspect` is the answer and the hint says so.
 - `batch`/`pipe` have no exit code per command: a failed assertion is `ok:false` with an `assertion` object. The CLI `batch` process exits `1` when `--stop-on-error` cut the run short (`stopped_at` is set) — `1` and never `2`, because the process is reporting that the batch stopped, not making a claim about the page. Without `--stop-on-error` it ran everything it was asked to and exits `0` even when an entry failed: read `ok`. The response is printed once either way, and only `--json` makes it JSON — text mode gets one line per entry.

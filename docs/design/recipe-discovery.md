@@ -1,6 +1,7 @@
 # Autonomous discovery and recipe trust
 
-Status: target design, 2026-09-13. This is not a description of shipped commands. The
+Status: target design, 2026-09-13. The implemented subset is documented in
+[caller-driven discovery](../discovery.md); the full lifecycle below remains the target. The
 [mission](../mission.md) defines the intended experience; the [roadmap](../roadmap.md) contains
 implementation gates and the settled product decisions.
 

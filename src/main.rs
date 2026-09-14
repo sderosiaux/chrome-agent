@@ -26,6 +26,11 @@ mod commands;
 mod connect_cli;
 #[cfg(unix)]
 mod daemon;
+mod discovery;
+mod discovery_cmd;
+mod discovery_store;
+#[cfg(test)]
+mod discovery_tests;
 mod element;
 mod element_controls;
 mod element_pointer;
@@ -202,6 +207,9 @@ async fn main() {
         // is the same claim class as an assertion, so a guard that ran and did not hold exits
         // 2 as well; a step that never ran exits 1. `Stopped` reads that off its report.
         if let Some(stopped) = e.downcast_ref::<macros_run::Stopped>() {
+            exit_after_stdout(stopped.report());
+        }
+        if let Some(stopped) = e.downcast_ref::<discovery::Stopped>() {
             exit_after_stdout(stopped.report());
         }
         // A CLI batch stopped by `--stop-on-error` already printed its one response; only the

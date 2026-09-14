@@ -683,6 +683,9 @@ pub async fn cmd_stop(json_mode: bool) -> Result<(), crate::BoxError> {
 #[must_use]
 pub const fn interrupt_owns_browser(command: &crate::cli::Command) -> bool {
     use crate::cli::Command as C;
+    if let C::Discover { action } = command {
+        return matches!(action, crate::discovery_cmd::DiscoveryAction::Step { .. });
+    }
     !matches!(
         command,
         C::Daemon { .. } | C::Status | C::Stop | C::Close { .. } | C::History { .. }

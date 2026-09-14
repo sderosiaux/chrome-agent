@@ -160,6 +160,10 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
             return Box::pin(crate::macros_cmd::run_cli(&cli, action)).await;
         }
 
+        Command::Discover { ref action } => {
+            return Box::pin(crate::discovery_cmd::run_cli(&cli, action)).await;
+        }
+
         Command::Replay { ref file, ref vars } => {
             return Box::pin(pipe::run_replay(&cli, file, vars.as_deref())).await;
         }
@@ -942,7 +946,8 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
         | Command::Pipe
         | Command::Replay { .. }
         | Command::History { .. }
-        | Command::Macro { .. } => {
+        | Command::Macro { .. }
+        | Command::Discover { .. } => {
             unreachable!()
         }
     }

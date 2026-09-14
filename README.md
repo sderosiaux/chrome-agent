@@ -17,7 +17,7 @@
 **Make websites learnable by agents.**
 
 Our mission is to turn websites into capabilities that agents discover, verify, reuse and
-maintain themselves. The calling agent supplies the reasoning; chrome-agent will preserve the
+maintain themselves. The calling agent supplies the reasoning; chrome-agent preserves the
 discovered knowledge and its validation evidence. Shared recipes will have a GitHub catalogue
 with automated validation and updates, starting with reading and extraction. Recipes that modify
 a site will follow later. Local and private recipes will use the same lifecycle.
@@ -25,7 +25,10 @@ a site will follow later. Local and private recipes will use the same lifecycle.
 Today, chrome-agent provides the execution foundation: a 3 MB Rust binary over CDP, browser
 observations, assertions, structured outputs and local macros. It reports retained values,
 intercepted clicks and missing observations so the calling agent can check what happened.
-Autonomous task discovery and the recipe catalogue are planned, not yet implemented.
+The repository now includes a [persistent discovery protocol](docs/discovery.md): the calling
+agent records experiments, resumes them across processes and exports local candidate macros.
+Autonomous discovery without a supplied procedure and independent recipe acceptance remain M1
+and later roadmap gates; there is no public catalogue yet.
 
 Read the [mission](docs/mission.md) and [implementation roadmap](docs/roadmap.md).
 
@@ -138,6 +141,7 @@ Use `--browser <name>` to give each parallel agent its own Chrome and its own se
 | `emulate device --width W --height H [--dpr N] [--mobile] [--touch] [--orientation portrait\|landscape] [--label name]` | Device metrics for one named page. Also `emulate status` and `emulate reset`. |
 | `webmcp list` | Tools the page registered on `document.modelContext`. Also `webmcp call <name> --args '{"k":"v"}'`. |
 | `macro record <name> --from-recording <file>` | Distil a recorded session into a guarded, parameterised path. Also `macro list`, `macro show`, `macro check`, `macro run`. |
+| `discover start\|show\|step\|export` | Persist caller-driven experiments and export selected paths as local candidates. |
 | `replay <file>` | Re-run a `pipe --record` file command by command. |
 | `batch` | Run a JSON array of commands from stdin. |
 | `pipe` | Persistent JSON stdin/stdout connection. |
@@ -237,8 +241,8 @@ Navigation Timing API so `--stealth` is untouched.
 ### Exit codes
 
 `0` success · `1` error, including a bad flag · `2` a claim this tool made did not hold · `130`
-Ctrl+C. `2` is an assertion, or a macro guard — the two things this tool promises about a page —
-so CI can tell "the page is wrong" from "the tool broke".
+Ctrl+C. `2` means an assertion or macro guard did not hold, including assertions in
+`discover step`. Operational errors and uncertain discovery outcomes exit `1`.
 
 ```bash
 chrome-agent fill --selector "#coupon" "SAVE10"
@@ -374,6 +378,24 @@ the same kind of claim. The report carries `stopped_by: "guard"` along with whic
 expected and what was there. A run that stopped for any other reason — the step itself failed, the
 page could not be read, the macro file is missing — exits `1`, with `stopped_by: "error"`.
 
+### Discovery across conversations
+
+The calling agent can persist an objective and its experiments, then hand the record to another
+process. Each proposal binds to a revision; identical retries retrieve the stored result. A
+crashed experiment stays uncertain. The browser reasoning remains in the calling agent.
+
+```bash
+chrome-agent --json discover start discovery.json --goal "Read the entry page" --url https://example.com --max-commands 10
+chrome-agent --json discover step discovery.json --proposal '{"id":"open","revision":0,"reason":"Observe the entry page","command":{"cmd":"goto","url":"https://example.com"},"checks":[{"cmd":"assert","what":"exists","selector":"h1"}]}'
+chrome-agent --json discover show discovery.json
+chrome-agent --json discover export discovery.json --name entry-page --steps open
+```
+
+This exports a local candidate with caller-declared checks. It does not independently validate
+the task or publish a recipe. The initial command profile accepts navigation within one origin,
+inspection, reads, extraction, assertions and waits; site JavaScript still runs normally.
+See [the protocol](docs/discovery.md) for parameterized reuse, limits and uncertainty handling.
+
 ### Files on disk
 
 For a complete workflow, see the [checked report export example](examples/report_export/README.md).
@@ -464,7 +486,7 @@ embeds a full LLM usage guide, and every error carries a `hint` naming the next 
 permissions: `{"permissions": {"allow": ["Bash(chrome-agent *)"]}}`.
 
 ```
-chrome-agent (3 MB Rust binary, ~29.7K lines of Rust in src/)
+chrome-agent (3 MB Rust binary, ~30.9K lines of Rust in src/)
     | CDP over WebSocket
     v
 Chrome (headless by default, no Node.js, no runtime)

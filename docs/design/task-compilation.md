@@ -16,6 +16,7 @@ autonomous discovery with a shared and private recipe lifecycle. The original pr
 | Offline macro preparation | `src/macros_prepare.rs`, `tests/macro_tasks_tests.rs` | Validate command shape, parameters and guards before opening Chrome. |
 | More complete recordings | `src/macros_record.rs`, `tests/macro_tests.rs` | Retain waits, assertions, reads and downloads; refuse promotion when essential behavior was lost. |
 | Outcome evidence | `src/macros_run.rs`, `src/commands/assert.rs` | Preserve command outputs and failed checks instead of treating dispatch as task completion. |
+| Discovery continuation | `src/discovery*.rs`, `tests/discovery_tests.rs` | Persist revision-bound experiments, retain uncertainty after interruption, and export selected paths as local candidates. See [the protocol](../discovery.md); autonomous discovery is not established by these scripted tests. |
 | Bounded observations | `src/commands/assert_wait.rs`, `tests/assert_wait_tests.rs` | Wait for a declared condition without repeating the action. |
 | Bounded browser discovery | `src/browser.rs`, `tests/browser_timeout_tests.rs` | Bound the complete HTTP response, including waiting for headers. This discovers a Chrome endpoint, not website capabilities. |
 | Shared execution protocol | `src/pipe_command.rs`, `src/pipe_dispatch.rs`, `examples/pipe_client.py` | Reuse command semantics across CLI, pipe, batch and macros; ordinary code supplies control flow. |

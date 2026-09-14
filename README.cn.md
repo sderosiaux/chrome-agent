@@ -22,7 +22,9 @@
 
 目前，chrome-agent 提供执行基础：一个通过 CDP 驱动 Chrome 的 3 MB Rust 二进制文件，支持页面观察、
 断言、结构化输出和本地宏。它报告输入值是否保留、点击是否被拦截，以及哪些结果无法观测，供调用它的
-Agent 判断实际发生了什么。任务自主发现和配方目录仍在规划中，尚未实现。
+Agent 判断实际发生了什么。仓库现已实现[持久化发现协议](docs/discovery.md)：调用方 Agent
+可以记录实验、跨进程继续探索，并导出本地候选宏。没有预设步骤的自主发现仍需通过 M1 验证；
+独立配方验证和公共目录尚未实现。
 
 项目方向见[使命说明](docs/mission.md)和[实施路线图](docs/roadmap.md)。
 
@@ -227,7 +229,9 @@ inspect。`goto` 清空 uid 映射但保留快照，所以 `diff` 会报 `docume
 
 ### 退出码
 
-`0` 成功 · `1` 错误，包括参数写错 · `2` 本工具做出的某个断言不成立 · `130` Ctrl+C。`2` 只有两个来源：
+`discover step` 中不成立的断言也返回 `2`；操作错误或结果不确定返回 `1`。
+
+`0` 成功 · `1` 错误，包括参数写错 · `2` 本工具做出的某个断言不成立 · `130` Ctrl+C。`2` 来自条件检查：
 `assert`，以及 `macro run` 里被检查过却不成立的 guard——这两者都是本工具对页面许下的承诺，所以 CI
 能区分「页面不对」和「工具坏了」。
 
@@ -400,7 +404,7 @@ API 测试，或者对一个自带 polyfill 的页面测试。在 `frame` 绑定
 `{"permissions": {"allow": ["Bash(chrome-agent *)"]}}`。
 
 ```
-chrome-agent（3 MB Rust 二进制，~29.7K 行 Rust 代码（src/ 下））
+chrome-agent（3 MB Rust 二进制，~30.9K 行 Rust 代码（src/ 下））
     | CDP over WebSocket
     v
 Chrome（默认无头，无 Node.js，无运行时）

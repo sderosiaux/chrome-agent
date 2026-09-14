@@ -3,7 +3,7 @@
 **Make websites learnable by agents.**
 
 Our mission is to turn websites into capabilities that agents discover, verify, reuse and
-maintain themselves. The calling agent supplies the reasoning; chrome-agent will preserve the
+maintain themselves. The calling agent supplies the reasoning; chrome-agent preserves the
 discovered knowledge and its validation evidence. Shared recipes will have a GitHub catalogue
 with automated validation and updates, starting with reading and extraction. Recipes that modify
 a site will follow later. Local and private recipes will use the same lifecycle.
@@ -11,11 +11,14 @@ a site will follow later. Local and private recipes will use the same lifecycle.
 Today, chrome-agent provides the execution foundation: a 3 MB Rust binary over CDP, browser
 observations, assertions, structured outputs and local macros. It reports retained values,
 intercepted clicks and missing observations so the calling agent can check what happened.
-Autonomous task discovery and the recipe catalogue are planned, not yet implemented.
+The repository now includes a persistent discovery protocol for caller-driven experiments,
+continuation and local candidate export. Autonomous discovery without a supplied procedure and
+independent recipe acceptance remain roadmap gates. See the
+[protocol](https://github.com/sderosiaux/chrome-agent/blob/main/docs/discovery.md).
 
 Read the [mission](https://github.com/sderosiaux/chrome-agent/blob/main/docs/mission.md) and [implementation roadmap](https://github.com/sderosiaux/chrome-agent/blob/main/docs/roadmap.md).
 
-chrome-agent v0.16.0 (~29.7K lines of Rust in `src/`, blank and comment-only lines excluded; 3 MB binary)
+chrome-agent v0.16.0 (~30.9K lines of Rust in `src/`, blank and comment-only lines excluded; 3 MB binary)
 
 Full documentation: [github.com/sderosiaux/chrome-agent](https://github.com/sderosiaux/chrome-agent).
 
@@ -124,7 +127,7 @@ each parallel agent its own `--browser <name>`, or they corrupt each other's ses
 | `unknown` | Nothing could be compared. Never repeat the action — it may already have landed. |
 
 Exit codes: `0` success, `1` error, `2` a claim this tool made did not hold, `130` Ctrl+C. `2` is
-a failed `assert`, or a `macro run` guard that was checked and did not hold — nothing else.
+a failed `assert`, a `macro run` guard, or a `discover step` assertion that did not hold.
 
 ## uids
 

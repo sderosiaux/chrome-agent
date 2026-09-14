@@ -125,8 +125,8 @@ to cap individual CDP calls.
 
 - **0** it held · **2** the condition did not hold (report or repair) · **1** the check could not
   finish: no browser, a selector matching nothing, an unparseable regex, a CDP timeout.
-  The only other thing that exits 2 is a `macro run` guard that was checked and did not hold — the
-  same kind of claim. A bad flag exits 1. Inside `pipe`/`batch` an assertion has no exit
+  A `macro run` guard or a `discover step` assertion that did not hold also exits 2.
+  A bad flag exits 1. Inside `pipe`/`batch` an assertion has no exit
   code of its own: it is `ok:false` with the same `assertion` object, and a `batch` that stopped
   on it exits 1, not 2.
 - `assert` is a read: no change report, no verdict, and it never clicks. Secrets are compared but
@@ -246,6 +246,38 @@ conditions are checked during replay. Use `--json` to retrieve each completed `s
 the stopped step's `result`, including data, assertion evidence and download paths. Declared secret
 inputs are redacted. Task success requires explicit outcome assertions supplied by the caller.
 
+## Discovery that survives a new conversation
+
+Use `discover` when exploring an unfamiliar task and another process may need to continue.
+You supply the reasoning; the CLI persists the objective, hypotheses, unknowns and command
+responses. It does not infer task completion from a successful browser command.
+
+```bash
+chrome-agent --json discover start discovery.json --goal "Read the entry page" --url https://example.com --max-commands 10
+chrome-agent --json discover step discovery.json --proposal '{"id":"open","revision":0,"reason":"Observe the entry page","command":{"cmd":"goto","url":"https://example.com"},"checks":[{"cmd":"assert","what":"exists","selector":"h1"}]}'
+chrome-agent --json discover show discovery.json
+chrome-agent --json discover export discovery.json --name entry-page --steps open
+```
+
+Use the returned revision for your next proposal and the browser/page names supplied at start.
+Identical proposals with the same ID retrieve earlier receipts (`replayed:true`); changed
+proposals under that ID are refused. A process loss leaves a pending experiment whose outcome
+is uncertain. Read the record and submit a new observation; do not blindly repeat the old step.
+
+The initial profile permits same-origin `goto`, `inspect`, `read`, `text`, `extract`, `assert`
+and `wait`. The first experiment must navigate to the entry URL. Defaults: 50 commands and
+1,800 seconds including time between calls. Checks and failed or unresolved attempts consume
+budget. Responses above 64 KiB stop with uncertainty; narrow the next read. The file contains
+raw inputs and observations and stays local. Site JavaScript can still cause external effects;
+this command profile is not a sandbox for untrusted recipes.
+
+Export selects successful experiments in order, requires a starting navigation and final
+assertion, refuses document uids, and creates a new macro name. It preserves parameter templates
+without input defaults. The candidate still needs fresh-input replay and independent result
+checks. Legacy `macro run` does not enforce discovery origin or budgets. `discover step` exits
+0 for observed commands/checks, 2 for an assertion that did not hold, and 1 for error or
+uncertainty. `start`, `show` and `export` never open Chrome.
+
 ## Global flags
 
 Accepted on **either side of the verb**. Two exceptions: `--timeout` and `--max-depth`. A command
@@ -277,7 +309,7 @@ Refused outright: `--user-data-dir`, `--remote-debugging-port`, `--remote-debugg
 `--proxy-server` (use the global one), `--headless` (use `--headed`).
 
 Exit codes: **0** success · **1** error (including a bad flag, and a `batch --stop-on-error` that
-stopped) · **2** a claim this tool made did not hold — an assertion, or a `macro run` guard ·
+stopped) · **2** an assertion (including `discover step`) or a `macro run` guard did not hold ·
 **130** Ctrl+C. JS dialogs auto-accept so the page never hangs.
 
 ### Bot protection

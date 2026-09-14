@@ -2,7 +2,9 @@
 
 Decision: 2026-09-13. This document sets the product direction. The [roadmap](roadmap.md)
 defines the work and its acceptance criteria. The discovery and recipe system described here
-is planned; the current release supplies browser execution, observations and local macros.
+is partly implemented: the repository supplies browser execution, local macros and a
+[persistent discovery protocol](discovery.md). Independent recipe acceptance and the catalogue
+remain planned.
 
 ## Make websites learnable by agents
 

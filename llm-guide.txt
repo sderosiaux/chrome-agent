@@ -249,6 +249,28 @@ LLM USAGE GUIDE:
     # other reason (stopped_by "error"): the step itself failed, the page could not be read, the
     # macro file is missing or malformed. Branch on stopped_by, or on the exit code.
 
+  Persistent discovery (the calling agent chooses experiments; no embedded model):
+    chrome-agent --json discover start discovery.json --goal "Read the entry page" --url https://example.com --max-commands 10
+    chrome-agent --json discover step discovery.json --proposal '{"id":"open","revision":0,"reason":"Observe the entry page","command":{"cmd":"goto","url":"https://example.com"},"checks":[{"cmd":"assert","what":"exists","selector":"h1"}]}'
+    chrome-agent --json discover show discovery.json
+    chrome-agent --json discover export discovery.json --name entry-page --steps open
+    # start/show/export never open Chrome. step requires the browser/page names used at start.
+    # Propose one command plus optional assertion checks, hypotheses and unknowns. Use the
+    # returned revision. Same id + identical proposal retrieves the stored receipt (replayed:true);
+    # different content under that id or a stale revision is refused before dispatch.
+    # Profiles: local_observation_v1 permits same-origin goto, inspect, read, text, extract,
+    # assert and wait. First command must goto the exact entry URL. This is not a sandbox:
+    # site scripts and scrolling can cause external effects. No public recipe acceptance.
+    # Default budget: 50 commands (max 100), 1800 seconds including time between calls (max 86400).
+    # Checks, failed attempts and unresolved reservations consume budget. Model usage is null.
+    # Exit 0: observed; 2: not_held assertion; 1: error or uncertain. A killed process leaves
+    # pending. Never repeat that experiment: read show, then submit a new observation if needed.
+    # Responses and inputs stay in the private local file. >64 KiB responses stop with uncertainty.
+    # Export selects successful IDs in order, starts with goto, ends with assert, refuses uids
+    # and existing macro names. It retains templates but no input defaults or observation journal.
+    # The result is a local candidate. macro run does not enforce discovery scope or budget.
+    # Verify with new inputs in a fresh context. Full protocol and limits: docs/discovery.md.
+
   Pipe and batch (one connection, uids stay valid across commands; ~12 ms less overhead per
   command -- measured 1.5x on a read stream, 1.1x on fills and clicks, so use it for the uids):
     echo '{"cmd":"goto","url":"https://example.com","inspect":true}' | chrome-agent pipe

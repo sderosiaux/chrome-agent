@@ -2,8 +2,9 @@
 
 Status: product reset, 2026-09-13. The [mission](mission.md) is the source of product direction.
 The [design](design/recipe-discovery.md) describes the discovery and trust boundaries. Items
-below are planned unless explicitly marked shipped. No discovery command, recipe registry or
-automatic merge service is currently implemented.
+below are planned unless explicitly marked implemented. The first
+[discovery protocol](discovery.md) is implemented; independent recipe acceptance, the registry
+and automatic merge service remain planned.
 
 ## What changes now
 
@@ -22,15 +23,15 @@ new investments follow the decisions below.
 
 Two product decisions are settled: the calling agent drives discovery, and the first public
 catalogue accepts read and extraction recipes. External-write recipes enter the catalogue only
-after the later acceptance gate below. These decisions unblock the M1 discovery protocol.
+after the later acceptance gate below.
 
 ## Investment decisions
 
 | Area | Decision | Next evidence or work |
 |---|---|---|
 | Observations, assertions, result identity and uncertainty | Invest | Make these the evidence used to accept or reject discovered capabilities. Preserve operational errors separately from failed conditions. |
-| Autonomous exploration | Add through the calling agent | Define a continuation protocol over goals, known state, unknown transitions, permissions and remaining budget. Persist failed attempts with their context. |
-| Site knowledge and recipe memory | Add | Store conditions, observations, parameters, checks and revisions; retrieve only knowledge applicable to the current task and environment. |
+| Autonomous exploration | Invest through the calling agent | Use the persistent experiment protocol to test discovery without supplied procedures, then fresh-context reuse against an independent evaluator. |
+| Site knowledge and recipe memory | Extend | The local journal stores observations, parameters, checks and revisions. Add applicability checks and retrieval across discoveries based on M1/M2 evidence. |
 | Recomposition and repair | Invest | Combine known capabilities for an unseen request; rediscover changed transitions while retaining result checks and unresolved effects. |
 | Shared and private recipe sources | Add | Source-qualified identity, immutable references, deterministic resolution, private forks and explicit update policy. |
 | Independent recipe acceptance | Add | A protected evaluator checks the actual outcome, allowed effects and artifact provenance. Candidate code cannot edit its own acceptance criteria. |
@@ -69,6 +70,13 @@ The following questions need experiments before an architectural commitment:
 | How should catalogue validation scale to authenticated sites? | Personal accounts and private traces are excluded from public validation. | Prove a resettable test tenant or publish a narrower capability whose acceptance conditions can be independently exercised. |
 
 ## M1: discover a capability without a supplied procedure
+
+Implemented foundation: `discover start/show/step/export` persists caller proposals,
+observations and uncertainty, enforces revisions and experiment budgets, and exports selected
+paths as local candidate macros. Real-Chrome tests cover process loss and fresh-input reuse.
+The profile limits explicit observation commands; it is not a public recipe sandbox.
+**M1 remains open:** scripted protocol tests do not establish autonomous discovery. The next
+experiment must isolate the calling agent from the application source and independent evaluator.
 
 Build the smallest complete discovery loop through a continuation protocol for the calling
 agent, using the existing executor. Persist each selected experiment, its reason, before/after

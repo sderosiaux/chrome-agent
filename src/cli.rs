@@ -718,6 +718,12 @@ pub enum Command {
     /// Stop the background daemon
     Stop,
 
+    /// Persist caller-driven discovery experiments and export local candidate macros
+    Discover {
+        #[command(subcommand)]
+        action: crate::discovery_cmd::DiscoveryAction,
+    },
+
     /// Daemon management
     Daemon {
         #[command(subcommand)]
