@@ -81,21 +81,44 @@ synthetic site. Its generated recipe passes ordinary replay but falsely claims c
 on a wrong-section response and a missing pagination cursor. **M1 remains open.** A successful
 discovery does not establish an acceptable recipe.
 
+Resume point, saved 2026-09-13: the evaluation is committed at `a5571b3`. The candidate passes
+four of nine acceptance cases and makes two false success claims. Implementation of the plan
+below has not started. The next work is the evaluated repair loop with explicit completeness
+conditions; catalogue work follows the existing later gates.
+
+The first hard problem is deciding what establishes completion when a real site's expected
+dataset is unavailable. Define the observable evidence required for each capability and retain
+uncertainty when it is missing. Site-specific conditions are discovered and tested by the
+calling agent. Passing fixture tests does not prove completeness on every future site state.
+
 Do the next work in this order:
 
-1. Make completeness and applicability enforceable acceptance conditions. Use the committed
-   evaluator to reject missing termination evidence, wrong scope and unsupported ordering
-   assumptions. Valid empty results must succeed. Repairs receive execution observations, while
-   the acceptance criteria and withheld answers stay outside the calling agent's control.
-2. Demonstrate a repaired candidate passing these cases and new withheld variants with unchanged
-   result requirements. Retain its rejected predecessor and bind the evidence to the exact source
-   digest. This is still local evaluation, not catalogue eligibility.
-3. Reduce repeated discovery through an explicit executable candidate reference and its tested
-   conditions. In the paired pilot, the informed agent used the program only after exploring the
-   site again; supplying source code alone did not save work. Require correct outcomes and fewer
-   discovery calls in fresh contexts before adding retrieval infrastructure.
-4. Expand to another site family and the remaining M1 adversarial cases. The Python container
-   prototype does not confine arbitrary website effects; M3 remains a separate gate.
+1. Make completeness and applicability enforceable acceptance conditions. Bind result scope,
+   record identities, pagination progress and recognized termination evidence to observations
+   retained by the executor. A candidate's `complete: true` cannot establish those facts.
+   For the current fixture, distinguish an absent cursor from an explicit terminal value; do
+   not stop on an old page without evidence supporting the ordering assumption. Valid empty
+   results must succeed. Test the site-specific hypotheses before making them reusable conditions.
+2. Automate bounded repair through the calling agent. Give it the candidate, execution
+   observations and the failed condition. Keep the evaluator's answers and acceptance rules
+   outside its control. Execute each proposed revision in isolation, retain the rejected parent
+   and bind validation evidence to the exact source digest. Acceptance: pass all nine current
+   cases and new withheld variants without false successes or manual recipe edits. Vary data,
+   pagination, empty results and inconsistent responses; cap both attempts and execution work.
+   This remains local evaluation, not catalogue eligibility.
+3. Make known capabilities directly executable. Give the calling agent a concise description,
+   parameters, tested application conditions and an immutable executable reference. The agent
+   selects the capability; the executor checks its conditions and runs that revision. A failed
+   condition returns the observations needed for targeted discovery. In the paired pilot, the
+   informed agent explored again before using the program, so supplying source alone did not
+   save work. Acceptance: correct execution without renewed exploration across multiple fresh
+   contexts when the conditions hold. Include verification costs in the comparison before adding
+   retrieval infrastructure.
+4. Test another site family, then deliberately change a previously discovered path. Require
+   the agent to repair the affected path while preserving the result requirements, and retain
+   the evidence showing what was reused and rediscovered. Cover the remaining M1 adversarial
+   cases. The Python container prototype does not confine arbitrary website effects; M3 remains
+   a separate gate.
 
 Keep the current observation profile. The caller discovered the page's cursor feed by reading
 delivered JavaScript; this case did not require clicks or a new HTTP command. Keep fixed macros
