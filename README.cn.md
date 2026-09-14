@@ -14,15 +14,17 @@
   <a href="README.md">English</a> | <a href="README.cn.md">简体中文</a>
 </p>
 
-**可以编译的网页任务。**
+**让 Agent 自主学习网站的操作方式。**
 
-浏览器不会回话。点击落在 cookie 横幅上，表单丢掉你刚输入的内容，页面在操作中途跳走——工具照样返回成功。
-Agent 接下来做的一切，都建立在这个"成功"之上。
+我们的使命是将网站转化为 Agent 能够自主发现、验证、复用和维护的能力。Agent 应能在陌生网站上
+探索任务的完成路径，并将所得知识保存为可复用的操作配方。共享配方将通过 GitHub 目录进行自动验证
+和更新；本地及私有配方也将支持相同的生命周期。
 
-chrome-agent 在每次操作之后回读页面，告诉你到底是哪一种：变更生效、点击被别的元素接走，或者什么都观测不到。
-一个词，JSON 格式，可以直接用来分支。
+目前，chrome-agent 提供执行基础：一个通过 CDP 驱动 Chrome 的 3 MB Rust 二进制文件，支持页面观察、
+断言、结构化输出和本地宏。它报告输入值是否保留、点击是否被拦截，以及哪些结果无法观测，供调用它的
+Agent 判断实际发生了什么。任务自主发现和配方目录仍在规划中，尚未实现。
 
-一个 3 MB 的 Rust 二进制文件，通过 CDP 驱动 Chrome。不需要 Node，不需要 Playwright，不需要守护进程。
+项目方向见[使命说明](docs/mission.md)和[实施路线图](docs/roadmap.md)。
 
 > 独立项目。与 Google 或 Chrome 团队无关联、无背书、无赞助。
 
@@ -379,36 +381,17 @@ API 测试，或者对一个自带 polyfill 的页面测试。在 `frame` 绑定
 | 卡在原生 `alert`/`confirm` 上 | 你传了 `--dialog manual`。 | 去掉它，或者自己应答对话框。 |
 | `network --abort` 什么都没拦到 | 它是阻塞式的，只运行 `--live N` 秒。 | 在导航之前就启动它。 |
 
-## 对比
-
-|  | chrome-agent | agent-browser (Vercel) | Playwright MCP |
-|---|---|---|---|
-| 语言 | Rust | Rust | TypeScript |
-| 体积 | 3 MB，零运行时 | 3 MB CLI + 面板 + 云服务商 | Node + Playwright |
-| 启动 | 实测 12 ms，浏览器已在跑时的一条命令 | 守护进程（首次之后快） | 冷启动 |
-| UID 稳定性 | `backendNodeId`，多次 inspect 之间稳定 | 顺序 `@e1`，每次快照重新分配 | 无（用选择器） |
-| 操作 + 观察 | `--inspect` 参数，一次调用 | 另外调一次快照 | 另外调一次 |
-| 合规性报告 | 每个操作都有 `verdict`/`next` | 无 | 无 |
-| 反检测 | 7 个 CDP 补丁 | 交给云服务商 | 无 |
-| 阅读模式 | `read`（Readability.js） | 无 | 无 |
-| 记录抽取 | `extract`，结构化，不调用 LLM | 无 | 无 |
-| PDF 导出 | `pdf` | 无 | 无 |
-| MCP server | 无 | 有 | 有 |
-| 云服务商、iOS/Safari | 无（可 `--connect` 到任何东西） | 有 | 无 |
-| 代码量 | ~29.7K 行 Rust 代码（src/ 下，不含空行与纯注释行；有测试重新测量） | ~40K 行（他们的数字，此处未核实） | Playwright |
+## 结构化抽取
 
 `extract` 用 MDR/DEPTA 风格的启发式（兄弟节点相似度、内容异质性、文本/链接比）在结构上找出重复记录，而不是
 让模型去读 DOM。在 Hacker News 首页，它用 1,571 tokens 交出 30 条记录，无障碍树要 5,652，原始 HTML 要
 8,727（[`scripts/measure.sh`](scripts/measure.sh)）。差距取决于页面：在一个通篇只有列表的博客归档页上，两者
 相差无几。
 
-## 什么时候不该用它
+## 当前范围
 
-- 你需要一个测试框架——用 Playwright。
-- 你需要 MCP server——这里没有。
-- 你需要浏览器集群、代理池或验证码破解——去看 Browserbase、Steel、Browserless。
-- 你需要 Firefox 或 Safari——这个工具说的是 CDP，只支持 Chrome。
-- 你想要一个有支持保障的产品——这是一个人的项目。
+当前运行时通过 CDP 操作 Chrome，尚未内置模型、MCP server、托管调度器或浏览器集群。
+路线图说明了将在执行基础之上构建的自主发现和配方能力。现有命令在此期间继续可用。
 
 ## 从 Agent 里使用
 

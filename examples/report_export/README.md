@@ -147,5 +147,5 @@ format or browser command was needed for this workflow.
 
 The shared [pipe caller](../pipe_client.py) handles JSONL framing, timeouts, terminal failures and
 process cleanup. The [pagination and draft examples](../verified_workflows/README.md) reuse it.
-This example does not measure discovery cost, model usage during discovery, or a speed advantage
-over agent-driven execution.
+This authored procedure does not demonstrate autonomous discovery. It supplies an execution and
+verification reference for the [discovery and recipe roadmap](../../docs/roadmap.md).

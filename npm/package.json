@@ -1,7 +1,7 @@
 {
   "name": "chrome-agent",
   "version": "0.16.0",
-  "description": "Web tasks that compile. Browser automation that reads the page back after every action and reports what actually happened, in JSON. Single binary, CDP direct.",
+  "description": "Browser execution for agents: observe actions, check outcomes and reuse local workflows. Rust binary over CDP.",
   "type": "module",
   "bin": {
     "chrome-agent": "./bin/chrome-agent.js"

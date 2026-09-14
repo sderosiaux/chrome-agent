@@ -173,7 +173,7 @@ measure_workload() {
 }
 
 # One CLI command against an already-running browser: the per-invocation floor on its own,
-# which is what the "startup" row of the README comparison table is about.
+# measured separately from the savings of keeping a pipe connection open.
 measure_floor() {
   local br="bench-floor-$$"
   "$BIN" --browser "$br" goto "$READ_PAGE" >/dev/null 2>&1 || true

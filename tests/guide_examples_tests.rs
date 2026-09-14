@@ -311,8 +311,8 @@ fn the_published_size_of_this_codebase_is_the_measured_one() {
         ("README.cn.md", include_str!("../README.cn.md")),
         ("npm/README.md", include_str!("../npm/README.md")),
     ];
-    let mut found = 0;
     for (name, text) in published {
+        let mut found = 0;
         for (index, line) in text.lines().enumerate() {
             let Some(claim) = published_line_count(line) else {
                 continue;
@@ -327,18 +327,17 @@ fn the_published_size_of_this_codebase_is_the_measured_one() {
                 drift * 100 / measured
             );
         }
+        assert!(
+            found > 0,
+            "{name} must state its published source-size metric"
+        );
     }
-    assert!(
-        found >= 4,
-        "expected every published size to state its metric, found {found} — a bare number in a \
-         table is the shape this test exists to refuse"
-    );
 }
 
 /// A published `~NN.NK lines of Rust in src/` claim, as a line count.
 ///
-/// Read BACKWARDS from the phrase, not forwards from the first `~`: the comparison tables put
-/// a competitor's figure in the next cell. A bare `~10.2K lines` is deliberately not matched.
+/// Read backwards from the metric phrase so another number on the line cannot become the
+/// claim. A bare `~10.2K lines` is deliberately not matched.
 fn published_line_count(line: &str) -> Option<usize> {
     // One marker per language: a guard that only reads English leaves the translated file
     // stale.

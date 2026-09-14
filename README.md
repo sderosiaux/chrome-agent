@@ -14,16 +14,19 @@
   <a href="README.md">English</a> | <a href="README.cn.md">简体中文</a>
 </p>
 
-**Web tasks that compile.**
+**Make websites learnable by agents.**
 
-A browser doesn't report back. The click lands on a cookie banner, the form drops what you typed,
-the page navigates away mid-action, and the tool returns success anyway. Everything the agent does
-next is built on that.
+Our mission is to turn websites into capabilities that agents discover, verify, reuse and
+maintain themselves. An agent should learn how to complete a task on an unfamiliar site and
+preserve that knowledge as a recipe. Shared recipes will have a GitHub catalogue with automated
+validation and updates; local and private recipes will follow the same lifecycle.
 
-chrome-agent reads the page back after every action and answers which one it was: the change held,
-something else took the click, or nothing could be observed. One word, in JSON, to branch on.
+Today, chrome-agent provides the execution foundation: a 3 MB Rust binary over CDP, browser
+observations, assertions, structured outputs and local macros. It reports retained values,
+intercepted clicks and missing observations so the calling agent can check what happened.
+Autonomous task discovery and the recipe catalogue are planned, not yet implemented.
 
-One 3 MB Rust binary over CDP. No Node, no Playwright, no daemon.
+Read the [mission](docs/mission.md) and [implementation roadmap](docs/roadmap.md).
 
 > Independent project. Not affiliated with, endorsed by, or sponsored by Google or the Chrome team.
 
@@ -439,23 +442,7 @@ main-world script is invisible from the isolated world.
 | Blocked on a native `alert`/`confirm` | You passed `--dialog manual`. | Drop it, or answer the dialog. |
 | `network --abort` catches nothing | It is blocking and runs for `--live N` seconds. | Start it before navigating. |
 
-## Comparison
-
-|  | chrome-agent | agent-browser (Vercel) | Playwright MCP |
-|---|---|---|---|
-| Language | Rust | Rust | TypeScript |
-| Binary | 3 MB, zero runtime | 3 MB CLI + dashboard + cloud providers | Node + Playwright |
-| Startup | 12 ms measured, one command on a running browser | daemon (fast after first) | cold start |
-| UID stability | `backendNodeId`, stable across inspects | sequential `@e1`, reassigned per snapshot | N/A (selectors) |
-| Action + observe | `--inspect` flag, one call | separate snapshot call | separate call |
-| Compliance reporting | `verdict`/`next` on every action | no | no |
-| Stealth | 7 CDP patches | delegated to cloud providers | none |
-| Reader mode | `read` (Readability.js) | none | none |
-| Record extraction | `extract`, structural, no LLM call | none | none |
-| PDF export | `pdf` | none | none |
-| MCP server | none | yes | yes |
-| Cloud providers, iOS/Safari | none (`--connect` to anything) | yes | none |
-| Codebase | ~29.7K lines of Rust in `src/` (blank and comment-only lines excluded; a test re-measures it) | ~40K lines (their figure, unverified here) | Playwright |
+## Structured extraction
 
 `extract` finds repeating records structurally with MDR/DEPTA-style heuristics (sibling similarity,
 content heterogeneity, text-to-link ratio) instead of asking a model to read the DOM. On the Hacker
@@ -463,13 +450,11 @@ News front page it hands over 30 stories as records in 1,571 tokens against 5,65
 accessibility tree and 8,727 for raw HTML ([`scripts/measure.sh`](scripts/measure.sh)). The gap
 depends on the page: on a blog archive that is nothing but a list, the two are close.
 
-## When not to use it
+## Current scope
 
-- You need a test framework — use Playwright.
-- You need an MCP server — there is none here.
-- You need a browser fleet, a proxy pool or CAPTCHA solving — Browserbase, Steel, Browserless.
-- You need Firefox or Safari — this speaks CDP, so Chrome only.
-- You want a supported product — this is one person's project.
+The runtime targets Chrome through CDP. It has no built-in model, MCP server, hosted scheduler,
+or managed browser fleet. The roadmap defines the discovery and recipe capabilities to build
+on this executor. Existing commands remain available while that work proceeds.
 
 ## Using it from an agent
 

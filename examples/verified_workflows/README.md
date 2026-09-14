@@ -156,5 +156,7 @@ total, next page and typed row attributes; `/drafts/search` exposes a complete s
 `/drafts/new` exposes the reference, title and EUR amount fields. Adapting them requires inspecting
 the real application's controls, pagination consistency and search semantics. A site without
 a reliable revision or complete reference lookup needs different checks or a stated limitation.
-Discovery cost and the savings from reuse on a real site remain unmeasured. The site task catalogue
-and marketplace remain deferred.
+These authored examples test execution and result handling. Autonomous discovery and maintenance
+are the next product direction, described in the [mission](../../docs/mission.md) and
+[roadmap](../../docs/roadmap.md). The planned GitHub catalogue will distribute independently
+validated recipes and support private sources. It is not implemented yet.
