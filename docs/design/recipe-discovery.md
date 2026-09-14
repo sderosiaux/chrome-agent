@@ -2,23 +2,38 @@
 
 Status: target design, 2026-09-13. This is not a description of shipped commands. The
 [mission](../mission.md) defines the intended experience; the [roadmap](../roadmap.md) contains
-implementation gates and the two pending product decisions.
+implementation gates and the settled product decisions.
 
 ## Components and authority
 
 | Component | Responsibility | Authority it does not receive |
 |---|---|---|
-| Discovery controller | Select observations and experiments, propose capabilities, compose paths and propose repairs | Changing the user's goal, budgets, access or publication policy |
+| Calling agent | Reason about observations, select experiments, propose capabilities, compose paths and propose repairs | Changing the user's goal, execution limits, access or publication policy |
+| Discovery protocol | Return applicable knowledge and evidence, record experiments and maintain resumable discovery state | Claiming that a model proposal is an observed fact |
 | Browser executor | Enforce the selected execution policy, perform actions, collect observations and preserve uncertain effects | Declaring arbitrary business success from a successful dispatch |
 | Local knowledge store | Keep scoped observations, hypotheses, capabilities, revisions and run journals | Promoting a historical observation into a current guarantee |
 | Recipe resolver | Select an applicable source-qualified revision and its pinned dependencies | Installing a same-name replacement or widening permissions silently |
 | Independent validator | Test a candidate against protected criteria and produce revision-bound evidence | Letting the candidate rewrite the criteria used to accept it |
 | Catalogue publisher | Check acceptance records, merge eligible revisions and publish trust metadata | Executing candidate code with publication credentials |
 
-Controller hosting depends on the pending product decision: a product-run explorer with a
-configurable model, or a protocol driven by the calling agent. Either way, the discovery loop,
-knowledge lifecycle and validation behavior must be defined by chrome-agent. A prompt telling
-an agent to write a script is insufficient evidence that those components exist.
+Decision: discovery is driven by the calling agent. It owns inference and model access;
+chrome-agent defines the continuation protocol, knowledge lifecycle and validation behavior.
+A prompt telling an agent to write a script is insufficient evidence that those components
+exist. No embedded model or provider layer is planned.
+
+Each continuation exposes the objective and input binding, policy and state revision,
+applicable knowledge, observed results, unresolved effects, remaining unknowns and execution
+budget. The agent proposes an experiment against that revision, with its expected observation.
+The executor validates the proposal, records the attempt and returns actual evidence.
+
+Persist experiment identity before dispatch. A repeated request retrieves the recorded outcome
+or reports an unresolved attempt; it must not silently repeat the browser action. Refuse a
+proposal based on stale state. A replacement agent can resume using the persisted record
+without the previous conversation. This is a planned protocol contract, not a shipped API.
+
+Model usage is enforced by the caller and may be reported with its provenance. Missing usage
+is unknown, not zero. chrome-agent enforces its own browser and continuation limits; it cannot
+bound inference or unrelated actions performed outside its interfaces.
 
 The existing Rust executor and typed pipe commands are the starting point. Preserve shared
 dispatch and compatibility. Choose the recipe execution representation through a confinement
@@ -156,8 +171,13 @@ revision. Clients report stale trust information and follow their configured fre
 ## Automated acceptance and publication
 
 The target pipeline is candidate creation, isolated validation, acceptance of an exact digest,
-merge, and distribution of that digest. Public eligibility for read and write recipes is a
-pending product decision; the pipeline must state which contexts it actually validates.
+merge, and distribution of that digest. The first public catalogue accepts read and extraction
+recipes. Eligibility depends on tested behavior and enforced capabilities; a read label cannot
+hide a mutation such as creating an export job. Local result files need scoped output access.
+
+Public write recipes require a later policy revision, isolated test contexts and evidence for
+effect verification and recovery. This catalogue restriction leaves existing trusted local
+mutation commands available. A routine recipe repair cannot expand its accepted effect class.
 
 The validator runs protected code and tests against an untrusted candidate. It has no publisher
 credentials. Candidate-supplied tests may add evidence, but cannot replace protected checks.

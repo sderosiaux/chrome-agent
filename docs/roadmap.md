@@ -20,12 +20,16 @@ backlog have been removed. The previous experiments are summarized in
 [execution foundations](design/task-compilation.md). Existing CLI commands remain supported;
 new investments follow the decisions below.
 
+Two product decisions are settled: the calling agent drives discovery, and the first public
+catalogue accepts read and extraction recipes. External-write recipes enter the catalogue only
+after the later acceptance gate below. These decisions unblock the M1 discovery protocol.
+
 ## Investment decisions
 
 | Area | Decision | Next evidence or work |
 |---|---|---|
 | Observations, assertions, result identity and uncertainty | Invest | Make these the evidence used to accept or reject discovered capabilities. Preserve operational errors separately from failed conditions. |
-| Autonomous exploration | Add | Select experiments from a goal, known state, unknown transitions, permissions and remaining budget. Persist failed attempts with their context. |
+| Autonomous exploration | Add through the calling agent | Define a continuation protocol over goals, known state, unknown transitions, permissions and remaining budget. Persist failed attempts with their context. |
 | Site knowledge and recipe memory | Add | Store conditions, observations, parameters, checks and revisions; retrieve only knowledge applicable to the current task and environment. |
 | Recomposition and repair | Invest | Combine known capabilities for an unseen request; rediscover changed transitions while retaining result checks and unresolved effects. |
 | Shared and private recipe sources | Add | Source-qualified identity, immutable references, deterministic resolution, private forks and explicit update policy. |
@@ -39,20 +43,21 @@ new investments follow the decisions below.
 | Human teaching as the learning mechanism | Remove from mission | People provide goals, access and permissions. The system acquires procedural knowledge. |
 | Marketplace billing, hosted browser fleet, visual workflow editor, vendor memory adapters | Outside scope | They do not establish discovery or recipe trust. |
 | Foundation-model training and exhaustive site crawling | Outside scope | Start with model reasoning over a partial operational memory and goal-directed experiments. |
+| Embedded explorer model and provider integrations | Outside scope | The calling agent supplies reasoning and model access. chrome-agent supplies persistent discovery state and execution. |
 
-## Decisions requiring product judgment
+## Settled decisions and remaining experiments
 
-Two questions are pending. Their dependent implementation must wait for an answer:
+The calling agent owns model selection, inference and its model-usage budget. chrome-agent owns
+the continuation protocol, stored knowledge, browser execution limits and validation records.
+Usage supplied by the caller must be identified as reported; unavailable model usage stays
+unknown. The executor cannot enforce a model budget outside its process.
 
-1. **Discovery controller:** should the product run its own explorer with a configurable model,
-   or organize discovery through the agent that already calls chrome-agent? The former owns the
-   autonomous session and model lifecycle; the latter must define and enforce a continuation
-   protocol with the calling agent. Both need product-owned memory, budgets and validation.
-2. **Initial public acceptance scope:** start with read/extraction recipes and add external
-   writes after a test environment is available, or include both in the first catalogue release?
-   This determines which isolated targets and effect verifiers are required before auto-merge.
+The first public acceptance policy covers reading and extracting information. A recipe's name
+or declared intent cannot establish that it is read-only. A flow that creates an export job,
+saves a draft or changes a cart has external effects and needs the later write-recipe gate.
+Local output files are allowed only within the execution policy's declared output locations.
 
-Other questions need experiments rather than an architectural commitment:
+The following questions need experiments before an architectural commitment:
 
 | Question | Current treatment | Evidence that decides it |
 |---|---|---|
@@ -65,10 +70,11 @@ Other questions need experiments rather than an architectural commitment:
 
 ## M1: discover a capability without a supplied procedure
 
-Build the smallest complete discovery loop, using the existing executor. Persist each selected
-experiment, its reason, before/after observations, effects, result checks and remaining unknowns.
-Separate candidate knowledge from knowledge supported by a validation run. Record action,
-elapsed-time and model-usage budgets; stop or return uncertainty when they are exhausted.
+Build the smallest complete discovery loop through a continuation protocol for the calling
+agent, using the existing executor. Persist each selected experiment, its reason, before/after
+observations, effects, result checks and remaining unknowns. Separate candidate knowledge from
+knowledge supported by a validation run. Enforce browser action and elapsed-time limits; expose
+remaining work and caller-reported model usage without claiming control over external inference.
 
 Use an unfamiliar application in an isolated test environment. The explorer receives a URL,
 objective, input values, permissions and browser tools. Its environment must deny access to the
@@ -80,6 +86,8 @@ Acceptance:
 - Discover a read/extraction path without selectors, page-specific instructions or human help.
 - Generate a candidate recipe with parameter bindings and input-bound result checks.
 - A fresh execution with no original conversation reuses it on held-out inputs.
+- A replacement calling agent resumes the persisted discovery state after interruption; stale
+  proposals are refused and resending an experiment does not silently repeat an action.
 - The independent evaluator checks exact identities, fields, scope and completeness, not the
   candidate's success message. Record false successes and incomplete results separately.
 - Test irrelevant navigation loops, duplicate labels, delayed rendering, malformed model output,
@@ -153,9 +161,10 @@ Acceptance:
 - Withdraw a broken revision, stop selecting it, and verify client behavior with cached trust
   data. A fallback revision must still pass current context checks before use.
 
-Initial public read/write eligibility depends on the product decision above. A site without an
-independently testable outcome cannot receive the same acceptance claim as a fully exercised
-recipe. It may remain a private or explicitly experimental candidate.
+Initial public eligibility is limited to read and extraction recipes. Test attempted mutations
+hidden behind a read label, including export-job creation. A site without an independently
+testable outcome cannot receive the same acceptance claim as a fully exercised recipe. It may
+remain a private or explicitly experimental candidate.
 
 ## M5: maintain the shared knowledge through use
 
@@ -166,7 +175,21 @@ itself has changed. Repairs follow the same independent acceptance and publicati
 Acceptance: detect drift, generate and validate a repair, publish a new revision, and update an
 eligible client under its configured policy. Demonstrate that a private fork stays private and
 that public updates do not overwrite it. Test login expiry, rate limiting, repeated repair
-failure and an unavailable catalogue; bound the model and browser work in every case.
+failure and an unavailable catalogue; bound browser work and continuation requests. Model work
+remains subject to the calling agent's limits. A maintenance trigger must invoke a calling agent
+to perform rediscovery; the CLI does not run an embedded model when the site changes.
+
+## Later gate: public recipes with external effects
+
+Extend catalogue eligibility only after demonstrating isolated, resettable test contexts for
+the proposed effect classes. Validate the intended write, absence of unintended writes, an
+already-satisfied result and recovery after interruption or response loss. Browser retries and
+concurrent actors must not be mistaken for exactly-once execution.
+
+The acceptance policy and client permissions must explicitly add each supported effect class.
+A repaired read recipe cannot acquire write permission through routine auto-merge. Existing
+local mutation commands remain available under their current trusted-caller model while this
+catalogue gate is closed.
 
 ## Release evidence
 

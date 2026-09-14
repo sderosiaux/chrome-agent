@@ -10,6 +10,8 @@ Read [the mission](docs/mission.md) and [roadmap](docs/roadmap.md) before extend
 The target is autonomous discovery of web capabilities, with verified recipes that agents can
 reuse, repair and share through a GitHub catalogue or private sources. The runtime below is
 the shipped foundation; discovery and catalogue acceptance are not implemented yet.
+Discovery is driven by the calling agent; no embedded model/provider layer is planned. The
+first public catalogue covers read and extraction recipes; external-write recipes come later.
 Prioritize work that enables that lifecycle. Existing macros and Python examples establish
 execution behavior; they are not a sandbox for recipes from untrusted sources.
 

@@ -17,9 +17,10 @@
 **Make websites learnable by agents.**
 
 Our mission is to turn websites into capabilities that agents discover, verify, reuse and
-maintain themselves. An agent should learn how to complete a task on an unfamiliar site and
-preserve that knowledge as a recipe. Shared recipes will have a GitHub catalogue with automated
-validation and updates; local and private recipes will follow the same lifecycle.
+maintain themselves. The calling agent supplies the reasoning; chrome-agent will preserve the
+discovered knowledge and its validation evidence. Shared recipes will have a GitHub catalogue
+with automated validation and updates, starting with reading and extraction. Recipes that modify
+a site will follow later. Local and private recipes will use the same lifecycle.
 
 Today, chrome-agent provides the execution foundation: a 3 MB Rust binary over CDP, browser
 observations, assertions, structured outputs and local macros. It reports retained values,

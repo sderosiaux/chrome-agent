@@ -14,6 +14,10 @@ the relevant parts of a site, determines which paths achieve the objective, and 
 the evidence supports. Discovering a procedure must not require a person to write selectors,
 demonstrate the steps or correct each attempt.
 
+Discovery is driven by the calling agent. It supplies the reasoning and chooses experiments;
+chrome-agent supplies the execution protocol, persistent knowledge and validation lifecycle.
+The product does not host its own model or require a separate model-provider configuration.
+
 Each useful exploration should make later tasks on that environment more directly executable.
 An agent starting a fresh conversation should be able to use the resulting knowledge without
 access to the conversation that produced it.
@@ -54,6 +58,10 @@ part of the target product: agents can propose recipes and updates, and an indep
 validation service can accept and merge eligible revisions under an explicit policy.
 Maintainers govern that policy and its exceptions. Routine eligible changes should not depend
 on a person approving every recipe.
+
+The first public catalogue accepts read and extraction recipes. Recipes that modify a site
+come later, once their effects and recovery can be independently tested in suitable environments.
+This publication scope does not remove the existing local mutation commands.
 
 The catalogue establishes a common acceptance process. Users can also keep local recipes,
 operate private repositories, select trusted sources and pin revisions. Execution remains with
