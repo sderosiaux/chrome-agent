@@ -120,7 +120,14 @@ pub async fn resolve_cli_connection(
             (conn, client)
         }
     } else {
-        let needs_existing = !matches!(cli.command, Command::Goto { .. } | Command::Pipe);
+        let needs_existing = !matches!(
+            cli.command,
+            Command::Goto { .. }
+                | Command::Pipe
+                | Command::Viewport {
+                    action: crate::cli_actions::ViewportAction::Set { .. }
+                }
+        );
         if needs_existing {
             return Err(format!(
                 "No browser session '{}'. Run `chrome-agent --browser {} goto <url>` first.",

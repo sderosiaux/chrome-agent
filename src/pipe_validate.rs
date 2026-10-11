@@ -132,6 +132,9 @@ pub fn validate(command: &PipeCommand) -> Result<(), crate::BoxError> {
             wait_shape(args)?;
             crate::pipe_dispatch::wait_condition(args)?;
         }
+        PipeCommand::Viewport(crate::viewport::ViewportArgs::Set { size }) => {
+            size.parse::<crate::viewport::Viewport>()?;
+        }
         PipeCommand::Emulate(args) => {
             emulate_shape(args)?;
             match args.action.as_deref() {

@@ -293,6 +293,24 @@ LLM USAGE GUIDE:
     # isolated world sees the frame's DOM but not its main-world JS variables. <iframe> only,
     # not legacy <frame>/<frameset>.
 
+  Exact viewport (CSS pixels, default 1440x900@1 in headless AND headed):
+    chrome-agent --browser ui --page desktop --viewport 1440x900 goto http://localhost:3000
+    chrome-agent --browser ui --page desktop viewport set 1024x768
+    chrome-agent --browser ui --page desktop viewport get
+    chrome-agent --browser ui --page phone --viewport 390x844@2 goto http://localhost:3000
+    # New default replaces the implicit Chrome window size, including old unconfigured pages.
+    # Omitted --viewport inherits this browser/page's saved size across invocations/navigation.
+    # set/get: requested, effective, delta, verdict=exact|mismatch|unknown; read-back runs even
+    # with --verdict off. Mismatch: ok:false, CLI exit 2. Unreadable: exit 1. Global --viewport
+    # refuses the following command if verification fails. get always measures the top frame.
+    # status lists requested viewports and the default; goto.landed.viewport is measured.
+    # screenshot (no clip/downscale): CSS width*DPR by height*DPR; 390x844@2 => 780x1688 PNG.
+    # OS outerWidth/outerHeight can be smaller in headed; layout/capture use the CDP surface.
+    # Pipe/batch/replay: {"cmd":"viewport","action":"set","size":"1024x768"}
+    #                  {"cmd":"viewport","action":"get"}
+    # No mobile/touch/UA change. viewport set leaves explicit device emulation; emulate reset
+    # restores the saved desktop size. Browser close/relaunch discards the saved page state.
+
   Device emulation (explicit CDP metrics, no preset catalog):
     chrome-agent --page mobile emulate device --label "checkout phone" --width 412 --height 915 --dpr 2.625 --mobile --touch
     chrome-agent --page mobile emulate status

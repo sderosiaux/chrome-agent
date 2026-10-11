@@ -37,8 +37,8 @@ impl EmulationRecovery {
                     "ok": false,
                     "error": message,
                     "hint": concat!(
-                        "Send {\"cmd\":\"emulate\",\"action\":\"reset\"} ",
-                        "to clear the invalid configuration."
+                        "Send {\"cmd\":\"viewport\",\"action\":\"set\",\"size\":\"1440x900\"} ",
+                        "to replace the invalid configuration."
                     ),
                 })
             })
@@ -65,11 +65,13 @@ fn handles_reapply_failure(cmd: &Value) -> bool {
 }
 
 fn repairs_reapply_failure(cmd: &Value) -> bool {
-    cmd.get("cmd").and_then(Value::as_str) == Some("emulate")
-        && matches!(
-            cmd.get("action").and_then(Value::as_str),
-            Some("device" | "reset")
-        )
+    (cmd.get("cmd").and_then(Value::as_str) == Some("viewport")
+        && cmd.get("action").and_then(Value::as_str) == Some("set"))
+        || cmd.get("cmd").and_then(Value::as_str) == Some("emulate")
+            && matches!(
+                cmd.get("action").and_then(Value::as_str),
+                Some("device" | "reset")
+            )
 }
 
 /// Attempt reapplication and retain only the error text needed for recovery.
@@ -203,8 +205,8 @@ mod tests {
         assert_eq!(
             response["hint"],
             concat!(
-                "Send {\"cmd\":\"emulate\",\"action\":\"reset\"} ",
-                "to clear the invalid configuration."
+                "Send {\"cmd\":\"viewport\",\"action\":\"set\",\"size\":\"1440x900\"} ",
+                "to replace the invalid configuration."
             )
         );
     }

@@ -205,3 +205,14 @@ pub enum AssertWhat {
         min: Option<usize>,
     },
 }
+
+#[derive(clap::Subcommand)]
+pub enum ViewportAction {
+    /// Set exact CSS dimensions and DPR, persist, then measure and report a verdict
+    Set {
+        #[arg(value_name = "WxH[@dpr]")]
+        size: crate::viewport::Viewport,
+    },
+    /// Read requested and effective dimensions, DPR, screen, and media query
+    Get,
+}

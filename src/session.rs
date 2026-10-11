@@ -63,6 +63,9 @@ pub struct PageSession {
     /// A Chrome relaunch replaces the browser entry, so they expire with the process.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device_emulation: Option<crate::emulation::DeviceEmulation>,
+    /// Desktop CSS viewport, restored when explicit device emulation is reset.
+    #[serde(default)]
+    pub viewport: crate::viewport::Viewport,
 }
 
 impl PageSession {
@@ -197,6 +200,7 @@ pub fn ensure_page<'a>(
             last_snapshot_frame: None,
             last_snapshot_loader: None,
             device_emulation: None,
+            viewport: crate::viewport::Viewport::default(),
         })
 }
 
@@ -220,6 +224,17 @@ fn session_path() -> Result<PathBuf, SessionError> {
 }
 
 fn dev_browser_dir() -> Result<PathBuf, SessionError> {
+    // Separate session schemas when testing a new binary alongside an installed older one.
+    // Profiles and daemon files must follow the store, including orphan housekeeping.
+    if let Some(path) = std::env::var_os("CHROME_AGENT_SESSION_DIR") {
+        let path = PathBuf::from(path);
+        if !path.is_absolute() {
+            return Err(SessionError(
+                "CHROME_AGENT_SESSION_DIR must be an absolute path".into(),
+            ));
+        }
+        return Ok(path);
+    }
     dirs::home_dir()
         .map(|h| h.join(".chrome-agent"))
         .ok_or_else(|| SessionError("Could not determine home directory".into()))
@@ -277,6 +292,45 @@ mod tests {
         );
         assert!(b.pages.contains_key("main"));
         assert_eq!(b.pages["main"].target_id, "target-abc");
+    }
+
+    #[test]
+    fn viewports_roundtrip_per_page_and_browser_and_legacy_pages_get_the_default() {
+        let mut store = SessionStore::default();
+        for name in ["first", "second"] {
+            let mut browser = browser("ws://localhost:9222");
+            ensure_page(&mut browser, "desktop", "a").viewport = "1024x768".parse().unwrap();
+            ensure_page(&mut browser, "phone", "b").viewport = "390x844@2".parse().unwrap();
+            store.browsers.insert(name.into(), browser);
+        }
+        store
+            .browsers
+            .get_mut("second")
+            .unwrap()
+            .pages
+            .get_mut("phone")
+            .unwrap()
+            .viewport = "800x600".parse().unwrap();
+        let loaded: SessionStore =
+            serde_json::from_str(&serde_json::to_string(&store).unwrap()).unwrap();
+        assert_eq!(
+            loaded.browsers["first"].pages["desktop"]
+                .viewport
+                .to_string(),
+            "1024x768@1"
+        );
+        assert_eq!(
+            loaded.browsers["first"].pages["phone"].viewport.to_string(),
+            "390x844@2"
+        );
+        assert_eq!(
+            loaded.browsers["second"].pages["phone"]
+                .viewport
+                .to_string(),
+            "800x600@1"
+        );
+        let legacy: PageSession = serde_json::from_str(r#"{"targetId":"old"}"#).unwrap();
+        assert_eq!(legacy.viewport, crate::viewport::Viewport::default());
     }
 
     #[test]

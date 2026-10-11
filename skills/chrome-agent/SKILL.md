@@ -13,6 +13,36 @@ metadata:
 which chrome-agent || npm install -g chrome-agent   # or: cargo install chrome-agent
 ```
 
+## Exact viewport
+
+New pages default to **1440x900@1**, in headless and headed Chrome. This replaces the implicit
+Chrome window dimensions. Use a named page for each size:
+
+```bash
+chrome-agent --page desktop --viewport 1440x900 goto http://localhost:3000
+chrome-agent --page desktop viewport set 1024x768
+chrome-agent --page desktop viewport get
+chrome-agent --page desktop eval innerWidth
+chrome-agent --page phone --viewport 390x844@2 goto http://localhost:3000
+chrome-agent --page phone screenshot
+```
+
+Omitting `--viewport` inherits the saved size for that browser/page. `set` and `get` measure the
+top document and report `requested`, `effective`, `delta`, and `verdict: exact|mismatch|unknown`.
+Never claim the requested dimensions on a mismatch (`ok:false`, exit 2) or an unreadable result
+(exit 1). This measurement remains enabled under `--verdict off`. The global flag refuses the
+following page command when verification fails. `status` lists requested sizes;
+`goto.landed.viewport` is measured. An ordinary PNG at 390x844@2 is 780x1688 physical pixels.
+A headed OS window may be smaller than the CDP rendering surface.
+
+Pipe/batch/replay: `{"cmd":"viewport","action":"set","size":"1024x768"}` or
+`{"cmd":"viewport","action":"get"}`. `viewport set` exits explicit device emulation;
+`emulate reset` restores the saved desktop viewport. Neither the viewport command nor its default
+adds mobile, touch, or user-agent emulation. Browser close/relaunch discards the page settings.
+
+For separate binary versions running concurrently, use an absolute `CHROME_AGENT_SESSION_DIR`
+to isolate sessions, daemon files and browser profiles. Older binaries can drop new session fields.
+
 ## Reading a response
 
 Every mutating action carries `verdict` + `verdict_reason` + `next`. Every pointer-targeted action

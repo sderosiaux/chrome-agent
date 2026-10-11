@@ -398,6 +398,7 @@ fn an_invalid_invocation_is_refused_before_a_browser_is_resolved() {
         let output = Command::new(common::binary())
             .args(args)
             .env("HOME", &home)
+            .env_remove("CHROME_AGENT_SESSION_DIR")
             .output()
             .expect("run chrome-agent");
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -422,6 +423,7 @@ fn an_invalid_invocation_is_refused_before_a_browser_is_resolved() {
         let output = Command::new(common::binary())
             .args(args)
             .env("HOME", &home)
+            .env_remove("CHROME_AGENT_SESSION_DIR")
             .env("CHROME_AGENT_PARSE_ONLY", "1")
             .output()
             .expect("run chrome-agent");

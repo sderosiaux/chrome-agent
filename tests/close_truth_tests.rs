@@ -57,13 +57,7 @@ fn a_hostile_path_does_not_reach_the_guard_that_decides_the_kill() {
         String::from_utf8_lossy(&launched.stderr)
     );
 
-    let profile = std::env::var("HOME")
-        .map(|home| {
-            std::path::PathBuf::from(home)
-                .join(".chrome-agent/browsers")
-                .join(browser.name())
-        })
-        .expect("HOME");
+    let profile = common::session_dir().join("browsers").join(browser.name());
     assert!(
         profile.exists(),
         "the launch should have created {}",
@@ -127,8 +121,8 @@ fn a_close_that_waited_for_the_exit_removes_the_port_file() {
         String::from_utf8_lossy(&launched.stderr)
     );
 
-    let port_file = std::path::PathBuf::from(std::env::var("HOME").expect("HOME"))
-        .join(".chrome-agent/browsers")
+    let port_file = common::session_dir()
+        .join("browsers")
         .join(browser.name())
         .join("chromium-profile/DevToolsActivePort");
     assert!(

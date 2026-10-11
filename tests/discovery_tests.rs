@@ -172,8 +172,7 @@ fn invalid_proposals_and_corrupt_history_fail_offline_without_debiting_budget() 
     corrupt["reserved_commands"] = json!(1);
     std::fs::write(&journal.0, corrupt.to_string()).unwrap();
     cli(&browser, &["discover", "show", journal.path()], 1);
-    let sessions = std::path::PathBuf::from(std::env::var_os("HOME").unwrap())
-        .join(".chrome-agent/sessions.json");
+    let sessions = common::session_dir().join("sessions.json");
     assert!(
         !std::fs::read_to_string(sessions)
             .unwrap_or_default()

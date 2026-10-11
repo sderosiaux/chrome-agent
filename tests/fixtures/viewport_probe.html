@@ -1,0 +1,11 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Viewport probe</title>
+<style>body { margin: 0; font: 16px monospace; } pre { white-space: pre-wrap; }</style>
+<pre id="metrics"></pre>
+<script>
+function measure() { return {innerWidth,innerHeight,outerWidth,outerHeight,screen:{width:screen.width,height:screen.height},devicePixelRatio,min1024:matchMedia('(min-width: 1024px)').matches}; }
+function render() { document.querySelector('#metrics').textContent=JSON.stringify(measure(),null,2); }
+addEventListener('resize',render); render();
+</script>

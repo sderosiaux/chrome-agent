@@ -713,11 +713,8 @@ fn chrome_default_profile_dir() -> Result<PathBuf, BrowserError> {
 
 /// Get the profile directory for a named browser instance.
 fn browser_profile_dir(name: &str) -> Result<PathBuf, BrowserError> {
-    let home = dirs::home_dir()
-        .ok_or_else(|| BrowserError::Launch("Could not determine home directory".into()))?;
-    Ok(home
-        .join(".chrome-agent")
-        .join("browsers")
+    Ok(crate::session::browsers_dir()
+        .map_err(|error| BrowserError::Launch(error.to_string()))?
         .join(name)
         .join("chromium-profile"))
 }

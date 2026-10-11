@@ -75,6 +75,7 @@ mod truncate;
 mod verdict;
 mod verdict_evidence;
 mod verdict_words;
+mod viewport;
 
 /// Shared error type alias used across the crate.
 pub(crate) type BoxError = Box<dyn std::error::Error>;
@@ -233,6 +234,18 @@ async fn main() {
                 }
             }
             exit_after_stdout(1);
+        }
+        if let Some(failed) = e.downcast_ref::<viewport::NotExact>() {
+            if json_mode {
+                run_helpers::json_output(&failed.0);
+            } else {
+                eprintln!("{}", viewport::text_report(&failed.0));
+            }
+            exit_after_stdout(if failed.0["verdict"] == "mismatch" {
+                2
+            } else {
+                1
+            });
         }
         let msg = e.to_string();
         if json_mode {

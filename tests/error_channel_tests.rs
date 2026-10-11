@@ -318,6 +318,7 @@ fn a_final_pipe_save_failure_is_a_terminal_json_failure() {
     let browser = common::unique_name("pipe-save-failure");
     let mut child = Command::new(binary())
         .env("HOME", &home)
+        .env_remove("CHROME_AGENT_SESSION_DIR")
         .args(["--browser", &browser, "pipe"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -365,6 +366,7 @@ fn a_final_pipe_save_failure_is_a_terminal_json_failure() {
         .expect("restore lock permissions");
     let _ = Command::new(binary())
         .env("HOME", &home)
+        .env_remove("CHROME_AGENT_SESSION_DIR")
         .args(["--browser", &browser, "close"])
         .output();
     let _ = std::fs::remove_dir_all(home);

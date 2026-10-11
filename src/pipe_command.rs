@@ -60,6 +60,7 @@ pub enum PipeCommand {
     History(HistoryArgs),
     Frame(FrameArgs),
     Emulate(EmulateArgs),
+    Viewport(crate::viewport::ViewportArgs),
     Assert(Box<AssertArgs>),
     #[serde(alias = "webmcp-list")]
     WebmcpList(NoArgs),
@@ -108,6 +109,7 @@ impl PipeCommand {
             Self::History(_) => "history",
             Self::Frame(_) => "frame",
             Self::Emulate(_) => "emulate",
+            Self::Viewport(_) => "viewport",
             Self::Assert(_) => "assert",
             Self::WebmcpList(_) => "webmcp_list",
             Self::WebmcpCall(_) => "webmcp_call",

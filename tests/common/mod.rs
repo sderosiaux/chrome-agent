@@ -120,6 +120,18 @@ pub fn binary() -> PathBuf {
     path
 }
 
+/// Session/profile root selected for an isolated suite, or the normal default.
+pub fn session_dir() -> PathBuf {
+    std::env::var_os("CHROME_AGENT_SESSION_DIR").map_or_else(
+        || {
+            dirs::home_dir()
+                .expect("home directory")
+                .join(".chrome-agent")
+        },
+        PathBuf::from,
+    )
+}
+
 /// A name no other process is using, and no later run of this one will reuse. The pid
 /// separates concurrent `cargo test` processes; the counter separates tests inside one, which
 /// the harness runs on parallel threads. Readable so it can be found in `chrome-agent status`.
@@ -135,24 +147,42 @@ pub fn unique_name(label: &str) -> String {
 /// The one mechanism for browser isolation: a hard-coded `--browser` name lets two concurrent
 /// runs drive one browser. `Drop` rather than a trailing `close`, which a panicking assertion
 /// skips, leaking a Chrome and its ~14 MB profile.
-pub struct TestBrowser(String);
+pub struct TestBrowser {
+    name: String,
+    session_dir: Option<PathBuf>,
+}
 
 impl TestBrowser {
     #[must_use]
     pub fn new(label: &str) -> Self {
-        Self(unique_name(label))
+        Self {
+            name: unique_name(label),
+            session_dir: None,
+        }
+    }
+
+    /// A browser whose cleanup uses the same private store as its commands.
+    pub fn in_session(label: &str, directory: &std::path::Path) -> Self {
+        Self {
+            name: unique_name(label),
+            session_dir: Some(directory.to_path_buf()),
+        }
     }
 
     #[must_use]
     pub fn name(&self) -> &str {
-        &self.0
+        &self.name
     }
 }
 
 impl Drop for TestBrowser {
     fn drop(&mut self) {
-        let _ = std::process::Command::new(binary())
-            .args(["--browser", &self.0, "close", "--purge"])
+        let mut command = std::process::Command::new(binary());
+        if let Some(directory) = &self.session_dir {
+            command.env("CHROME_AGENT_SESSION_DIR", directory);
+        }
+        let _ = command
+            .args(["--browser", &self.name, "close", "--purge"])
             .output();
     }
 }

@@ -50,7 +50,7 @@ pub struct ScreenshotOpts<'a> {
     pub quality: Option<u32>,
     /// Downscale so the captured width fits within this many CSS pixels.
     pub max_width: Option<u32>,
-    /// Element clip rectangle (page CSS px). `None` captures the full page.
+    /// Element clip rectangle (page CSS px). `None` captures the viewport unless downscaling.
     pub clip: Option<Rect>,
 }
 
@@ -87,7 +87,7 @@ pub async fn run(client: &CdpClient, opts: &ScreenshotOpts<'_>) -> Result<String
                 format: Some(opts.format.cdp().into()),
                 quality,
                 clip: clip_value,
-                from_surface: None,
+                from_surface: Some(true),
                 capture_beyond_viewport: clip.map(|_| true),
                 optimize_for_speed: None,
             },

@@ -101,6 +101,10 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub headed: bool,
 
+    /// Exact CSS viewport for this named page, `WxH[@dpr]`. New pages default to 1440x900@1; omitted inherits saved size
+    #[arg(long, global = true, value_name = "WxH[@dpr]")]
+    pub viewport: Option<crate::viewport::Viewport>,
+
     /// Global timeout in seconds for page loads
     #[arg(long, default_value = "30")]
     pub timeout: u64,
@@ -666,6 +670,12 @@ pub enum Command {
     Frame {
         /// CSS selector of the iframe, or "main" to return to top-level
         target: String,
+    },
+
+    /// Set or measure the exact viewport of this named page
+    Viewport {
+        #[command(subcommand)]
+        action: crate::cli_actions::ViewportAction,
     },
 
     /// Manage explicit device metrics for this named page only

@@ -138,6 +138,7 @@ Use `--browser <name>` to give each parallel agent its own Chrome and its own se
 | `network [--filter "pattern"] [--body] [--live N] [--abort "pattern"]` | Requests and API responses. `--abort` blocks matching requests for `--live N` seconds. |
 | `console [--level error] [--clear]` | console.log/warn/error and JS exceptions. |
 | `frame <selector\|main>` | Bind `eval`/`inspect` to an iframe. Only within one `pipe`/`batch` process. |
+| `viewport set WxH[@dpr]` / `viewport get` | Exact per-page CSS viewport, persisted with measured verdict. Global `--viewport` also sets it. Default: `1440x900@1`. |
 | `emulate device --width W --height H [--dpr N] [--mobile] [--touch] [--orientation portrait\|landscape] [--label name]` | Device metrics for one named page. Also `emulate status` and `emulate reset`. |
 | `webmcp list` | Tools the page registered on `document.modelContext`. Also `webmcp call <name> --args '{"k":"v"}'`. |
 | `macro record <name> --from-recording <file>` | Distil a recorded session into a guarded, parameterised path. Also `macro list`, `macro show`, `macro check`, `macro run`. |
@@ -419,6 +420,45 @@ chrome-agent screenshot --uid n42
 Read `downloaded`, not `ok`. A click that was delivered and produced no file answers `ok:true` with
 `downloaded:false`: a click is not undoable, and an error there invites a second real one.
 `--timeout` bounds the whole window; `--max-bytes` cancels a transfer that goes past it.
+
+### Exact viewport
+
+```bash
+chrome-agent --browser ui --page desktop --viewport 1440x900 goto http://localhost:3000
+chrome-agent --browser ui --page desktop viewport set 1024x768
+chrome-agent --browser ui --page desktop viewport get
+chrome-agent --browser ui --page desktop eval innerWidth
+chrome-agent --browser ui --page phone --viewport 390x844@2 goto http://localhost:3000
+chrome-agent --browser ui --page phone screenshot
+```
+
+**Default change:** new pages (including old session entries without a saved viewport) now use
+**1440×900 CSS pixels at DPR 1**, in headless and headed Chrome. Omitting `--viewport` on a later
+invocation inherits the page's saved dimensions. State belongs to the `--browser` / `--page` pair,
+survives navigation and separate invocations, and expires when that browser is closed or relaunched.
+`status` lists requested sizes and the default; `goto.landed.viewport` reports measured dimensions.
+
+`viewport set` and `viewport get` always read the top document and return `requested`, `effective`,
+`delta` and `verdict`: `exact`, `mismatch` or `unknown`. This check also runs with `--verdict off`.
+A mismatch returns `ok:false` and CLI exit 2; an unreadable result exits 1. The global flag refuses
+to run the following page command if its size cannot be verified. Width, height and DPR must all
+match; fractional DPR normalization by Chrome can therefore produce a reported mismatch.
+
+CDP sets the page's layout and rendered surface independently of the OS window, so headed Chrome
+may display only part of a larger viewport. `effective.outerWidth/outerHeight` exposes the actual
+window dimensions. Screenshots without clipping or downscaling have W×DPR by H×DPR pixels (Chrome
+rounds fractional pixel dimensions); for example `390x844@2` produces a 780×1688 PNG. This does not
+change the user agent or enable mobile/touch behavior.
+
+When testing a new binary while an older installed version is running, set
+`CHROME_AGENT_SESSION_DIR` to an absolute private directory. It isolates session records, daemon
+files and managed browser profiles; screenshots, history and macros keep their usual locations.
+Old binaries can otherwise erase fields they do not recognize in the shared session file.
+
+Pipe, batch and replay accept `{"cmd":"viewport","action":"set","size":"1024x768"}` and
+`{"cmd":"viewport","action":"get"}`. Explicit `emulate device` temporarily supersedes the desktop
+viewport; `emulate reset` restores it. `viewport set` or `--viewport` leaves explicit device mode
+and saves the new desktop size.
 
 ### Device emulation
 

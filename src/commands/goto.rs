@@ -175,7 +175,8 @@ pub async fn run(
                         }
                         shape = { resources, controls, links, scripts, text };
                     } catch (e) { shape = null; }
-                    return { url: location.href, title: document.title, status, shape };
+                    return { url: location.href, title: document.title, status, shape,
+                        viewport: {width: innerWidth, height: innerHeight, dpr: devicePixelRatio} };
                 })()",
                 "returnByValue": true,
             }),
@@ -209,7 +210,10 @@ pub async fn run(
 
     // `url`, not the caller's raw argument: comparing against the pre-normalised form would
     // report a redirect on every `goto example.com`.
-    let landed = crate::landing::Landing::new(url, &settled_url, status, shape.as_ref());
+    let mut landed = crate::landing::Landing::new(url, &settled_url, status, shape.as_ref());
+    landed.viewport = page_state
+        .and_then(|state| state.get("viewport"))
+        .and_then(|value| serde_json::from_value(value.clone()).ok());
 
     Ok(GotoResult {
         url: settled_url,

@@ -597,6 +597,7 @@ fn download_refuses_an_ambiguous_or_absent_target() {
         let out = Command::new(common::binary())
             .args(args)
             .env("HOME", &home)
+            .env_remove("CHROME_AGENT_SESSION_DIR")
             .output()
             .expect("run");
         let stderr = String::from_utf8_lossy(&out.stderr).to_string();

@@ -126,13 +126,7 @@ fn check_is_offline_and_parameter_values_survive_the_cli_and_replay() {
     assert_eq!(code, 0, "{stdout}{stderr}");
     let checked: Value = serde_json::from_str(&stdout).unwrap();
     assert_eq!(checked["browser_opened"], false);
-    let sessions = file
-        .path()
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .join("sessions.json");
+    let sessions = common::session_dir().join("sessions.json");
     assert!(
         !std::fs::read_to_string(sessions)
             .unwrap_or_default()

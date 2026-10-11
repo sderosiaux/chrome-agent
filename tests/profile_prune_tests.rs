@@ -13,6 +13,7 @@ fn run_in(home: &Path, args: &[&str]) -> (String, i32) {
     let out = Command::new(common::binary())
         .args(args)
         .env("HOME", home)
+        .env_remove("CHROME_AGENT_SESSION_DIR")
         .output()
         .expect("run chrome-agent");
     (
@@ -156,6 +157,7 @@ fn concurrent_saves_do_not_delete_each_others_fresh_profiles() {
             Command::new(common::binary())
                 .args(["close", "--browser", name])
                 .env("HOME", &home)
+                .env_remove("CHROME_AGENT_SESSION_DIR")
                 .spawn()
                 .expect("spawn a concurrent agent"),
         );

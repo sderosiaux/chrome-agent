@@ -26,6 +26,9 @@ pub struct Landing {
     /// Flattened so one `goto` answers both questions in one object.
     #[serde(flatten)]
     pub served: Assessment,
+    /// Measured in the settled top document, in CSS pixels.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub viewport: Option<crate::viewport::Viewport>,
 }
 
 /// Path segments that suggest an authentication wall. A guess about a URL, not a reading of the
@@ -49,6 +52,7 @@ impl Landing {
             redirected: is_redirect(requested, final_url),
             http_status,
             served: crate::serving::assess(http_status, shape),
+            viewport: None,
         }
     }
 
@@ -104,6 +108,9 @@ impl Landing {
                 "serving: {} — {gloss}",
                 self.served.serving.as_str()
             ));
+        }
+        if let Some(viewport) = self.viewport {
+            lines.push(format!("viewport: {viewport}"));
         }
         if lines.is_empty() {
             return None;

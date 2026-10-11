@@ -198,12 +198,15 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
     client.spawn_dialog_handler(dialog_policy, cli.dialog_text.clone());
     // Reapplying before `device` or `reset` would let an invalid stored configuration block
     // the command that repairs it. Batch defers the same decision to `run_batch`.
-    let defers_emulation_reapply = matches!(
-        &cli.command,
-        Command::Emulate {
-            action: EmulateAction::Device { .. } | EmulateAction::Reset,
-        } | Command::Batch { .. }
-    );
+    let defers_emulation_reapply = cli.viewport.is_some()
+        || matches!(
+            &cli.command,
+            Command::Emulate {
+                action: EmulateAction::Device { .. } | EmulateAction::Reset,
+            } | Command::Viewport {
+                action: crate::cli_actions::ViewportAction::Set { .. }
+            } | Command::Batch { .. }
+        );
     if !defers_emulation_reapply
         && let Err(error) =
             crate::emulation::reapply(&client, &store, &cli.browser, &cli.page).await
@@ -213,7 +216,7 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
         // wrong viewport.
         return Err(format!(
             "Could not reapply this page's stored device configuration: {error}. \
-             Clear it: chrome-agent --browser {} --page {} emulate reset",
+             Reset metrics: chrome-agent --browser {} --page {} viewport set 1440x900",
             cli.browser, cli.page
         )
         .into());
@@ -238,7 +241,25 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
         max_depth: cli.max_depth,
         report: policy,
     };
+    if let Some(viewport) = cli.viewport {
+        let response = crate::viewport::set(&mut ctx, viewport).await?;
+        crate::viewport::require_exact(response)?;
+    }
     match cli.command {
+        Command::Viewport { action } => {
+            let response = match action {
+                crate::cli_actions::ViewportAction::Set { size } => {
+                    crate::viewport::set(&mut ctx, size).await?
+                }
+                crate::cli_actions::ViewportAction::Get => crate::viewport::get(&ctx).await?,
+            };
+            let response = crate::viewport::require_exact(response)?;
+            output_read(
+                json_mode,
+                &response,
+                &crate::viewport::text_report(&response),
+            );
+        }
         // `goto` is the one navigation verb that does NOT route through its dispatcher: text
         // mode renders `landed` from the `Landing` struct (`text_line`), and the JSON the
         // dispatcher returns has already flattened it. `output_goto` owns both renderings.

@@ -550,6 +550,8 @@ pub fn cmd_status(json_mode: bool) -> Result<(), crate::BoxError> {
                     "pid": b.pid,
                     "headless": b.headless,
                     "pages": b.pages.len(),
+                    "viewports": b.pages.iter().map(|(name, page)|
+                        (name.clone(), crate::viewport::requested(page))).collect::<std::collections::BTreeMap<_, _>>(),
                     "ws": b.ws_endpoint,
                 })
             })
@@ -564,6 +566,7 @@ pub fn cmd_status(json_mode: bool) -> Result<(), crate::BoxError> {
         json_output(&json!({
             "ok": true,
             "browsers": browsers,
+            "defaultViewport": crate::viewport::Viewport::default(),
             "orphans": orphan_json,
             "daemon": if daemon_alive { "running" } else { "stopped" },
         }));
@@ -587,6 +590,12 @@ pub fn cmd_status(json_mode: bool) -> Result<(), crate::BoxError> {
                     browser.pages.len(),
                     browser.ws_endpoint
                 );
+                for (page_name, page) in &browser.pages {
+                    out_line!(
+                        "  page={page_name} viewport={} (requested; measure with viewport get)",
+                        crate::viewport::requested(page)
+                    );
+                }
             }
         }
 
@@ -598,6 +607,7 @@ pub fn cmd_status(json_mode: bool) -> Result<(), crate::BoxError> {
             );
         }
 
+        out_line!("default viewport: {}", crate::viewport::Viewport::default());
         out_line!(
             "daemon: {}",
             if daemon_alive { "running" } else { "stopped" }

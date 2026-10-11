@@ -753,6 +753,7 @@ async fn dispatch_one(
             PipeCommand::History(a) => dispatch_history(a),
             PipeCommand::Frame(a) => dispatch_frame(ctx.client, a).await,
             PipeCommand::Emulate(a) => dispatch_emulate(ctx, a).await,
+            PipeCommand::Viewport(a) => crate::viewport::dispatch(ctx, a).await,
             PipeCommand::Assert(a) => dispatch_assert(ctx, a).await,
             PipeCommand::WebmcpList(_) => dispatch_webmcp_list(ctx.client).await,
             PipeCommand::WebmcpCall(a) => dispatch_webmcp_call(ctx.client, a).await,

@@ -177,6 +177,21 @@ pub async fn open_session(cli: &Cli) -> Result<Session, crate::BoxError> {
     let dialog_policy = crate::setup::DialogPolicy::parse(&cli.dialog)?;
     client.spawn_dialog_handler(dialog_policy, cli.dialog_text.clone());
     let policy = report_policy(cli)?;
+    if let Some(viewport) = cli.viewport {
+        let mut ctx = crate::page_ctx::PageCtx {
+            client: &client,
+            browser_client: &browser_client,
+            store: &mut store,
+            browser: &cli.browser,
+            page: &cli.page,
+            target_id: &target_id,
+            timeout: cli.timeout,
+            max_depth: cli.max_depth,
+            report: policy,
+        };
+        let response = crate::viewport::set(&mut ctx, viewport).await?;
+        crate::viewport::require_exact(response)?;
+    }
     Ok(Session {
         store,
         browser_client,

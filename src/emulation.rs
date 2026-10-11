@@ -235,14 +235,18 @@ pub async fn apply_and_store(
     page_name: &str,
     config: DeviceEmulation,
 ) -> Result<Value, crate::BoxError> {
-    let (previous, target_id) = match page_session(store, browser_name, page_name) {
-        Ok(page) => (page.device_emulation.clone(), page.target_id.clone()),
+    let (previous, viewport, target_id) = match page_session(store, browser_name, page_name) {
+        Ok(page) => (
+            page.device_emulation.clone(),
+            page.viewport,
+            page.target_id.clone(),
+        ),
         Err(error) => return Err(error),
     };
     activate_target(client, &target_id).await?;
     if let Err(error) = apply_overrides(client, &config).await {
         let message = error.to_string();
-        restore_previous(client, previous.as_ref(), &message).await?;
+        restore_previous(client, previous.as_ref(), viewport, &message).await?;
         return Err(message.into());
     }
     let observed = match read_effective_metrics(client)
@@ -252,7 +256,7 @@ pub async fn apply_and_store(
         Ok(observed) => observed,
         Err(message) => {
             let _ = clear_overrides(client).await;
-            restore_previous(client, previous.as_ref(), &message).await?;
+            restore_previous(client, previous.as_ref(), viewport, &message).await?;
             return Err(message.into());
         }
     };
@@ -292,6 +296,8 @@ pub async fn clear(
         .clone();
     activate_target(client, &target_id).await?;
     clear_overrides(client).await?;
+    let viewport = page_session(store, browser_name, page_name)?.viewport;
+    crate::viewport::apply(client, viewport).await?;
     page_session_mut(store, browser_name, page_name)?.device_emulation = None;
     Ok(json!({"ok": true, "emulation": null}))
 }
@@ -312,6 +318,9 @@ pub async fn reapply(
     if let Some(config) = config {
         activate_target(client, &target_id).await?;
         apply_overrides(client, &config).await?;
+    } else {
+        let viewport = page_session(store, browser_name, page_name)?.viewport;
+        crate::viewport::apply(client, viewport).await?;
     }
     Ok(())
 }
@@ -319,10 +328,15 @@ pub async fn reapply(
 async fn restore_previous(
     client: &CdpClient,
     previous: Option<&DeviceEmulation>,
+    viewport: crate::viewport::Viewport,
     original_error: &str,
 ) -> Result<(), crate::BoxError> {
     let Some(previous) = previous else {
-        return Ok(());
+        return crate::viewport::apply(client, viewport)
+            .await
+            .map_err(|restore| {
+                format!("{original_error}; restoring previous viewport failed: {restore}").into()
+            });
     };
     apply_overrides(client, previous).await.map_err(|restore_error| {
         format!(
