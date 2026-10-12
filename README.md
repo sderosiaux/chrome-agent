@@ -534,6 +534,10 @@ Chrome (headless by default, no Node.js, no runtime)
 
 Design records live in [`docs/design/README.md`](docs/design/README.md).
 
+## Built on chrome-agent
+
+- [chrome-agent-search](https://github.com/ominiverdi/chrome-agent-search) — search (Bing, Brave, DuckDuckGo) and read pages through chrome-agent, JSON output.
+
 ## License
 
 MIT
